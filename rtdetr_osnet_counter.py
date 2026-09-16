@@ -110,14 +110,16 @@ def resolve_device(device_variant):
         if torch.version.cuda is not None:
             raise RuntimeError(
                 "CPU mode requires the CPU-only PyTorch build. "
-                "Run with: uv run --extra cpu main.py <video> --device cpu"
+                "Run with: uv run --extra cpu rtdetr_osnet_counter.py "
+                "<video> --device cpu"
             )
         return torch.device("cpu")
 
     if torch.version.cuda is None:
         raise RuntimeError(
             "GPU mode requires a CUDA-enabled PyTorch build. "
-            "Run with: uv run --extra gpu main.py <video> --device gpu"
+            "Run with: uv run --extra gpu rtdetr_osnet_counter.py "
+            "<video> --device gpu"
         )
     if not torch.cuda.is_available():
         raise RuntimeError(

@@ -6,7 +6,7 @@ device selection and will fail instead of falling back to another device.
 ## CPU-only
 
 ```bash
-uv run --extra cpu main.py samples/three_people_walking.mp4 --device cpu
+uv run --extra cpu rtdetr_osnet_counter.py samples/three_people_walking.mp4 --device cpu
 ```
 
 ## NVIDIA GPU
@@ -14,7 +14,7 @@ uv run --extra cpu main.py samples/three_people_walking.mp4 --device cpu
 The GPU variant uses the official PyTorch CUDA 12.8 wheels:
 
 ```bash
-uv run --extra gpu main.py samples/three_people_walking.mp4 --device gpu
+uv run --extra gpu rtdetr_osnet_counter.py samples/three_people_walking.mp4 --device gpu
 ```
 
 By default, the script samples the source at 3 FPS, batches eight frames per
@@ -24,12 +24,12 @@ remains available when detection accuracy is more important than throughput.
 
 ```bash
 # Tune GPU throughput and sampling
-uv run --extra gpu main.py samples/subway.mp4 \
+uv run --extra gpu rtdetr_osnet_counter.py samples/subway.mp4 \
   --device gpu --sample-fps 3 --batch-size 8 \
   --detector-model r18 --detection-threshold 0.6
 
 # Higher-accuracy detector, every source frame, FP32
-uv run --extra gpu main.py samples/subway.mp4 \
+uv run --extra gpu rtdetr_osnet_counter.py samples/subway.mp4 \
   --device gpu --sample-fps all --batch-size 1 --no-fp16 --detector-model r50
 ```
 
@@ -55,17 +55,17 @@ dataset, privacy, and biometric-use considerations independently.
 
 ## RF-DETR Large and BoT-SORT comparison
 
-`botsort_comparison.py` uses Roboflow RF-DETR Large detections, Supervision
+`rfdetr_botsort_counter.py` uses Roboflow RF-DETR Large detections, Supervision
 `Detections`, and Roboflow Trackers' BoT-SORT implementation:
 
 ```bash
-uv run --extra gpu botsort_comparison.py samples/subway.mp4 --device gpu
+uv run --extra gpu rfdetr_botsort_counter.py samples/subway.mp4 --device gpu
 ```
 
 The CPU variant uses the same interface:
 
 ```bash
-uv run --extra cpu botsort_comparison.py samples/subway.mp4 --device cpu
+uv run --extra cpu rfdetr_botsort_counter.py samples/subway.mp4 --device cpu
 ```
 
 The script outputs only a timestamped CSV such as
@@ -81,3 +81,25 @@ reproducibility.
 This BoT-SORT implementation does not include an appearance ReID branch.
 Tracks that expire and later re-enter can receive a new ID, unlike the primary
 OSNet identity gallery.
+
+## Experiment notebooks
+
+Install the notebook dependencies together with exactly one hardware variant:
+
+```bash
+uv sync --extra gpu --extra experiments
+uv run --extra gpu --extra experiments jupyter lab
+```
+
+Use `--extra cpu` instead of `--extra gpu` for CPU experiments.
+
+- `notebooks/scenario_benchmark.ipynb` runs both pipelines over the same
+  scenario videos and records runtime, throughput, unique counts, and
+  fragmentation proxies.
+- `notebooks/tracking_quality_analysis.ipynb` compares benchmark results with
+  optional count and entry/exit ground truth, then produces per-scenario
+  rankings.
+
+Run the benchmark notebook and the model subprocesses with the same hardware
+variant. The summary telemetry can evaluate counts and temporal intervals but
+cannot calculate frame-level MOT metrics such as IDF1 or HOTA.

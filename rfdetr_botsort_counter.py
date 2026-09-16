@@ -90,7 +90,7 @@ def resolve_device(device_variant):
         if torch.version.cuda is not None:
             raise RuntimeError(
                 "CPU mode requires the CPU-only PyTorch build. "
-                "Run with: uv run --extra cpu botsort_comparison.py "
+                "Run with: uv run --extra cpu rfdetr_botsort_counter.py "
                 "<video> --device cpu"
             )
         return torch.device("cpu")
@@ -98,7 +98,7 @@ def resolve_device(device_variant):
     if torch.version.cuda is None:
         raise RuntimeError(
             "GPU mode requires a CUDA-enabled PyTorch build. "
-            "Run with: uv run --extra gpu botsort_comparison.py "
+            "Run with: uv run --extra gpu rfdetr_botsort_counter.py "
             "<video> --device gpu"
         )
     if not torch.cuda.is_available():
