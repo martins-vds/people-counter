@@ -9,7 +9,7 @@ import torch
 from huggingface_hub import hf_hub_download
 from libreyolo.tracking.reid import OSNetEmbedder
 from scipy.optimize import linear_sum_assignment
-from transformers import AutoImageProcessor, RTDetrForObjectDetection
+from transformers import AutoImageProcessor, RTDetrV2ForObjectDetection
 
 REID_REPO_ID = "LibreYOLO/LibreReID-osnet"
 REID_FILENAME = "osnet_ain_x0_25.pt"
@@ -121,7 +121,9 @@ device = resolve_device(args.device)
 print(f"Running {args.device.upper()} variant on: {device}")
 reid_embedder = load_reid_embedder(device)
 processor = AutoImageProcessor.from_pretrained("PekingU/rtdetr_v2_r50vd")
-model = RTDetrForObjectDetection.from_pretrained("PekingU/rtdetr_v2_r50vd").to(device)
+model = RTDetrV2ForObjectDetection.from_pretrained(
+    "PekingU/rtdetr_v2_r50vd"
+).to(device)
 
 # 2. OSNet ReID tracker state
 track_gallery = {}
