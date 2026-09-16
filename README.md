@@ -51,3 +51,32 @@ The LibreYOLO implementation and the pinned LibreReID OSNet weight repository
 are MIT licensed. The model card notes that its upstream training datasets
 have research-oriented terms, so production deployments should review those
 dataset, privacy, and biometric-use considerations independently.
+
+## RF-DETR Large and BoT-SORT comparison
+
+`botsort_comparison.py` uses Roboflow RF-DETR Large detections, Supervision
+`Detections`, and Roboflow Trackers' BoT-SORT implementation:
+
+```bash
+uv run --extra gpu botsort_comparison.py samples/subway.mp4 --device gpu
+```
+
+The CPU variant uses the same interface:
+
+```bash
+uv run --extra cpu botsort_comparison.py samples/subway.mp4 --device cpu
+```
+
+The script outputs only
+`outputs/<video>_telemetry_rfdetr_large_botsort_<device>.csv`. Its sampling,
+batch-size, confidence, and FP16 options match the primary script where
+applicable.
+
+Supervision is MIT licensed. RF-DETR code and RF-DETR Large weights are
+Apache-2.0 licensed. Roboflow Trackers is Apache-2.0 licensed and pinned to
+commit `3fb83d1618f29b7fdd4617757b6894e4ec71146d` from its `develop` branch for
+reproducibility.
+
+This BoT-SORT implementation does not include an appearance ReID branch.
+Tracks that expire and later re-enter can receive a new ID, unlike the primary
+OSNet identity gallery.
