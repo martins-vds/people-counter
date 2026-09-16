@@ -5,28 +5,53 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "permissive-object-counter"
 version = "0.1.0"
-description = "A 100% Permissive (MIT/Apache2) CPU Distinct Person Counter"
+description = "A permissively licensed CPU/GPU distinct person counter"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 
 # Permissive, production-ready computer vision dependencies
 dependencies = [
-    "torch",                          # Triggers the custom CPU index resolution
-    "torchvision",
     "transformers>=4.40.0",           # Apache 2.0 (RT-DETR Model Engine)
     "opencv-python-headless>=4.8.0.0", # MIT/BSD (Headless CV2 for clean CPU deployment)
     "numpy>=1.24.0",                   # BSD
     "scipy>=1.10.0"                    # BSD
 ]
 
-# --- Force UV to map the official PyTorch CPU registry ---
+[project.optional-dependencies]
+cpu = [
+    "torch",
+    "torchvision",
+]
+gpu = [
+    "torch",
+    "torchvision",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "gpu" },
+    ],
+]
+
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
-# --- Anchor torch packages strictly to the CPU registry ---
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "gpu" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "gpu" },
+]

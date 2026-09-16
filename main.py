@@ -1,3 +1,4 @@
+import argparse
 import csv
 from pathlib import Path
 
@@ -5,6 +6,51 @@ import cv2
 import torch
 import numpy as np
 from transformers import AutoImageProcessor, RTDetrForObjectDetection
+
+
+def video_file_path(value):
+    path = Path(value).expanduser()
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"Video file does not exist: {path}")
+    return path
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Count unique people in a video.")
+    parser.add_argument(
+        "video",
+        type=video_file_path,
+        help="Path to the input video file.",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "gpu"),
+        required=True,
+        help="Run with the matching CPU-only or CUDA-enabled PyTorch variant.",
+    )
+    return parser.parse_args()
+
+
+def resolve_device(device_variant):
+    if device_variant == "cpu":
+        if torch.version.cuda is not None:
+            raise RuntimeError(
+                "CPU mode requires the CPU-only PyTorch build. "
+                "Run with: uv run --extra cpu main.py <video> --device cpu"
+            )
+        return torch.device("cpu")
+
+    if torch.version.cuda is None:
+        raise RuntimeError(
+            "GPU mode requires a CUDA-enabled PyTorch build. "
+            "Run with: uv run --extra gpu main.py <video> --device gpu"
+        )
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "GPU mode was requested, but CUDA is unavailable. "
+            "Check the NVIDIA driver and GPU access."
+        )
+    return torch.device("cuda")
 
 
 def format_video_timestamp(frame_index, fps):
@@ -16,7 +62,9 @@ def format_video_timestamp(frame_index, fps):
 
 
 # 1. Initialize Permissive RT-DETR Model (Apache 2.0)
-device = "cpu"  # Explicitly forced to CPU
+args = parse_args()
+device = resolve_device(args.device)
+print(f"Running {args.device.upper()} variant on: {device}")
 processor = AutoImageProcessor.from_pretrained("PekingU/rtdetr_v2_r50vd")
 model = RTDetrForObjectDetection.from_pretrained("PekingU/rtdetr_v2_r50vd").to(device)
 
@@ -31,30 +79,18 @@ tracked_distinct_people = set()
 person_telemetry = {}
 
 # 3. Read Video Stream
-input_path = Path("samples/three_people_walking.mp4")
-output_path = Path("outputs/three_people_walking_counted.mp4")
-telemetry_path = Path("outputs/three_people_walking_telemetry.csv")
+input_path = args.video
+telemetry_path = Path(f"outputs/{input_path.stem}_telemetry_{args.device}.csv")
 cap = cv2.VideoCapture(str(input_path))
 if not cap.isOpened():
     raise RuntimeError(f"Could not open input video: {input_path}")
 
-frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 fps = cap.get(cv2.CAP_PROP_FPS)
-if frame_width <= 0 or frame_height <= 0 or fps <= 0:
+if fps <= 0:
     cap.release()
     raise RuntimeError(f"Invalid video metadata for input: {input_path}")
 
-output_path.parent.mkdir(parents=True, exist_ok=True)
-writer = cv2.VideoWriter(
-    str(output_path),
-    cv2.VideoWriter_fourcc(*"mp4v"),
-    fps,
-    (frame_width, frame_height),
-)
-if not writer.isOpened():
-    cap.release()
-    raise RuntimeError(f"Could not open output video for writing: {output_path}")
+telemetry_path.parent.mkdir(parents=True, exist_ok=True)
 
 frame_index = 0
 while cap.isOpened():
@@ -142,24 +178,9 @@ while cap.isOpened():
 
     track_gallery = updated_tracks
 
-    # 5. Visual Render Output via standard OpenCV
-    for tid, profile in track_gallery.items():
-        if profile["age"] == 0:  # Only draw if actively seen in current frame
-            x1, y1, x2, y2 = profile["bbox"]
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(frame, f"ID: {tid}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-    # Display running total tracking metrics
-    cv2.putText(
-        frame, f"Distinct People: {len(tracked_distinct_people)}", (30, 60), 
-        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3, cv2.LINE_AA
-    )
-    
-    writer.write(frame)
     frame_index += 1
 
 cap.release()
-writer.release()
 
 with telemetry_path.open("w", newline="", encoding="utf-8") as telemetry_file:
     fieldnames = [
@@ -192,7 +213,6 @@ with telemetry_path.open("w", newline="", encoding="utf-8") as telemetry_file:
                 "duration_seconds": f"{exit_seconds - entry_seconds:.3f}",
             }
         )
-
 print(f"Process ended cleanly. Total distinct individuals: {len(tracked_distinct_people)}")
-print(f"Annotated video saved to: {output_path}")
+print(f"Process ended cleanly. Total distinct individuals: {len(tracked_distinct_people)}")
 print(f"Person telemetry saved to: {telemetry_path}")
