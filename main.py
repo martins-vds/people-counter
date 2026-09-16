@@ -3,6 +3,7 @@ import csv
 import hashlib
 import math
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -367,7 +368,10 @@ person_telemetry = {}
 
 # 3. Read Video Stream
 input_path = args.video
-telemetry_path = Path(f"outputs/{input_path.stem}_telemetry_{args.device}.csv")
+run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+telemetry_path = Path(
+    f"outputs/{input_path.stem}_telemetry_{args.device}_{run_timestamp}.csv"
+)
 cap = cv2.VideoCapture(str(input_path))
 if not cap.isOpened():
     raise RuntimeError(f"Could not open input video: {input_path}")

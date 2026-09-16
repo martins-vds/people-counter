@@ -2,6 +2,7 @@ import argparse
 import csv
 import math
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -188,9 +189,10 @@ def main():
     )
 
     input_path = args.video
+    run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     telemetry_path = Path(
         f"outputs/{input_path.stem}_telemetry_rfdetr_large_botsort_"
-        f"{args.device}.csv"
+        f"{args.device}_{run_timestamp}.csv"
     )
     capture = cv2.VideoCapture(str(input_path))
     if not capture.isOpened():
