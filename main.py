@@ -1,11 +1,24 @@
 import argparse
 import csv
+import hashlib
 from pathlib import Path
 
 import cv2
-import torch
 import numpy as np
+import torch
+from huggingface_hub import hf_hub_download
+from libreyolo.tracking.reid import OSNetEmbedder
+from scipy.optimize import linear_sum_assignment
 from transformers import AutoImageProcessor, RTDetrForObjectDetection
+
+REID_REPO_ID = "LibreYOLO/LibreReID-osnet"
+REID_FILENAME = "osnet_ain_x0_25.pt"
+REID_REVISION = "5c7c20e54ccf80c9889a64020748f148ad5f7634"
+REID_SHA256 = "ce171fe160b3608f5e4c19489774991419be965b1d6f4bdccc4b4cfd2ef95347"
+ACTIVE_MATCH_THRESHOLD = 0.70
+REENTRY_MATCH_THRESHOLD = 0.75
+MAX_CENTROID_DISTANCE = 150
+EMBEDDING_EMA_ALPHA = 0.95
 
 
 def video_file_path(value):
@@ -53,6 +66,47 @@ def resolve_device(device_variant):
     return torch.device("cuda")
 
 
+def load_reid_embedder(device):
+    weights_path = Path(
+        hf_hub_download(
+            repo_id=REID_REPO_ID,
+            filename=REID_FILENAME,
+            revision=REID_REVISION,
+        )
+    )
+    weights_digest = hashlib.sha256(weights_path.read_bytes()).hexdigest()
+    if weights_digest != REID_SHA256:
+        raise RuntimeError(
+            f"ReID weights checksum mismatch for {weights_path}: "
+            f"expected {REID_SHA256}, got {weights_digest}"
+        )
+    return OSNetEmbedder(
+        variant="osnet_ain_x0_25",
+        weights=weights_path,
+        device=str(device),
+    )
+
+
+def update_embedding(previous_embedding, current_embedding):
+    embedding = (
+        EMBEDDING_EMA_ALPHA * previous_embedding
+        + (1.0 - EMBEDDING_EMA_ALPHA) * current_embedding
+    )
+    norm = np.linalg.norm(embedding)
+    if norm == 0:
+        raise RuntimeError("OSNet produced a zero-norm identity embedding")
+    return embedding / norm
+
+
+def make_track_profile(detection, embedding):
+    return {
+        "centroid": detection["centroid"],
+        "embedding": embedding,
+        "age": 0,
+        "bbox": detection["bbox"],
+    }
+
+
 def format_video_timestamp(frame_index, fps):
     total_milliseconds = round((frame_index / fps) * 1000)
     hours, remainder = divmod(total_milliseconds, 3_600_000)
@@ -65,12 +119,13 @@ def format_video_timestamp(frame_index, fps):
 args = parse_args()
 device = resolve_device(args.device)
 print(f"Running {args.device.upper()} variant on: {device}")
+reid_embedder = load_reid_embedder(device)
 processor = AutoImageProcessor.from_pretrained("PekingU/rtdetr_v2_r50vd")
 model = RTDetrForObjectDetection.from_pretrained("PekingU/rtdetr_v2_r50vd").to(device)
 
-# 2. Permissive Manual Tracker State (MIT Logic)
-# Stores tracking memory: { track_id: {"centroid": (x, y), "color_hist": hist_data, "age": frame_count} }
+# 2. OSNet ReID tracker state
 track_gallery = {}
+identity_gallery = {}
 next_track_id = 1
 max_disappeared_frames = 30  # How long to remember someone when they disappear
 
@@ -114,67 +169,143 @@ while cap.isOpened():
     labels = result["labels"].cpu().numpy()
     
     current_frame_detections = []
-    
+    person_boxes = []
+
     # Filter strictly for "person" (COCO class 0)
     person_mask = labels == 0
     if np.any(person_mask):
         for box in boxes[person_mask]:
             x1, y1, x2, y2 = map(int, box)
-            
+
             # Prevent cropping errors on edge boundaries
             x1, y1 = max(0, x1), max(0, y1)
             x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
-            
-            # Compute spatial center point (Centroid)
-            cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-            
-            # Compute a lightweight permissive ReID marker: Color Histogram of clothes/person
-            person_crop = frame[y1:y2, x1:x2]
-            if person_crop.size > 0:
-                hist = cv2.calcHist([person_crop], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-                cv2.normalize(hist, hist)
-                current_frame_detections.append({"bbox": (x1, y1, x2, y2), "centroid": (cx, cy), "hist": hist})
+            if x2 > x1 and y2 > y1:
+                person_boxes.append((x1, y1, x2, y2))
 
-    # 4. Core ReID Tracker Matching Logic (MIT/BSD-compliant algorithm)
+    if person_boxes:
+        embeddings = reid_embedder(
+            rgb_frame, np.asarray(person_boxes, dtype=np.float32)
+        )
+        for bbox, embedding in zip(person_boxes, embeddings):
+            x1, y1, x2, y2 = bbox
+            current_frame_detections.append(
+                {
+                    "bbox": bbox,
+                    "centroid": ((x1 + x2) // 2, (y1 + y2) // 2),
+                    "embedding": embedding,
+                }
+            )
+
+    # 4. One-to-one OSNet identity association
     updated_tracks = {}
-    
-    for det in current_frame_detections:
-        best_match_id = None
-        best_score = -1  # High correlation score means highly similar visual profile
-        
-        # Check against every existing person profile in our memory gallery
-        for tid, profile in track_gallery.items():
-            # Spatial distance constraint (Are they near where the person was last seen?)
-            spatial_dist = np.hypot(det["centroid"][0] - profile["centroid"][0], det["centroid"][1] - profile["centroid"][1])
-            
-            if spatial_dist < 150: # Distance threshold in pixels
-                # Visual appearance verification (ReID via Cosine/Histogram Correlation)
-                appearance_score = cv2.compareHist(det["hist"], profile["hist"], cv2.HISTCMP_CORREL)
-                
-                if appearance_score > best_score and appearance_score > 0.5:
-                    best_score = appearance_score
-                    best_match_id = tid
-        
-        if best_match_id is not None:
-            # ReID Match Found! Update the person's records and retain their original ID
-            updated_tracks[best_match_id] = {"centroid": det["centroid"], "hist": det["hist"], "age": 0, "bbox": det["bbox"]}
-            person_telemetry[best_match_id]["last_seen_frame"] = frame_index
-        else:
-            # Brand New Identity discovered
-            updated_tracks[next_track_id] = {"centroid": det["centroid"], "hist": det["hist"], "age": 0, "bbox": det["bbox"]}
-            tracked_distinct_people.add(next_track_id)
-            person_telemetry[next_track_id] = {
-                "entry_frame": frame_index,
-                "last_seen_frame": frame_index,
-            }
-            next_track_id += 1
+    matched_detection_indices = set()
+    active_track_ids = list(track_gallery)
+
+    if current_frame_detections and active_track_ids:
+        detection_embeddings = np.stack(
+            [detection["embedding"] for detection in current_frame_detections]
+        )
+        active_embeddings = np.stack(
+            [track_gallery[track_id]["embedding"] for track_id in active_track_ids]
+        )
+        similarities = detection_embeddings @ active_embeddings.T
+        costs = 1.0 - similarities
+        valid_pairs = np.zeros(costs.shape, dtype=bool)
+
+        for detection_index, detection in enumerate(current_frame_detections):
+            for track_index, track_id in enumerate(active_track_ids):
+                profile = track_gallery[track_id]
+                spatial_distance = np.hypot(
+                    detection["centroid"][0] - profile["centroid"][0],
+                    detection["centroid"][1] - profile["centroid"][1],
+                )
+                valid_pairs[detection_index, track_index] = (
+                    spatial_distance < MAX_CENTROID_DISTANCE
+                )
+
+        costs[~valid_pairs] = 1_000_000
+        matched_rows, matched_columns = linear_sum_assignment(costs)
+        for detection_index, track_index in zip(matched_rows, matched_columns):
+            if (
+                not valid_pairs[detection_index, track_index]
+                or similarities[detection_index, track_index]
+                < ACTIVE_MATCH_THRESHOLD
+            ):
+                continue
+
+            track_id = active_track_ids[track_index]
+            detection = current_frame_detections[detection_index]
+            embedding = update_embedding(
+                identity_gallery[track_id], detection["embedding"]
+            )
+            identity_gallery[track_id] = embedding
+            updated_tracks[track_id] = make_track_profile(detection, embedding)
+            person_telemetry[track_id]["last_seen_frame"] = frame_index
+            matched_detection_indices.add(detection_index)
+
+    unmatched_detection_indices = [
+        index
+        for index in range(len(current_frame_detections))
+        if index not in matched_detection_indices
+    ]
+    inactive_identity_ids = [
+        track_id for track_id in identity_gallery if track_id not in track_gallery
+    ]
+
+    if unmatched_detection_indices and inactive_identity_ids:
+        unmatched_embeddings = np.stack(
+            [
+                current_frame_detections[index]["embedding"]
+                for index in unmatched_detection_indices
+            ]
+        )
+        inactive_embeddings = np.stack(
+            [identity_gallery[track_id] for track_id in inactive_identity_ids]
+        )
+        reentry_similarities = unmatched_embeddings @ inactive_embeddings.T
+        reentry_rows, reentry_columns = linear_sum_assignment(
+            1.0 - reentry_similarities
+        )
+
+        for unmatched_row, inactive_column in zip(reentry_rows, reentry_columns):
+            if (
+                reentry_similarities[unmatched_row, inactive_column]
+                < REENTRY_MATCH_THRESHOLD
+            ):
+                continue
+
+            detection_index = unmatched_detection_indices[unmatched_row]
+            track_id = inactive_identity_ids[inactive_column]
+            detection = current_frame_detections[detection_index]
+            embedding = update_embedding(
+                identity_gallery[track_id], detection["embedding"]
+            )
+            identity_gallery[track_id] = embedding
+            updated_tracks[track_id] = make_track_profile(detection, embedding)
+            person_telemetry[track_id]["last_seen_frame"] = frame_index
+            matched_detection_indices.add(detection_index)
+
+    for detection_index, detection in enumerate(current_frame_detections):
+        if detection_index in matched_detection_indices:
+            continue
+
+        embedding = detection["embedding"]
+        identity_gallery[next_track_id] = embedding
+        updated_tracks[next_track_id] = make_track_profile(detection, embedding)
+        tracked_distinct_people.add(next_track_id)
+        person_telemetry[next_track_id] = {
+            "entry_frame": frame_index,
+            "last_seen_frame": frame_index,
+        }
+        next_track_id += 1
 
     # Age unmapped tracks to see if they should be dropped or held in memory
-    for tid, profile in list(track_gallery.items()):
+    for tid, profile in track_gallery.items():
         if tid not in updated_tracks:
             profile["age"] += 1
             if profile["age"] <= max_disappeared_frames:
-                updated_tracks[tid] = profile # Carry over track memory to keep ReID active
+                updated_tracks[tid] = profile
 
     track_gallery = updated_tracks
 
@@ -213,6 +344,5 @@ with telemetry_path.open("w", newline="", encoding="utf-8") as telemetry_file:
                 "duration_seconds": f"{exit_seconds - entry_seconds:.3f}",
             }
         )
-print(f"Process ended cleanly. Total distinct individuals: {len(tracked_distinct_people)}")
 print(f"Process ended cleanly. Total distinct individuals: {len(tracked_distinct_people)}")
 print(f"Person telemetry saved to: {telemetry_path}")
