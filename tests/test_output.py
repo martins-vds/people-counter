@@ -1,7 +1,9 @@
 import csv
 import tempfile
 import unittest
+from datetime import timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from people_counter.models import LineCountRecord, PersonTelemetry, RunResult
 from people_counter.output import (
@@ -55,6 +57,26 @@ class OutputTests(unittest.TestCase):
         )
         self.assertIsNone(botsort.line_counts)
 
+    def test_output_paths_generate_utc_timestamp_when_unspecified(self):
+        now = MagicMock()
+        now.strftime.return_value = "generated"
+        with patch("people_counter.output.datetime") as datetime_type:
+            datetime_type.now.return_value = now
+            paths = generate_output_paths(
+                Path("video.mp4"),
+                "",
+                "cpu",
+                False,
+            )
+
+        datetime_type.now.assert_called_once()
+        datetime_type.now.assert_called_once_with(timezone.utc)
+        now.strftime.assert_called_once_with("%Y%m%dT%H%M%S%fZ")
+        self.assertEqual(
+            paths.telemetry,
+            Path("outputs/video_telemetry_cpu_generated.csv"),
+        )
+
     def test_uninitialized_run_result_is_not_written(self):
         with tempfile.TemporaryDirectory() as directory:
             output_path = Path(directory) / "telemetry.csv"
@@ -74,7 +96,9 @@ class OutputTests(unittest.TestCase):
 
     def test_telemetry_csv_schema_and_values(self):
         with tempfile.TemporaryDirectory() as directory:
-            output_path = Path(directory) / "telemetry.csv"
+            output_path = (
+                Path(directory) / "nested" / "deep" / "telemetry.csv"
+            )
             write_telemetry(
                 output_path,
                 {
@@ -92,6 +116,7 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(rows[0]["exit_timestamp"], "00:00:02.000")
         self.assertEqual(rows[0]["duration_seconds"], "2.000")
         self.assertEqual(rows[1]["entry_seconds"], "1.000")
+        self.assertEqual(rows[1]["duration_seconds"], "2.000")
 
     def test_line_counts_csv_schema_and_values(self):
         records = [
@@ -110,7 +135,10 @@ class OutputTests(unittest.TestCase):
             )
         ]
         with tempfile.TemporaryDirectory() as directory:
-            output_path = Path(directory) / "line_counts.csv"
+            output_path = (
+                Path(directory) / "nested" / "deep" / "line_counts.csv"
+            )
+            write_line_counts(output_path, records)
             write_line_counts(output_path, records)
             with output_path.open(newline="", encoding="utf-8") as output:
                 rows = list(csv.DictReader(output))
@@ -119,3 +147,31 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(rows[0]["frame_in_count"], "1")
         self.assertEqual(rows[0]["cumulative_in_count"], "2")
         self.assertEqual(rows[0]["line_end_x"], "99")
+
+    def test_write_run_result_delegates_complete_result(self):
+        result = RunResult(
+            initialized=True,
+            fps=30.0,
+            telemetry={1: PersonTelemetry(0, 3)},
+            line_counts=[],
+        )
+        paths = OutputPaths(
+            telemetry=Path("telemetry.csv"),
+            line_counts=Path("line.csv"),
+        )
+
+        with (
+            patch("people_counter.output.write_telemetry") as telemetry,
+            patch("people_counter.output.write_line_counts") as line_counts,
+        ):
+            write_run_result(paths, result)
+
+        telemetry.assert_called_once_with(
+            paths.telemetry,
+            result.telemetry,
+            30.0,
+        )
+        line_counts.assert_called_once_with(
+            paths.line_counts,
+            result.line_counts,
+        )
