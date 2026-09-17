@@ -32,6 +32,10 @@ people-counter-rfdetr = "people_counter.cli:rfdetr_botsort_main"
 where = ["src"]
 include = ["people_counter*"]
 
+[tool.mutmut]
+source_paths = ["src/people_counter/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+
 [project.optional-dependencies]
 cpu = [
     "libreyolo==1.5.0",
