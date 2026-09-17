@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "permissive-object-counter"
+name = "people-counter"
 version = "0.1.0"
 description = "A permissively licensed CPU/GPU distinct person counter"
 readme = "README.md"
