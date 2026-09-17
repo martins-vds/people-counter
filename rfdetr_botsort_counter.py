@@ -1,49 +1,33 @@
 import argparse
-import csv
 import math
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
+import numpy as np
 import supervision as sv
 import torch
+from people_counter.common import (
+    DETECTOR_FLOOR,
+    MIN_CONFIRMATION_FRAMES,
+    FrameReadState,
+    coasting_track_detections,
+    confirmed_entry_frame,
+    create_line_zone,
+    detection_threshold_value,
+    iter_sampled_frame_batches,
+    lost_track_buffer_for_sample_rate,
+    positive_int,
+    record_line_counts,
+    sample_fps_value,
+    video_file_path,
+    write_line_counts,
+    write_telemetry,
+)
 from rfdetr import RFDETRLarge
 from trackers import BoTSORTTracker
-
-PERSON_CLASS_ID = 1
-DETECTOR_FLOOR = 0.1
-
-
-def video_file_path(value):
-    path = Path(value).expanduser()
-    if not path.is_file():
-        raise argparse.ArgumentTypeError(f"Video file does not exist: {path}")
-    return path
-
-
-def positive_int(value):
-    parsed_value = int(value)
-    if parsed_value <= 0:
-        raise argparse.ArgumentTypeError("Value must be greater than zero")
-    return parsed_value
-
-
-def sample_fps_value(value):
-    if value.lower() == "all":
-        return None
-    parsed_value = float(value)
-    if parsed_value <= 0:
-        raise argparse.ArgumentTypeError("Sample FPS must be greater than zero")
-    return parsed_value
-
-
-def probability_value(value):
-    parsed_value = float(value)
-    if not 0 < parsed_value <= 1:
-        raise argparse.ArgumentTypeError("Probability must be in the range (0, 1]")
-    return parsed_value
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -74,7 +58,7 @@ def parse_args():
     )
     parser.add_argument(
         "--detection-threshold",
-        type=probability_value,
+        type=detection_threshold_value,
         default=0.6,
         help="Confidence required to activate a track (default: 0.6).",
     )
@@ -89,6 +73,15 @@ def parse_args():
         nargs=4,
         metavar=("X1", "Y1", "X2", "Y2"),
         help="Directed counting line in source-video pixels.",
+    )
+    parser.add_argument(
+        "--cmc",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable camera-motion compensation "
+            "(default: enabled only when processing every frame)."
+        ),
     )
     return parser.parse_args()
 
@@ -115,140 +108,6 @@ def resolve_device(device_variant):
             "Check the NVIDIA driver and GPU access."
         )
     return torch.device("cuda")
-
-
-def iter_sampled_frame_batches(capture, sample_interval, batch_size):
-    batch = []
-    source_frame_index = 0
-
-    while capture.isOpened():
-        success, frame = capture.read()
-        if not success:
-            break
-
-        if source_frame_index % sample_interval == 0:
-            batch.append((source_frame_index, frame))
-            if len(batch) == batch_size:
-                yield batch
-                batch = []
-
-        source_frame_index += 1
-
-    if batch:
-        yield batch
-
-
-def format_video_timestamp(frame_index, fps):
-    total_milliseconds = round((frame_index / fps) * 1000)
-    hours, remainder = divmod(total_milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds, milliseconds = divmod(remainder, 1000)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
-
-
-def create_line_zone(line_coordinates, frame_width, frame_height):
-    if line_coordinates is None:
-        return None
-
-    x1, y1, x2, y2 = line_coordinates
-    if (x1, y1) == (x2, y2):
-        raise ValueError("Counting line start and end coordinates must differ")
-    for x, y in ((x1, y1), (x2, y2)):
-        if not 0 <= x < frame_width or not 0 <= y < frame_height:
-            raise ValueError(
-                f"Counting line point ({x}, {y}) is outside the "
-                f"{frame_width}x{frame_height} video frame"
-            )
-
-    return sv.LineZone(
-        start=sv.Point(x=x1, y=y1),
-        end=sv.Point(x=x2, y=y2),
-        triggering_anchors=(sv.Position.BOTTOM_CENTER,),
-    )
-
-
-def record_line_counts(
-    line_zone,
-    detections,
-    source_frame_index,
-    fps,
-    line_coordinates,
-    line_count_records,
-):
-    if line_zone is None:
-        return
-
-    crossed_in, crossed_out = line_zone.trigger(detections)
-    x1, y1, x2, y2 = line_coordinates
-    line_count_records.append(
-        {
-            "frame": source_frame_index,
-            "video_seconds": f"{source_frame_index / fps:.3f}",
-            "video_timestamp": format_video_timestamp(source_frame_index, fps),
-            "frame_in_count": int(crossed_in.sum()),
-            "frame_out_count": int(crossed_out.sum()),
-            "cumulative_in_count": line_zone.in_count,
-            "cumulative_out_count": line_zone.out_count,
-            "line_start_x": x1,
-            "line_start_y": y1,
-            "line_end_x": x2,
-            "line_end_y": y2,
-        }
-    )
-
-
-def write_line_counts(line_counts_path, line_count_records):
-    fieldnames = [
-        "frame",
-        "video_seconds",
-        "video_timestamp",
-        "frame_in_count",
-        "frame_out_count",
-        "cumulative_in_count",
-        "cumulative_out_count",
-        "line_start_x",
-        "line_start_y",
-        "line_end_x",
-        "line_end_y",
-    ]
-    with line_counts_path.open("w", newline="", encoding="utf-8") as counts_file:
-        writer = csv.DictWriter(counts_file, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(line_count_records)
-
-
-def write_telemetry(telemetry_path, telemetry, fps):
-    with telemetry_path.open("w", newline="", encoding="utf-8") as telemetry_file:
-        fieldnames = [
-            "person_id",
-            "entry_frame",
-            "exit_frame",
-            "entry_seconds",
-            "exit_seconds",
-            "entry_timestamp",
-            "exit_timestamp",
-            "duration_seconds",
-        ]
-        writer = csv.DictWriter(telemetry_file, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for person_id in sorted(telemetry):
-            entry_frame = telemetry[person_id]["entry_frame"]
-            exit_frame = telemetry[person_id]["last_seen_frame"]
-            entry_seconds = entry_frame / fps
-            exit_seconds = exit_frame / fps
-            writer.writerow(
-                {
-                    "person_id": person_id,
-                    "entry_frame": entry_frame,
-                    "exit_frame": exit_frame,
-                    "entry_seconds": f"{entry_seconds:.3f}",
-                    "exit_seconds": f"{exit_seconds:.3f}",
-                    "entry_timestamp": format_video_timestamp(entry_frame, fps),
-                    "exit_timestamp": format_video_timestamp(exit_frame, fps),
-                    "duration_seconds": f"{exit_seconds - entry_seconds:.3f}",
-                }
-            )
 
 
 def main():
@@ -292,38 +151,52 @@ def main():
         capture.release()
         raise RuntimeError(f"Invalid video metadata for input: {input_path}")
 
-    line_zone = create_line_zone(args.line, frame_width, frame_height)
+    results_initialized = False
     line_count_records = []
-    total_source_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    requested_sample_fps = args.sample_fps or fps
-    sample_interval = max(1, round(fps / min(requested_sample_fps, fps)))
-    effective_sample_fps = fps / sample_interval
-    total_sampled_frames = (
-        math.ceil(total_source_frames / sample_interval)
-        if total_source_frames > 0
-        else 0
-    )
-
-    tracker = BoTSORTTracker(
-        frame_rate=fps,
-        lost_track_buffer=max(1, round(fps)),
-        track_activation_threshold=args.detection_threshold,
-        high_conf_det_threshold=args.detection_threshold,
-        enable_cmc=True,
-    )
     telemetry = {}
-    processed_frames = 0
-    processing_started = time.perf_counter()
-    telemetry_path.parent.mkdir(parents=True, exist_ok=True)
-
-    print(
-        f"Sampling {effective_sample_fps:.2f} FPS (every {sample_interval} "
-        f"source frame(s)); detector batch size {batch_size}; FP16 {use_fp16}"
-    )
-
     try:
+        line_zone = create_line_zone(args.line, frame_width, frame_height)
+        total_source_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        requested_sample_fps = args.sample_fps or fps
+        sample_interval = max(1, round(fps / min(requested_sample_fps, fps)))
+        effective_sample_fps = fps / sample_interval
+        total_sampled_frames = (
+            math.ceil(total_source_frames / sample_interval)
+            if total_source_frames > 0
+            else 0
+        )
+        read_state = FrameReadState()
+        line_track_cache = {}
+        enable_cmc = args.cmc if args.cmc is not None else sample_interval == 1
+        lost_track_buffer = lost_track_buffer_for_sample_rate(
+            effective_sample_fps
+        )
+        tracker = BoTSORTTracker(
+            frame_rate=fps,
+            lost_track_buffer=lost_track_buffer,
+            track_activation_threshold=args.detection_threshold,
+            high_conf_det_threshold=args.detection_threshold,
+            minimum_consecutive_frames=MIN_CONFIRMATION_FRAMES,
+            instant_first_frame_activation=False,
+            enable_cmc=enable_cmc,
+        )
+        processed_frames = 0
+        processing_started = time.perf_counter()
+        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+        results_initialized = True
+
+        print(
+            f"Sampling {effective_sample_fps:.2f} FPS (every {sample_interval} "
+            f"source frame(s)); detector batch size {batch_size}; FP16 {use_fp16}; "
+            f"CMC {enable_cmc}"
+        )
+
         for frame_batch in iter_sampled_frame_batches(
-            capture, sample_interval, batch_size
+            capture,
+            sample_interval,
+            batch_size,
+            total_source_frames,
+            read_state,
         ):
             source_frame_indices = [item[0] for item in frame_batch]
             frames = [item[1] for item in frame_batch]
@@ -343,10 +216,10 @@ def main():
             for source_frame_index, frame, detections in zip(
                 source_frame_indices, frames, detections_batch
             ):
-                if detections.class_id is None:
-                    raise RuntimeError("RF-DETR detections did not include class IDs")
-
-                people = detections[detections.class_id == PERSON_CLASS_ID]
+                class_names = detections.data.get("class_name")
+                if class_names is None:
+                    raise RuntimeError("RF-DETR detections did not include class names")
+                people = detections[np.asarray(class_names) == "person"]
                 tracked_people = tracker.update(
                     people,
                     frame=frame,
@@ -359,14 +232,20 @@ def main():
                         tracked_people.tracker_id >= 0
                     ]
 
-                record_line_counts(
-                    line_zone,
-                    confirmed_people,
-                    source_frame_index,
-                    fps,
-                    args.line,
-                    line_count_records,
-                )
+                if line_zone is not None:
+                    record_line_counts(
+                        line_zone,
+                        coasting_track_detections(
+                            confirmed_people,
+                            line_track_cache,
+                            source_frame_index,
+                            round((lost_track_buffer / 30) * fps),
+                        ),
+                        source_frame_index,
+                        fps,
+                        args.line,
+                        line_count_records,
+                    )
                 if confirmed_people.tracker_id is None:
                     continue
 
@@ -375,26 +254,39 @@ def main():
                     record = telemetry.setdefault(
                         person_id,
                         {
-                            "entry_frame": source_frame_index,
+                            "entry_frame": confirmed_entry_frame(
+                                source_frame_index,
+                                sample_interval,
+                            ),
                             "last_seen_frame": source_frame_index,
                         },
                     )
                     record["last_seen_frame"] = source_frame_index
 
             processed_frames += len(frame_batch)
-            if total_sampled_frames > 0:
-                print(
-                    f"\rProcessed {processed_frames}/{total_sampled_frames} "
-                    f"sampled frames",
-                    end="",
-                    flush=True,
-                )
+            progress_total = (
+                f"/{total_sampled_frames}" if total_sampled_frames > 0 else ""
+            )
+            print(
+                f"\rProcessed {processed_frames}{progress_total} sampled frames",
+                end="",
+                flush=True,
+            )
     finally:
         capture.release()
+        if results_initialized:
+            write_telemetry(telemetry_path, telemetry, fps)
+        if results_initialized and line_counts_path is not None:
+            write_line_counts(line_counts_path, line_count_records)
 
     processing_seconds = time.perf_counter() - processing_started
-    if total_sampled_frames > 0:
-        print()
+    print()
+    if read_state.ended_early:
+        print(
+            f"Warning: video decoding stopped after "
+            f"{read_state.source_frames_read}/{total_source_frames} source frames",
+            file=sys.stderr,
+        )
     processing_fps = (
         processed_frames / processing_seconds if processing_seconds else 0
     )
@@ -403,11 +295,9 @@ def main():
         f"({processing_fps:.2f} sampled FPS)"
     )
 
-    write_telemetry(telemetry_path, telemetry, fps)
     print(f"Process ended cleanly. Total distinct individuals: {len(telemetry)}")
     print(f"Person telemetry saved to: {telemetry_path}")
     if line_counts_path is not None:
-        write_line_counts(line_counts_path, line_count_records)
         print(
             f"Line crossings: {line_zone.in_count} in, {line_zone.out_count} out"
         )
