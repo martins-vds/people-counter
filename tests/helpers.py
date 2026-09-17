@@ -17,9 +17,11 @@ def detection(
 
 
 class FakeCapture:
-    def __init__(self, frames):
+    def __init__(self, frames, fps=10.0):
         self.frames = list(frames)
         self.index = 0
+        self.fps = fps
+        self.released = False
 
     def isOpened(self):
         return True
@@ -36,6 +38,18 @@ class FakeCapture:
             return False
         self.index += 1
         return True
+
+    def get(self, property_id):
+        metadata = {
+            3: self.frames[0].shape[1],
+            4: self.frames[0].shape[0],
+            5: self.fps,
+            7: len(self.frames),
+        }
+        return metadata[property_id]
+
+    def release(self):
+        self.released = True
 
 
 class RecordingEmbedder:

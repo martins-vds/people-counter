@@ -2,6 +2,7 @@ import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -12,6 +13,7 @@ from people_counter.config import (
     DETECTOR_FLOOR,
     MIN_CONFIRMATION_FRAMES,
     RTDetrOsnetConfig,
+    SamplingConfig,
     disappeared_frames_for_sample_rate,
     sampling_config,
 )
@@ -29,7 +31,10 @@ from people_counter.models import (
     TrackProfile,
 )
 from people_counter.video import (
+    FrameBatch,
     FrameReadState,
+    VideoCapture,
+    VideoMetadata,
     iter_sampled_frame_batches,
     read_video_metadata,
 )
@@ -62,6 +67,43 @@ class RTDetrTrackingState:
     telemetry: dict[int, PersonTelemetry] = field(default_factory=dict)
     next_track_id: int = 1
     next_tentative_id: int = -1
+
+
+@dataclass
+class AssociationState:
+    detections: list[Detection]
+    tracking: RTDetrTrackingState
+    source_frame_index: int
+    max_centroid_displacement: float
+    max_disappeared_frames: int
+    max_reentry_frames: int
+    sample_interval: int
+    activation_threshold: float
+    updated_tracks: dict[int, TrackProfile] = field(default_factory=dict)
+    matched_detection_indices: set[int] = field(default_factory=set)
+    matched_track_ids: set[int] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class RTDetrRuntime:
+    device: torch.device
+    reid_embedder: Any
+    processor: Any
+    model: Any
+    person_class_id: int
+
+
+@dataclass(frozen=True)
+class RTDetrRunState:
+    config: RTDetrOsnetConfig
+    runtime: RTDetrRuntime
+    tracking: RTDetrTrackingState
+    metadata: VideoMetadata
+    sampling: SamplingConfig
+    max_disappeared_frames: int
+    max_reentry_frames: int
+    max_centroid_displacement: float
+    line_zone: Any
 
 
 def detection_embedding(detection: Detection) -> Embedding:
@@ -293,480 +335,585 @@ def associate_detections(
     sample_interval: int,
     activation_threshold: float,
 ) -> None:
-    track_gallery = tracking.tracks
-    identity_gallery = tracking.identities
-    person_telemetry = tracking.telemetry
+    state = AssociationState(
+        detections=detections,
+        tracking=tracking,
+        source_frame_index=source_frame_index,
+        max_centroid_displacement=max_centroid_displacement,
+        max_disappeared_frames=max_disappeared_frames,
+        max_reentry_frames=max_reentry_frames,
+        sample_interval=sample_interval,
+        activation_threshold=activation_threshold,
+    )
+    expire_inactive_identities(state)
+    assign_active_appearance_matches(state)
+    assign_spatial_secondary_matches(state)
+    assign_reentry_matches(state)
+    spawn_tentative_tracks(state)
+    age_unmatched_tracks(state)
+    tracking.tracks = state.updated_tracks
+
+
+def expire_inactive_identities(state: AssociationState) -> None:
     active_confirmed_ids = {
-        track_id for track_id in track_gallery if track_id > 0
+        track_id for track_id in state.tracking.tracks if track_id > 0
     }
     expired_identity_ids = [
         track_id
-        for track_id in identity_gallery
+        for track_id in state.tracking.identities
         if track_id not in active_confirmed_ids
-        and source_frame_index
-        - person_telemetry[track_id].last_seen_frame
-        > max_reentry_frames
+        and state.source_frame_index
+        - state.tracking.telemetry[track_id].last_seen_frame
+        > state.max_reentry_frames
     ]
     for track_id in expired_identity_ids:
-        del identity_gallery[track_id]
+        del state.tracking.identities[track_id]
 
-    updated_tracks = {}
-    matched_detection_indices = set()
-    matched_track_ids = set()
-    active_track_ids = list(track_gallery)
 
-    if detections and active_track_ids:
-        detection_embeddings = np.stack(
-            [detection_embedding(detection) for detection in detections]
+def _active_spatially_valid(
+    state: AssociationState,
+    detection: Detection,
+    profile: TrackProfile,
+) -> bool:
+    spatial_distance = np.hypot(
+        detection.centroid[0] - profile.centroid[0],
+        detection.centroid[1] - profile.centroid[1],
+    )
+    return spatial_distance < centroid_distance_limit(
+        detection,
+        profile,
+        state.max_centroid_displacement,
+        state.max_disappeared_frames,
+    )
+
+
+def _record_track_match(
+    state: AssociationState,
+    detection_index: int,
+    original_track_id: int,
+    embedding: Embedding,
+    update_identity: bool,
+) -> None:
+    detection = state.detections[detection_index]
+    previous_profile = state.tracking.tracks[original_track_id]
+    hits = previous_profile.hits + 1
+    track_id = original_track_id
+    if track_id < 0 and hits >= MIN_CONFIRMATION_FRAMES:
+        track_id = state.tracking.next_track_id
+        state.tracking.next_track_id += 1
+        state.tracking.identities[track_id] = embedding
+        state.tracking.telemetry[track_id] = PersonTelemetry(
+            entry_frame=previous_profile.first_seen_frame,
+            last_seen_frame=state.source_frame_index,
+            last_geometry=LastGeometry(
+                centroid=detection.centroid,
+                bbox=detection.bbox,
+            ),
         )
-        active_embeddings = np.stack(
-            [track_gallery[track_id].embedding for track_id in active_track_ids]
-        )
-        similarities = detection_embeddings @ active_embeddings.T
-        costs = 1.0 - similarities
-        valid_pairs = np.zeros(costs.shape, dtype=bool)
-
-        for detection_index, detection in enumerate(detections):
-            for track_index, track_id in enumerate(active_track_ids):
-                profile = track_gallery[track_id]
-                spatial_distance = np.hypot(
-                    detection.centroid[0] - profile.centroid[0],
-                    detection.centroid[1] - profile.centroid[1],
-                )
-                distance_limit = centroid_distance_limit(
-                    detection,
-                    profile,
-                    max_centroid_displacement,
-                    max_disappeared_frames,
-                )
-                valid_pairs[detection_index, track_index] = (
-                    spatial_distance < distance_limit
-                )
-
-        costs[~valid_pairs] = 1_000_000
-        matched_rows, matched_columns = linear_sum_assignment(costs)
-        for detection_index, track_index in zip(matched_rows, matched_columns):
-            if (
-                not valid_pairs[detection_index, track_index]
-                or similarities[detection_index, track_index]
-                < ACTIVE_MATCH_THRESHOLD
-            ):
-                continue
-
-            original_track_id = active_track_ids[track_index]
-            track_id = original_track_id
-            detection = detections[detection_index]
-            embedding = update_embedding(
-                track_gallery[track_id].embedding,
-                detection_embedding(detection),
-            )
-            previous_profile = track_gallery[track_id]
-            hits = previous_profile.hits + 1
-            updated_profile = make_track_profile(
-                detection,
-                embedding,
-                previous_profile.first_seen_frame,
-                hits,
-            )
-            if track_id < 0 and hits >= MIN_CONFIRMATION_FRAMES:
-                track_id = tracking.next_track_id
-                tracking.next_track_id += 1
-                identity_gallery[track_id] = embedding
-                person_telemetry[track_id] = PersonTelemetry(
-                    entry_frame=previous_profile.first_seen_frame,
-                    last_seen_frame=source_frame_index,
-                    last_geometry=LastGeometry(
-                        centroid=detection.centroid,
-                        bbox=detection.bbox,
-                    ),
-                )
-            elif track_id > 0:
-                identity_gallery[track_id] = embedding
-                update_person_telemetry(
-                    person_telemetry[track_id],
-                    detection,
-                    source_frame_index,
-                )
-            updated_tracks[track_id] = updated_profile
-            matched_detection_indices.add(detection_index)
-            matched_track_ids.add(original_track_id)
-
-    unmatched_detection_indices = [
-        index
-        for index in range(len(detections))
-        if index not in matched_detection_indices
-    ]
-    secondary_detection_indices = [
-        index
-        for index in unmatched_detection_indices
-        if detections[index].confidence >= activation_threshold
-    ]
-    secondary_track_ids = [
-        track_id
-        for track_id in track_gallery
-        if track_id not in matched_track_ids
-    ]
-    if secondary_detection_indices and secondary_track_ids:
-        spatial_costs = np.full(
-            (len(secondary_detection_indices), len(secondary_track_ids)),
-            1_000_000.0,
-        )
-        valid_spatial_pairs = np.zeros(spatial_costs.shape, dtype=bool)
-        for row, detection_index in enumerate(secondary_detection_indices):
-            detection = detections[detection_index]
-            for column, track_id in enumerate(secondary_track_ids):
-                profile = track_gallery[track_id]
-                spatial_distance = np.hypot(
-                    detection.centroid[0] - profile.centroid[0],
-                    detection.centroid[1] - profile.centroid[1],
-                )
-                distance_limit = centroid_distance_limit(
-                    detection,
-                    profile,
-                    max_centroid_displacement,
-                    max_disappeared_frames,
-                )
-                if spatial_distance < distance_limit:
-                    similarity = float(
-                        detection_embedding(detection)
-                        @ profile.embedding
-                    )
-                    if similarity >= SECONDARY_MATCH_THRESHOLD:
-                        valid_spatial_pairs[row, column] = True
-                        spatial_costs[row, column] = (
-                            spatial_distance / distance_limit
-                        )
-
-        matched_rows, matched_columns = linear_sum_assignment(spatial_costs)
-        for row, column in zip(matched_rows, matched_columns):
-            if not valid_spatial_pairs[row, column]:
-                continue
-
-            detection_index = secondary_detection_indices[row]
-            track_id = secondary_track_ids[column]
-            detection = detections[detection_index]
-            previous_profile = track_gallery[track_id]
-            embedding = previous_profile.embedding
-            hits = previous_profile.hits + 1
-            updated_profile = make_track_profile(
-                detection,
-                embedding,
-                previous_profile.first_seen_frame,
-                hits,
-            )
-            original_track_id = track_id
-            if track_id < 0 and hits >= MIN_CONFIRMATION_FRAMES:
-                track_id = tracking.next_track_id
-                tracking.next_track_id += 1
-                identity_gallery[track_id] = embedding
-                person_telemetry[track_id] = PersonTelemetry(
-                    entry_frame=previous_profile.first_seen_frame,
-                    last_seen_frame=source_frame_index,
-                    last_geometry=LastGeometry(
-                        centroid=detection.centroid,
-                        bbox=detection.bbox,
-                    ),
-                )
-            elif track_id > 0:
-                update_person_telemetry(
-                    person_telemetry[track_id],
-                    detection,
-                    source_frame_index,
-                )
-            updated_tracks[track_id] = updated_profile
-            matched_detection_indices.add(detection_index)
-            matched_track_ids.add(original_track_id)
-
-    unmatched_detection_indices = [
-        index
-        for index in range(len(detections))
-        if index not in matched_detection_indices
-    ]
-    reentry_detection_indices = [
-        index
-        for index in unmatched_detection_indices
-        if detections[index].confidence >= activation_threshold
-    ]
-    reentry_identity_ids = [
-        track_id
-        for track_id in identity_gallery
-        if track_id not in updated_tracks
-        and (
-            track_id not in track_gallery
-            or track_gallery[track_id].age > 0
-        )
-    ]
-
-    if reentry_detection_indices and reentry_identity_ids:
-        unmatched_embeddings = np.stack(
-            [
-                detection_embedding(detections[index])
-                for index in reentry_detection_indices
-            ]
-        )
-        reentry_embeddings = np.stack(
-            [identity_gallery[track_id] for track_id in reentry_identity_ids]
-        )
-        reentry_similarities = unmatched_embeddings @ reentry_embeddings.T
-        reentry_costs = 1.0 - reentry_similarities
-        valid_reentry_pairs = np.zeros(reentry_costs.shape, dtype=bool)
-        for row, detection_index in enumerate(reentry_detection_indices):
-            detection = detections[detection_index]
-            for column, track_id in enumerate(reentry_identity_ids):
-                telemetry = person_telemetry[track_id]
-                elapsed_sample_periods = max(
-                    1.0,
-                    (
-                        source_frame_index - telemetry.last_seen_frame
-                    )
-                    / sample_interval,
-                )
-                if telemetry.last_geometry is None:
-                    raise RuntimeError("Identity is missing its last geometry")
-                last_centroid = telemetry.last_geometry.centroid
-                spatial_distance = np.hypot(
-                    detection.centroid[0] - last_centroid[0],
-                    detection.centroid[1] - last_centroid[1],
-                )
-                last_bbox = telemetry.last_geometry.bbox
-                bbox_height = max(
-                    detection.bbox[3] - detection.bbox[1],
-                    last_bbox[3] - last_bbox[1],
-                )
-                distance_limit = max(
-                    max_centroid_displacement * elapsed_sample_periods,
-                    MIN_CENTROID_DISTANCE_BBOX_HEIGHTS * bbox_height,
-                )
-                valid_reentry_pairs[row, column] = (
-                    spatial_distance < distance_limit
-                )
-        reentry_costs[~valid_reentry_pairs] = 1_000_000
-        reentry_rows, reentry_columns = linear_sum_assignment(
-            reentry_costs
-        )
-
-        for unmatched_row, inactive_column in zip(reentry_rows, reentry_columns):
-            if (
-                not valid_reentry_pairs[unmatched_row, inactive_column]
-                or reentry_similarities[unmatched_row, inactive_column]
-                < REENTRY_MATCH_THRESHOLD
-            ):
-                continue
-
-            detection_index = reentry_detection_indices[unmatched_row]
-            track_id = reentry_identity_ids[inactive_column]
-            detection = detections[detection_index]
-            embedding = update_embedding(
-                identity_gallery[track_id],
-                detection_embedding(detection),
-            )
-            identity_gallery[track_id] = embedding
-            updated_tracks[track_id] = make_track_profile(
-                detection,
-                embedding,
-                person_telemetry[track_id].entry_frame,
-                MIN_CONFIRMATION_FRAMES,
-            )
-            update_person_telemetry(
-                person_telemetry[track_id],
-                detection,
-                source_frame_index,
-            )
-            matched_detection_indices.add(detection_index)
-
-    for detection_index, detection in enumerate(detections):
-        if detection_index in matched_detection_indices:
-            continue
-        if detection.confidence < activation_threshold:
-            continue
-        if any(
-            track_id not in matched_track_ids
-            and np.hypot(
-                detection.centroid[0] - profile.centroid[0],
-                detection.centroid[1] - profile.centroid[1],
-            )
-            < centroid_distance_limit(
-                detection,
-                profile,
-                max_centroid_displacement,
-                max_disappeared_frames,
-            )
-            and float(detection_embedding(detection) @ profile.embedding)
-            >= SECONDARY_MATCH_THRESHOLD
-            for track_id, profile in track_gallery.items()
-        ):
-            continue
-
-        embedding = detection_embedding(detection)
-        updated_tracks[tracking.next_tentative_id] = make_track_profile(
+    elif track_id > 0:
+        if update_identity:
+            state.tracking.identities[track_id] = embedding
+        update_person_telemetry(
+            state.tracking.telemetry[track_id],
             detection,
+            state.source_frame_index,
+        )
+    state.updated_tracks[track_id] = make_track_profile(
+        detection,
+        embedding,
+        previous_profile.first_seen_frame,
+        hits,
+    )
+    state.matched_detection_indices.add(detection_index)
+    state.matched_track_ids.add(original_track_id)
+
+
+def assign_active_appearance_matches(state: AssociationState) -> None:
+    active_track_ids = list(state.tracking.tracks)
+    if not state.detections or not active_track_ids:
+        return
+    detection_embeddings = np.stack(
+        [detection_embedding(detection) for detection in state.detections]
+    )
+    active_embeddings = np.stack(
+        [
+            state.tracking.tracks[track_id].embedding
+            for track_id in active_track_ids
+        ]
+    )
+    similarities = detection_embeddings @ active_embeddings.T
+    costs = 1.0 - similarities
+    valid_pairs = np.zeros(costs.shape, dtype=bool)
+    for detection_index, detection in enumerate(state.detections):
+        for track_index, track_id in enumerate(active_track_ids):
+            valid_pairs[detection_index, track_index] = _active_spatially_valid(
+                state,
+                detection,
+                state.tracking.tracks[track_id],
+            )
+    costs[~valid_pairs] = 1_000_000
+    matched_rows, matched_columns = linear_sum_assignment(costs)
+    for detection_index, track_index in zip(matched_rows, matched_columns):
+        if not valid_pairs[detection_index, track_index]:
+            continue
+        if similarities[detection_index, track_index] < ACTIVE_MATCH_THRESHOLD:
+            continue
+        track_id = active_track_ids[track_index]
+        embedding = update_embedding(
+            state.tracking.tracks[track_id].embedding,
+            detection_embeddings[detection_index],
+        )
+        _record_track_match(
+            state,
+            int(detection_index),
+            track_id,
             embedding,
-            source_frame_index,
+            update_identity=True,
+        )
+
+
+def _unmatched_activated_detections(state: AssociationState) -> list[int]:
+    return [
+        index
+        for index, detection in enumerate(state.detections)
+        if index not in state.matched_detection_indices
+        and detection.confidence >= state.activation_threshold
+    ]
+
+
+def _secondary_pair_cost(
+    state: AssociationState,
+    detection: Detection,
+    profile: TrackProfile,
+) -> float | None:
+    spatial_distance = np.hypot(
+        detection.centroid[0] - profile.centroid[0],
+        detection.centroid[1] - profile.centroid[1],
+    )
+    distance_limit = centroid_distance_limit(
+        detection,
+        profile,
+        state.max_centroid_displacement,
+        state.max_disappeared_frames,
+    )
+    if spatial_distance >= distance_limit:
+        return None
+    similarity = float(detection_embedding(detection) @ profile.embedding)
+    if similarity < SECONDARY_MATCH_THRESHOLD:
+        return None
+    return float(spatial_distance / distance_limit)
+
+
+def assign_spatial_secondary_matches(state: AssociationState) -> None:
+    detection_indices = _unmatched_activated_detections(state)
+    track_ids = [
+        track_id
+        for track_id in state.tracking.tracks
+        if track_id not in state.matched_track_ids
+    ]
+    if not detection_indices or not track_ids:
+        return
+    costs = np.full((len(detection_indices), len(track_ids)), 1_000_000.0)
+    valid_pairs = np.zeros(costs.shape, dtype=bool)
+    for row, detection_index in enumerate(detection_indices):
+        for column, track_id in enumerate(track_ids):
+            cost = _secondary_pair_cost(
+                state,
+                state.detections[detection_index],
+                state.tracking.tracks[track_id],
+            )
+            if cost is not None:
+                valid_pairs[row, column] = True
+                costs[row, column] = cost
+    matched_rows, matched_columns = linear_sum_assignment(costs)
+    for row, column in zip(matched_rows, matched_columns):
+        if not valid_pairs[row, column]:
+            continue
+        detection_index = detection_indices[row]
+        track_id = track_ids[column]
+        _record_track_match(
+            state,
+            detection_index,
+            track_id,
+            state.tracking.tracks[track_id].embedding,
+            update_identity=False,
+        )
+
+
+def _reentry_spatially_valid(
+    state: AssociationState,
+    detection: Detection,
+    telemetry: PersonTelemetry,
+) -> bool:
+    if telemetry.last_geometry is None:
+        raise RuntimeError("Identity is missing its last geometry")
+    elapsed_sample_periods = max(
+        1.0,
+        (
+            state.source_frame_index - telemetry.last_seen_frame
+        )
+        / state.sample_interval,
+    )
+    last_geometry = telemetry.last_geometry
+    spatial_distance = np.hypot(
+        detection.centroid[0] - last_geometry.centroid[0],
+        detection.centroid[1] - last_geometry.centroid[1],
+    )
+    bbox_height = max(
+        detection.bbox[3] - detection.bbox[1],
+        last_geometry.bbox[3] - last_geometry.bbox[1],
+    )
+    distance_limit = max(
+        state.max_centroid_displacement * elapsed_sample_periods,
+        MIN_CENTROID_DISTANCE_BBOX_HEIGHTS * bbox_height,
+    )
+    return spatial_distance < distance_limit
+
+
+def _reentry_identity_ids(state: AssociationState) -> list[int]:
+    return [
+        track_id
+        for track_id in state.tracking.identities
+        if track_id not in state.updated_tracks
+        and (
+            track_id not in state.tracking.tracks
+            or state.tracking.tracks[track_id].age > 0
+        )
+    ]
+
+
+def _record_reentry_match(
+    state: AssociationState,
+    detection_index: int,
+    track_id: int,
+) -> None:
+    detection = state.detections[detection_index]
+    embedding = update_embedding(
+        state.tracking.identities[track_id],
+        detection_embedding(detection),
+    )
+    state.tracking.identities[track_id] = embedding
+    state.updated_tracks[track_id] = make_track_profile(
+        detection,
+        embedding,
+        state.tracking.telemetry[track_id].entry_frame,
+        MIN_CONFIRMATION_FRAMES,
+    )
+    update_person_telemetry(
+        state.tracking.telemetry[track_id],
+        detection,
+        state.source_frame_index,
+    )
+    state.matched_detection_indices.add(detection_index)
+
+
+def assign_reentry_matches(state: AssociationState) -> None:
+    detection_indices = _unmatched_activated_detections(state)
+    identity_ids = _reentry_identity_ids(state)
+    if not detection_indices or not identity_ids:
+        return
+    detection_embeddings = np.stack(
+        [
+            detection_embedding(state.detections[index])
+            for index in detection_indices
+        ]
+    )
+    identity_embeddings = np.stack(
+        [state.tracking.identities[track_id] for track_id in identity_ids]
+    )
+    similarities = detection_embeddings @ identity_embeddings.T
+    costs = 1.0 - similarities
+    valid_pairs = np.zeros(costs.shape, dtype=bool)
+    for row, detection_index in enumerate(detection_indices):
+        for column, track_id in enumerate(identity_ids):
+            valid_pairs[row, column] = _reentry_spatially_valid(
+                state,
+                state.detections[detection_index],
+                state.tracking.telemetry[track_id],
+            )
+    costs[~valid_pairs] = 1_000_000
+    matched_rows, matched_columns = linear_sum_assignment(costs)
+    for row, column in zip(matched_rows, matched_columns):
+        if not valid_pairs[row, column]:
+            continue
+        if similarities[row, column] < REENTRY_MATCH_THRESHOLD:
+            continue
+        _record_reentry_match(
+            state,
+            detection_indices[row],
+            identity_ids[column],
+        )
+
+
+def _overlaps_unmatched_track(
+    state: AssociationState,
+    detection: Detection,
+) -> bool:
+    return any(
+        track_id not in state.matched_track_ids
+        and _active_spatially_valid(state, detection, profile)
+        and float(detection_embedding(detection) @ profile.embedding)
+        >= SECONDARY_MATCH_THRESHOLD
+        for track_id, profile in state.tracking.tracks.items()
+    )
+
+
+def spawn_tentative_tracks(state: AssociationState) -> None:
+    for detection_index in _unmatched_activated_detections(state):
+        detection = state.detections[detection_index]
+        if _overlaps_unmatched_track(state, detection):
+            continue
+        state.updated_tracks[
+            state.tracking.next_tentative_id
+        ] = make_track_profile(
+            detection,
+            detection_embedding(detection),
+            state.source_frame_index,
             1,
         )
-        tracking.next_tentative_id -= 1
-
-    for track_id, profile in track_gallery.items():
-        if track_id not in updated_tracks and track_id not in matched_track_ids:
-            profile.age += 1
-            if track_id > 0 and profile.age <= max_disappeared_frames:
-                updated_tracks[track_id] = profile
-
-    tracking.tracks = updated_tracks
+        state.tracking.next_tentative_id -= 1
 
 
+def age_unmatched_tracks(state: AssociationState) -> None:
+    for track_id, profile in state.tracking.tracks.items():
+        if (
+            track_id in state.updated_tracks
+            or track_id in state.matched_track_ids
+        ):
+            continue
+        profile.age += 1
+        if (
+            track_id > 0
+            and profile.age <= state.max_disappeared_frames
+        ):
+            state.updated_tracks[track_id] = profile
 
 
-def run(config: RTDetrOsnetConfig) -> RunResult:
-    """Run RT-DETR/OSNet and mutate the result owned by ``config``."""
-    config.result.ensure_unused()
+
+
+def load_runtime(config: RTDetrOsnetConfig) -> RTDetrRuntime:
     device = torch.device(config.device)
     if config.device_variant == "gpu":
         torch.backends.cudnn.benchmark = True
-
     reid_embedder = load_reid_embedder(device)
     detector_model_id = DETECTOR_MODELS[config.detector_model]
     processor = AutoImageProcessor.from_pretrained(detector_model_id)
     model = RTDetrV2ForObjectDetection.from_pretrained(detector_model_id).to(
         device
     )
-    person_class_id = resolve_person_class_id(model.config.id2label)
+    return RTDetrRuntime(
+        device=device,
+        reid_embedder=reid_embedder,
+        processor=processor,
+        model=model,
+        person_class_id=resolve_person_class_id(model.config.id2label),
+    )
 
-    tracking = RTDetrTrackingState(telemetry=config.result.telemetry)
-    input_path = config.video
-    cap = cv2.VideoCapture(str(input_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open input video: {input_path}")
 
-    try:
-        metadata = read_video_metadata(cap, input_path)
-    except Exception:
-        cap.release()
-        raise
+def _notify_progress(config: RTDetrOsnetConfig) -> None:
+    if config.progress_callback is not None:
+        config.progress_callback(config.result)
 
+
+def initialize_run_state(
+    config: RTDetrOsnetConfig,
+    runtime: RTDetrRuntime,
+    tracking: RTDetrTrackingState,
+    metadata: VideoMetadata,
+) -> RTDetrRunState:
+    line_zone = create_line_zone(
+        config.line,
+        metadata.width,
+        metadata.height,
+    )
+    sampling = sampling_config(
+        metadata.fps,
+        config.sample_fps,
+        metadata.total_source_frames,
+    )
+    max_disappeared_frames = disappeared_frames_for_sample_rate(
+        sampling.effective_fps
+    )
     result = config.result
+    result.fps = metadata.fps
+    result.total_source_frames = metadata.total_source_frames
+    result.total_sampled_frames = sampling.total_sampled_frames
+    result.sample_interval = sampling.interval
+    result.effective_sample_fps = sampling.effective_fps
+    result.batch_size = config.batch_size
+    result.use_fp16 = config.use_fp16
+    result.initialized = True
+    _notify_progress(config)
+    return RTDetrRunState(
+        config=config,
+        runtime=runtime,
+        tracking=tracking,
+        metadata=metadata,
+        sampling=sampling,
+        max_disappeared_frames=max_disappeared_frames,
+        max_reentry_frames=round(MAX_REENTRY_SECONDS * metadata.fps),
+        max_centroid_displacement=(
+            metadata.height
+            * MAX_CENTROID_SPEED_FRAME_HEIGHTS_PER_SECOND
+            / sampling.effective_fps
+        ),
+        line_zone=line_zone,
+    )
+
+
+def predict_detector_results(
+    state: RTDetrRunState,
+    frames: list[np.ndarray],
+    rgb_frames: list[np.ndarray],
+) -> Any:
+    detector_frames = [
+        cv2.resize(
+            rgb_frame,
+            DETECTOR_IMAGE_SIZE,
+            interpolation=cv2.INTER_LINEAR,
+        )
+        for rgb_frame in rgb_frames
+    ]
+    inputs = state.runtime.processor(
+        images=detector_frames,
+        do_resize=False,
+        return_tensors="pt",
+    ).to(state.runtime.device)
+    with torch.inference_mode(), torch.autocast(
+        device_type=state.runtime.device.type,
+        dtype=torch.float16,
+        enabled=state.config.use_fp16,
+    ):
+        outputs = state.runtime.model(**inputs)
+    target_sizes = torch.tensor(
+        [frame.shape[:2] for frame in frames],
+        device=state.runtime.device,
+    )
+    return state.runtime.processor.post_process_object_detection(
+        outputs,
+        target_sizes=target_sizes,
+        threshold=DETECTOR_FLOOR,
+    )
+
+
+def process_frame(
+    state: RTDetrRunState,
+    source_frame_index: int,
+    frame: np.ndarray,
+    rgb_frame: np.ndarray,
+    detector_result: Any,
+) -> None:
+    detections = extract_person_detections(
+        detector_result,
+        frame,
+        rgb_frame,
+        state.runtime.reid_embedder,
+        state.runtime.person_class_id,
+        state.tracking.tracks,
+        state.config.detection_threshold,
+    )
+    associate_detections(
+        detections,
+        state.tracking,
+        source_frame_index,
+        state.max_centroid_displacement,
+        state.max_disappeared_frames,
+        state.max_reentry_frames,
+        state.sampling.interval,
+        state.config.detection_threshold,
+    )
+    if state.line_zone is not None:
+        record_line_counts(
+            state.line_zone,
+            active_track_detections(state.tracking.tracks),
+            source_frame_index,
+            state.metadata.fps,
+            state.config.line,
+            state.config.result.line_counts,
+        )
+
+
+def process_frame_batch(
+    state: RTDetrRunState,
+    frame_batch: FrameBatch,
+) -> None:
+    source_frame_indices = [item[0] for item in frame_batch]
+    frames = [item[1] for item in frame_batch]
+    rgb_frames = [
+        cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames
+    ]
+    detector_results = predict_detector_results(state, frames, rgb_frames)
+    for source_frame_index, frame, rgb_frame, detector_result in zip(
+        source_frame_indices,
+        frames,
+        rgb_frames,
+        detector_results,
+    ):
+        process_frame(
+            state,
+            source_frame_index,
+            frame,
+            rgb_frame,
+            detector_result,
+        )
+    state.config.result.processed_frames += len(frame_batch)
+    _notify_progress(state.config)
+
+
+def finalize_run(
+    result: RunResult,
+    capture: VideoCapture,
+    read_state: FrameReadState,
+    processing_started: float,
+    line_zone: Any,
+) -> None:
+    capture.release()
+    result.processing_seconds = time.perf_counter() - processing_started
+    result.source_frames_read = read_state.source_frames_read
+    result.ended_early = read_state.ended_early
+    if result.initialized and line_zone is not None:
+        result.line_in_count = line_zone.in_count
+        result.line_out_count = line_zone.out_count
+
+
+def run(config: RTDetrOsnetConfig) -> RunResult:
+    """Run RT-DETR/OSNet and mutate the result owned by ``config``."""
+    config.result.ensure_unused()
+    runtime = load_runtime(config)
+    tracking = RTDetrTrackingState(telemetry=config.result.telemetry)
+    capture = cv2.VideoCapture(str(config.video))
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not open input video: {config.video}")
+    try:
+        metadata = read_video_metadata(capture, config.video)
+    except Exception:
+        capture.release()
+        raise
     read_state = FrameReadState()
     processing_started = time.perf_counter()
     line_zone = None
     try:
-        line_zone = create_line_zone(
-            config.line,
-            metadata.width,
-            metadata.height,
+        state = initialize_run_state(
+            config,
+            runtime,
+            tracking,
+            metadata,
         )
-        sampling = sampling_config(
-            metadata.fps,
-            config.sample_fps,
-            metadata.total_source_frames,
-        )
-        max_disappeared_frames = disappeared_frames_for_sample_rate(
-            sampling.effective_fps
-        )
-        max_reentry_frames = round(MAX_REENTRY_SECONDS * metadata.fps)
-        max_centroid_displacement = (
-            metadata.height
-            * MAX_CENTROID_SPEED_FRAME_HEIGHTS_PER_SECOND
-            / sampling.effective_fps
-        )
-        result.fps = metadata.fps
-        result.total_source_frames = metadata.total_source_frames
-        result.total_sampled_frames = sampling.total_sampled_frames
-        result.sample_interval = sampling.interval
-        result.effective_sample_fps = sampling.effective_fps
-        result.batch_size = config.batch_size
-        result.use_fp16 = config.use_fp16
-        result.initialized = True
-        if config.progress_callback is not None:
-            config.progress_callback(result)
-
+        line_zone = state.line_zone
         for frame_batch in iter_sampled_frame_batches(
-            cap,
-            sampling.interval,
+            capture,
+            state.sampling.interval,
             config.batch_size,
             metadata.total_source_frames,
             read_state,
         ):
-            source_frame_indices = [item[0] for item in frame_batch]
-            frames = [item[1] for item in frame_batch]
-            rgb_frames = [
-                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames
-            ]
-            detector_frames = [
-                cv2.resize(
-                    rgb_frame,
-                    DETECTOR_IMAGE_SIZE,
-                    interpolation=cv2.INTER_LINEAR,
-                )
-                for rgb_frame in rgb_frames
-            ]
-            inputs = processor(
-                images=detector_frames,
-                do_resize=False,
-                return_tensors="pt",
-            ).to(device)
-
-            with torch.inference_mode(), torch.autocast(
-                device_type=device.type,
-                dtype=torch.float16,
-                enabled=config.use_fp16,
-            ):
-                outputs = model(**inputs)
-
-            target_sizes = torch.tensor(
-                [frame.shape[:2] for frame in frames],
-                device=device,
-            )
-            detector_results = processor.post_process_object_detection(
-                outputs,
-                target_sizes=target_sizes,
-                threshold=DETECTOR_FLOOR,
-            )
-
-            for source_frame_index, frame, rgb_frame, detector_result in zip(
-                source_frame_indices,
-                frames,
-                rgb_frames,
-                detector_results,
-            ):
-                detections = extract_person_detections(
-                    detector_result,
-                    frame,
-                    rgb_frame,
-                    reid_embedder,
-                    person_class_id,
-                    tracking.tracks,
-                    config.detection_threshold,
-                )
-                associate_detections(
-                    detections,
-                    tracking,
-                    source_frame_index,
-                    max_centroid_displacement,
-                    max_disappeared_frames,
-                    max_reentry_frames,
-                    sampling.interval,
-                    config.detection_threshold,
-                )
-                if line_zone is not None:
-                    record_line_counts(
-                        line_zone,
-                        active_track_detections(tracking.tracks),
-                        source_frame_index,
-                        metadata.fps,
-                        config.line,
-                        result.line_counts,
-                    )
-
-            result.processed_frames += len(frame_batch)
-            if config.progress_callback is not None:
-                config.progress_callback(result)
+            process_frame_batch(state, frame_batch)
     finally:
-        cap.release()
-        result.processing_seconds = time.perf_counter() - processing_started
-        result.source_frames_read = read_state.source_frames_read
-        result.ended_early = read_state.ended_early
-        if result.initialized and line_zone is not None:
-            result.line_in_count = line_zone.in_count
-            result.line_out_count = line_zone.out_count
-
-    return result
+        finalize_run(
+            config.result,
+            capture,
+            read_state,
+            processing_started,
+            line_zone,
+        )
+    return config.result
