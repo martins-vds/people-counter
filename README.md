@@ -5,17 +5,148 @@ device selection and will fail instead of falling back to another device.
 The installed `people-counter` command provides `rtdetr-osnet` and
 `rfdetr-botsort` subcommands; run `people-counter --help` for an overview.
 
-The package separates typed configuration and result models from video
-sampling, line counting, and CSV output. Programmatic callers can construct
-`RTDetrOsnetConfig` or `RFDetrBotsortConfig` from `people_counter.config` and
-pass it to `people_counter.pipelines.rtdetr_osnet.run(config)` or
-`people_counter.pipelines.rfdetr_botsort.run(config)`. Each config and its
-mutable `RunResult` are single-use. The result retains partial telemetry if
-processing raises, allowing callers to persist it before re-raising the
-exception.
+The package separates its public Python SDK from the CLI, video sampling,
+tracking, line counting, and CSV output. Applications can use
+`people_counter.run(config)` with either typed pipeline configuration and
+convert the result to dependency-free records for pandas, Spark, databases,
+or APIs. The wheel includes a PEP 561 marker so downstream type checkers use
+the SDK's inline annotations.
 
 The legacy `people-counter-rtdetr` and `people-counter-rfdetr` commands remain
 available as aliases for the two subcommands.
+
+## Python SDK
+
+Install the package with exactly one hardware variant, then import only from
+the stable top-level API:
+
+```python
+from pathlib import Path
+
+from people_counter import RTDetrOsnetConfig, run, telemetry_records
+
+config = RTDetrOsnetConfig(
+    video=Path("/data/entrance-camera.mp4"),
+    device_variant="cpu",
+    device="cpu",
+    batch_size=1,
+    sample_fps=3.0,
+    detection_threshold=0.6,
+    line=(0, 540, 1919, 540),
+    progress_callback=lambda current: print(
+        f"{current.processed_frames}/{current.total_sampled_frames}"
+    ),
+)
+
+result = run(config)
+records = telemetry_records(result)
+
+print(f"Distinct people: {len(result.telemetry)}")
+print(f"Entered: {result.line_in_count}")
+print(f"Exited: {result.line_out_count}")
+```
+
+Use `RFDetrBotsortConfig` with the same `run` function to select the
+RF-DETR/BoT-SORT pipeline. Each config and its mutable `RunResult` are
+single-use. Create a new config for every invocation.
+
+`telemetry_records(result)` and `line_count_records(result)` return typed
+lists of built-in dictionaries. They intentionally do not depend on pandas or
+Spark:
+
+```python
+import pandas as pd
+
+from people_counter import line_count_records
+
+telemetry_frame = pd.DataFrame(telemetry_records(result))
+line_count_frame = pd.DataFrame(line_count_records(result))
+```
+
+If processing raises after video initialization, `config.result` retains
+partial telemetry. Persist it if useful and re-raise the exception so an
+orchestrator sees the failure:
+
+```python
+try:
+    result = run(config)
+finally:
+    if config.result.initialized:
+        records = telemetry_records(config.result)
+        persist_records(records)
+```
+
+An exception still propagates from this `finally` block, allowing a data
+pipeline to mark the activity as failed.
+
+### Microsoft Fabric
+
+Build the wheel with `uv build`, upload it to a Fabric Environment, and attach
+that environment to the notebook. Configure the environment with exactly one
+of the CPU or GPU dependency variants. A Fabric Data Pipeline can then invoke
+the notebook as an activity.
+
+Process each video sequentially in one notebook process because tracking state
+depends on frame order. Parallelize across videos with separate notebook
+activities rather than distributing frames from one video across Spark
+executors.
+
+Use a Lakehouse file path that OpenCV can open:
+
+```python
+from pathlib import Path
+
+from people_counter import (
+    RTDetrOsnetConfig,
+    line_count_records,
+    run,
+    telemetry_records,
+)
+
+video = Path("/lakehouse/default/Files/incoming/entrance-camera.mp4")
+if not video.is_file():
+    raise FileNotFoundError(f"Video not found: {video}")
+
+result = run(
+    RTDetrOsnetConfig(
+        video=video,
+        device_variant="cpu",
+        device="cpu",
+        batch_size=1,
+        line=(0, 540, 1919, 540),
+    )
+)
+
+telemetry = [
+    {"source_video": video.name, **record}
+    for record in telemetry_records(result)
+]
+line_counts = [
+    {"source_video": video.name, **record}
+    for record in line_count_records(result)
+]
+
+if telemetry:
+    (
+        spark.createDataFrame(telemetry)
+        .write.format("delta")
+        .mode("append")
+        .saveAsTable("people_counter_telemetry")
+    )
+
+if line_counts:
+    (
+        spark.createDataFrame(line_counts)
+        .write.format("delta")
+        .mode("append")
+        .saveAsTable("people_counter_line_counts")
+    )
+```
+
+For retry-safe pipelines, add a stable run identifier and use Delta merge
+semantics instead of unconditional append. If an `abfss://` URI cannot be
+opened by OpenCV, stage the video in notebook-local storage before invoking
+the SDK and write the result back to OneLake.
 
 ## CPU-only
 
