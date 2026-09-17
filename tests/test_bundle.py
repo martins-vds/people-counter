@@ -20,6 +20,7 @@ from people_counter.bundle import (
     _sdk_build_command,
     _sha256,
     _validate_wheelhouse,
+    _vcs_wheel_command,
     _write_requirements,
     build_bundle,
     bundle_name,
@@ -34,7 +35,14 @@ class BundleBuilderTests(unittest.TestCase):
             output_path = Path(
                 command[command.index("--output-file") + 1]
             )
-            output_path.write_text("dependency==1.0\n", encoding="utf-8")
+            output_path.write_text(
+                (
+                    "dependency==1.0 \\\n"
+                    "    --hash=sha256:dependency\n"
+                    "trackers @ git+https://example.test/trackers.git@commit\n"
+                ),
+                encoding="utf-8",
+            )
             return
         if command[:2] == ["uv", "build"]:
             wheels_path = Path(command[command.index("--out-dir") + 1])
@@ -47,12 +55,17 @@ class BundleBuilderTests(unittest.TestCase):
                 command[command.index("--requirement") + 1]
             )
             wheels_path = Path(command[command.index("--wheel-dir") + 1])
-            self.exported_requirements = requirements_path.read_text(
-                encoding="utf-8"
-            )
-            (wheels_path / "dependency-1.0-py3-none-any.whl").write_bytes(
-                b"dependency"
-            )
+            if "--no-deps" in command:
+                (wheels_path / "trackers-1.0-py3-none-any.whl").write_bytes(
+                    b"trackers"
+                )
+            else:
+                self.exported_requirements = requirements_path.read_text(
+                    encoding="utf-8"
+                )
+                (
+                    wheels_path / "dependency-1.0-py3-none-any.whl"
+                ).write_bytes(b"dependency")
             return
         self.fail(f"Unexpected command: {command}")
 
@@ -91,6 +104,9 @@ class BundleBuilderTests(unittest.TestCase):
                     requirements = archive.read(
                         f"{bundle_root}/requirements-{variant}.lock"
                     ).decode()
+                    vcs_requirements = archive.read(
+                        f"{bundle_root}/requirements-vcs.lock"
+                    ).decode()
                     manifest = json.loads(
                         archive.read(f"{bundle_root}/manifest.json")
                     )
@@ -100,6 +116,12 @@ class BundleBuilderTests(unittest.TestCase):
                 self.assertNotIn(
                     PYTORCH_INDEXES[other_variant],
                     requirements,
+                )
+                self.assertNotIn("git+", requirements)
+                self.assertIn(
+                    "trackers @ git+https://example.test/"
+                    "trackers.git@commit",
+                    vcs_requirements,
                 )
                 self.assertEqual(manifest["variant"], variant)
                 self.assertEqual(
@@ -133,9 +155,11 @@ class BundleBuilderTests(unittest.TestCase):
                 [artifact["path"] for artifact in manifest["artifacts"]],
                 [
                     "requirements-cpu.lock",
+                    "requirements-vcs.lock",
                     "README.txt",
                     "wheels/dependency-1.0-py3-none-any.whl",
                     "wheels/people_counter-0.1.0-py3-none-any.whl",
+                    "wheels/trackers-1.0-py3-none-any.whl",
                 ],
             )
             for artifact in manifest["artifacts"]:
@@ -163,6 +187,10 @@ class BundleBuilderTests(unittest.TestCase):
                 wraps=_dependency_wheel_command,
             ) as dependency_command,
             patch(
+                "people_counter.bundle._vcs_wheel_command",
+                wraps=_vcs_wheel_command,
+            ) as vcs_command,
+            patch(
                 "people_counter.bundle.shutil.make_archive",
                 wraps=shutil.make_archive,
             ) as make_archive,
@@ -182,6 +210,9 @@ class BundleBuilderTests(unittest.TestCase):
             "requirements-gpu.lock",
         )
         self.assertEqual(dependency_args[1].name, "wheels")
+        vcs_args = vcs_command.call_args.args
+        self.assertEqual(vcs_args[0].name, "requirements-vcs.lock")
+        self.assertEqual(vcs_args[1].name, "wheels")
         self.assertEqual(
             make_archive.call_args.kwargs["base_dir"],
             bundle_name("gpu"),
@@ -311,6 +342,28 @@ class BundleBuilderTests(unittest.TestCase):
                 "pip",
                 "--disable-pip-version-check",
                 "wheel",
+                "--require-hashes",
+                "--requirement",
+                str(requirements),
+                "--wheel-dir",
+                str(wheels),
+            ],
+        )
+        self.assertEqual(
+            _vcs_wheel_command(requirements, wheels),
+            [
+                "uv",
+                "run",
+                "--isolated",
+                "--no-project",
+                "--with",
+                "pip",
+                "python",
+                "-m",
+                "pip",
+                "--disable-pip-version-check",
+                "wheel",
+                "--no-deps",
                 "--requirement",
                 str(requirements),
                 "--wheel-dir",
@@ -318,23 +371,66 @@ class BundleBuilderTests(unittest.TestCase):
             ],
         )
 
-    def test_requirements_include_only_selected_index(self):
+    def test_requirements_split_hashed_registry_and_vcs_dependencies(self):
         raw = self.project_root / "raw.txt"
         output = self.project_root / "requirements.lock"
-        raw.write_text("dependency==1.0\n", encoding="utf-8")
+        vcs_output = self.project_root / "requirements-vcs.lock"
+        raw.write_text(
+            (
+                "dependency==1.0 \\\n"
+                "    --hash=sha256:dependency\n"
+                "trackers @ git+https://example.test/trackers.git@commit\n"
+            ),
+            encoding="utf-8",
+        )
 
-        _write_requirements(raw, output, "cpu")
+        has_vcs = _write_requirements(
+            raw,
+            output,
+            vcs_output,
+            "cpu",
+        )
 
+        self.assertTrue(has_vcs)
         self.assertEqual(
             output.read_text(encoding="utf-8"),
             (
                 "# Locked people-counter CPU deployment dependencies.\n"
                 f"--index-url {PYPI_INDEX}\n"
                 f"--extra-index-url {PYTORCH_INDEXES['cpu']}\n\n"
-                "dependency==1.0\n"
+                "dependency==1.0 \\\n"
+                "    --hash=sha256:dependency\n"
             ),
         )
         self.assertNotIn(PYTORCH_INDEXES["gpu"], output.read_text())
+        self.assertEqual(
+            vcs_output.read_text(encoding="utf-8"),
+            (
+                "# Pinned VCS dependencies built separately because pip "
+                "cannot hash repositories.\n"
+                "trackers @ git+https://example.test/trackers.git@commit\n"
+            ),
+        )
+
+    def test_requirements_reject_unhashed_registry_dependency(self):
+        raw = self.project_root / "raw.txt"
+        output = self.project_root / "requirements.lock"
+        vcs_output = self.project_root / "requirements-vcs.lock"
+        raw.write_text("dependency==1.0\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            (
+                "^Lock export contains unhashed non-VCS requirements: "
+                "dependency==1.0$"
+            ),
+        ):
+            _write_requirements(
+                raw,
+                output,
+                vcs_output,
+                "cpu",
+            )
 
     def test_wheelhouse_validation_rejects_incomplete_outputs(self):
         wheels = self.project_root / "wheels"

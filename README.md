@@ -170,6 +170,8 @@ current platform, and Python ABI under `dist/sdk-bundles/`. Each ZIP contains:
 
 - `wheels/` with the SDK and all variant-specific dependency wheels;
 - `requirements-cpu.lock` or `requirements-gpu.lock`;
+- `requirements-vcs.lock` with separately built, commit-pinned VCS
+  dependencies;
 - `manifest.json` with SHA-256 checksums and runtime metadata;
 - `README.txt` with the offline installation command.
 

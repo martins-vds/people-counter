@@ -85,14 +85,16 @@ def build_bundle(
         wheels_directory.mkdir(parents=True)
 
         requirements_path = bundle_directory / f"requirements-{variant}.lock"
+        vcs_requirements_path = bundle_directory / "requirements-vcs.lock"
         raw_requirements_path = temporary_root / "requirements.raw"
         _run(
             _export_command(variant, raw_requirements_path),
             project_root,
         )
-        _write_requirements(
+        has_vcs_requirements = _write_requirements(
             raw_requirements_path,
             requirements_path,
+            vcs_requirements_path,
             variant,
         )
 
@@ -104,6 +106,14 @@ def build_bundle(
             ),
             project_root,
         )
+        if has_vcs_requirements:
+            _run(
+                _vcs_wheel_command(
+                    vcs_requirements_path,
+                    wheels_directory,
+                ),
+                project_root,
+            )
         _validate_wheelhouse(wheels_directory)
 
         readme_path = bundle_directory / "README.txt"
@@ -115,7 +125,11 @@ def build_bundle(
         manifest = _build_manifest(
             bundle_directory,
             variant,
-            requirements_path,
+            (
+                [requirements_path, vcs_requirements_path]
+                if has_vcs_requirements
+                else [requirements_path]
+            ),
             readme_path,
             wheels_directory,
         )
@@ -183,6 +197,31 @@ def _dependency_wheel_command(
         "pip",
         "--disable-pip-version-check",
         "wheel",
+        "--require-hashes",
+        "--requirement",
+        str(requirements_path),
+        "--wheel-dir",
+        str(wheels_directory),
+    ]
+
+
+def _vcs_wheel_command(
+    requirements_path: Path,
+    wheels_directory: Path,
+) -> list[str]:
+    return [
+        "uv",
+        "run",
+        "--isolated",
+        "--no-project",
+        "--with",
+        "pip",
+        "python",
+        "-m",
+        "pip",
+        "--disable-pip-version-check",
+        "wheel",
+        "--no-deps",
         "--requirement",
         str(requirements_path),
         "--wheel-dir",
@@ -193,19 +232,80 @@ def _dependency_wheel_command(
 def _write_requirements(
     raw_path: Path,
     output_path: Path,
+    vcs_output_path: Path,
     variant: Variant,
-) -> None:
+) -> bool:
     locked_requirements = raw_path.read_text(encoding="utf-8")
+    registry_blocks, vcs_blocks = _partition_requirement_blocks(
+        locked_requirements
+    )
+    unhashed = [
+        block.splitlines()[0]
+        for block in registry_blocks
+        if "--hash=" not in block
+    ]
+    if unhashed:
+        raise RuntimeError(
+            "Lock export contains unhashed non-VCS requirements: "
+            + ", ".join(unhashed)
+        )
+
+    registry_requirements = "\n".join(registry_blocks)
     output_path.write_text(
         (
             "# Locked people-counter "
             f"{variant.upper()} deployment dependencies.\n"
             f"--index-url {PYPI_INDEX}\n"
             f"--extra-index-url {PYTORCH_INDEXES[variant]}\n\n"
-            f"{locked_requirements}"
+            f"{registry_requirements}\n"
         ),
         encoding="utf-8",
     )
+    if not vcs_blocks:
+        return False
+
+    vcs_requirements = "\n".join(vcs_blocks)
+    vcs_output_path.write_text(
+        (
+            "# Pinned VCS dependencies built separately because pip cannot "
+            "hash repositories.\n"
+            f"{vcs_requirements}\n"
+        ),
+        encoding="utf-8",
+    )
+    return True
+
+
+def _partition_requirement_blocks(
+    locked_requirements: str,
+) -> tuple[list[str], list[str]]:
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in locked_requirements.splitlines():
+        if not line.strip():
+            continue
+        if line[:1].isspace():
+            if not current:
+                raise RuntimeError(
+                    "Lock export starts with a continuation line"
+                )
+            current.append(line)
+            continue
+        if current:
+            blocks.append("\n".join(current))
+        current = [line]
+    if current:
+        blocks.append("\n".join(current))
+
+    vcs_blocks = [
+        block
+        for block in blocks
+        if re.search(r"\s@\s(?:git|hg|svn|bzr)\+", block.splitlines()[0])
+    ]
+    registry_blocks = [
+        block for block in blocks if block not in vcs_blocks
+    ]
+    return registry_blocks, vcs_blocks
 
 
 def _validate_wheelhouse(wheels_directory: Path) -> None:
@@ -227,12 +327,12 @@ def _validate_wheelhouse(wheels_directory: Path) -> None:
 def _build_manifest(
     bundle_directory: Path,
     variant: Variant,
-    requirements_path: Path,
+    requirements_paths: Sequence[Path],
     readme_path: Path,
     wheels_directory: Path,
 ) -> BundleManifest:
     artifact_paths = [
-        requirements_path,
+        *requirements_paths,
         readme_path,
         *sorted(wheels_directory.glob("*.whl")),
     ]
