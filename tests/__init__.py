@@ -1,0 +1,1 @@
+"""People counter test suite."""

@@ -1,12 +1,26 @@
 # People Counter
 
-Run exactly one PyTorch variant at a time. The script requires an explicit
+Run exactly one PyTorch variant at a time. Each command requires an explicit
 device selection and will fail instead of falling back to another device.
+The installed `people-counter` command provides `rtdetr-osnet` and
+`rfdetr-botsort` subcommands; run `people-counter --help` for an overview.
+
+The package separates typed configuration and result models from video
+sampling, line counting, and CSV output. Programmatic callers can construct
+`RTDetrOsnetConfig` or `RFDetrBotsortConfig` from `people_counter.config` and
+pass it to `people_counter.pipelines.rtdetr_osnet.run(config)` or
+`people_counter.pipelines.rfdetr_botsort.run(config)`. Each config and its
+mutable `RunResult` are single-use. The result retains partial telemetry if
+processing raises, allowing callers to persist it before re-raising the
+exception.
+
+The legacy `people-counter-rtdetr` and `people-counter-rfdetr` commands remain
+available as aliases for the two subcommands.
 
 ## CPU-only
 
 ```bash
-uv run --extra cpu rtdetr_osnet_counter.py samples/three_people_walking.mp4 --device cpu
+uv run --extra cpu people-counter rtdetr-osnet samples/three_people_walking.mp4 --device cpu
 ```
 
 ## NVIDIA GPU
@@ -14,10 +28,10 @@ uv run --extra cpu rtdetr_osnet_counter.py samples/three_people_walking.mp4 --de
 The GPU variant uses the official PyTorch CUDA 12.8 wheels:
 
 ```bash
-uv run --extra gpu rtdetr_osnet_counter.py samples/three_people_walking.mp4 --device gpu
+uv run --extra gpu people-counter rtdetr-osnet samples/three_people_walking.mp4 --device gpu
 ```
 
-By default, the script samples the source at 3 FPS, batches eight frames per
+By default, the command samples the source at 3 FPS, batches eight frames per
 GPU detector call, uses the RT-DETRv2 R18 backbone, and uses FP16 detector
 inference. Detections down to 0.1 can maintain an existing track, while the
 configured detection threshold (0.6 by default) is required to start a track.
@@ -26,12 +40,12 @@ than throughput.
 
 ```bash
 # Tune GPU throughput and sampling
-uv run --extra gpu rtdetr_osnet_counter.py samples/subway.mp4 \
+uv run --extra gpu people-counter rtdetr-osnet samples/subway.mp4 \
   --device gpu --sample-fps 3 --batch-size 8 \
   --detector-model r18 --detection-threshold 0.6
 
 # Higher-accuracy detector, every source frame, FP32
-uv run --extra gpu rtdetr_osnet_counter.py samples/subway.mp4 \
+uv run --extra gpu people-counter rtdetr-osnet samples/subway.mp4 \
   --device gpu --sample-fps all --batch-size 1 --no-fp16 --detector-model r50
 ```
 
@@ -40,8 +54,9 @@ effective sampled-frame throughput are printed while processing.
 
 The telemetry CSV is written under `outputs/`. Its base name is derived from
 the input video and ends with the device and a UTC run timestamp, for example
-`subway_telemetry_gpu_20260916T230655123456Z.csv`. The script does not
-generate an annotated video.
+`subway_telemetry_gpu_20260916T230655123456Z.csv`. The subcommand does not
+generate an annotated video. Use `--output-dir PATH` to select another output
+directory.
 
 ## Person re-identification
 
@@ -65,22 +80,22 @@ dataset, privacy, and biometric-use considerations independently.
 
 ## RF-DETR Large and BoT-SORT comparison
 
-`rfdetr_botsort_counter.py` uses Roboflow RF-DETR Large detections, Supervision
+`people-counter rfdetr-botsort` uses Roboflow RF-DETR Large detections, Supervision
 `Detections`, and Roboflow Trackers' BoT-SORT implementation:
 
 ```bash
-uv run --extra gpu rfdetr_botsort_counter.py samples/subway.mp4 --device gpu
+uv run --extra gpu people-counter rfdetr-botsort samples/subway.mp4 --device gpu
 ```
 
 The CPU variant uses the same interface:
 
 ```bash
-uv run --extra cpu rfdetr_botsort_counter.py samples/subway.mp4 --device cpu
+uv run --extra cpu people-counter rfdetr-botsort samples/subway.mp4 --device cpu
 ```
 
-The script outputs only a timestamped CSV such as
+The command outputs only a timestamped CSV such as
 `outputs/subway_telemetry_rfdetr_large_botsort_gpu_20260916T230655123456Z.csv`.
-Its sampling, batch-size, confidence, and FP16 options match the primary script
+Its sampling, batch-size, confidence, and FP16 options match the primary pipeline
 where applicable. Both pipelines detect down to confidence 0.1 for secondary
 association and require `--detection-threshold` confidence to activate a new
 track. RT-DETR requires a consecutive second detection to confirm it, but that
@@ -99,7 +114,7 @@ person for up to 30 seconds.
 Run the focused tracking and frame-reader regressions with:
 
 ```bash
-uv run --extra cpu python -m unittest tests/test_counter_logic.py -v
+uv run --extra cpu python -m unittest discover -s tests -v
 ```
 
 Supervision is MIT licensed. RF-DETR code and RF-DETR Large weights are
@@ -113,21 +128,21 @@ OSNet identity gallery.
 
 ## Line-crossing counts
 
-Both scripts accept an optional directed counting line as source-video pixel
+Both subcommands accept an optional directed counting line as source-video pixel
 coordinates:
 
 ```bash
-uv run --extra gpu rtdetr_osnet_counter.py samples/subway.mp4 \
+uv run --extra gpu people-counter rtdetr-osnet samples/subway.mp4 \
   --device gpu --line 0 1080 3839 1080
 
-uv run --extra gpu rfdetr_botsort_counter.py samples/subway.mp4 \
+uv run --extra gpu people-counter rfdetr-botsort samples/subway.mp4 \
   --device gpu --line 0 1080 3839 1080
 ```
 
 The coordinates are `X1 Y1 X2 Y2`, where `(X1, Y1)` is the start and
 `(X2, Y2)` is the end of the directed line. Reversing the endpoints swaps the
 meaning of `in` and `out`. Coordinates must be inside the source video frame.
-Each script continues to write its identity telemetry CSV and additionally
+Each subcommand continues to write its identity telemetry CSV and additionally
 writes a separate timestamped `line_counts` CSV containing per-sampled-frame
 and cumulative in/out counts.
 

@@ -1,0 +1,1 @@
+"""Person-counting pipeline implementations."""
