@@ -284,7 +284,7 @@ such a gap cannot be recovered. Place counting lines away from entry edges
 and increase `--sample-fps` when people can reach the line within the first
 three sampled frames.
 
-## Experiment notebooks
+## Notebooks
 
 Install the notebook dependencies together with exactly one hardware variant:
 
@@ -295,6 +295,12 @@ uv run --extra gpu --extra experiments jupyter lab
 
 Use `--extra cpu` instead of `--extra gpu` for CPU experiments.
 
+- The [Python SDK tutorial](notebooks/sdk_tutorial.ipynb) teaches typed
+  configuration, pipeline selection, structured results, DataFrame
+  conversion, partial-result handling, and Microsoft Fabric Delta writes.
+- The [CLI tutorial](notebooks/cli_tutorial.ipynb) teaches safe CLI
+  orchestration, option discovery, output ingestion, model selection, and
+  Fabric notebook activity integration.
 - `notebooks/scenario_benchmark.ipynb` runs both pipelines over the same
   scenario videos and records runtime, throughput, unique counts, and
   fragmentation proxies.
