@@ -82,6 +82,26 @@ This BoT-SORT implementation does not include an appearance ReID branch.
 Tracks that expire and later re-enter can receive a new ID, unlike the primary
 OSNet identity gallery.
 
+## Line-crossing counts
+
+Both scripts accept an optional directed counting line as source-video pixel
+coordinates:
+
+```bash
+uv run --extra gpu rtdetr_osnet_counter.py samples/subway.mp4 \
+  --device gpu --line 0 1080 3839 1080
+
+uv run --extra gpu rfdetr_botsort_counter.py samples/subway.mp4 \
+  --device gpu --line 0 1080 3839 1080
+```
+
+The coordinates are `X1 Y1 X2 Y2`, where `(X1, Y1)` is the start and
+`(X2, Y2)` is the end of the directed line. Reversing the endpoints swaps the
+meaning of `in` and `out`. Coordinates must be inside the source video frame.
+Each script continues to write its identity telemetry CSV and additionally
+writes a separate timestamped `line_counts` CSV containing per-sampled-frame
+and cumulative in/out counts.
+
 ## Experiment notebooks
 
 Install the notebook dependencies together with exactly one hardware variant:

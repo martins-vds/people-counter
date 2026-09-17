@@ -8,6 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import supervision as sv
 import torch
 from huggingface_hub import hf_hub_download
 from libreyolo.tracking.reid import OSNetEmbedder
@@ -101,6 +102,13 @@ def parse_args():
         "--no-fp16",
         action="store_true",
         help="Disable FP16 detector inference in GPU mode.",
+    )
+    parser.add_argument(
+        "--line",
+        type=int,
+        nargs=4,
+        metavar=("X1", "Y1", "X2", "Y2"),
+        help="Directed counting line in source-video pixels.",
     )
     return parser.parse_args()
 
@@ -348,6 +356,99 @@ def format_video_timestamp(frame_index, fps):
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
 
+def create_line_zone(line_coordinates, frame_width, frame_height):
+    if line_coordinates is None:
+        return None
+
+    x1, y1, x2, y2 = line_coordinates
+    if (x1, y1) == (x2, y2):
+        raise ValueError("Counting line start and end coordinates must differ")
+    for x, y in ((x1, y1), (x2, y2)):
+        if not 0 <= x < frame_width or not 0 <= y < frame_height:
+            raise ValueError(
+                f"Counting line point ({x}, {y}) is outside the "
+                f"{frame_width}x{frame_height} video frame"
+            )
+
+    return sv.LineZone(
+        start=sv.Point(x=x1, y=y1),
+        end=sv.Point(x=x2, y=y2),
+        triggering_anchors=(sv.Position.BOTTOM_CENTER,),
+    )
+
+
+def active_track_detections(track_gallery):
+    active_tracks = [
+        (track_id, profile)
+        for track_id, profile in track_gallery.items()
+        if profile["age"] == 0
+    ]
+    if not active_tracks:
+        return sv.Detections.empty()
+
+    return sv.Detections(
+        xyxy=np.asarray(
+            [profile["bbox"] for _, profile in active_tracks],
+            dtype=np.float32,
+        ),
+        class_id=np.zeros(len(active_tracks), dtype=np.int32),
+        tracker_id=np.asarray(
+            [track_id for track_id, _ in active_tracks],
+            dtype=np.int32,
+        ),
+    )
+
+
+def record_line_counts(
+    line_zone,
+    detections,
+    source_frame_index,
+    fps,
+    line_coordinates,
+    line_count_records,
+):
+    if line_zone is None:
+        return
+
+    crossed_in, crossed_out = line_zone.trigger(detections)
+    x1, y1, x2, y2 = line_coordinates
+    line_count_records.append(
+        {
+            "frame": source_frame_index,
+            "video_seconds": f"{source_frame_index / fps:.3f}",
+            "video_timestamp": format_video_timestamp(source_frame_index, fps),
+            "frame_in_count": int(np.count_nonzero(crossed_in)),
+            "frame_out_count": int(np.count_nonzero(crossed_out)),
+            "cumulative_in_count": line_zone.in_count,
+            "cumulative_out_count": line_zone.out_count,
+            "line_start_x": x1,
+            "line_start_y": y1,
+            "line_end_x": x2,
+            "line_end_y": y2,
+        }
+    )
+
+
+def write_line_counts(line_counts_path, line_count_records):
+    fieldnames = [
+        "frame",
+        "video_seconds",
+        "video_timestamp",
+        "frame_in_count",
+        "frame_out_count",
+        "cumulative_in_count",
+        "cumulative_out_count",
+        "line_start_x",
+        "line_start_y",
+        "line_end_x",
+        "line_end_y",
+    ]
+    with line_counts_path.open("w", newline="", encoding="utf-8") as counts_file:
+        writer = csv.DictWriter(counts_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(line_count_records)
+
+
 # 1. Initialize Permissive RT-DETR Model (Apache 2.0)
 args = parse_args()
 device = resolve_device(args.device)
@@ -374,15 +475,27 @@ run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 telemetry_path = Path(
     f"outputs/{input_path.stem}_telemetry_{args.device}_{run_timestamp}.csv"
 )
+line_counts_path = (
+    Path(
+        f"outputs/{input_path.stem}_line_counts_{args.device}_"
+        f"{run_timestamp}.csv"
+    )
+    if args.line is not None
+    else None
+)
 cap = cv2.VideoCapture(str(input_path))
 if not cap.isOpened():
     raise RuntimeError(f"Could not open input video: {input_path}")
 
 fps = cap.get(cv2.CAP_PROP_FPS)
-if fps <= 0:
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+if fps <= 0 or frame_width <= 0 or frame_height <= 0:
     cap.release()
     raise RuntimeError(f"Invalid video metadata for input: {input_path}")
 
+line_zone = create_line_zone(args.line, frame_width, frame_height)
+line_count_records = []
 total_source_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 requested_sample_fps = args.sample_fps or fps
 sample_interval = max(1, round(fps / min(requested_sample_fps, fps)))
@@ -458,6 +571,14 @@ try:
                 max_centroid_distance,
                 max_disappeared_frames,
             )
+            record_line_counts(
+                line_zone,
+                active_track_detections(track_gallery),
+                source_frame_index,
+                fps,
+                args.line,
+                line_count_records,
+            )
 
         processed_frames += len(frame_batch)
         if total_sampled_frames > 0:
@@ -512,3 +633,9 @@ with telemetry_path.open("w", newline="", encoding="utf-8") as telemetry_file:
         )
 print(f"Process ended cleanly. Total distinct individuals: {len(identity_gallery)}")
 print(f"Person telemetry saved to: {telemetry_path}")
+if line_counts_path is not None:
+    write_line_counts(line_counts_path, line_count_records)
+    print(
+        f"Line crossings: {line_zone.in_count} in, {line_zone.out_count} out"
+    )
+    print(f"Line counts saved to: {line_counts_path}")
