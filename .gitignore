@@ -9,3 +9,4 @@ outputs/
 
 # Virtual environments
 .venv
+.coverage
