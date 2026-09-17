@@ -81,10 +81,9 @@ pipeline to mark the activity as failed.
 
 ### Microsoft Fabric
 
-Build the wheel with `uv build`, upload it to a Fabric Environment, and attach
-that environment to the notebook. Configure the environment with exactly one
-of the CPU or GPU dependency variants. A Fabric Data Pipeline can then invoke
-the notebook as an activity.
+Generate a platform-specific CPU or GPU deployment bundle, upload its wheels
+to a Fabric Environment, and attach that environment to the notebook. A
+Fabric Data Pipeline can then invoke the notebook as an activity.
 
 Process each video sequentially in one notebook process because tracking state
 depends on frame order. Parallelize across videos with separate notebook
@@ -147,6 +146,38 @@ For retry-safe pipelines, add a stable run identifier and use Delta merge
 semantics instead of unconditional append. If an `abfss://` URI cannot be
 opened by OpenCV, stage the video in notebook-local storage before invoking
 the SDK and write the result back to OneLake.
+
+### Build CPU or GPU deployment bundles
+
+The [bundle generator](scripts/build_sdk_bundle.py) builds the SDK wheel,
+exports the selected locked dependency graph, builds or downloads every
+dependency wheel, and creates a ZIP with a checksum manifest:
+
+```bash
+# CPU-only PyTorch bundle
+uv run python scripts/build_sdk_bundle.py cpu
+
+# CUDA 12.8 PyTorch bundle
+uv run python scripts/build_sdk_bundle.py gpu
+```
+
+Use `--dry-run` to inspect the selected platform, output, and PyTorch index
+without downloading anything. Use `--output-dir PATH` to change the
+destination and `--force` to atomically replace an existing bundle.
+
+The default artifact name identifies the SDK version, selected variant,
+current platform, and Python ABI under `dist/sdk-bundles/`. Each ZIP contains:
+
+- `wheels/` with the SDK and all variant-specific dependency wheels;
+- `requirements-cpu.lock` or `requirements-gpu.lock`;
+- `manifest.json` with SHA-256 checksums and runtime metadata;
+- `README.txt` with the offline installation command.
+
+Bundles are specific to the operating system, architecture, and Python
+version on which they are generated. Build the bundle on a host matching the
+target Fabric runtime or deployment environment. The generator includes only
+the selected PyTorch index, so a CPU bundle cannot accidentally resolve CUDA
+wheels and a GPU bundle cannot resolve CPU-only wheels.
 
 ## CPU-only
 
