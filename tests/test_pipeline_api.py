@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
@@ -11,6 +11,7 @@ from people_counter.pipelines.rfdetr_botsort import RFDetrRuntime
 from people_counter.pipelines.rfdetr_botsort import run as run_botsort
 from people_counter.pipelines.rtdetr_osnet import RTDetrRuntime
 from people_counter.pipelines.rtdetr_osnet import run as run_rtdetr
+from people_counter.video import read_video_metadata
 from tests.helpers import FakeCapture, RecordingEmbedder
 
 
@@ -120,9 +121,11 @@ class PipelineApiTests(unittest.TestCase):
         frames = [
             np.zeros((80, 120, 3), dtype=np.uint8),
             np.zeros((80, 120, 3), dtype=np.uint8),
+            np.zeros((80, 120, 3), dtype=np.uint8),
         ]
         capture = FakeCapture(frames)
         progress = []
+        line_zone = MagicMock(in_count=4, out_count=3)
         runtime = RTDetrRuntime(
             device=torch.device("cpu"),
             reid_embedder=RecordingEmbedder(),
@@ -136,6 +139,7 @@ class PipelineApiTests(unittest.TestCase):
             device="cpu",
             batch_size=1,
             sample_fps=None,
+            line=(60, 0, 60, 79),
             progress_callback=lambda result: progress.append(
                 result.processed_frames
             ),
@@ -145,22 +149,38 @@ class PipelineApiTests(unittest.TestCase):
             patch(
                 "people_counter.pipelines.rtdetr_osnet.load_runtime",
                 return_value=runtime,
-            ),
+            ) as load_runtime,
             patch(
                 "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
                 return_value=capture,
+            ) as open_capture,
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.read_video_metadata",
+                wraps=read_video_metadata,
+            ) as read_metadata,
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.create_line_zone",
+                return_value=line_zone,
+            ),
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.record_line_counts",
             ),
         ):
             result = run_rtdetr(config)
 
+        load_runtime.assert_called_once_with(config)
+        open_capture.assert_called_once_with("video.mp4")
+        read_metadata.assert_called_once_with(capture, Path("video.mp4"))
         self.assertIs(result, config.result)
         self.assertTrue(capture.released)
-        self.assertEqual(progress, [0, 1, 2])
-        self.assertEqual(result.processed_frames, 2)
-        self.assertEqual(result.source_frames_read, 2)
+        self.assertEqual(progress, [0, 1, 2, 3])
+        self.assertEqual(result.processed_frames, 3)
+        self.assertEqual(result.source_frames_read, 3)
         self.assertFalse(result.ended_early)
+        self.assertEqual(result.line_in_count, 4)
+        self.assertEqual(result.line_out_count, 3)
         self.assertEqual(result.telemetry[1].entry_frame, 0)
-        self.assertEqual(result.telemetry[1].last_seen_frame, 1)
+        self.assertEqual(result.telemetry[1].last_seen_frame, 2)
 
     def test_rtdetr_run_retains_partial_result_after_detector_failure(self):
         frames = [
@@ -191,15 +211,17 @@ class PipelineApiTests(unittest.TestCase):
             patch(
                 "people_counter.pipelines.rtdetr_osnet.load_runtime",
                 return_value=runtime,
-            ),
+            ) as load_runtime,
             patch(
                 "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
                 return_value=capture,
-            ),
+            ) as open_capture,
             self.assertRaisesRegex(RuntimeError, "detector failed"),
         ):
             run_rtdetr(config)
 
+        load_runtime.assert_called_once_with(config)
+        open_capture.assert_called_once_with("video.mp4")
         self.assertTrue(capture.released)
         self.assertTrue(config.result.initialized)
         self.assertEqual(config.result.processed_frames, 1)
@@ -210,15 +232,18 @@ class PipelineApiTests(unittest.TestCase):
         frames = [
             np.zeros((80, 120, 3), dtype=np.uint8),
             np.zeros((80, 120, 3), dtype=np.uint8),
+            np.zeros((80, 120, 3), dtype=np.uint8),
         ]
         capture = FakeCapture(frames)
         progress = []
+        line_zone = MagicMock(in_count=4, out_count=3)
         config = RFDetrBotsortConfig(
             video=Path("video.mp4"),
             device_variant="cpu",
             device="cpu",
             batch_size=2,
             sample_fps=None,
+            line=(60, 0, 60, 79),
             progress_callback=lambda result: progress.append(
                 result.processed_frames
             ),
@@ -228,7 +253,7 @@ class PipelineApiTests(unittest.TestCase):
             patch(
                 "people_counter.pipelines.rfdetr_botsort.load_runtime",
                 return_value=RFDetrRuntime(model=FakeRFDetrModel()),
-            ),
+            ) as load_runtime,
             patch(
                 "people_counter.pipelines.rfdetr_botsort.BoTSORTTracker",
                 return_value=FakeBoTSORTTracker(),
@@ -236,19 +261,91 @@ class PipelineApiTests(unittest.TestCase):
             patch(
                 "people_counter.pipelines.rfdetr_botsort.cv2.VideoCapture",
                 return_value=capture,
+            ) as open_capture,
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.read_video_metadata",
+                wraps=read_video_metadata,
+            ) as read_metadata,
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.create_line_zone",
+                return_value=line_zone,
+            ),
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.record_line_counts",
+            ),
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.coasting_track_detections",
+                return_value=object(),
             ),
         ):
             result = run_botsort(config)
 
+        load_runtime.assert_called_once_with(config)
+        open_capture.assert_called_once_with("video.mp4")
+        read_metadata.assert_called_once_with(capture, Path("video.mp4"))
         self.assertIs(result, config.result)
         self.assertTrue(capture.released)
-        self.assertEqual(progress, [0, 2])
-        self.assertEqual(result.processed_frames, 2)
-        self.assertEqual(result.source_frames_read, 2)
+        self.assertEqual(progress, [0, 2, 3])
+        self.assertEqual(result.processed_frames, 3)
+        self.assertEqual(result.source_frames_read, 3)
         self.assertFalse(result.ended_early)
         self.assertTrue(result.camera_motion_compensation)
+        self.assertEqual(result.line_in_count, 4)
+        self.assertEqual(result.line_out_count, 3)
         self.assertEqual(result.telemetry[3].entry_frame, 0)
-        self.assertEqual(result.telemetry[3].last_seen_frame, 1)
+        self.assertEqual(result.telemetry[3].last_seen_frame, 2)
+
+    def test_rtdetr_run_rejects_unopenable_video(self):
+        capture = FakeCapture([np.zeros((1, 1, 3), dtype=np.uint8)])
+        capture.isOpened = lambda: False
+        config = RTDetrOsnetConfig(
+            video=Path("missing.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+
+        with (
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.load_runtime",
+                return_value=MagicMock(spec=RTDetrRuntime),
+            ),
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
+                return_value=capture,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "^Could not open input video: missing.mp4$",
+            ),
+        ):
+            run_rtdetr(config)
+
+    def test_botsort_run_rejects_unopenable_video(self):
+        capture = FakeCapture([np.zeros((1, 1, 3), dtype=np.uint8)])
+        capture.isOpened = lambda: False
+        config = RFDetrBotsortConfig(
+            video=Path("missing.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+
+        with (
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.load_runtime",
+                return_value=MagicMock(spec=RFDetrRuntime),
+            ),
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.cv2.VideoCapture",
+                return_value=capture,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "^Could not open input video: missing.mp4$",
+            ),
+        ):
+            run_botsort(config)
 
 
 if __name__ == "__main__":
