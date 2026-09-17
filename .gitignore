@@ -10,3 +10,6 @@ outputs/
 # Virtual environments
 .venv
 .coverage
+
+# Mutation tests
+mutants/
