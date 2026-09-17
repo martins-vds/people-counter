@@ -17,6 +17,41 @@ from people_counter.video import format_video_timestamp
 
 
 class OutputTests(unittest.TestCase):
+    def test_csv_writers_open_with_explicit_newline_and_utf8(self):
+        original_open = Path.open
+        open_calls = []
+
+        def record_open(path, *args, **kwargs):
+            open_calls.append((path, args, kwargs))
+            return original_open(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            telemetry_path = Path(directory) / "telemetry.csv"
+            line_path = Path(directory) / "line.csv"
+            with patch.object(Path, "open", record_open):
+                write_telemetry(
+                    telemetry_path,
+                    {1: PersonTelemetry(0, 3)},
+                    fps=3.0,
+                )
+                write_line_counts(line_path, [])
+
+        self.assertEqual(
+            open_calls,
+            [
+                (
+                    telemetry_path,
+                    ("w",),
+                    {"newline": "", "encoding": "utf-8"},
+                ),
+                (
+                    line_path,
+                    ("w",),
+                    {"newline": "", "encoding": "utf-8"},
+                ),
+            ],
+        )
+
     def test_output_paths_match_pipeline_filename_conventions(self):
         video = Path("samples/example.mp4")
 

@@ -4,7 +4,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from people_counter.cli import (
     PIPELINES,
@@ -320,6 +320,14 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertIsNone(defaults.cmc)
+
+    def test_common_parser_explicitly_disables_parent_help(self):
+        parser_type = MagicMock(side_effect=argparse.ArgumentParser)
+        argparse_module = MagicMock(ArgumentParser=parser_type)
+        with patch("people_counter.cli.argparse", argparse_module):
+            _common_parser()
+
+        parser_type.assert_called_once_with(add_help=False)
 
     def test_subcommand_help_preserves_user_facing_descriptions(self):
         help_text = build_parser().format_help()
@@ -737,6 +745,47 @@ class CliTests(unittest.TestCase):
             ["Additionally failed to persist partial results: disk full"],
         )
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_execute_reports_partial_output_failure_without_add_note(self):
+        result = RunResult(initialized=True, fps=30.0)
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+            result=result,
+        )
+
+        def fail(_):
+            raise RuntimeError("processing failed")
+
+        stderr = io.StringIO()
+        with (
+            patch(
+                "people_counter.cli.write_run_result",
+                side_effect=OSError("disk full"),
+            ),
+            patch(
+                "people_counter.cli.hasattr",
+                return_value=False,
+                create=True,
+            ),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaisesRegex(RuntimeError, "processing failed"),
+        ):
+            _execute(
+                config,
+                fail,
+                OutputPaths(Path("telemetry.csv"), None),
+            )
+
+        self.assertEqual(
+            stderr.getvalue(),
+            (
+                "Additionally failed to persist partial results: "
+                "disk full\n"
+            ),
+        )
 
 
 if __name__ == "__main__":

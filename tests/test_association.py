@@ -13,6 +13,18 @@ from people_counter.pipelines.rtdetr_osnet import (
 from tests.helpers import RecordingEmbedder, detection
 
 
+class InspectingEmbedder:
+    def __init__(self, embeddings):
+        self.embeddings = list(embeddings)
+        self.frame = None
+        self.boxes = None
+
+    def __call__(self, frame, boxes):
+        self.frame = frame
+        self.boxes = boxes
+        return self.embeddings
+
+
 class AssociationTests(unittest.TestCase):
     def setUp(self):
         self.state = RTDetrTrackingState()
@@ -243,3 +255,48 @@ class DetectionPreparationTests(unittest.TestCase):
 
         self.assertEqual(len(prepared), 1)
         self.assertEqual(embedder.boxes.tolist(), [[0.0, 0.0, 20.0, 40.0]])
+
+    def test_extract_person_detections_clips_boxes_filters_degenerate_shapes_and_embeds_threshold_person(
+        self,
+    ):
+        frame = np.zeros((50, 100, 3), dtype=np.uint8)
+        rgb_frame = np.ones((50, 100, 3), dtype=np.uint8)
+        embedder = InspectingEmbedder(
+            [np.asarray([0.25, 0.75], dtype=np.float32)]
+        )
+        result = {
+            "boxes": torch.tensor(
+                [
+                    [11, 41, 20, 80],
+                    [30, 5, 30, 25],
+                    [40, 10, 55, 10],
+                    [0, 0, 10, 10],
+                ],
+                dtype=torch.float32,
+            ),
+            "labels": torch.tensor([0, 0, 0, 1]),
+            "scores": torch.tensor([0.6, 0.95, 0.95, 0.99]),
+        }
+        activation_threshold = float(result["scores"][0].item())
+
+        prepared = extract_person_detections(
+            result,
+            frame,
+            rgb_frame,
+            embedder,
+            person_class_id=0,
+            track_gallery={},
+            activation_threshold=activation_threshold,
+        )
+
+        self.assertEqual(len(prepared), 1)
+        self.assertEqual(prepared[0].bbox, (11, 41, 20, 50))
+        self.assertEqual(prepared[0].centroid, (15, 45))
+        self.assertAlmostEqual(prepared[0].confidence, 0.6)
+        np.testing.assert_array_equal(
+            prepared[0].embedding,
+            np.asarray([0.25, 0.75], dtype=np.float32),
+        )
+        self.assertIs(embedder.frame, rgb_frame)
+        self.assertEqual(embedder.boxes.dtype, np.float32)
+        self.assertEqual(embedder.boxes.tolist(), [[11.0, 41.0, 20.0, 50.0]])

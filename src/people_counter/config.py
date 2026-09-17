@@ -66,10 +66,8 @@ def sampling_config(
     return SamplingConfig(
         interval=interval,
         effective_fps=source_fps / interval,
-        total_sampled_frames=(
-            math.ceil(total_source_frames / interval)
-            if total_source_frames > 0
-            else 0
+        total_sampled_frames=math.ceil(
+            max(0, total_source_frames) / interval
         ),
     )
 
@@ -79,12 +77,9 @@ def retention_seconds_for_sample_rate(effective_sample_fps: float) -> float:
 
 
 def disappeared_frames_for_sample_rate(effective_sample_fps: float) -> int:
-    return max(
-        1,
-        round(
-            retention_seconds_for_sample_rate(effective_sample_fps)
-            * effective_sample_fps
-        ),
+    return round(
+        retention_seconds_for_sample_rate(effective_sample_fps)
+        * effective_sample_fps
     )
 
 

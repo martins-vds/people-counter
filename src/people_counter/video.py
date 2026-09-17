@@ -70,8 +70,7 @@ def iter_sampled_frame_batches(
             frame = None
         if not success:
             read_state.ended_early = (
-                expected_source_frames > 0
-                and source_frame_index < expected_source_frames - 1
+                source_frame_index + 1 < expected_source_frames
             )
             break
 

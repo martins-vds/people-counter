@@ -230,7 +230,6 @@ def build_parser() -> argparse.ArgumentParser:
     botsort.add_argument(
         "--cmc",
         action=argparse.BooleanOptionalAction,
-        default=None,
         help="Camera-motion compensation (default: on only for all frames).",
     )
     return parser

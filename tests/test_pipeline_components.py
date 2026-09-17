@@ -29,6 +29,20 @@ class RecordingInputs(dict):
         return self
 
 
+class RecordingContextManager:
+    def __init__(self):
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *_):
+        self.exited = True
+        return False
+
+
 class ArrayDetections:
     def __init__(self, class_names, tracker_ids=None):
         self.data = {"class_name": np.asarray(class_names)}
@@ -116,11 +130,12 @@ class RuntimeLoadingTests(unittest.TestCase):
         )
         for labels in ({0: "car"}, {0: "person", 1: "PERSON"}):
             with self.subTest(labels=labels):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "exactly one 'person'",
-                ):
+                with self.assertRaises(RuntimeError) as raised:
                     rtdetr_osnet.resolve_person_class_id(labels)
+                self.assertEqual(
+                    str(raised.exception),
+                    "Detector label map must contain exactly one 'person' class",
+                )
 
     def test_rtdetr_load_runtime_wires_selected_model_and_gpu(self):
         config = RTDetrOsnetConfig(
@@ -393,6 +408,24 @@ class FinalizationTests(unittest.TestCase):
     def test_botsort_finalization_records_partial_run_and_line_totals(self):
         self._assert_finalization(rfdetr_botsort)
 
+    def test_botsort_finalization_ignores_line_totals_before_initialization(
+        self,
+    ):
+        result = RunResult()
+        capture = FakeCapture([np.zeros((1, 1, 3), dtype=np.uint8)])
+        line_zone = MagicMock(in_count=3, out_count=2)
+
+        rfdetr_botsort.finalize_run(
+            result,
+            capture,
+            FrameReadState(),
+            processing_started=0.0,
+            line_zone=line_zone,
+        )
+
+        self.assertEqual(result.line_in_count, 0)
+        self.assertEqual(result.line_out_count, 0)
+
     def _assert_finalization(self, pipeline):
         result = RunResult(initialized=True)
         capture = FakeCapture([np.zeros((1, 1, 3), dtype=np.uint8)])
@@ -421,6 +454,95 @@ class FinalizationTests(unittest.TestCase):
         self.assertTrue(result.ended_early)
         self.assertEqual(result.line_in_count, 3)
         self.assertEqual(result.line_out_count, 2)
+
+
+class RunExecutionTests(unittest.TestCase):
+    def test_rtdetr_run_preserves_partial_initialization_failure_state(self):
+        progress = []
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+            result=RunResult(),
+            progress_callback=lambda result: progress.append(
+                (
+                    result.initialized,
+                    result.fps,
+                    result.processing_seconds,
+                )
+            ),
+        )
+        runtime = MagicMock(spec=rtdetr_osnet.RTDetrRuntime)
+        metadata = VideoMetadata(
+            fps=30.0,
+            width=120,
+            height=80,
+            total_source_frames=10,
+        )
+        capture = FakeCapture([np.zeros((2, 2, 3), dtype=np.uint8)])
+
+        def fail_initialize(
+            failing_config,
+            runtime_arg,
+            tracking_arg,
+            metadata_arg,
+        ):
+            self.assertIs(failing_config, config)
+            self.assertIs(runtime_arg, runtime)
+            self.assertIs(metadata_arg, metadata)
+            self.assertIs(tracking_arg.telemetry, config.result.telemetry)
+            failing_config.result.fps = metadata_arg.fps
+            failing_config.result.initialized = True
+            rtdetr_osnet._notify_progress(failing_config)
+            raise RuntimeError("RT-DETR initialization failed")
+
+        with (
+            patch.object(
+                rtdetr_osnet,
+                "load_runtime",
+                return_value=runtime,
+            ),
+            patch.object(
+                rtdetr_osnet.cv2,
+                "VideoCapture",
+                return_value=capture,
+            ),
+            patch.object(
+                rtdetr_osnet,
+                "read_video_metadata",
+                return_value=metadata,
+            ),
+            patch.object(
+                rtdetr_osnet,
+                "initialize_run_state",
+                side_effect=fail_initialize,
+            ),
+            patch.object(
+                rtdetr_osnet.time,
+                "perf_counter",
+                side_effect=[10.0, 12.5],
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "^RT-DETR initialization failed$",
+            ),
+        ):
+            rtdetr_osnet.run(config)
+
+        self.assertTrue(capture.released)
+        self.assertEqual(
+            progress,
+            [(True, 30.0, 0.0)],
+        )
+        self.assertTrue(config.result.started)
+        self.assertTrue(config.result.initialized)
+        self.assertEqual(config.result.fps, 30.0)
+        self.assertEqual(config.result.processing_seconds, 2.5)
+        self.assertEqual(config.result.source_frames_read, 0)
+        self.assertFalse(config.result.ended_early)
+        self.assertEqual(config.result.line_in_count, 0)
+        self.assertEqual(config.result.line_out_count, 0)
 
 
 class FrameProcessingTests(unittest.TestCase):
@@ -466,12 +588,32 @@ class FrameProcessingTests(unittest.TestCase):
         rgb_b = np.ones((60, 100, 3), dtype=np.uint8)
         resized_a = object()
         resized_b = object()
+        inference_mode = RecordingContextManager()
+        autocast_mode = RecordingContextManager()
+        real_tensor = torch.tensor
 
-        with patch.object(
-            rtdetr_osnet.cv2,
-            "resize",
-            side_effect=[resized_a, resized_b],
-        ) as resize:
+        with (
+            patch.object(
+                rtdetr_osnet.cv2,
+                "resize",
+                side_effect=[resized_a, resized_b],
+            ) as resize,
+            patch.object(
+                rtdetr_osnet.torch,
+                "inference_mode",
+                return_value=inference_mode,
+            ) as inference_factory,
+            patch.object(
+                rtdetr_osnet.torch,
+                "autocast",
+                return_value=autocast_mode,
+            ) as autocast_factory,
+            patch.object(
+                rtdetr_osnet.torch,
+                "tensor",
+                side_effect=real_tensor,
+            ) as tensor_factory,
+        ):
             results = rtdetr_osnet.predict_detector_results(
                 state,
                 [frame_a, frame_b],
@@ -500,7 +642,21 @@ class FrameProcessingTests(unittest.TestCase):
             return_tensors="pt",
         )
         self.assertEqual(inputs.device, torch.device("cpu"))
+        inference_factory.assert_called_once_with()
+        self.assertTrue(inference_mode.entered)
+        self.assertTrue(inference_mode.exited)
+        autocast_factory.assert_called_once_with(
+            device_type="cpu",
+            dtype=torch.float16,
+            enabled=False,
+        )
+        self.assertTrue(autocast_mode.entered)
+        self.assertTrue(autocast_mode.exited)
         model.assert_called_once_with()
+        self.assertEqual(
+            tensor_factory.call_args.kwargs["device"],
+            torch.device("cpu"),
+        )
         post_process_call = (
             processor.post_process_object_detection.call_args
         )
@@ -842,6 +998,38 @@ class FrameProcessingTests(unittest.TestCase):
 
         self.assertIsInstance(confirmed, sv.Detections)
         self.assertEqual(len(confirmed), 0)
+
+    def test_botsort_telemetry_records_first_and_latest_seen_frames(self):
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        state = rfdetr_botsort.RFDetrRunState(
+            config=config,
+            runtime=MagicMock(spec=rfdetr_botsort.RFDetrRuntime),
+            metadata=VideoMetadata(30.0, 120, 80, 61),
+            sampling=SamplingConfig(10, 3.0, 7),
+            tracker=MagicMock(),
+            lost_track_buffer=30,
+            line_track_cache={},
+            line_zone=None,
+        )
+        confirmed = sv.Detections(
+            xyxy=np.asarray([[0, 0, 20, 40]], dtype=np.float32),
+            tracker_id=np.asarray([7], dtype=np.int32),
+        )
+
+        rfdetr_botsort._record_telemetry(state, confirmed, 20)
+
+        self.assertEqual(config.result.telemetry[7].entry_frame, 10)
+        self.assertEqual(config.result.telemetry[7].last_seen_frame, 20)
+
+        rfdetr_botsort._record_telemetry(state, confirmed, 30)
+
+        self.assertEqual(config.result.telemetry[7].entry_frame, 10)
+        self.assertEqual(config.result.telemetry[7].last_seen_frame, 30)
 
     def test_botsort_process_batch_preserves_frame_correspondence(self):
         progress = []

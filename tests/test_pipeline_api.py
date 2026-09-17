@@ -347,6 +347,43 @@ class PipelineApiTests(unittest.TestCase):
         ):
             run_botsort(config)
 
+    def test_botsort_run_preserves_progress_callback_failure(self):
+        capture = FakeCapture(
+            [np.zeros((80, 120, 3), dtype=np.uint8)]
+        )
+        progress_error = RuntimeError("progress failed")
+
+        def fail_progress(_):
+            raise progress_error
+
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+            progress_callback=fail_progress,
+        )
+
+        with (
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.load_runtime",
+                return_value=RFDetrRuntime(model=FakeRFDetrModel()),
+            ),
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.BoTSORTTracker",
+                return_value=FakeBoTSORTTracker(),
+            ),
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.cv2.VideoCapture",
+                return_value=capture,
+            ),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            run_botsort(config)
+
+        self.assertIs(raised.exception, progress_error)
+        self.assertTrue(capture.released)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,7 @@ MIN_CENTROID_DISTANCE_BBOX_HEIGHTS = 0.5
 PERSON_NMS_IOU_THRESHOLD = 0.7
 EMBEDDING_EMA_ALPHA = 0.95
 DETECTOR_IMAGE_SIZE = (640, 640)
+INVALID_ASSIGNMENT_COST = 1_000_000.0
 DETECTOR_MODELS = {
     "r18": "PekingU/rtdetr_v2_r18vd",
     "r50": "PekingU/rtdetr_v2_r50vd",
@@ -221,14 +222,8 @@ def non_max_suppression(detections: list[Detection]) -> list[Detection]:
     if not detections:
         return []
 
-    boxes = np.asarray(
-        [detection.bbox for detection in detections],
-        dtype=np.float32,
-    )
-    scores = np.asarray(
-        [detection.confidence for detection in detections],
-        dtype=np.float32,
-    )
+    boxes = np.asarray([detection.bbox for detection in detections])
+    scores = np.asarray([detection.confidence for detection in detections])
     areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
     order = scores.argsort()[::-1]
     kept_indices = []
@@ -260,12 +255,7 @@ def non_max_suppression(detections: list[Detection]) -> list[Detection]:
             np.maximum(0, intersection_y2 - intersection_y1)
         )
         union = areas[selected_index] + areas[remaining] - intersection
-        iou = np.divide(
-            intersection,
-            union,
-            out=np.zeros_like(intersection),
-            where=union > 0,
-        )
+        iou = intersection / union
         order = remaining[iou <= PERSON_NMS_IOU_THRESHOLD]
 
     return [detections[index] for index in kept_indices]
@@ -428,9 +418,36 @@ def _record_track_match(
     state.matched_track_ids.add(original_track_id)
 
 
+def _finite_assignments(costs: np.ndarray) -> list[tuple[int, int]]:
+    candidate_rows = [
+        index for index, row in enumerate(costs) if np.isfinite(row).any()
+    ]
+    if not candidate_rows:
+        return []
+    candidate_columns = [
+        index
+        for index, column in enumerate(costs.T)
+        if np.isfinite(column).any()
+    ]
+    filtered_costs = costs[np.ix_(candidate_rows, candidate_columns)]
+    solver_costs = np.where(
+        np.isfinite(filtered_costs),
+        filtered_costs,
+        INVALID_ASSIGNMENT_COST,
+    )
+    matched_rows, matched_columns = linear_sum_assignment(solver_costs)
+    return [
+        (candidate_rows[int(row)], candidate_columns[int(column)])
+        for row, column in zip(matched_rows, matched_columns)
+        if np.isfinite(filtered_costs[row, column])
+    ]
+
+
 def assign_active_appearance_matches(state: AssociationState) -> None:
     active_track_ids = list(state.tracking.tracks)
-    if not state.detections or not active_track_ids:
+    if not state.detections:
+        return
+    if not active_track_ids:
         return
     detection_embeddings = np.stack(
         [detection_embedding(detection) for detection in state.detections]
@@ -442,20 +459,22 @@ def assign_active_appearance_matches(state: AssociationState) -> None:
         ]
     )
     similarities = detection_embeddings @ active_embeddings.T
-    costs = 1.0 - similarities
-    valid_pairs = np.zeros(costs.shape, dtype=bool)
-    for detection_index, detection in enumerate(state.detections):
-        for track_index, track_id in enumerate(active_track_ids):
-            valid_pairs[detection_index, track_index] = _active_spatially_valid(
-                state,
-                detection,
-                state.tracking.tracks[track_id],
-            )
-    costs[~valid_pairs] = 1_000_000
-    matched_rows, matched_columns = linear_sum_assignment(costs)
-    for detection_index, track_index in zip(matched_rows, matched_columns):
-        if not valid_pairs[detection_index, track_index]:
-            continue
+    costs = np.asarray(
+        [
+            [
+                -similarities[detection_index, track_index]
+                if _active_spatially_valid(
+                    state,
+                    detection,
+                    state.tracking.tracks[track_id],
+                )
+                else np.inf
+                for track_index, track_id in enumerate(active_track_ids)
+            ]
+            for detection_index, detection in enumerate(state.detections)
+        ],
+    )
+    for detection_index, track_index in _finite_assignments(costs):
         if similarities[detection_index, track_index] < ACTIVE_MATCH_THRESHOLD:
             continue
         track_id = active_track_ids[track_index]
@@ -511,24 +530,29 @@ def assign_spatial_secondary_matches(state: AssociationState) -> None:
         for track_id in state.tracking.tracks
         if track_id not in state.matched_track_ids
     ]
-    if not detection_indices or not track_ids:
+    if not detection_indices:
         return
-    costs = np.full((len(detection_indices), len(track_ids)), 1_000_000.0)
-    valid_pairs = np.zeros(costs.shape, dtype=bool)
-    for row, detection_index in enumerate(detection_indices):
-        for column, track_id in enumerate(track_ids):
-            cost = _secondary_pair_cost(
-                state,
-                state.detections[detection_index],
-                state.tracking.tracks[track_id],
-            )
-            if cost is not None:
-                valid_pairs[row, column] = True
-                costs[row, column] = cost
-    matched_rows, matched_columns = linear_sum_assignment(costs)
-    for row, column in zip(matched_rows, matched_columns):
-        if not valid_pairs[row, column]:
-            continue
+    if not track_ids:
+        return
+    costs = np.asarray(
+        [
+            [
+                np.inf
+                if (
+                    cost := _secondary_pair_cost(
+                        state,
+                        state.detections[detection_index],
+                        state.tracking.tracks[track_id],
+                    )
+                )
+                is None
+                else cost
+                for track_id in track_ids
+            ]
+            for detection_index in detection_indices
+        ],
+    )
+    for row, column in _finite_assignments(costs):
         detection_index = detection_indices[row]
         track_id = track_ids[column]
         _record_track_match(
@@ -610,7 +634,9 @@ def _record_reentry_match(
 def assign_reentry_matches(state: AssociationState) -> None:
     detection_indices = _unmatched_activated_detections(state)
     identity_ids = _reentry_identity_ids(state)
-    if not detection_indices or not identity_ids:
+    if not detection_indices:
+        return
+    if not identity_ids:
         return
     detection_embeddings = np.stack(
         [
@@ -622,26 +648,28 @@ def assign_reentry_matches(state: AssociationState) -> None:
         [state.tracking.identities[track_id] for track_id in identity_ids]
     )
     similarities = detection_embeddings @ identity_embeddings.T
-    costs = 1.0 - similarities
-    valid_pairs = np.zeros(costs.shape, dtype=bool)
-    for row, detection_index in enumerate(detection_indices):
-        for column, track_id in enumerate(identity_ids):
-            valid_pairs[row, column] = _reentry_spatially_valid(
-                state,
-                state.detections[detection_index],
-                state.tracking.telemetry[track_id],
-            )
-    costs[~valid_pairs] = 1_000_000
-    matched_rows, matched_columns = linear_sum_assignment(costs)
-    for row, column in zip(matched_rows, matched_columns):
-        if not valid_pairs[row, column]:
-            continue
-        if similarities[row, column] < REENTRY_MATCH_THRESHOLD:
+    costs = np.asarray(
+        [
+            [
+                -similarities[row, column]
+                if _reentry_spatially_valid(
+                    state,
+                    state.detections[detection_index],
+                    state.tracking.telemetry[track_id],
+                )
+                else np.inf
+                for column, track_id in enumerate(identity_ids)
+            ]
+            for row, detection_index in enumerate(detection_indices)
+        ],
+    )
+    for detection_index, identity_index in _finite_assignments(costs):
+        if similarities[detection_index, identity_index] < REENTRY_MATCH_THRESHOLD:
             continue
         _record_reentry_match(
             state,
-            detection_indices[row],
-            identity_ids[column],
+            detection_indices[detection_index],
+            identity_ids[identity_index],
         )
 
 

@@ -152,17 +152,17 @@ def _record_telemetry(
         return
     for tracker_id in confirmed_people.tracker_id:
         person_id = int(tracker_id)
-        record = state.config.result.telemetry.setdefault(
-            person_id,
-            PersonTelemetry(
+        record = state.config.result.telemetry.get(person_id)
+        if record is None:
+            state.config.result.telemetry[person_id] = PersonTelemetry(
                 entry_frame=confirmed_entry_frame(
                     source_frame_index,
                     state.sampling.interval,
                 ),
                 last_seen_frame=source_frame_index,
-            ),
-        )
-        record.last_seen_frame = source_frame_index
+            )
+        else:
+            record.last_seen_frame = source_frame_index
 
 
 def process_frame(
