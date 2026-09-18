@@ -267,6 +267,12 @@ attempt tables directly.
 
 All timestamps are UTC.
 
+Columns described as required in the contracts below are enforced by the
+registration and worker notebooks. The bootstrap creates tables through the
+DataFrame Delta writer instead of interpolated `CREATE TABLE` SQL, and removes
+column-level `NOT NULL` from its schema strings for Fabric Runtime
+compatibility. The resulting physical Delta columns are nullable.
+
 ### Control tables
 
 #### `people_counter_event_receipts`
@@ -416,7 +422,9 @@ capacity headroom.
 
 ### 6.2 Lakehouse bootstrap
 
-1. Create `people-counter-<environment>` Lakehouse.
+1. Create a `people_counter_<environment>` Lakehouse, for example
+   `people_counter_dev`, `people_counter_test`, or `people_counter_prod`.
+   Fabric Lakehouse names can contain only letters, numbers, and underscores.
 2. Attach it as the default Lakehouse to all notebooks.
 3. Run [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb).
 4. Verify every expected Delta table and committed view from the SQL
