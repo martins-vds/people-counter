@@ -781,12 +781,6 @@ Create `pc-event-intake`:
    - Keep the rejected event receipt as an audit record, or remove it only
      according to the approved development-data cleanup process.
 
-The event and backfill registration notebooks share a global registration
-mutex. Pass `REGISTRATION_ID=@pipeline().RunId` to
-[`02_register_backfill.ipynb`](./02_register_backfill.ipynb); event intake
-uses `event_key` as its lock owner. Do not bypass these notebooks with direct
-appends to `video_work`.
-
 ### 6.5 Activator rule and pipeline action
 
 Return to the Activator item created in section 6.3:
@@ -932,6 +926,63 @@ At 80% useful utilization (`U=0.8`) and 20% headroom (`H=1.2`):
 
 This is why capacity cannot be selected from SKU labels alone.
 
+### Backfill registration pipeline
+
+`02_register_backfill` does not belong in `pc-event-intake`. Create a
+separate pipeline named `pc-backfill-register` for the historical load:
+
+1. Create the Fabric Data Pipeline `pc-backfill-register`.
+2. Add one String pipeline parameter named `MANIFEST_GLOB`. A pipeline run
+   supplies one bounded ADLS manifest partition, for example:
+
+   ```text
+   abfss://videos@peoplecountingfootage.dfs.core.windows.net/incoming/2025/01/01/*/*.json
+   ```
+
+3. Add one Notebook activity targeting the imported
+   `02_register_backfill` Fabric notebook item, sourced from
+   [`02_register_backfill.ipynb`](./02_register_backfill.ipynb).
+4. Confirm `people_counter_<environment>` is attached and pinned as that
+   notebook's default Lakehouse.
+5. Configure these Notebook activity base parameters:
+
+   | Notebook base parameter | Type | Value |
+   |---|---|---|
+   | `MANIFEST_GLOB` | `String` | `@pipeline().parameters.MANIFEST_GLOB` |
+   | `REGISTRATION_ID` | `String` | `@pipeline().RunId` |
+   | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
+   | `MAX_ATTEMPTS` | `Int` | `4` |
+   | `PRIORITY` | `Int` | `10` |
+   | `PIPELINE` | `String` | `rtdetr-osnet` |
+   | `DEVICE_VARIANT` | `String` | `cpu` |
+   | `DEVICE` | `String` | `cpu` |
+   | `BATCH_SIZE` | `Int` | `1` |
+   | `SAMPLE_FPS` | `Float` | `3.0` |
+   | `DETECTION_THRESHOLD` | `Float` | `0.6` |
+   | `USE_FP16` | `Bool` | `false` |
+   | `DETECTOR_MODEL` | `String` | `r18` |
+   | `CAMERA_MOTION_COMPENSATION` | `String` | Empty; parsed as null |
+
+   `MANIFEST_GLOB` and `REGISTRATION_ID` use **Add dynamic content** in the
+   Value field; their Type remains `String`.
+6. Set **Timeout** to `0.01:00:00`, enable `3` retries, choose
+   **Increasing Delay**, set the initial interval to `60` seconds and the
+   maximum to `900` seconds. Leave preview retry conditions empty initially.
+7. Keep each `MANIFEST_GLOB` partition small enough that validation and
+   registration finish comfortably inside the notebook's 15-minute
+   registration mutex. Start with at most 1,000 manifests and adjust only
+   after measuring duration.
+8. Save the pipeline. Run it once per inventory partition or call it from a
+   separate bounded inventory/ForEach orchestration pipeline.
+9. Verify the returned JSON counts:
+   `manifest_count`, `already_registered`, and `newly_registered`.
+
+Event intake and backfill registration share the global registration mutex.
+Event intake uses `event_key` as the lock owner; backfill uses the pipeline
+run ID supplied through `REGISTRATION_ID`. Do not run both registration paths
+outside these notebooks or append directly to `video_work`.
+
 ### Backfill execution phases
 
 1. **Inventory:** partition manifest inventory by capture date and storage
@@ -961,9 +1012,8 @@ This is why capacity cannot be selected from SKU labels alone.
 9. **Completion:** reconcile the inventory, committed work, and dead-letter
    queue before declaring the backfill complete.
 
-Use [`02_register_backfill.ipynb`](./02_register_backfill.ipynb) to register
-partitions. It must create the same `work_id` and rows as event intake so a
-backfill item and a later duplicate event converge.
+The backfill pipeline and event intake create the same `work_id` and rows, so
+a backfill item and a later duplicate storage event converge.
 
 ## 8. Observability design
 
