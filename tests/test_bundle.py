@@ -46,6 +46,10 @@ class BundleBuilderTests(unittest.TestCase):
             return
         if command[:2] == ["uv", "build"]:
             wheels_path = Path(command[command.index("--out-dir") + 1])
+            (wheels_path / ".gitignore").write_text(
+                "*\n",
+                encoding="utf-8",
+            )
             (wheels_path / "people_counter-0.1.0-py3-none-any.whl").write_bytes(
                 b"sdk"
             )
@@ -133,6 +137,9 @@ class BundleBuilderTests(unittest.TestCase):
                         name.endswith("people_counter-0.1.0-py3-none-any.whl")
                         for name in names
                     )
+                )
+                self.assertFalse(
+                    any(name.endswith("/.gitignore") for name in names)
                 )
 
     def test_manifest_checksums_match_archived_artifacts(self):
@@ -307,6 +314,7 @@ class BundleBuilderTests(unittest.TestCase):
             [
                 "uv",
                 "export",
+                "--quiet",
                 "--extra",
                 "gpu",
                 "--no-dev",

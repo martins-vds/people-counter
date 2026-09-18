@@ -99,6 +99,7 @@ def build_bundle(
         )
 
         _run(_sdk_build_command(wheels_directory), project_root)
+        (wheels_directory / ".gitignore").unlink(missing_ok=True)
         _run(
             _dependency_wheel_command(
                 requirements_path,
@@ -159,6 +160,7 @@ def _export_command(
     return [
         "uv",
         "export",
+        "--quiet",
         "--extra",
         variant,
         "--no-dev",
