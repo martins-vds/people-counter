@@ -147,6 +147,11 @@ semantics instead of unconditional append. If an `abfss://` URI cannot be
 opened by OpenCV, stage the video in notebook-local storage before invoking
 the SDK and write the result back to OneLake.
 
+See the
+[retry-safe Fabric pipeline notebook](notebooks/fabric_retry_safe_pipeline.ipynb)
+for parameter validation, local staging, input/configuration fingerprints,
+idempotent Delta merges, failed-attempt snapshots, and a run-status ledger.
+
 ### Build CPU or GPU deployment bundles
 
 The [bundle generator](scripts/build_sdk_bundle.py) builds the SDK wheel,
