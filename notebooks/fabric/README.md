@@ -425,55 +425,223 @@ capacity headroom.
 1. Create a `people_counter_<environment>` Lakehouse, for example
    `people_counter_dev`, `people_counter_test`, or `people_counter_prod`.
    Fabric Lakehouse names can contain only letters, numbers, and underscores.
-2. Attach it as the default Lakehouse to all notebooks.
-3. Run [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb).
-4. Verify every expected Delta table and committed view from the SQL
+2. Import the repository notebooks as Fabric notebook items:
+   - Open the target Fabric workspace.
+   - From the workspace toolbar, select **Import** and then **Notebook**.
+     Depending on the current Fabric navigation, this entry can also appear
+     under **New item** or the Data Engineering home page.
+   - Upload all `.ipynb` files from this [`notebooks/fabric/`](./) folder.
+     Fabric supports importing standard Jupyter `.ipynb` files and creates
+     one Fabric notebook item per file.
+   - Keep the numeric prefixes and names, such as
+     `00_bootstrap_lakehouse` and `01_register_event`, so the pipeline
+     instructions match the Fabric items.
+   - Open each imported notebook and verify that its tagged parameter cell is
+     recognized before using it in a Notebook pipeline activity.
+3. Attach the Lakehouse to **every imported notebook**:
+   - Open the notebook.
+   - In the Lakehouse explorer, select **Add lakehouse**.
+   - Select **Existing lakehouse**, choose
+     `people_counter_<environment>`, and add it.
+   - Pin it or select **Set as default** so it is the notebook's default
+     Lakehouse.
+   - Save the notebook and confirm the default Lakehouse remains attached
+     after reopening it.
+4. Select the published `people-counter-<environment>` Environment for every
+   notebook. This is required for the worker/benchmark package and keeps all
+   notebook runtimes consistent.
+5. Run [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb).
+6. Verify every expected Delta table and committed view from the SQL
    analytics endpoint.
-5. Grant the runtime identity read access to ADLS and write access to the
+7. Grant the runtime identity read access to ADLS and write access to the
    Lakehouse.
 
-### 6.3 ADLS event ingestion
+### 6.3 ADLS Eventstream and Activator data connection
+
+Azure Blob/ADLS events are not a storage inventory and are not replayed for
+objects that existed before the Eventstream connected. Existing video files
+therefore do not populate the preview. This design also triggers on a newly
+moved JSON manifest, not on the video object itself.
 
 1. Confirm the source account is ADLS Gen2/StorageV2 and supported in the
    Fabric region.
 2. In Fabric Real-Time Hub, add Azure Blob Storage events for the production
-   account and container.
-3. Because the producer moves the completed manifest from `staging/` to
-   `incoming/`, select ADLS `Microsoft.Storage.BlobRenamed` events. A
-   hierarchical-namespace rename is not a `BlobCreated` event.
-4. Filter the CloudEvent subject to the `incoming/` prefix and `.json`
-   suffix. Do not trigger for videos; the manifest-last move is the readiness
-   event.
-5. Preserve at least event `source`, `id`, `type`, `time`, `subject`, and
-   `data.destinationUrl`. Map `MANIFEST_URI` from `destinationUrl`; renamed
-   events do not provide a destination ETag.
-6. Create an Activator/Reflex rule that invokes the event intake pipeline.
-   Activator-to-item parameter passing is currently Preview and supports
-   scalar string, Boolean, and numeric parameters only. Pass event properties
-   individually, not as one event object.
-7. Map event fields to pipeline parameters. Keep the full event `source` and
-   `id`; neither a filename nor pipeline run ID is a deduplication key.
-   Map the event's Blob HTTPS URL to `MANIFEST_URI`; the intake notebook
-   normalizes supported Blob/DFS URLs to an `abfss://` URI.
-8. Optionally route the unmodified event stream to Eventhouse for an
-   independent ingress audit.
-9. Upload and move one test video/manifest pair twice and verify two event
-   receipts resolve to one work item.
+   account and container. Once created, do not use the source-node pencil to
+   change the account or event-link configuration; Fabric does not support
+   updating this event link in place.
+3. The required event type is `Microsoft.Storage.BlobRenamed` because the
+   producer moves the completed manifest from `staging/` to `incoming/`. A
+   hierarchical-namespace rename is not a `BlobCreated` event. If the source
+   wizard does not offer an event-type selector, keep the source unchanged
+   and filter `type` downstream after the first event supplies a schema.
+4. Before adding a Filter node, generate a live schema-bootstrap event:
+   - Start/connect the Eventstream source and leave the canvas open.
+   - Create a valid manifest under `staging/<asset-version>/<name>.json` for
+     one of the existing videos.
+   - Rename/move that manifest into
+     `incoming/<yyyy>/<mm>/<dd>/<asset-version>/<name>.json`.
+   - Select the source or stream node, set preview to **Last hour**, and
+     refresh. Wait until the CloudEvent fields appear.
+   - Only then connect/configure the Filter nodes. The Filter field selector
+     stays empty while the upstream stream has no inferred schema.
+5. Add three Filter nodes in series because the Eventstream Filter operator
+   allows only one condition per node. The serial nodes implement a logical
+   AND:
+
+   ```text
+   filter_blob_renamed:
+   type equals:
+   Microsoft.Storage.BlobRenamed
+
+   filter_incoming_manifests:
+   subject starts with:
+   /blobServices/default/containers/<container>/blobs/incoming/
+
+   filter_json_manifests:
+   subject ends with:
+   .json
+   ```
+
+   Connect them as:
+
+   ```text
+   Azure Blob Storage events
+     -> filter_blob_renamed
+     -> filter_incoming_manifests
+     -> filter_json_manifests
+     -> Activator/Eventhouse destination
+   ```
+
+   Do not trigger for videos; the manifest-last move is the readiness event.
+
+6. Verify the output of `filter_json_manifests`; this is not another
+   transformation step:
+   - Select `filter_json_manifests`.
+   - Open its data preview and confirm that the event still contains
+     `source`, `id`, `type`, `time`, `subject`, and
+     `data.destinationUrl`.
+   - If Fabric displays nested properties as flattened columns, the last
+     field might appear simply as `destinationUrl`.
+   - Do not add a **Manage fields** operation that removes these values.
+
+   `destinationUrl` is the final `incoming/...json` path after the rename.
+   Do not use `sourceUrl`, which points to the old pre-rename path. The
+   observed Fabric event can include an `eTag`, but that is the manifest
+   blob's ETag—not the referenced video's ETag. The referenced video ETag and
+   SHA-256 come from the manifest content.
+7. Add the Activator destination shown in the Eventstream UI:
+
+   | Field | Value |
+   |---|---|
+   | **Destination name** | `to_pc_manifest_arrival_activator` |
+   | **Workspace** | Current environment workspace, such as `people-counter-dev` |
+   | **Activator** | Select **Create new**, then name it `pc_manifest_arrival_activator` |
+   | **Input data format** | `Json` |
+   | **Activate ingestion after adding the data source** | Checked |
+
+   Select **Save**. The destination name identifies the Eventstream
+   connection; the Activator name identifies the Fabric item created in the
+   workspace.
+8. Stop here after saving the destination. At this point Eventstream is
+   delivering filtered manifest events into the Activator item, but no rule
+   invokes a pipeline yet.
+
+If the live manifest move still produces no preview:
+
+1. Confirm the move happened **after** the Eventstream source was connected.
+2. Confirm `BlobRenamed` was selected and inspect the source-node monitoring
+   errors before configuring downstream operators.
+3. Confirm the storage account is StorageV2 with hierarchical namespace
+   enabled and the move uses a file rename rather than copy-and-delete.
+4. Confirm the Fabric workspace capacity region supports the Azure Blob
+   Storage events connector. It is not supported in Central US, Germany West
+   Central, South-Central US, West US2, West US3, or West India.
+5. Check tenant/workspace private-link and outbound-access policies. Blocking
+   public access can prevent Azure event delivery unless the documented
+   Real-Time Events connectivity is configured.
+6. Temporarily remove downstream Filter/Activator nodes and verify the raw
+   source first. Re-add the three serial filters only after raw events are
+   visible.
+
+#### Recover `Update event link is not supported`
+
+This publish error means Fabric is trying to mutate the Azure Storage event
+link behind the existing source:
+
+```text
+dataSourceErrors:
+  <source>: Update event link is not supported.
+```
+
+The filter or Activator edit usually exposes the problem, but the failing
+resource is the Blob source link. Use this recovery order:
+
+1. Copy the three filter expressions and Activator destination settings.
+2. Discard the failed draft if Fabric offers that option, reopen the
+   Eventstream, and confirm its previously published Live view still works.
+3. In Edit mode, delete only the **Azure Blob Storage Events** source node and
+   publish that deletion. Deleting and recreating is supported; updating the
+   existing event link is not.
+4. Add a new Azure Blob Storage Events source for
+   `peoplecountingfootage`. Configure the account once and publish it without
+   reopening/saving the source settings.
+5. Select **Stream events**, generate a new rename event, and confirm raw
+   preview data.
+6. Recreate/reconnect
+   `filter_blob_renamed -> filter_incoming_manifests ->
+   filter_json_manifests`.
+7. Publish the filters before adding a destination.
+8. Re-add the Activator destination, selecting the existing
+   `pc_manifest_arrival_activator`, and publish again.
+
+If deleting the source also removes its connected nodes, recreate those nodes
+from the copied settings. If the source-only replacement still produces the
+same error, create a new Eventstream in parallel from Real-Time Hub, validate
+it end to end, and retire the old Eventstream only after the replacement is
+live.
 
 ### 6.4 Event intake pipeline
 
+The Activator does not run inside this pipeline. It is an external trigger
+that invokes the pipeline after section 6.5 configures the rule.
+
 Create `pc-event-intake`:
 
-1. Add one Notebook activity targeting
-   [`01_register_event.ipynb`](./01_register_event.ipynb).
-2. Map `EVENT_SOURCE`, `EVENT_ID`, `EVENT_TYPE`, `EVENT_TIME`, `SUBJECT`,
-   `MANIFEST_URI`, and `PIPELINE_RUN_ID`.
-3. Set `PIPELINE_RUN_ID` from the current Fabric pipeline run ID.
-4. Use a short timeout because this pipeline only validates a small manifest
-   and writes control rows.
-5. Retry transient storage, capacity, and Delta conflicts. Do not retry a
-   schema-invalid manifest.
-6. Alert on terminal failure.
+1. Create a new Fabric Data Pipeline named `pc-event-intake`.
+2. Define these string pipeline parameters:
+   `EVENT_SOURCE`, `EVENT_ID`, `EVENT_TYPE`, `EVENT_TIME`, `SUBJECT`, and
+   `MANIFEST_URI`.
+3. Add one Notebook activity targeting
+   the imported `01_register_event` Fabric notebook item, sourced from
+   [`01_register_event.ipynb`](./01_register_event.ipynb). If it does not
+   appear in the activity selector, return to section 6.2, import/save it,
+   and attach the default Lakehouse first.
+4. In the Notebook activity **Settings** under **Base parameters**, map every
+   imported notebook parameter to dynamic pipeline content:
+
+   | Notebook base parameter | Dynamic value |
+   |---|---|
+   | `EVENT_SOURCE` | `@pipeline().parameters.EVENT_SOURCE` |
+   | `EVENT_ID` | `@pipeline().parameters.EVENT_ID` |
+   | `EVENT_TYPE` | `@pipeline().parameters.EVENT_TYPE` |
+   | `EVENT_TIME` | `@pipeline().parameters.EVENT_TIME` |
+   | `SUBJECT` | `@pipeline().parameters.SUBJECT` |
+   | `MANIFEST_URI` | `@pipeline().parameters.MANIFEST_URI` |
+   | `PIPELINE_RUN_ID` | `@pipeline().RunId` |
+
+   Leave the remaining notebook base parameters at their reviewed
+   environment defaults.
+5. Do not validate the notebook by running its registration cell
+   interactively with blank defaults. Pipeline parameters are injected only
+   when the Notebook activity runs. For an interactive smoke test, populate
+   the tagged parameter cell from one Eventstream preview event, rerun that
+   cell, and then run the registration cell.
+6. Set a short timeout because this pipeline validates a small manifest and
+   writes control rows; it does not process video.
+7. Enable retries for transient storage, capacity, and Delta conflicts. Do
+   not retry a schema-invalid manifest.
+8. Save the pipeline so it becomes selectable by the Activator rule.
+9. Add terminal-failure alerting after the complete event flow is validated.
 
 The event and backfill registration notebooks share a global registration
 mutex. Pass `REGISTRATION_ID=@pipeline().RunId` to
@@ -481,7 +649,48 @@ mutex. Pass `REGISTRATION_ID=@pipeline().RunId` to
 uses `event_key` as its lock owner. Do not bypass these notebooks with direct
 appends to `video_work`.
 
-### 6.5 Dispatcher pipeline
+### 6.5 Activator rule and pipeline action
+
+Return to the Activator item created in section 6.3:
+
+1. Open `pc_manifest_arrival_activator` and create a rule named
+   `run_pc_event_intake_on_manifest_renamed` that invokes the
+   `pc-event-intake` pipeline for each event emitted by
+   `filter_json_manifests`. Use these exact names in development, test, and
+   production so deployment comparisons and monitoring filters stay
+   consistent. Activator-to-item parameter passing is currently Preview and
+   supports scalar string, Boolean, and numeric parameters only. Pass event
+   properties individually, not as one event object.
+2. In the Activator **Run a Fabric item** action, map the filtered event
+   fields to the intake pipeline's scalar parameters:
+
+   | Pipeline parameter | Filtered event field |
+   |---|---|
+   | `EVENT_SOURCE` | `source` |
+   | `EVENT_ID` | `id` |
+   | `EVENT_TYPE` | `type` |
+   | `EVENT_TIME` | `time` |
+   | `SUBJECT` | `subject` |
+   | `MANIFEST_URI` | `data.destinationUrl` or flattened `destinationUrl` |
+
+   Keep the complete `source` and `id`; together they form the event
+   deduplication key. Do not substitute a filename or pipeline run ID.
+   The intake notebook normalizes the destination Blob HTTPS URL to an
+   `abfss://` URI.
+3. Save and activate
+   `run_pc_event_intake_on_manifest_renamed`.
+4. Optionally route the unmodified event stream to Eventhouse for an
+   independent ingress audit.
+5. Upload and move one test video/manifest pair twice and verify two event
+   receipts resolve to one work item.
+
+The observed 16-byte `manifest.json` is sufficient to prove that rename
+events and filters work, but it is not a valid processing manifest unless it
+contains every required manifest-version-1 field. Replace the smoke-test
+content with the complete manifest contract before testing
+`01_register_event.ipynb`.
+
+### 6.6 Dispatcher pipeline
 
 Create `pc-dispatcher-00` with a one-minute fixed schedule. Fabric fixed
 schedules require start and end dates, so choose a reviewed far-future end
@@ -529,7 +738,7 @@ aggregate limit. The capacity gate must prove that Fabric can admit the
 resulting Spark jobs—creating more pipeline activities does not create more
 capacity.
 
-### 6.6 Watchdog, reconciliation, and aggregation
+### 6.7 Watchdog, reconciliation, and aggregation
 
 Create four scheduled pipelines:
 
@@ -934,6 +1143,7 @@ The implementation is ready only when all checks pass:
 - [Fabric pipeline expression language](https://learn.microsoft.com/fabric/data-factory/expression-language)
 - [Activity retries](https://learn.microsoft.com/fabric/data-factory/activity-retries)
 - [Notebook activity](https://learn.microsoft.com/fabric/data-factory/notebook-activity)
+- [Create, import, and connect Fabric notebooks](https://learn.microsoft.com/fabric/data-engineering/how-to-use-notebook)
 - [ForEach activity](https://learn.microsoft.com/fabric/data-factory/foreach-activity)
 - [Spark concurrency and queueing](https://learn.microsoft.com/fabric/data-engineering/spark-job-concurrency-and-queueing)
 - [Fabric Spark compute](https://learn.microsoft.com/fabric/data-engineering/spark-compute)
