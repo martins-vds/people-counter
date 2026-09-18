@@ -151,6 +151,9 @@ See the
 [retry-safe Fabric pipeline notebook](notebooks/fabric_retry_safe_pipeline.ipynb)
 for parameter validation, local staging, input/configuration fingerprints,
 idempotent Delta merges, failed-attempt snapshots, and a run-status ledger.
+For event-driven ADLS ingestion, bounded dispatch, lease recovery,
+observability, Direct Lake reporting, and large backfills, use the
+[production Fabric implementation plan](notebooks/fabric/README.md).
 
 ### Build CPU or GPU deployment bundles
 
