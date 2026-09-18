@@ -436,8 +436,14 @@ capacity headroom.
    - Keep the numeric prefixes and names, such as
      `00_bootstrap_lakehouse` and `01_register_event`, so the pipeline
      instructions match the Fabric items.
-   - Open each imported notebook and verify that its tagged parameter cell is
-     recognized before using it in a Notebook pipeline activity.
+   - Open each imported notebook and locate the code cell containing its
+     uppercase configuration variables.
+   - Open that cell's **...** menu and select **Toggle parameter cell**.
+     Imported Jupyter `tags: ["parameters"]` metadata does not reliably
+     activate Fabric parameter injection by itself.
+   - Confirm the cell displays Fabric's parameter-cell indicator and that
+     exactly one code cell is marked as the parameter cell.
+   - Save the notebook before using it in a Notebook pipeline activity.
 3. Attach the Lakehouse to **every imported notebook**:
    - Open the notebook.
    - In the Lakehouse explorer, select **Add lakehouse**.
@@ -455,6 +461,11 @@ capacity headroom.
    analytics endpoint.
 7. Grant the runtime identity read access to ADLS and write access to the
    Lakehouse.
+
+After toggling or changing a parameter cell, reopen the corresponding
+pipeline Notebook activity and reselect/refresh the notebook so Fabric
+reloads its Base parameters. Verify the expressions and types before running
+the pipeline.
 
 ### 6.3 ADLS Eventstream and Activator data connection
 
@@ -785,35 +796,133 @@ Create `pc-event-intake`:
 
 Return to the Activator item created in section 6.3:
 
-1. Open `pc_manifest_arrival_activator` and create a rule named
-   `run_pc_event_intake_on_manifest_renamed` that invokes the
-   `pc-event-intake` pipeline for each event emitted by
-   `filter_json_manifests`. Use these exact names in development, test, and
-   production so deployment comparisons and monitoring filters stay
-   consistent. Activator-to-item parameter passing is currently Preview and
-   supports scalar string, Boolean, and numeric parameters only. Pass event
-   properties individually, not as one event object.
-2. In the Activator **Run a Fabric item** action, map the filtered event
-   fields to the intake pipeline's scalar parameters:
+1. In the `people-counter-dev` workspace, open the Activator item
+   `pc_manifest_arrival_activator`, then select the **Events** tab.
+2. In **Explorer**, select the event source created by the Eventstream
+   destination `to_pc_manifest_arrival_activator`. The center pane should
+   show **Live feed**, **Analytics**, and **Manage source** tabs. Confirm that
+   recent events contain `api=RenameFile` and the final `destinationUrl`.
 
-   | Pipeline parameter | Filtered event field |
+   Fabric generates the Activator source name independently from the
+   Eventstream stream/operator names. In the current environment, the
+   recreated source is `azure_storage_events_eventstream-stream`, even
+   though the Eventstream stream is named `videos_storage_stream` and the
+   destination is connected after `filter_json_manifests`. Do not infer
+   destination placement from the Activator source name; verify the edge on
+   the Eventstream canvas.
+
+   Do not select the Job-events hierarchy
+   `pc-event-intake -> people-counter-dev event ->
+   alert_pc_event_intake_failed`; that source monitors pipeline failures and
+   is separate from manifest arrivals. If Explorer shows only that hierarchy,
+   the Eventstream Activator destination is not yet connected/published to
+   this Activator. Return to the Eventstream and add or repair
+   `to_pc_manifest_arrival_activator` before continuing.
+
+   **Do not start a manifest rule whose Definition pane shows
+   `Monitor -> Event -> people-counter-dev event`.** That is the job-events
+   source. Pointing its action back to `pc-event-intake` could create a
+   feedback loop in which pipeline job events start more pipeline runs.
+3. With the manifest-arrival event source selected, choose **New rule** from
+   either the top Events toolbar or the **New rule** button in the Live feed
+   pane. If Fabric has already opened an empty rule definition pane, use that
+   pane instead.
+4. For **Rule name**, enter:
+
+   ```text
+   run_pc_event_intake_on_manifest_renamed
+   ```
+
+5. In **Definition -> Condition -> Condition 1**, open **Operation**. The
+   current UI groups operations under Numeric change/state, Text
+   change/state, Logical change/state, Common change, and Heartbeat. Select:
+
+   | Field | Value |
    |---|---|
-   | `EVENT_SOURCE` | `source` |
-   | `EVENT_ID` | `id` |
-   | `EVENT_TYPE` | `type` |
-   | `EVENT_TIME` | `time` |
-   | `SUBJECT` | `subject` |
-   | `MANIFEST_URI` | `data.destinationUrl` or flattened `destinationUrl` |
+   | **Operation category** | `Heartbeat` |
+   | **Operation** | `On every value` |
 
-   Keep the complete `source` and `id`; together they form the event
-   deduplication key. Do not substitute a filename or pipeline run ID.
-   The intake notebook normalizes the destination Blob HTTPS URL to an
-   `abfss://` URI.
-3. Save and activate
-   `run_pc_event_intake_on_manifest_renamed`.
-4. Optionally route the unmodified event stream to Eventhouse for an
+   Do not select **No presence of data**. `On every value` runs the action
+   once for every event reaching the selected Activator source. No additional
+   field, comparison, or value is required because the three serial
+   Eventstream filters already restrict the source to renamed JSON manifests
+   under `incoming/`.
+6. Under **Action**, open the action dropdown shown in the UI and select
+   **Run Pipeline** under **Run Fabric activities**. Do not select Email,
+   Run Notebook, or Publish Business event for this rule.
+7. In the OneLake catalog/item picker:
+   - Select workspace `people-counter-dev`.
+   - Select the Data Pipeline `pc-event-intake`.
+   - Confirm the selection.
+8. Select **Edit action** or expand the selected pipeline action. Add the six
+   pipeline parameters below. The parameter names and type must exactly match
+   the parameters created in section 6.4. For each **Value**, use the dynamic
+   property picker/tag icon rather than typing a literal:
+
+   | Pipeline parameter | Type | Dynamic event property |
+   |---|---|---|
+   | `EVENT_SOURCE` | `String` | `source` |
+   | `EVENT_ID` | `String` | `id` |
+   | `EVENT_TYPE` | `String` | `type` |
+   | `EVENT_TIME` | `String` | `time` |
+   | `SUBJECT` | `String` | `subject` |
+   | `MANIFEST_URI` | `String` | `data.destinationUrl` |
+
+   Select the original unprefixed Eventstream columns. Do not select
+   Activator's `__source`, `__id`, `__type`, `__time`, or `__subject`
+   wrapper metadata. For example, `__type` is
+   `Microsoft.Fabric.EventstreamEvents.Custom`, not the original
+   `Microsoft.Storage.BlobRenamed` type. In the current Activator source, the
+   storage payload remains nested under `data`, so select
+   `data.destinationUrl` exactly as displayed by the dynamic-property picker.
+   Do not use `data.sourceUrl` or `data.sourceBlobUrl`; they identify the
+   pre-rename object. The original `source` plus `id` is the event
+   deduplication key.
+9. Select **Save**.
+10. Before starting, verify the Definition pane shows all three of these
+   values:
+
+   | Definition section | Required value |
+   |---|---|
+   | **Monitor -> Event** | The source created by `to_pc_manifest_arrival_activator`; currently `azure_storage_events_eventstream-stream` |
+   | **Condition -> Operation** | `On every value` |
+   | **Action -> Action** | `Run Pipeline` |
+
+   Confirm destination placement on the Eventstream canvas: the connection
+   must be `filter_json_manifests -> to_pc_manifest_arrival_activator`. The
+   Activator source name can remain generated or retain an older stream name
+   and is not evidence that filters were bypassed.
+
+   If **Action -> Action** shows `Email`, stop/edit the rule, select
+   **Run Pipeline**, select `pc-event-intake`, add the six parameter
+   mappings, and select **Save and update**.
+11. Select **Start** and confirm the rule status changes to **Running**.
+12. Generate a **new** valid manifest rename after the Eventstream
+   destination and rule are running. Activator does not replay the matching
+   event previously used to infer the Eventstream schema.
+13. Trace the new event in this order:
+   - Activator source **Live feed** shows the event.
+   - Rule **Analytics** shows at least one projected activation.
+   - Rule **History** shows an action execution.
+   - Monitoring Hub shows a `pc-event-intake` pipeline run.
+14. If **Live feed** remains empty, troubleshoot the Eventstream destination
+   connection and publish state; changing the rule condition cannot fix an
+   empty Activator source.
+15. If Live feed has an event but projected activations remain zero, confirm
+   the rule is **Running** and its operation is **On every value**.
+16. If projected activation exists but no pipeline run appears, inspect rule
+   **History**, then verify the action is **Run Pipeline**, the selected item
+   is `pc-event-intake`, and all six mappings use dynamic event properties.
+17. Inspect the Notebook activity output:
+   - A complete valid manifest should return `QUEUED` or `EXISTING_WORK`.
+   - A smoke-test/invalid manifest should fail visibly as `REJECTED`.
+18. Use these exact names in development, test, and production so deployment
+   comparisons and monitoring filters stay consistent. Activator-to-item
+   parameter passing is currently Preview and supports scalar string,
+   Boolean, and numeric parameters only.
+19. Optionally route the unmodified event stream to Eventhouse for an
    independent ingress audit.
-5. Upload and move one test video/manifest pair twice and verify two event
+20. Upload and move one test video/manifest pair twice and verify two event
    receipts resolve to one work item.
 
 The observed 16-byte `manifest.json` is sufficient to prove that rename
