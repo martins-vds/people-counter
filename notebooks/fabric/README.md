@@ -608,40 +608,178 @@ that invokes the pipeline after section 6.5 configures the rule.
 Create `pc-event-intake`:
 
 1. Create a new Fabric Data Pipeline named `pc-event-intake`.
-2. Define these string pipeline parameters:
-   `EVENT_SOURCE`, `EVENT_ID`, `EVENT_TYPE`, `EVENT_TIME`, `SUBJECT`, and
-   `MANIFEST_URI`.
+2. On the pipeline canvas, select the blank canvas, open **Settings**, and
+   create these pipeline parameters. Use type **String** and leave the
+   default value empty; the Activator supplies them at runtime:
+
+   ```text
+   EVENT_SOURCE
+   EVENT_ID
+   EVENT_TYPE
+   EVENT_TIME
+   SUBJECT
+   MANIFEST_URI
+   ```
 3. Add one Notebook activity targeting
    the imported `01_register_event` Fabric notebook item, sourced from
    [`01_register_event.ipynb`](./01_register_event.ipynb). If it does not
    appear in the activity selector, return to section 6.2, import/save it,
    and attach the default Lakehouse first.
-4. In the Notebook activity **Settings** under **Base parameters**, map every
-   imported notebook parameter to dynamic pipeline content:
+4. Select the Notebook activity, open **Settings**, and find **Base
+   parameters**. For each event/correlation parameter below, select its
+   **Value** field, choose **Add dynamic content**, and enter the expression
+   exactly as shown. `Expression` is not a parameter type. Set **Type** to
+   `String` and put the expression in **Value** without surrounding quotes:
 
-   | Notebook base parameter | Dynamic value |
-   |---|---|
-   | `EVENT_SOURCE` | `@pipeline().parameters.EVENT_SOURCE` |
-   | `EVENT_ID` | `@pipeline().parameters.EVENT_ID` |
-   | `EVENT_TYPE` | `@pipeline().parameters.EVENT_TYPE` |
-   | `EVENT_TIME` | `@pipeline().parameters.EVENT_TIME` |
-   | `SUBJECT` | `@pipeline().parameters.SUBJECT` |
-   | `MANIFEST_URI` | `@pipeline().parameters.MANIFEST_URI` |
-   | `PIPELINE_RUN_ID` | `@pipeline().RunId` |
+   | Notebook base parameter | Type | Value |
+   |---|---|---|
+   | `EVENT_SOURCE` | `String` | `@pipeline().parameters.EVENT_SOURCE` |
+   | `EVENT_ID` | `String` | `@pipeline().parameters.EVENT_ID` |
+   | `EVENT_TYPE` | `String` | `@pipeline().parameters.EVENT_TYPE` |
+   | `EVENT_TIME` | `String` | `@pipeline().parameters.EVENT_TIME` |
+   | `SUBJECT` | `String` | `@pipeline().parameters.SUBJECT` |
+   | `MANIFEST_URI` | `String` | `@pipeline().parameters.MANIFEST_URI` |
+   | `PIPELINE_RUN_ID` | `String` | `@pipeline().RunId` |
 
-   Leave the remaining notebook base parameters at their reviewed
-   environment defaults.
+   Configure the remaining base parameters as literal values, not dynamic
+   expressions:
+
+   | Notebook base parameter | Type | Literal value |
+   |---|---|---|
+   | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
+   | `MAX_ATTEMPTS` | `Int` | `4` |
+   | `PRIORITY` | `Int` | `100` |
+   | `PIPELINE` | `String` | `rtdetr-osnet` |
+   | `DEVICE_VARIANT` | `String` | `cpu` |
+   | `DEVICE` | `String` | `cpu` |
+   | `BATCH_SIZE` | `Int` | `1` |
+   | `SAMPLE_FPS` | `Float` | `3.0` |
+   | `DETECTION_THRESHOLD` | `Float` | `0.6` |
+   | `USE_FP16` | `Bool` | `false` |
+   | `DETECTOR_MODEL` | `String` | `r18` |
+   | `CAMERA_MOTION_COMPENSATION` | `String` | Empty; parsed as null |
+
+   If Fabric already populated these literal defaults from the notebook's
+   tagged parameter cell, verify them rather than adding duplicate rows.
 5. Do not validate the notebook by running its registration cell
    interactively with blank defaults. Pipeline parameters are injected only
    when the Notebook activity runs. For an interactive smoke test, populate
    the tagged parameter cell from one Eventstream preview event, rerun that
    cell, and then run the registration cell.
-6. Set a short timeout because this pipeline validates a small manifest and
-   writes control rows; it does not process video.
-7. Enable retries for transient storage, capacity, and Delta conflicts. Do
-   not retry a schema-invalid manifest.
+6. In the Notebook activity **General** settings, use this initial production
+   policy:
+
+   | Setting | Value |
+   |---|---|
+   | **Timeout** | `0.00:30:00` (30 minutes; format is `D.HH:MM:SS`) |
+   | **Enable retries** | Checked |
+   | **Retry** | `3` additional attempts |
+   | **Retry interval type** | `Increasing Delay` |
+   | **Retry interval (sec)** | `60` |
+   | **Max retry interval (sec)** | `900` |
+   | **Retry conditions (preview)** | Leave empty initially |
+
+   An empty condition list means retry on every failure. This is intentional
+   for the initial deployment because Fabric Notebook activities can wrap
+   Python, Spark, storage, capacity, and Delta errors under tenant/runtime-
+   specific codes. `01_register_event` is idempotent: duplicate events merge
+   by `event_key`, and deterministic validation failures remain recorded as
+   `REJECTED`. A malformed manifest can therefore consume the three retries,
+   but it cannot create duplicate work.
+
+   The 30-minute timeout includes Spark admission/session startup, manifest
+   read, validation, and Delta writes. It is not a video-processing timeout.
+   No additional action is required on this activity-settings screen. Before
+   production, complete the 20-minute intake-duration alert described in
+   section 8 under **Alerts**. Sustained queueing near 30 minutes means
+   capacity/admission needs correction rather than a larger timeout.
+7. After test runs expose the actual error envelope in your tenant, you may
+   enable **Retry conditions (preview)** to avoid retrying deterministic
+   validation failures. Conditions determine which failures are retried; join
+   these rows with **Or**, not **And**:
+
+   | Field | Operator | Value |
+   |---|---|---|
+   | `Failure type` | `Contains` | `System error` |
+   | `Error code` | `Contains` | `429` |
+   | `Error code` | `Contains` | `430` |
+   | `Error code` | `Contains` | `500` |
+   | `Error code` | `Contains` | `502` |
+   | `Error code` | `Contains` | `503` |
+   | `Error code` | `Contains` | `504` |
+   | `Error message` | `Contains` | `Concurrent` |
+   | `Error message` | `Contains` | `temporarily unavailable` |
+   | `Error message` | `Contains` | `timed out` |
+
+   Do not add conditions speculatively. First force one representative
+   storage failure, Delta conflict, capacity failure, and invalid manifest;
+   inspect each Notebook activity's **Output** in Monitoring Hub, then keep
+   only conditions that match the observed transient failures. Confirm that
+   an invalid manifest containing `ValueError`, `Unsupported manifest`, or
+   `REJECTED` does not match. Fabric waits for the retry interval before
+   evaluating a condition, so a nonmatching failure can still incur one
+   delay.
 8. Save the pipeline so it becomes selectable by the Activator rule.
-9. Add terminal-failure alerting after the complete event flow is validated.
+9. After the complete event flow is validated, add terminal-failure alerting
+   for this pipeline:
+   - Open **Real-Time hub** and select **Fabric events**.
+   - Find **Job events**, select **...**, and choose **Set alert**.
+   - For **Rule name**, enter `alert_pc_event_intake_failed`.
+   - Under **Monitor**, choose **Select source events**.
+   - For **Event types**, select
+     `Microsoft.Fabric.ItemJobFailed`.
+   - For **Event source**, select **By item**.
+   - Select the current environment workspace, such as
+     `people-counter-dev`.
+   - For **Item**, select the `pc-event-intake` Data Pipeline.
+   - Do not add another status filter; the selected event type already means
+     the item job failed, became stuck, or was canceled.
+   - Save the source connection.
+   - Under **Condition**, configure:
+
+     | Field | Value |
+     |---|---|
+     | **Check** | `On each event when` |
+     | **Grouping field** | Leave empty |
+     | **When** | `__type` |
+     | **Condition** | `Is equal to` |
+     | **Value** | Select the failure type shown by the Activator schema; in the current UI this is `Microsoft.Fabric.JobEvents.ItemJobFailed` |
+
+     The source is already restricted to `pc-event-intake` and the
+     `ItemJobFailed` event type. Activator exposes the top-level CloudEvent
+     field as `__type`. Do not select `jobType`: that field describes the
+     workload operation, such as a pipeline or notebook run, rather than the
+     event category. If another Fabric runtime displays
+     `Microsoft.Fabric.ItemJobFailed` instead, use the exact `__type` value
+     visible in that event preview. This predicate repeats the event-type
+     check only because the current Activator UI requires a **When** field.
+   - Under **Action**, choose one or both:
+     - **Send email** to the operations distribution list.
+     - **Teams → Channel post** to the operations team/channel.
+   - Use a subject/headline such as:
+
+     ```text
+     [Fabric][<environment>] pc-event-intake failed
+     ```
+
+   - Include the available job context fields in the notification:
+     `JobInstanceId`, workspace, item, event time, failure details, and
+     invocation type.
+   - If Fabric asks where to save the rule, create or select an Activator
+     named `pc_job_failure_activator`.
+   - Save and start/activate the rule.
+
+   Validate it in development before production:
+   - Temporarily set the intake Notebook activity retry count to `0` so the
+     test completes quickly.
+   - Manually run `pc-event-intake` with a unique `EVENT_ID` and a
+     `MANIFEST_URI` that points to a development-only invalid manifest.
+   - Confirm the pipeline fails, a `Microsoft.Fabric.ItemJobFailed` event is
+     produced, and the notification contains the job correlation fields.
+   - Restore the retry count to `3`.
+   - Keep the rejected event receipt as an audit record, or remove it only
+     according to the approved development-data cleanup process.
 
 The event and backfill registration notebooks share a global registration
 mutex. Pass `REGISTRATION_ID=@pipeline().RunId` to
@@ -974,6 +1112,23 @@ daily completed hours below burn-down target
 capacity queue/throttling sustained
 reconciliation severity = ERROR
 ```
+
+Configure the intake-duration alert before production:
+
+1. Enable Workspace monitoring and confirm `ItemJobEventLogs` contains
+   `pc-event-intake` pipeline and `01_register_event` notebook jobs.
+2. In the Real-Time Dashboard, create a query/tile restricted to those items
+   where `JobStatus` is `Not started` or `In progress`.
+3. Calculate elapsed minutes from the job's scheduled/start timestamp to the
+   current UTC time.
+4. Filter to elapsed time greater than or equal to `20` minutes.
+5. Create an Activator alert named
+   `alert_pc_event_intake_duration_20m` from that tile.
+6. Notify the operations email/Teams channel on each matching job and include
+   `JobInstanceId`, status, start time, workspace, and capacity.
+7. Resolve the incident by checking capacity admission, Spark queueing,
+   throttling, or a stuck notebook. Do not increase the 30-minute timeout
+   until the cause is understood and a measured p95/p99 runtime justifies it.
 
 ## 9. Security, privacy, and lifecycle
 
