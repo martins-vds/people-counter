@@ -40,6 +40,7 @@ deployment:
 | `<manifest-file>` | Any valid test manifest filename |
 | `<video-file>` | Any representative test video filename |
 | `<partition-path>` | Environment-specific backfill partition prefix |
+| `<bundle-manifest-sha256>` | SHA-256 of the deployed SDK bundle's `manifest.json`; constant for one deployed release, not one video |
 
 Examples must not depend on a particular tenant, GUID, file name, or measured
 frame count. Obtain OneLake ABFS identifiers from shortcut **Properties** and
@@ -1229,53 +1230,224 @@ Create `pc-dispatcher-00` with a one-minute fixed schedule. Fabric fixed
 schedules require start and end dates, so choose a reviewed far-future end
 date and alert before it expires:
 
-1. Add a Notebook activity targeting
+1. Create these parameters on the `pc-dispatcher-00` pipeline before adding
+   activities. Select the blank pipeline canvas, open **Settings ->
+   Parameters**, and add:
+
+   | Pipeline parameter | Type | Initial default |
+   |---|---|---|
+   | `MAX_CONCURRENT_WORKERS` | `Int` | `4` |
+   | `CLAIM_LIMIT` | `Int` | `4` |
+   | `LEASE_MINUTES` | `Int` | `30` |
+   | `BUNDLE_MANIFEST_SHA256` | `String` | Empty for initial development; set to the deployed release hash before production |
+
+   Do not create a `DISPATCHER_ID` pipeline parameter. Every pipeline run
+   already has a unique `@pipeline().RunId`, which is the dispatcher ID.
+   Start with these conservative defaults; replace the worker limits only
+   after the capacity benchmark approves a higher value.
+2. Add a Notebook activity to the canvas and name the activity `ClaimWork`.
+   Target the imported `03_claim_work` Fabric notebook item, sourced from
    [`03_claim_work.ipynb`](./03_claim_work.ipynb).
-2. Pass `DISPATCHER_ID` as the dispatcher pipeline run ID,
-   `MAX_CONCURRENT_WORKERS`, `CLAIM_LIMIT`, and lease settings.
-3. Parse the notebook string exit value as JSON. Start with
-   `@json(activity('ClaimWork').output.result.exitValue).items`, then run the
-   claim activity once and inspect its Output in the target tenant to verify
-   the exact exit-value path.
-4. Add an `If` activity that skips the `ForEach` when the returned list is
-   empty.
-5. Add a `ForEach` over the claimed `{work_id, attempt_id}` objects.
-6. Set `ForEach` batch count to the benchmark-approved per-pipeline
-   concurrency, with an upper bound of 50. Never set it higher than
-   `CLAIM_LIMIT`.
-7. Inside `ForEach`, add a Notebook activity targeting
-   [`04_process_video.ipynb`](./04_process_video.ipynb).
-8. Pass `WORK_ID=@item().work_id`,
-   `ATTEMPT_ID=@item().attempt_id`, and
-   `PIPELINE_RUN_ID=@pipeline().RunId`. Fabric does not expose the Data
-   Factory activity-run ID or monitoring `JobInstanceId` to the notebook.
-   Set `ACTIVITY_RUN_ID` to a clearly synthetic correlation such as
-   `@concat(pipeline().RunId, '/', item().attempt_id)` and leave
-   `FABRIC_JOB_INSTANCE_ID` empty for later monitoring reconciliation.
-9. Configure the worker's shortcut parameters as literals:
+   - Confirm the notebook's configuration cell is toggled as its parameter
+     cell.
+   - Confirm `<lakehouse-name>` is attached and pinned as its default
+     Lakehouse.
+   - In **Settings -> Connection**, select the environment's validated
+     Notebook activity connection, then refresh/reselect the notebook if the
+     Base parameters do not populate.
+3. In `ClaimWork` **Settings -> Base parameters**, configure:
 
    | Notebook base parameter | Type | Value |
    |---|---|---|
-   | `SOURCE_STORAGE_ACCOUNT` | `String` | `<storage-account>` |
-   | `SOURCE_CONTAINER` | `String` | `<source-filesystem>` |
-   | `SOURCE_SHORTCUT_LOCAL_ROOT` | `String` | `/lakehouse/default/Files/<shortcut-name>` |
+   | `DISPATCHER_ID` | `String` | `@pipeline().RunId` |
+   | `MAX_CONCURRENT_WORKERS` | `Int` | `@pipeline().parameters.MAX_CONCURRENT_WORKERS` |
+   | `CLAIM_LIMIT` | `Int` | `@pipeline().parameters.CLAIM_LIMIT` |
+   | `LEASE_MINUTES` | `Int` | `@pipeline().parameters.LEASE_MINUTES` |
+   | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
 
-10. Set the worker Notebook activity retry count to zero. A failed activity
-   records `RETRY_WAIT`; a later dispatcher claim creates a fresh attempt ID.
-   This prevents an activity timeout from running two executions under the
-   same lease.
-11. Set the activity timeout from benchmark p99 runtime by duration bucket,
-    with staging and capacity headroom.
-12. Fabric does not document a fixed-schedule no-overlap switch. The
+   For the first four rows, select the **Value** field, choose **Add dynamic
+   content**, and enter the expression exactly as shown without quotes. The
+   **Type** remains `String` or `Int`; `Expression` is not a type.
+4. In the `ClaimWork` activity **General** settings, configure:
+
+   | Setting | Value |
+   |---|---|
+   | **Timeout** | `0.00:30:00` |
+   | **Enable retries** | Checked |
+   | **Retry** | `3` |
+   | **Retry interval type** | `Increasing Delay` |
+   | **Retry interval (sec)** | `30` |
+   | **Max retry interval (sec)** | `300` |
+   | **Retry conditions (preview)** | Leave empty initially |
+
+   `ClaimWork` is idempotent for one `DISPATCHER_ID`: a retry returns that
+   dispatcher run's existing unexpired claims rather than allocating another
+   batch.
+5. Do not add a parsing activity. `ClaimWork` returns its result as a JSON
+   string in the Notebook activity output, and the downstream expressions
+   parse that string inline. Use this expected output path:
+
+   ```text
+   output.result.exitValue
+   ```
+
+   Its value is a JSON string shaped like:
+
+   ```json
+   {
+     "dispatcher_id": "<pipeline-run-id>",
+     "active_before": 0,
+     "claimed_count": 1,
+     "items": [
+       {
+         "work_id": "<work-id>",
+         "attempt_id": "<attempt-id>"
+       }
+     ]
+   }
+   ```
+
+   The expression that converts this string to the `items` array is:
+
+   ```text
+   @json(activity('ClaimWork').output.result.exitValue).items
+   ```
+
+   Do not test `ClaimWork` by itself while real work is queued: it would
+   create leases without starting workers. Wire the complete flow first.
+   After the first complete dispatcher run, open **View run history ->
+   ClaimWork -> Output** and verify this property path. If the current tenant
+   uses a different path, update the next two expressions before enabling the
+   schedule.
+6. Do not add an **If Condition**. Fabric does not support nesting a
+   `ForEach` inside an `If Condition`. A top-level `ForEach` given an empty
+   array performs zero iterations and completes successfully, so the extra
+   condition is unnecessary.
+7. Add a top-level **ForEach** activity directly on the pipeline canvas:
+   - Name it `ForEachClaimedWork`.
+   - Connect the green **On success** output of `ClaimWork` directly to
+     `ForEachClaimedWork`.
+   - In **Settings -> Items**, choose **Add dynamic content** and enter:
+
+     ```text
+     @json(activity('ClaimWork').output.result.exitValue).items
+     ```
+
+   Each iteration's `@item()` is one object containing `work_id` and
+   `attempt_id`. If `items` is empty, `ForEachClaimedWork` runs zero child
+   activities and the dispatcher succeeds as a no-op.
+8. In `ForEachClaimedWork` **Settings**:
+   - Turn **Sequential** off.
+   - Set **Batch count** to the literal integer `4`.
+
+   Yes: the sensible initial Batch count is the same numeric value as the
+   `CLAIM_LIMIT` pipeline parameter. Fabric's Batch count field is a maximum
+   concurrency setting, not the `CLAIM_LIMIT` expression itself, so enter
+   `4`, not `@pipeline().parameters.CLAIM_LIMIT`.
+
+   Keep these values aligned:
+
+   ```text
+   CLAIM_LIMIT pipeline default = 4
+   ForEach Batch count          = 4
+   MAX_CONCURRENT_WORKERS       = 4
+   ```
+
+   `CLAIM_LIMIT` controls how many new leases one dispatcher can create.
+   Batch count controls how many claimed items that pipeline run can process
+   concurrently. `MAX_CONCURRENT_WORKERS` limits active leases across
+   dispatcher runs. If Batch count is lower than `CLAIM_LIMIT`, some claimed
+   items wait inside the ForEach while their leases are already aging.
+
+   After benchmarking, change `CLAIM_LIMIT` and Batch count together, keep
+   both at or below `50`, and set `MAX_CONCURRENT_WORKERS` to the approved
+   aggregate concurrency. With dispatcher shards, each shard keeps
+   `CLAIM_LIMIT = Batch count <= 50`, while all shards share the global
+   `MAX_CONCURRENT_WORKERS`.
+9. Open `ForEachClaimedWork` and add a Notebook activity. Name the child
+   activity `ProcessVideo` and target the imported `04_process_video` Fabric
+   notebook item, sourced from
+   [`04_process_video.ipynb`](./04_process_video.ipynb).
+   - Confirm its configuration cell is toggled as the parameter cell.
+   - Confirm `<lakehouse-name>` is attached and pinned as its default
+     Lakehouse.
+   - Select the environment's validated Notebook activity connection.
+10. In `ProcessVideo` **Settings -> Base parameters**, configure every
+    parameter:
+
+    | Notebook base parameter | Type | Value source | Value |
+    |---|---|---|---|
+    | `WORK_ID` | `String` | Dynamic | `@item().work_id` |
+    | `ATTEMPT_ID` | `String` | Dynamic | `@item().attempt_id` |
+    | `PIPELINE_RUN_ID` | `String` | Dynamic | `@pipeline().RunId` |
+    | `ACTIVITY_RUN_ID` | `String` | Dynamic | `@concat(pipeline().RunId, '/', item().attempt_id)` |
+    | `FABRIC_JOB_INSTANCE_ID` | `String` | Literal | Empty; populated later by monitoring reconciliation |
+    | `BUNDLE_MANIFEST_SHA256` | `String` | Dynamic | `@pipeline().parameters.BUNDLE_MANIFEST_SHA256` |
+    | `SOURCE_STORAGE_ACCOUNT` | `String` | Literal | `<storage-account>` |
+    | `SOURCE_CONTAINER` | `String` | Literal | `<source-filesystem>` |
+    | `SOURCE_SHORTCUT_LOCAL_ROOT` | `String` | Literal | `/lakehouse/default/Files/<shortcut-name>` |
+    | `DATABASE` | `String` | Literal | Empty; uses the attached default Lakehouse |
+    | `TABLE_PREFIX` | `String` | Literal | `people_counter` |
+    | `LEASE_MINUTES` | `Int` | Literal | `30` |
+    | `HEARTBEAT_SECONDS` | `Int` | Literal | `600` |
+
+    For the five Dynamic rows, select **Value -> Add dynamic content** and
+    enter the expression exactly as shown without quotes. `ACTIVITY_RUN_ID`
+    is a synthetic correlation ID because Fabric does not expose the Data
+    Factory activity-run ID or monitoring `JobInstanceId` to the notebook.
+
+    `BUNDLE_MANIFEST_SHA256` identifies the SDK deployment bundle, not the
+    per-video manifest. Set the pipeline parameter once per deployed release
+    to the SHA-256 of that bundle's `manifest.json`. The per-video content
+    hash remains `expected_sha256` inside each input manifest. Do not
+    hard-code a placeholder string in `ProcessVideo`.
+
+11. In `ProcessVideo` **General**, leave **Enable retries** unchecked. Do not
+    enable Fabric activity retries for the worker. A failed attempt records
+    `RETRY_WAIT`; a later dispatcher claim creates a fresh attempt ID. This
+    prevents an activity timeout from running two executions under the same
+    lease.
+
+12. Set the initial `ProcessVideo` **Timeout** to:
+
+    ```text
+    0.06:00:00
+    ```
+
+    This six-hour value is a conservative deployment default while workload
+    benchmarks are incomplete. Before the backfill, replace it per video-
+    duration bucket with:
+
+    ```text
+    max(1 hour, measured p99 end-to-end runtime × 1.25)
+    ```
+
+    End-to-end runtime includes Spark admission, shortcut-to-local staging,
+    model loading, inference, Delta writes, and cleanup. If any approved
+    bucket needs more than six hours, create a separate worker
+    activity/pipeline for that bucket rather than silently increasing every
+    video's timeout. Fabric activity timeout must remain within the platform
+    maximum.
+
+13. Fabric does not document a fixed-schedule no-overlap switch. The
     dispatcher notebook therefore takes a short global Delta mutex before
     counting active leases and claiming work.
 
 Fabric `ForEach` parallelism is capped at 50. If the benchmark requires more
 than 50 concurrent notebook activities, clone the dispatcher pipeline into
-`pc-dispatcher-00` through `pc-dispatcher-NN`, offset their schedules, and
-give every run a unique `DISPATCHER_ID`. Each shard still uses
-`CLAIM_LIMIT <= 50`; the global mutex and `MAX_CONCURRENT_WORKERS` enforce the
-aggregate limit. The capacity gate must prove that Fabric can admit the
+`pc-dispatcher-00` through `pc-dispatcher-NN` and offset their schedules.
+Do not add a `DISPATCHER_ID` pipeline parameter to any clone. In every
+clone's `ClaimWork` Notebook activity, keep this base-parameter mapping:
+
+```text
+DISPATCHER_ID = @pipeline().RunId
+```
+
+Fabric supplies a different run ID for every execution of every clone, so
+each dispatcher run is already unique. Each shard still uses
+`CLAIM_LIMIT <= 50`; the global mutex and `MAX_CONCURRENT_WORKERS` enforce
+the aggregate limit. The capacity gate must prove that Fabric can admit the
 resulting Spark jobs—creating more pipeline activities does not create more
 capacity.
 
@@ -1295,6 +1467,34 @@ Create four scheduled pipelines:
   `OPERATION_DATE`.
 - `pc-delta-maintenance`, daily or weekly according to approved retention,
   runs [`09_maintain_delta.ipynb`](./09_maintain_delta.ipynb).
+
+Use these initial Notebook activity names and **General** settings:
+
+| Pipeline | Notebook activity name | Initial cadence | Timeout | Enable retries | Retry | Interval type | Initial interval | Max interval | Retry conditions |
+|---|---|---|---|---|---:|---|---:|---:|---|
+| `pc-watchdog` | `WatchdogRecovery` | Every 5 minutes | `0.00:10:00` | Yes | 2 | Increasing Delay | 30 sec | 120 sec | Empty |
+| `pc-reconcile` | `ReconcilePublication` | Every 15 minutes | `0.00:30:00` | Yes | 2 | Increasing Delay | 60 sec | 300 sec | Empty |
+| `pc-gold-refresh` | `BuildGoldAggregates` | Hourly and after controlled backfill batches | `0.02:00:00` | Yes | 2 | Increasing Delay | 60 sec | 600 sec | Empty |
+| `pc-delta-maintenance` | `MaintainDelta` | Daily during the backfill; weekly in steady state | `0.06:00:00` | Yes | 1 | Increasing Delay | 300 sec | 900 sec | Empty |
+
+`Retry` is the number of additional attempts after the initial attempt.
+Leave preview retry conditions empty until the target tenant's actual
+transient error codes/messages have been captured. Each notebook is designed
+to be idempotent for its supplied scope, so bounded activity retries are
+appropriate.
+
+Schedule guidance:
+
+- Offset `pc-watchdog` and `pc-reconcile` by at least two minutes so they do
+  not normally begin together.
+- Schedule `pc-gold-refresh` after dispatcher/backfill batches, with the
+  hourly schedule serving as a catch-up.
+- Run `pc-delta-maintenance` during a low-admission window. Keep
+  `RUN_VACUUM=false` until retention is formally approved.
+- Perform one manual run before enabling each schedule. Its normal duration
+  should be well below both its cadence and timeout. If a run regularly
+  overlaps its next scheduled start, reduce its per-run scope or lengthen the
+  cadence; do not solve sustained overlap only by increasing timeout.
 
 The worker defaults to a 10-minute heartbeat and a 30-minute renewable lease
 to limit Delta contention; tune both from the benchmark and p99 batch time.
