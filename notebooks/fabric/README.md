@@ -1854,7 +1854,7 @@ At 80% useful utilization (`U=0.8`) and 20% headroom (`H=1.2`):
 
 This is why capacity cannot be selected from SKU labels alone.
 
-### Backfill registration pipeline
+### 7.1 Backfill registration pipeline
 
 `02_register_backfill` does not belong in `pc-event-intake`. Create a
 separate pipeline named `pc-backfill-register` for the historical load:
@@ -1880,7 +1880,7 @@ separate pipeline named `pc-backfill-register` for the historical load:
    | `REGISTRATION_ID` | `String` | `@pipeline().RunId` |
    | `SOURCE_STORAGE_ACCOUNT` | `String` | `<storage-account>` |
    | `SOURCE_CONTAINER` | `String` | `<source-filesystem>` |
-   | `SOURCE_SHORTCUT_NAME` | `String` | `<shortcut-name>` |
+   | `SOURCE_SHORTCUT_NAME` | `String` | `<shortcut-name>`, for example `source_footage` |
    | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
    | `TABLE_PREFIX` | `String` | `people_counter` |
    | `MAX_ATTEMPTS` | `Int` | `4` |
@@ -1897,6 +1897,12 @@ separate pipeline named `pc-backfill-register` for the historical load:
 
    `MANIFEST_GLOB` and `REGISTRATION_ID` use **Add dynamic content** in the
    Value field; their Type remains `String`.
+
+   `SOURCE_SHORTCUT_NAME` must exactly match the shortcut folder name shown
+   under the default Lakehouse's **Files** node. For example, if Lakehouse
+   Explorer shows `Files/source_footage`, enter `source_footage`. Do not enter
+   the storage-account name, ADLS filesystem name, `Files/source_footage`, or
+   the full OneLake ABFS path.
 6. Set **Timeout** to `0.01:00:00`, enable `3` retries, choose
    **Increasing Delay**, set the initial interval to `60` seconds and the
    maximum to `900` seconds. Leave preview retry conditions empty initially.
@@ -1914,7 +1920,7 @@ Event intake uses `event_key` as the lock owner; backfill uses the pipeline
 run ID supplied through `REGISTRATION_ID`. Do not run both registration paths
 outside these notebooks or append directly to `video_work`.
 
-### Backfill execution phases
+### 7.2 Backfill execution phases
 
 1. **Inventory:** partition manifest inventory by capture date and storage
    prefix.
@@ -1967,7 +1973,7 @@ flowchart LR
     DLA --> PBA[Power BI traffic report]
 ```
 
-### Operations dashboard
+### 8.1 Operations dashboard
 
 Enable Workspace monitoring and use its `ItemJobEventLogs` in a Real-Time
 Dashboard for Fabric job telemetry. Add:
@@ -1985,45 +1991,588 @@ Configure it in Fabric:
    **Monitoring**, select **+ Eventhouse**, and enable Workspace monitoring.
 2. Wait for Fabric to provision the monitoring Eventhouse/KQL database and
    confirm that `ItemJobEventLogs` contains both Data Pipeline and
-   `PipelineRunNotebook` jobs.
-3. Open **Real-Time Intelligence**, create a Real-Time Dashboard, and add the
-   monitoring KQL database as its data source.
-4. Create tiles grouped by `JobStatus` and distinct `JobInstanceId` for
-   `Not started`, `In progress`, `Completed`, and `Failed`. Add start-time,
-   duration, item, workspace, and capacity filters.
-5. Add parameters for pipeline, notebook, status, and time window.
-6. Pin running-job count, oldest not-started age, p95 duration, and recent
-   failures to the first page.
-7. From the dashboard, choose **Set alert** and create Activator rules for
-   failed jobs, queue age, and runtime SLA breaches.
-8. Separately subscribe to Fabric job events in Real-Time Hub for immediate
-   terminal-failure notifications; dashboard polling is for stuck/SLA
-   conditions.
+   pipeline-launched Notebook jobs. Use the `JobType` column for this check,
+   not `ItemKind`:
+
+   - On the `ItemJobEventLogs` table page, **Query with code** contains only
+     predefined sample queries. Do not use that menu for this custom query.
+   - Select **KQL Queryset** from the toolbar.
+   - In **New KQL Queryset**, enter:
+
+     ```text
+     Name: pc_workspace_monitoring_queries
+     Location: <workspace-name>
+     ```
+
+   - Select **Create**.
+   - If the queryset opens a **Get started** dialog, select
+     **Eventhouse / KQL Database**, then select the monitoring KQL database
+     created by Workspace monitoring. If Fabric opened the queryset already
+     connected, verify that database in the data-source selector.
+   - Create or select a query tab, paste the KQL below, select the query text,
+     and choose **Run**. The query results appear below the editor.
+
+   ```kusto
+   ItemJobEventLogs
+   | where ItemName in ("pc-dispatcher-00", "03_claim_work")
+   | summarize
+       Records = count(),
+       Statuses = make_set(JobStatus)
+       by ItemName, ItemKind, JobType
+   | order by ItemName asc
+   ```
+
+   Expect:
+
+   | ItemName | Relevant `ItemKind` | Required `JobType` |
+   |---|---|---|
+   | `pc-dispatcher-00` | `Pipeline` | `Data Pipeline` |
+   | `03_claim_work` | `SynapseNotebook` or the tenant's Notebook label | `PipelineRunNotebook` |
+
+   `ItemName` identifies the specific pipeline/notebook. `ItemKind`
+   identifies the artifact type. `JobType` proves how it was executed.
+   `JobStatus` contains lifecycle values, and `JobInstanceId` identifies one
+   job across its multiple status-event rows. If `JobType` is not visible in
+   Data preview, use the **Columns** pane or run the KQL query above.
+
+   Keep `pc_workspace_monitoring_queries`; later dashboard and alert queries
+   can be developed and validated in the same reusable queryset.
+3. Create the dashboard from the workspace:
+   - Return to `<workspace-name>`.
+   - Select **New item**.
+   - Under **Visualize data**, select **Real-Time Dashboard**. This is the
+     correct item shown in the current UI; **Real-Time hub** is used to
+     discover streams/events and is not the dashboard-creation screen.
+   - Name the item:
+
+     ```text
+     pc_operations_dashboard
+     ```
+
+   - Select **Create**.
+   - In the new dashboard, select **Add data source** (or **New data source**
+     in the current toolbar).
+   - Choose **KQL Database**.
+   - Select `<workspace-name>`, the monitoring Eventhouse created by
+     Workspace monitoring, and its monitoring KQL database.
+   - Give the dashboard data source a recognizable name such as
+     `workspace_monitoring`.
+   - Test/save the data-source connection before adding visuals.
+4. Create dashboard parameters before adding parameterized visuals:
+   - Enter dashboard **Editing** mode and select **Manage -> Parameters**.
+   - Edit the built-in **Time range** parameter:
+     - **Show on pages**: `Select all`. This is the current UI equivalent of
+       pinning the parameter as a dashboard filter.
+     - **Default value**: `Last 24 hours`.
+     - Select **Done**. The parameter is referenced in KQL as `_startTime`
+       and `_endTime`.
+   - Select **New parameter -> Add** and create the following. For all three,
+     set **Show on pages** to `Select all`, enable **Add "Select all"
+     value**, and choose **Select all** as the default value.
+
+     **Item**
+
+     | Dialog field | Value |
+     |---|---|
+     | Label | `Item` |
+     | Parameter type | `Multiple selection` |
+     | Variable name | `_itemName` |
+     | Data type | `string` |
+     | Show on pages | `Select all` |
+     | Source | `Query` |
+     | Data source | `workspace_monitoring` |
+     | Query | `ItemJobEventLogs \| distinct ItemName \| order by ItemName asc` |
+     | Value column | `ItemName (string)` |
+     | Label column | `Match value selection` |
+     | Add "Select all" value | Enabled |
+     | Default value | `Select all` |
+
+     **Job type**
+
+     | Dialog field | Value |
+     |---|---|
+     | Label | `Job type` |
+     | Parameter type | `Multiple selection` |
+     | Variable name | `_jobType` |
+     | Data type | `string` |
+     | Show on pages | `Select all` |
+     | Source | `Query` |
+     | Data source | `workspace_monitoring` |
+     | Query | `ItemJobEventLogs \| distinct JobType \| order by JobType asc` |
+     | Value column | `JobType (string)` |
+     | Label column | `Match value selection` |
+     | Add "Select all" value | Enabled |
+     | Default value | `Select all` |
+
+     **Status**
+
+     | Dialog field | Value |
+     |---|---|
+     | Label | `Status` |
+     | Parameter type | `Multiple selection` |
+     | Variable name | `_jobStatus` |
+     | Data type | `string` |
+     | Show on pages | `Select all` |
+     | Source | `Fixed values` |
+     | Values | `Not started`, `In progress`, `Completed`, `Failed` |
+     | Display labels | Match each value exactly |
+     | Add "Select all" value | Enabled |
+     | Default value | `Select all` |
+
+   - Select **Done** after each parameter, then save the dashboard. The
+     controls can remain inactive until a visual query references them;
+     validate the filter bar after completing step 5.
+5. Add the operational visuals. For each one, select **Add visual** in the
+   toolbar (or select a visual from the empty **Add visual** canvas), choose
+   `workspace_monitoring`, paste the query, run it, select the indicated
+   visual type, set its fields, name the visual, and apply/save it.
+
+   **Jobs by status** — Bar chart; Y/category=`JobStatus`, X/value=`Jobs`:
+
+   ```kusto
+   let CurrentJobs =
+       ItemJobEventLogs
+       | where Timestamp between (_startTime .. _endTime)
+       | where isempty(_itemName) or ItemName in (_itemName)
+       | where isempty(_jobType) or JobType in (_jobType)
+       | summarize arg_max(Timestamp, *) by JobInstanceId;
+   CurrentJobs
+   | where isempty(_jobStatus) or JobStatus in (_jobStatus)
+   | summarize Jobs = count() by JobStatus
+   | order by JobStatus asc
+   ```
+
+   **Running jobs** — KPI visual; Value=`RunningJobs`:
+
+   ```kusto
+   ItemJobEventLogs
+   | where Timestamp between (_startTime .. _endTime)
+   | where isempty(_itemName) or ItemName in (_itemName)
+   | where isempty(_jobType) or JobType in (_jobType)
+   | summarize arg_max(Timestamp, *) by JobInstanceId
+   | where JobStatus == "In progress"
+   | summarize RunningJobs = count()
+   ```
+
+   **Not-started jobs** — KPI visual; Value=`NotStartedJobs`:
+
+   ```kusto
+   ItemJobEventLogs
+   | where Timestamp between (_startTime .. _endTime)
+   | where isempty(_itemName) or ItemName in (_itemName)
+   | where isempty(_jobType) or JobType in (_jobType)
+   | summarize arg_max(Timestamp, *) by JobInstanceId
+   | where JobStatus == "Not started"
+   | summarize NotStartedJobs = count()
+   ```
+
+   **Oldest not-started age** — KPI visual;
+   Value=`OldestQueueAgeMinutes`:
+
+   ```kusto
+   ItemJobEventLogs
+   | where Timestamp between (_startTime .. _endTime)
+   | where isempty(_itemName) or ItemName in (_itemName)
+   | where isempty(_jobType) or JobType in (_jobType)
+   | summarize arg_max(Timestamp, *) by JobInstanceId
+   | where JobStatus == "Not started"
+   | extend QueueReferenceTime = coalesce(JobScheduleTime, Timestamp)
+   | summarize OldestQueueAgeMinutes =
+       max(datetime_diff("minute", now(), QueueReferenceTime))
+   ```
+
+   **P95 terminal duration** — KPI visual; Value=`P95DurationMinutes`:
+
+   ```kusto
+   ItemJobEventLogs
+   | where Timestamp between (_startTime .. _endTime)
+   | where isempty(_itemName) or ItemName in (_itemName)
+   | where isempty(_jobType) or JobType in (_jobType)
+   | summarize arg_max(Timestamp, *) by JobInstanceId
+   | where JobStatus in ("Completed", "Failed")
+   | summarize P95DurationMinutes =
+       percentile(todouble(DurationMs), 95) / 60000.0
+   ```
+
+   **Recent failures** — Table visual:
+
+   ```kusto
+   ItemJobEventLogs
+   | where Timestamp between (_startTime .. _endTime)
+   | where isempty(_itemName) or ItemName in (_itemName)
+   | where isempty(_jobType) or JobType in (_jobType)
+   | summarize arg_max(Timestamp, *) by JobInstanceId
+   | where JobStatus == "Failed"
+   | project
+       Timestamp,
+       WorkspaceName,
+       ItemKind,
+       ItemName,
+       JobType,
+       JobInstanceId,
+       JobInvokeType,
+       DurationMinutes = todouble(DurationMs) / 60000.0,
+       CapacityId
+   | top 50 by Timestamp desc
+   ```
+
+   **Terminal job trend** — Time chart visual;
+   X-axis=`Hour`, Y-axis=`Jobs`, Series=`JobStatus`:
+
+   ```kusto
+   ItemJobEventLogs
+   | where Timestamp between (_startTime .. _endTime)
+   | where isempty(_itemName) or ItemName in (_itemName)
+   | where isempty(_jobType) or JobType in (_jobType)
+   | where JobStatus in ("Completed", "Failed")
+   | summarize Jobs = dcount(JobInstanceId)
+       by Hour = bin(Timestamp, 1h), JobStatus
+   | order by Hour asc
+   ```
+
+6. Arrange and validate the first page:
+   - First row: **Running jobs**, **Not-started jobs**, **Oldest not-started
+     age**, and **P95 terminal duration** KPI visuals.
+   - Second row: **Jobs by status** and **Terminal job trend**.
+   - Third row: the full-width **Recent failures** table.
+   - Set dashboard auto-refresh to five minutes for operations use.
+   - Confirm the Time range, Item, Job type, and Status controls now appear
+     in the dashboard filter bar on every selected page.
+   - Confirm their initial values are **Last 24 hours**, **Select all**,
+     **Select all**, and **Select all**, respectively.
+   - Change each dashboard filter and confirm every applicable visual
+     updates. If a control is inactive, inspect the visual's KQL and verify it
+     references the corresponding variable.
+   - Compare at least one `JobInstanceId` with Monitoring Hub before sharing
+     the dashboard.
+   - Save the dashboard after the layout and queries are verified.
+7. Continue editing the existing `pc_operations_dashboard` created in step
+   3; do not create another Real-Time Dashboard. Add dashboard-polled SLA
+   alerts there only for conditions that require elapsed-time evaluation.
+   For the intake-duration alert:
+   - In `pc_operations_dashboard`, select **Add visual -> Table** and name the
+     new visual **Intake jobs at or above 20 minutes**:
+
+     ```kusto
+     ItemJobEventLogs
+     | where ItemName in ("pc-event-intake", "01_register_event")
+     | summarize arg_max(Timestamp, *) by JobInstanceId
+     | where JobStatus in ("Not started", "In progress")
+     | extend ReferenceTime =
+         iff(
+             JobStatus == "Not started",
+             coalesce(JobScheduleTime, Timestamp),
+             coalesce(JobStartTime, Timestamp)
+         )
+     | extend ElapsedMinutes =
+         datetime_diff("minute", now(), ReferenceTime)
+     | where ElapsedMinutes >= 20
+     | extend AlertTimestamp = now()
+     | project
+         AlertTimestamp,
+         JobInstanceId,
+         ItemName,
+         JobType,
+         JobStatus,
+         ElapsedMinutes,
+         JobScheduleTime,
+         JobStartTime,
+         WorkspaceName,
+         CapacityId
+     | order by ElapsedMinutes desc
+     ```
+
+   - Run the query and confirm it returns zero rows during normal operation.
+   - Select that visual, then select **Add alert** in the toolbar or
+     **Set alert** from the visual's options menu.
+   - Name the rule `alert_pc_event_intake_duration_20m`.
+   - Use the dashboard query output as the monitored source and configure the
+     rule form shown in the current UI:
+
+     | Rule field | Value |
+     |---|---|
+     | **Timestamp** | `AlertTimestamp` |
+     | **Check** | `On each event when` |
+     | **Grouping field** | `JobInstanceId` |
+     | **When** | `ElapsedMinutes` |
+     | **Condition** | `Is greater than or equal to` |
+     | **Value** | `20` |
+
+     The KQL query already filters to `ElapsedMinutes >= 20`; repeating the
+     same threshold in the rule is intentional because this rule UI requires
+     a **When**, **Condition**, and **Value**. Do not choose `JobStartTime` as
+     the Timestamp because it is null for `Not started` jobs.
+   - Set the polling/evaluation interval to five minutes when the UI exposes
+     that option.
+   - Under **Action**, choose the email or Teams action and recipient.
+   - In **Context -> Select attributes**, check:
+     `JobInstanceId`, `ItemName`, `JobType`, `JobStatus`,
+     `ElapsedMinutes`, `WorkspaceName`, `CapacityId`, `JobScheduleTime`, and
+     `JobStartTime`. Selecting these attributes is what adds the diagnostic
+     fields to the notification context.
+   - Set **Headline** to a concise message such as
+     `Fabric intake job exceeded 20 minutes`.
+   - In **Notes**, enter explanatory text and use the tag/property button to
+     insert dynamic `ItemName`, `JobStatus`, `ElapsedMinutes`, and
+     `JobInstanceId` values. Do not type angle-bracket placeholders as
+     literal text when a dynamic-property token is available.
+   - Save and start the rule. Test it in development by temporarily using a
+     lower threshold or an intentionally delayed test job, then restore 20
+     minutes.
+8. Create immediate terminal-failure alerts separately through Job events:
+   - Open **Real-Time hub -> Fabric events -> Job events -> Set alert**.
+   - In **Add rule -> Details**, enter
+     `alert_<item-name>_failed`.
+   - Under **Monitor**, select **Select source events**. In the
+     **Configure connection settings** dialog:
+     1. Open **Event type(s)**. Deselect the four-event default selection and
+        select only `Microsoft.Fabric.ItemJobFailed`.
+     2. Keep **Event scope** set to `By item`.
+     3. Select workspace `<workspace-name>`.
+     4. Under **Item**, select the exact pipeline or notebook being
+        monitored, such as `pc-dispatcher-00`.
+     5. Do not add a source filter; event type and item already define the
+        desired stream.
+     6. Select **Next**, review the event type/workspace/item, then select
+        **Connect** or **Save**.
+   - Back in **Add rule -> Condition**, configure:
+
+     | Rule field | Value |
+     |---|---|
+     | **Check** | `On each event when` |
+     | **Grouping field** | Leave empty |
+     | **When** | `__type` |
+     | **Condition** | `Is equal to` |
+     | **Value** | Select the failure value exposed by the picker, normally `Microsoft.Fabric.JobEvents.ItemJobFailed` |
+
+     The source already contains only ItemJobFailed events; this condition is
+     repeated because the current rule UI requires a **When** field. Do not
+     use `jobType` as the event condition.
+   - Under **Action**, select **Message to individuals**, **Channel post**, or
+     **Email**, then configure the recipient.
+   - Set **Headline** to
+     `[Fabric][<environment>] <item-name> failed`.
+   - In **Notes**, use the property/tag picker to insert the available failure
+     details.
+   - Under **Context -> Select columns**, select:
+     `jobInstanceId`, `itemName`, `itemKind`, `jobType`, `jobStatus`,
+     `jobInvokeType`, `jobStartTime`, `jobEndTime`, and `workspaceName`.
+     Field capitalization follows the picker in the current tenant.
+     `capacityId` is not exposed by this Job-event alert's Context picker;
+     use `ItemJobEventLogs.CapacityId` in `pc_operations_dashboard` when
+     capacity correlation is required.
+   - Under **Save location**:
+     - Workspace: `<workspace-name>`.
+     - Item: create or select `pc_job_failure_activator`.
+     - Do not save these operational failure rules in
+       `pc_manifest_arrival_activator`.
+   - Select **Create**. Open the created rule, verify its definition, then
+     select **Start**.
+   - Test in development by causing one controlled failure for the selected
+     item and verifying the notification and context values.
+   - Repeat for critical dispatcher, worker, watchdog, reconciliation, gold,
+     and maintenance items as operational policy requires.
+
+   Job-event alerts provide immediate terminal notification. Dashboard alerts
+   poll KQL results and are appropriate for queue age, elapsed runtime, and
+   other SLA conditions.
 
 Workspace monitoring retains 30 days, is read-only, consumes Fabric capacity,
 and currently does not support private links. Keep the Delta attempt ledger
 for longer operational history.
 
-Create a Power BI operations page over `video_work`, `video_attempts`, and
-`reconciliation_findings` for application state:
+#### Create the separate Power BI operations report
 
-- queue depth and oldest queued age;
-- active leases and oldest heartbeat age;
-- work by state;
-- completed video-hours versus the 200,000-hour target;
-- actual versus required daily burn-down;
-- retry and dead-letter counts;
-- median and p95 staging/inference/write duration;
-- processing speed relative to real time;
-- input and output freshness;
-- orphan and correlation findings.
+Do not create this page inside `pc_operations_dashboard`. Use two artifacts:
 
-Run
-[`11_validate_observability.ipynb`](./11_validate_observability.ipynb) before
-publishing dashboards to verify that each visual has populated, correctly
-scoped source data.
+| Artifact | Purpose |
+|---|---|
+| `pc_operations_dashboard` | Real-Time Dashboard over 30-day Workspace-monitoring job logs |
+| `pc_operations_report` | Power BI report over the durable application ledger and gold operations tables |
 
-### Analytical report
+Create the Power BI operations report:
+
+1. Run
+   [`11_validate_observability.ipynb`](./11_validate_observability.ipynb)
+   with `<lakehouse-name>` attached. Confirm the status, active-work,
+   queue-health, attempt-health, burn-down, and reconciliation results are
+   populated as expected.
+2. Open `<lakehouse-name>` in Lakehouse view and confirm the required
+   physical Delta tables appear under **Tables**.
+3. Select **New semantic model** from the Lakehouse.
+4. Name it:
+
+   ```text
+   pc_operations_model
+   ```
+
+5. Choose **Direct Lake on OneLake**, then add these physical Delta tables:
+
+   ```text
+   people_counter_video_work
+   people_counter_video_attempts
+   people_counter_event_receipts
+   people_counter_reconciliation_findings
+   people_counter_replay_requests
+   people_counter_gold_operations_hour
+   ```
+
+   Do not choose **Direct Lake on SQL** for this model. Direct Lake on
+   OneLake reads the physical Delta tables directly and doesn't fall back to
+   DirectQuery through the SQL analytics endpoint. Direct Lake on SQL is
+   useful when SQL endpoint discovery/permissions or SQL views are required,
+   but SQL views can force DirectQuery fallback. This operations model uses
+   physical tables and model-level security instead.
+
+6. Create the relationships without using the horizontally wide
+   **Manage relationships -> New relationship** data-preview grid. Do not
+   modify the Fabric page HTML; use one of these supported model-editing
+   methods instead.
+
+   **Preferred: Model-view drag and drop**
+
+   1. Open the semantic model in **Editing** mode and switch to **Model
+      view**.
+   2. Place `people_counter_video_work` and the four child table cards near
+      each other.
+   3. Expand each table card and scroll vertically inside the card until
+      `work_id` is visible.
+   4. Drag `people_counter_video_work[work_id]` onto the child table's
+      `work_id`.
+   5. Select the new relationship line and verify/correct its settings in the
+      **Properties** pane.
+   6. Repeat for each child table.
+
+   **Alternative: Model explorer**
+
+   1. In Model view, open the **Model explorer** pane.
+   2. Use Model explorer search to verify the relevant tables and columns,
+      then clear the search so the object tree is visible.
+   3. Expand or right-click **Relationships** and select **New
+      relationship**.
+   4. Configure the relationship through the **Properties** pane and select
+      **Apply changes**.
+   5. Repeat for each child table.
+
+   Create these four relationships:
+
+   | From table | From column | To table | To column | Cardinality |
+   |---|---|---|---|---|
+   | `people_counter_video_work` | `work_id` | `people_counter_video_attempts` | `work_id` | One to many (`1:*`) |
+   | `people_counter_video_work` | `work_id` | `people_counter_event_receipts` | `work_id` | One to many (`1:*`) |
+   | `people_counter_video_work` | `work_id` | `people_counter_reconciliation_findings` | `work_id` | One to many (`1:*`) |
+   | `people_counter_video_work` | `work_id` | `people_counter_replay_requests` | `work_id` | One to many (`1:*`) |
+
+   For every relationship:
+
+   - **Cross-filter direction**: `Single`.
+   - Ensure filtering flows from `people_counter_video_work` on the `1` side
+     to the child table on the `*` side.
+   - **Make this relationship active**: Checked.
+   - **Assume referential integrity**: Leave unchecked. Some event receipts
+     and reconciliation rows can legitimately have a null `work_id`, and the
+     application performs its own integrity checks.
+   - Select **Save**, then repeat **+ New relationship** for the next row.
+
+   After creating all four, return to **Manage relationships** and verify four
+   active relationships are listed. In Model view, each solid line should
+   show `1` beside `people_counter_video_work`, `*` beside the child table,
+   and one filter-direction arrow toward the child. Leave
+   `people_counter_gold_operations_hour` disconnected because it is already
+   an aggregated hourly fact table.
+7. Create these initial measures. Replace table names in DAX only if a
+   deployment uses a different `TABLE_PREFIX`:
+
+   ```DAX
+   Queue Depth =
+   CALCULATE(
+       COUNTROWS(people_counter_video_work),
+       people_counter_video_work[status] IN {"QUEUED", "RETRY_WAIT"}
+   )
+
+   Active Leases =
+   CALCULATE(
+       COUNTROWS(people_counter_video_work),
+       people_counter_video_work[status]
+           IN {"LEASED", "STAGING", "RUNNING", "WRITING", "RECOVERING"}
+   )
+
+   Dead Letter Count =
+   CALCULATE(
+       COUNTROWS(people_counter_video_work),
+       people_counter_video_work[status] = "DEAD_LETTERED"
+   )
+
+   Failed Work Count =
+   CALCULATE(
+       COUNTROWS(people_counter_video_work),
+       people_counter_video_work[status]
+           IN {"TERMINAL_FAILED", "DEAD_LETTERED"}
+   )
+
+   Oldest Queue Age Minutes =
+   VAR OldestQueuedAt =
+       MINX(
+           FILTER(
+               people_counter_video_work,
+               people_counter_video_work[status]
+                   IN {"QUEUED", "RETRY_WAIT"}
+           ),
+           people_counter_video_work[queued_at]
+       )
+   RETURN
+       IF(
+           ISBLANK(OldestQueuedAt),
+           BLANK(),
+           DATEDIFF(OldestQueuedAt, UTCNOW(), MINUTE)
+       )
+
+   Completed Video Hours =
+   SUM(people_counter_gold_operations_hour[video_hours_completed])
+
+   Open Reconciliation Errors =
+   CALCULATE(
+       COUNTROWS(people_counter_reconciliation_findings),
+       people_counter_reconciliation_findings[severity] = "ERROR",
+       ISBLANK(people_counter_reconciliation_findings[resolved_at])
+   )
+   ```
+
+8. From the semantic model, select **New report** and name it:
+
+   ```text
+   pc_operations_report
+   ```
+
+9. Rename the first report page **Operations** and add:
+   - Cards: Queue Depth, Active Leases, Dead Letter Count, Failed Work Count,
+     Oldest Queue Age Minutes, and Open Reconciliation Errors.
+   - Stacked bar chart: count of `work_id` by `video_work.status`.
+   - Line chart: `gold_operations_hour.hour_utc` by
+     `video_hours_completed`, with a cumulative measure if desired.
+   - Table: terminal/dead-lettered work with `work_id`, asset, source URI,
+     camera/location, last error, attempt count, and queued/completed times.
+   - Table: unresolved reconciliation findings with severity, finding type,
+     work ID, attempt ID, first detection, last detection, and details.
+10. Add a **Backfill** page:
+    - Completed Video Hours card.
+    - Hourly completed video-hours line chart.
+    - Queued/started/succeeded/failed series from
+      `people_counter_gold_operations_hour`.
+    - Cards for remaining hours and forecast completion after those measures
+      are added.
+11. Add slicers for status, camera, location, capture date, and completion
+    date where the selected tables provide those fields.
+12. Apply model-level row-level security for authorized locations/cameras
+    before sharing.
+13. Save and publish `pc_operations_report`. Reconcile several report values
+    against the output from `11_validate_observability.ipynb`.
+
+The Power BI report provides durable business/application operations history.
+The Real-Time Dashboard provides near-real-time Fabric job status and SLA
+alerts. Use both; they answer different operational questions.
+
+### 8.2 Analytical report
 
 Create an explicit Direct Lake semantic model over the gold tables. Include:
 
@@ -2055,10 +2604,14 @@ Recommended visuals:
 
 Configure the analytical model in Fabric:
 
-1. Open the Lakehouse SQL analytics endpoint and verify the committed views
-   and all `people_counter_gold_*` Delta tables are visible.
-2. Select **New semantic model**, choose Direct Lake storage mode, and add the
-   four gold tables. New Lakehouses do not automatically create this model.
+1. Open `<lakehouse-name>` in Lakehouse view and verify all
+   `people_counter_gold_*` physical Delta tables are visible under
+   **Tables**.
+2. Select **New semantic model**, choose **Direct Lake on OneLake**, and add
+   the four gold tables. Do not choose Direct Lake on SQL; this model does not
+   use SQL views or SQL-endpoint security, and OneLake mode avoids
+   DirectQuery fallback. New Lakehouses do not automatically create this
+   model.
 3. Create Date, Time, Camera, Location, and Video dimensions. Relate them to
    the gold facts with one-to-many, single-direction relationships.
 4. Mark the Date table and set UTC as the storage time zone. Add local-time
@@ -2077,7 +2630,7 @@ Estimated occupancy is valid only when an initial occupancy and consistent
 line direction are configured. Distinct tracker IDs must not be summed across
 videos or cameras as unique humans.
 
-### Alerts
+### 8.3 Alerts
 
 Use Fabric job events and Activator for immediate terminal failures. Use
 scheduled/KQL or ledger checks for:
@@ -2094,24 +2647,15 @@ capacity queue/throttling sustained
 reconciliation severity = ERROR
 ```
 
-Configure the intake-duration alert before production:
-
-1. Enable Workspace monitoring and confirm `ItemJobEventLogs` contains
-   `pc-event-intake` pipeline and `01_register_event` notebook jobs.
-2. In the Real-Time Dashboard, create a query/tile restricted to those items
-   where `JobStatus` is `Not started` or `In progress`.
-3. Calculate elapsed minutes from the job's scheduled/start timestamp to the
-   current UTC time.
-4. Filter to elapsed time greater than or equal to `20` minutes.
-5. Create an Activator alert named
-   `alert_pc_event_intake_duration_20m` from that tile.
-6. Notify the operations email/Teams channel on each matching job and include
-   `JobInstanceId`, status, start time, workspace, and capacity.
-7. Resolve the incident by checking capacity admission, Spark queueing,
-   throttling, or a stuck notebook. Do not increase the 30-minute timeout
-   until the cause is understood and a measured p95/p99 runtime justifies it.
+Implement the intake-duration and immediate terminal-failure alerts in
+section 8.1 steps 7 and 8. Add the remaining application-ledger alerts only
+after their Delta/KQL data sources and operator runbooks are validated. Avoid
+creating both a dashboard-polled failure rule and a Job-event failure rule
+for the same item unless duplicate notifications are intentional.
 
 ## 9. Security, privacy, and lifecycle
+
+### 9.1 Identity and access
 
 1. Use the tenant-validated service-principal Fabric connection for external
    ADLS access. Store and rotate its secret only through Fabric connection
@@ -2120,13 +2664,19 @@ Configure the intake-duration alert before production:
 2. Grant source read and target write permissions separately.
 3. Keep raw videos in a restricted storage zone. Reports expose aggregates,
    not video URLs, unless the user is explicitly authorized.
-4. Define retention separately for raw video, event receipts, attempts,
-   failed snapshots, committed telemetry, and gold aggregates.
-5. Record the operator, reason, and timestamp for every replay.
-6. Apply row-level security in the semantic model for location/camera access.
-7. Treat camera IDs and timestamps as potentially sensitive operational data.
-8. Define a deletion workflow that removes or tombstones all facts derived
+4. Apply row-level security in the semantic model for location/camera access.
+
+### 9.2 Privacy, audit, and deletion
+
+1. Treat camera IDs and timestamps as potentially sensitive operational data.
+2. Record the operator, reason, and timestamp for every replay.
+3. Define a deletion workflow that removes or tombstones all facts derived
    from a deleted source asset where policy requires it.
+
+### 9.3 Retention and Delta lifecycle
+
+Define retention separately for raw video, event receipts, attempts, failed
+snapshots, committed telemetry, and gold aggregates.
 
 Recommended starting retention, subject to policy approval:
 
