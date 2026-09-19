@@ -64,6 +64,7 @@ Run or deploy the notebooks in this order:
 | [`09_maintain_delta.ipynb`](./09_maintain_delta.ipynb) | Removes expired uncommitted output and runs reviewed Delta optimization/vacuum | Daily or weekly according to retention policy |
 | [`10_replay_work.ipynb`](./10_replay_work.ipynb) | Audits and requeues one terminal/dead-lettered work item | Operator-approved incident recovery |
 | [`11_validate_observability.ipynb`](./11_validate_observability.ipynb) | Validates running-job, queue, burn-down, flow, and camera-level reporting data | Before dashboard release and during incident diagnosis |
+| [`12_plan_gold_refresh.ipynb`](./12_plan_gold_refresh.ipynb) | Discovers date partitions changed within a lookback window for gold refresh | At the start of every gold-refresh pipeline run |
 
 The earlier
 [`fabric_retry_safe_pipeline.ipynb`](../fabric_retry_safe_pipeline.ipynb) is a
@@ -1453,54 +1454,207 @@ capacity.
 
 ### 6.7 Watchdog, reconciliation, and aggregation
 
-Create four scheduled pipelines:
+Complete these shared prerequisites first:
 
-- `pc-watchdog`, every five minutes, runs
-  [`05_watchdog_recovery.ipynb`](./05_watchdog_recovery.ipynb).
-- `pc-reconcile`, every 15 minutes, runs
-  [`06_reconcile_publication.ipynb`](./06_reconcile_publication.ipynb).
-- `pc-gold-refresh`, after commits, determines the distinct historical
-  `capture_date` partitions and `to_date(observed_at_utc)` flow partitions
-  changed since its last watermark and runs
-  [`07_build_gold_aggregates.ipynb`](./07_build_gold_aggregates.ipynb) once
-  per `FLOW_DATE`/`CAPTURE_DATE`; it also supplies the current
-  `OPERATION_DATE`.
-- `pc-delta-maintenance`, daily or weekly according to approved retention,
-  runs [`09_maintain_delta.ipynb`](./09_maintain_delta.ipynb).
+1. Import `05_watchdog_recovery`, `06_reconcile_publication`,
+   `07_build_gold_aggregates`, `09_maintain_delta`, and
+   `12_plan_gold_refresh`.
+2. Toggle each notebook's configuration cell as its parameter cell.
+3. Attach and pin `<lakehouse-name>` as every notebook's default Lakehouse.
+4. Select the environment's validated Notebook activity connection in every
+   pipeline activity.
+5. Do not create schedules until all four pipelines pass one manual run.
 
-Use these initial Notebook activity names and **General** settings:
+#### 6.7.1 Create `pc-watchdog`
 
-| Pipeline | Notebook activity name | Initial cadence | Timeout | Enable retries | Retry | Interval type | Initial interval | Max interval | Retry conditions |
-|---|---|---|---|---|---:|---|---:|---:|---|
-| `pc-watchdog` | `WatchdogRecovery` | Every 5 minutes | `0.00:10:00` | Yes | 2 | Increasing Delay | 30 sec | 120 sec | Empty |
-| `pc-reconcile` | `ReconcilePublication` | Every 15 minutes | `0.00:30:00` | Yes | 2 | Increasing Delay | 60 sec | 300 sec | Empty |
-| `pc-gold-refresh` | `BuildGoldAggregates` | Hourly and after controlled backfill batches | `0.02:00:00` | Yes | 2 | Increasing Delay | 60 sec | 600 sec | Empty |
-| `pc-delta-maintenance` | `MaintainDelta` | Daily during the backfill; weekly in steady state | `0.06:00:00` | Yes | 1 | Increasing Delay | 300 sec | 900 sec | Empty |
+1. Create a Data Pipeline named `pc-watchdog`.
+2. Add a Notebook activity named `WatchdogRecovery`.
+3. Target
+   [`05_watchdog_recovery.ipynb`](./05_watchdog_recovery.ipynb).
+4. Configure base parameters:
 
-`Retry` is the number of additional attempts after the initial attempt.
-Leave preview retry conditions empty until the target tenant's actual
-transient error codes/messages have been captured. Each notebook is designed
-to be idempotent for its supplied scope, so bounded activity retries are
-appropriate.
+   | Parameter | Type | Value |
+   |---|---|---|
+   | `DATABASE` | `String` | Empty |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
+   | `EXPIRY_GRACE_MINUTES` | `Int` | `5` |
+   | `HEARTBEAT_TIMEOUT_MINUTES` | `Int` | `20` |
+   | `MAX_RECOVERIES_PER_RUN` | `Int` | `1000` |
 
-Schedule guidance:
+5. Configure General settings:
 
-- Offset `pc-watchdog` and `pc-reconcile` by at least two minutes so they do
-  not normally begin together.
-- Schedule `pc-gold-refresh` after dispatcher/backfill batches, with the
-  hourly schedule serving as a catch-up.
-- Run `pc-delta-maintenance` during a low-admission window. Keep
-  `RUN_VACUUM=false` until retention is formally approved.
-- Perform one manual run before enabling each schedule. Its normal duration
-  should be well below both its cadence and timeout. If a run regularly
-  overlaps its next scheduled start, reduce its per-run scope or lengthen the
-  cadence; do not solve sustained overlap only by increasing timeout.
+   | Setting | Value |
+   |---|---|
+   | Timeout | `0.00:10:00` |
+   | Enable retries | Yes |
+   | Retry | `2` |
+   | Interval type | Increasing Delay |
+   | Initial interval | `30` seconds |
+   | Max interval | `120` seconds |
+   | Retry conditions | Empty |
+
+6. Save and run manually. Verify the output reports
+   `expired_candidates`, `fenced_attempts`, `requeued`, and
+   `dead_lettered`.
+
+#### 6.7.2 Create `pc-reconcile`
+
+1. Create a Data Pipeline named `pc-reconcile`.
+2. Add a Notebook activity named `ReconcilePublication`.
+3. Target
+   [`06_reconcile_publication.ipynb`](./06_reconcile_publication.ipynb).
+4. Configure base parameters:
+
+   | Parameter | Type | Value |
+   |---|---|---|
+   | `DATABASE` | `String` | Empty |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
+
+5. Configure General settings:
+
+   | Setting | Value |
+   |---|---|
+   | Timeout | `0.00:30:00` |
+   | Enable retries | Yes |
+   | Retry | `2` |
+   | Interval type | Increasing Delay |
+   | Initial interval | `60` seconds |
+   | Max interval | `300` seconds |
+   | Retry conditions | Empty |
+
+6. Save and run manually. Inspect
+   `people_counter_reconciliation_findings`; resolve any `ERROR` finding
+   before enabling the schedule.
+
+#### 6.7.3 Create `pc-gold-refresh`
+
+Do not manually calculate `FLOW_DATE`, `CAPTURE_DATE`, or `OPERATION_DATE`.
+The planner discovers recently affected dates.
+
+1. Create a Data Pipeline named `pc-gold-refresh`.
+2. Create one pipeline parameter:
+
+   | Parameter | Type | Default |
+   |---|---|---:|
+   | `LOOKBACK_HOURS` | `Int` | `48` |
+
+3. Add a Notebook activity named `PlanGoldRefresh`.
+4. Target
+   [`12_plan_gold_refresh.ipynb`](./12_plan_gold_refresh.ipynb).
+5. Configure its base parameters:
+
+   | Parameter | Type | Value |
+   |---|---|---|
+   | `LOOKBACK_HOURS` | `Int` | `@pipeline().parameters.LOOKBACK_HOURS` |
+   | `DATABASE` | `String` | Empty |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
+
+6. Configure `PlanGoldRefresh` General settings:
+
+   | Setting | Value |
+   |---|---|
+   | Timeout | `0.00:30:00` |
+   | Enable retries | Yes |
+   | Retry | `2` |
+   | Interval type | Increasing Delay |
+   | Initial interval | `60` seconds |
+   | Max interval | `300` seconds |
+   | Retry conditions | Empty |
+
+7. Add a top-level ForEach named `ForEachGoldPartition` and connect
+   `PlanGoldRefresh` success directly to it.
+8. Set its Items expression to:
+
+   ```text
+   @json(activity('PlanGoldRefresh').output.result.exitValue).items
+   ```
+
+9. Turn Sequential off and set Batch count to `4`.
+10. Inside the ForEach, add a Notebook activity named
+    `BuildGoldAggregates`.
+11. Target
+    [`07_build_gold_aggregates.ipynb`](./07_build_gold_aggregates.ipynb).
+12. Configure its base parameters:
+
+    | Parameter | Type | Value |
+    |---|---|---|
+    | `FLOW_DATE` | `String` | `@item().partition_date` |
+    | `CAPTURE_DATE` | `String` | `@item().partition_date` |
+    | `OPERATION_DATE` | `String` | `@item().partition_date` |
+    | `DATABASE` | `String` | Empty |
+    | `TABLE_PREFIX` | `String` | `people_counter` |
+
+13. Configure `BuildGoldAggregates` General settings:
+
+    | Setting | Value |
+    |---|---|
+    | Timeout | `0.02:00:00` |
+    | Enable retries | Yes |
+    | Retry | `2` |
+    | Interval type | Increasing Delay |
+    | Initial interval | `60` seconds |
+    | Max interval | `600` seconds |
+    | Retry conditions | Empty |
+
+14. Save and run manually with `LOOKBACK_HOURS=48`.
+15. Verify `PlanGoldRefresh` output contains `partition_count` and `items`,
+    and verify the corresponding `people_counter_gold_*` partitions.
+16. If existing completed work is older than 48 hours, temporarily increase
+    `LOOKBACK_HOURS`, run once, and restore it to `48`.
+
+#### 6.7.4 Create `pc-delta-maintenance`
+
+1. Create a Data Pipeline named `pc-delta-maintenance`.
+2. Add a Notebook activity named `MaintainDelta`.
+3. Target [`09_maintain_delta.ipynb`](./09_maintain_delta.ipynb).
+4. Configure base parameters:
+
+   | Parameter | Type | Value |
+   |---|---|---|
+   | `DATABASE` | `String` | Empty |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
+   | `UNCOMMITTED_RETENTION_DAYS` | `Int` | `30` |
+   | `OPTIMIZE_LOOKBACK_DAYS` | `Int` | `7` |
+   | `VACUUM_RETENTION_HOURS` | `Int` | `168` |
+   | `RUN_VACUUM` | `Bool` | `false` |
+
+5. Configure General settings:
+
+   | Setting | Value |
+   |---|---|
+   | Timeout | `0.06:00:00` |
+   | Enable retries | Yes |
+   | Retry | `1` |
+   | Interval type | Increasing Delay |
+   | Initial interval | `300` seconds |
+   | Max interval | `900` seconds |
+   | Retry conditions | Empty |
+
+6. Keep `RUN_VACUUM=false` until retention is approved.
+7. Save and run manually during a low-admission window. Verify
+   `stale_uncommitted_attempts`, `optimize_start`, and `vacuum_ran`.
+
+#### 6.7.5 Enable schedules
+
+Only after all four manual runs succeed:
+
+1. Schedule `pc-watchdog` every five minutes.
+2. Schedule `pc-reconcile` every 15 minutes, offset at least two minutes from
+   the watchdog.
+3. Schedule `pc-gold-refresh` hourly and invoke it after controlled backfill
+   batches as a catch-up.
+4. Schedule `pc-delta-maintenance` daily during the backfill and weekly in
+   steady state, during a low-admission window.
+5. Use reviewed far-future end dates because Fabric fixed schedules require
+   start and end dates.
+6. If a run regularly overlaps its next schedule, reduce its per-run scope
+   or lengthen the cadence; do not solve sustained overlap only by increasing
+   timeout.
 
 The worker defaults to a 10-minute heartbeat and a 30-minute renewable lease
 to limit Delta contention; tune both from the benchmark and p99 batch time.
 The watchdog may requeue only work whose lease or heartbeat is expired and
-whose current attempt is not already committed. Replays from `TERMINAL_FAILED` or
-`DEAD_LETTERED` require an operator-supplied reason and a new attempt.
+whose current attempt is not already committed.
 
 Create a manually invoked, operator-restricted `pc-replay` pipeline around
 [`10_replay_work.ipynb`](./10_replay_work.ipynb). Require `REPLAY_ID`,
