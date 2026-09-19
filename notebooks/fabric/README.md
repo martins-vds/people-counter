@@ -1656,10 +1656,175 @@ to limit Delta contention; tune both from the benchmark and p99 batch time.
 The watchdog may requeue only work whose lease or heartbeat is expired and
 whose current attempt is not already committed.
 
-Create a manually invoked, operator-restricted `pc-replay` pipeline around
-[`10_replay_work.ipynb`](./10_replay_work.ipynb). Require `REPLAY_ID`,
-`WORK_ID`, `REQUESTED_BY`, and `REASON`; do not expose this pipeline to the
-event-trigger identity.
+#### 6.7.6 Create the manual `pc-replay` pipeline
+
+This pipeline is an operator recovery tool, not a scheduled or event-driven
+pipeline.
+
+1. Create a Data Pipeline named `pc-replay`.
+2. Do **not** add a schedule, Eventstream trigger, Activator action, or call
+   from another production pipeline.
+3. Restrict access to the operations group responsible for incident
+   recovery. If the workspace permissions are broader than that group, place
+   the pipeline in a restricted operations workspace or apply supported
+   item-level sharing. The event-trigger identity must not be able to run it.
+4. Create these pipeline parameters with empty defaults except
+   `MAX_ATTEMPTS`:
+
+   | Pipeline parameter | Type | Default | How the operator obtains it |
+   |---|---|---|---|
+   | `REPLAY_ID` | `String` | Empty | Generate one UUID for the recovery request; reuse the same UUID if retrying that request |
+   | `WORK_ID` | `String` | Empty | At run time, select one eligible failed work row using the query in step 9, then copy that row's `work_id` |
+   | `REQUESTED_BY` | `String` | Empty | Operator's corporate UPN/email |
+   | `REASON` | `String` | Empty | Incident/change ticket plus a concise recovery reason |
+   | `MAX_ATTEMPTS` | `Int` | `4` | Approved new attempt budget |
+
+   Generate `REPLAY_ID` with a standard UUID tool, for example `uuidgen` on
+   Linux/macOS or `[guid]::NewGuid()` in PowerShell. Do not generate a new ID
+   when retrying the same partially completed replay.
+5. Add a Notebook activity named `ReplayWork`.
+6. Target the imported
+   [`10_replay_work.ipynb`](./10_replay_work.ipynb). Confirm its parameter
+   cell, default Lakehouse, and validated Notebook activity connection.
+7. Configure `ReplayWork` base parameters:
+
+   | Notebook base parameter | Type | Value |
+   |---|---|---|
+   | `REPLAY_ID` | `String` | `@pipeline().parameters.REPLAY_ID` |
+   | `WORK_ID` | `String` | `@pipeline().parameters.WORK_ID` |
+   | `REQUESTED_BY` | `String` | `@pipeline().parameters.REQUESTED_BY` |
+   | `REASON` | `String` | `@pipeline().parameters.REASON` |
+   | `MAX_ATTEMPTS` | `Int` | `@pipeline().parameters.MAX_ATTEMPTS` |
+   | `DATABASE` | `String` | Empty |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
+
+   Use **Add dynamic content** for the five pipeline-parameter values.
+8. Configure `ReplayWork` General settings:
+
+   | Setting | Value |
+   |---|---|
+   | Timeout | `0.00:30:00` |
+   | Enable retries | No; leave unchecked |
+
+   A replay is an operator-approved administrative action. Deterministic
+   errors such as an ineligible status should fail immediately rather than
+   retry automatically. If a transient Fabric/Delta failure occurs after a
+   partial write, rerun the `pc-replay` pipeline manually with the exact same
+   `REPLAY_ID`, `WORK_ID`, `REQUESTED_BY`, and `REASON`; the notebook
+   reconciles the partially applied request idempotently.
+9. Before every replay, open a separate operator/diagnostic Fabric notebook
+   in the target environment. Attach and pin `<lakehouse-name>` as that
+   notebook's default Lakehouse. First list only replay-eligible work:
+
+   ```python
+   from pyspark.sql import functions as F
+
+   eligible = (
+       spark.table("people_counter_video_work")
+       .where(
+           F.col("status").isin("TERMINAL_FAILED", "DEAD_LETTERED")
+           & F.col("committed_attempt_id").isNull()
+       )
+       .select(
+           "work_id",
+           "asset_id",
+           "asset_version",
+           "source_uri",
+           "camera_id",
+           "location_id",
+           "status",
+           "attempt_count",
+           "max_attempts",
+           "completed_at",
+           "last_error_category",
+           "last_error_type",
+           "last_error_message",
+       )
+       .orderBy(F.col("completed_at").asc_nulls_last(), "work_id")
+   )
+   display(eligible)
+   ```
+
+   Match the incident/change ticket to the intended row using `asset_id`,
+   `asset_version`, `source_uri`, camera/location, and the last error. Do not
+   select a row merely because it appears first. Copy the complete `work_id`
+   from that exact row and run a final single-row check:
+
+   ```python
+   work_id = "<copied-work-id>"
+   display(
+       spark.table("people_counter_video_work")
+       .where(F.col("work_id") == work_id)
+       .select(
+           "work_id",
+           "status",
+           "attempt_count",
+           "max_attempts",
+           "committed_attempt_id",
+           "last_error_category",
+           "last_error_type",
+           "last_error_message",
+       )
+   )
+   ```
+
+   Continue only if this returns exactly one row, its `status` is
+   `TERMINAL_FAILED` or `DEAD_LETTERED`, `committed_attempt_id` is null, and
+   the row matches the intended incident. Never choose work in `QUEUED`,
+   `LEASED`, `STAGING`, `RUNNING`, `WRITING`, `RETRY_WAIT`, or `SUCCEEDED`.
+   The replay notebook independently enforces eligibility and rejects replay
+   of committed work.
+
+   If an operator nevertheless submits noneligible work, the notebook handles
+   it safely:
+
+   | Selected work state | Result |
+   |---|---|
+   | Work ID does not exist | Pipeline fails with `Work row does not exist` |
+   | `SUCCEEDED` or `committed_attempt_id` is populated | Pipeline fails with `Committed work cannot be replayed` |
+   | `QUEUED`, `LEASED`, `STAGING`, `RUNNING`, `WRITING`, or `RETRY_WAIT` | Pipeline fails with `Work is not eligible for replay: status=...` |
+   | Duplicate rows for the work ID | Pipeline fails closed with a duplicate-row error |
+
+   For a new `REPLAY_ID`, these checks happen before the replay request is
+   inserted or the work row is changed. The pipeline therefore fails without
+   requeueing or modifying the selected work. An existing partially applied
+   replay request is handled separately so rerunning the same request ID can
+   finish reconciliation.
+10. Return to the `pc-replay` **Data Pipeline** item—not the diagnostic
+    notebook—and select **Run** from the pipeline toolbar. In the pipeline
+    parameter prompt, supply `REPLAY_ID`, `WORK_ID`, `REQUESTED_BY`, `REASON`,
+    and `MAX_ATTEMPTS`. Have the operator confirm the work ID, new attempt
+    budget, and reason before submitting the pipeline run.
+11. After the `pc-replay` pipeline succeeds, return to the separate
+    operator/diagnostic Fabric notebook from step 9. Confirm
+    `<lakehouse-name>` is still attached and pinned as its default Lakehouse,
+    then run this code in a notebook code cell to verify the result:
+
+    ```python
+    replay_id = "<replay-id>"
+    work_id = "<work-id>"
+
+    display(
+        spark.table("people_counter_replay_requests")
+        .where(F.col("replay_id") == replay_id)
+    )
+    display(
+        spark.table("people_counter_video_work")
+        .where(F.col("work_id") == work_id)
+        .select(
+            "work_id",
+            "status",
+            "attempt_count",
+            "max_attempts",
+            "queued_at",
+            "committed_attempt_id",
+        )
+    )
+    ```
+
+    Expect one replay-request row with `applied_at` populated and one work row
+    with `status=QUEUED`, `attempt_count=0`, the approved `max_attempts`, and
+    no committed attempt.
 
 ## 7. Backfill plan for 200,000 video-hours
 
