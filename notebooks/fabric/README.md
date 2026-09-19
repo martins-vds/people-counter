@@ -20,6 +20,31 @@ The design assumes:
 The implementation provides deduplicated work and exactly-once **visible**
 results. Azure/Fabric events and notebook execution remain at-least-once.
 
+## Deployment placeholders
+
+Values in angle brackets are environment-specific and must be replaced during
+deployment:
+
+| Placeholder | Meaning |
+|---|---|
+| `<environment>` | Environment name such as `dev`, `test`, or `prod` |
+| `<workspace-name>` | Fabric workspace name |
+| `<workspace-id>` | Fabric workspace GUID |
+| `<lakehouse-name>` | Fabric Lakehouse name |
+| `<lakehouse-id>` | Fabric Lakehouse item GUID |
+| `<storage-account>` | ADLS Gen2 storage-account name |
+| `<source-filesystem>` | ADLS filesystem/container containing footage |
+| `<shortcut-name>` | Lakehouse shortcut name under `Files` |
+| `<eventstream-stream-name>` | Stream name assigned in Eventstream |
+| `<activator-source-name>` | Source name generated in Activator |
+| `<manifest-file>` | Any valid test manifest filename |
+| `<video-file>` | Any representative test video filename |
+| `<partition-path>` | Environment-specific backfill partition prefix |
+
+Examples must not depend on a particular tenant, GUID, file name, or measured
+frame count. Obtain OneLake ABFS identifiers from shortcut **Properties** and
+configure them separately for every environment.
+
 ## Artifact map
 
 Run or deploy the notebooks in this order:
@@ -116,7 +141,7 @@ Therefore a manifest event means the referenced video is ready.
   "schema_version": 1,
   "asset_id": "camera-17_20260917T210000Z_0001",
   "asset_version": "01K5EDQ4AJ7MYW6W8F6Y8B4SCP",
-  "video_uri": "abfss://videos@account.dfs.core.windows.net/incoming/2026/09/17/01K5.../segment.mp4",
+  "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/incoming/2026/09/17/<asset-version>/<video-file>",
   "source_etag": "0x8DEE...",
   "expected_size_bytes": 2489912034,
   "expected_sha256": "required-lowercase-hex-sha256",
@@ -422,8 +447,7 @@ capacity headroom.
 
 ### 6.2 Lakehouse bootstrap
 
-1. Create a `people_counter_<environment>` Lakehouse, for example
-   `people_counter_dev`, `people_counter_test`, or `people_counter_prod`.
+1. Create the environment Lakehouse named `<lakehouse-name>`.
    Fabric Lakehouse names can contain only letters, numbers, and underscores.
 2. Import the repository notebooks as Fabric notebook items:
    - Open the target Fabric workspace.
@@ -459,8 +483,187 @@ capacity headroom.
 5. Run [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb).
 6. Verify every expected Delta table and committed view from the SQL
    analytics endpoint.
-7. Grant the runtime identity read access to ADLS and write access to the
-   Lakehouse.
+7. Create the tenant-validated ADLS service-principal connection:
+   - In the Fabric header, select the **Settings** gear.
+   - Open **Manage connections and gateways -> Connections -> New -> Cloud**.
+   - Select the Azure Data Lake Storage Gen2/Azure Storage connection type
+     used for `<storage-account>`.
+   - Name it `pc_adls_service_principal_<environment>`.
+   - Set the storage endpoint/account to `<storage-account>`.
+   - For **Authentication method**, select **Service principal**.
+   - Enter the tenant ID, client/application ID, and client secret. The
+     development environment successfully used the same service principal
+     created for the workspace identity, with a separately created secret.
+   - Enable **Allow Code-First Artifacts like Notebooks to access this
+     connection (Preview)**.
+   - Create/save the connection.
+   - Return to every Data Pipeline Notebook activity, open **Settings ->
+     Connection**, select **Refresh**, and choose
+     `pc_adls_service_principal_<environment>`.
+
+   The workspace-identity authentication option shown by this tenant did not
+   provide working Azure Storage access for the raw external
+   `notebookutils.fs` path. The service-principal connection above is the
+   tested configuration. Without an explicit activity Connection, Fabric can
+   fall back to the pipeline's last-modified user; do not rely on that mutable
+   human identity in production. The Eventstream payload's
+   `identity=$superuser` value is also unrelated to notebook execution.
+
+   Reusing the workspace identity's service principal with a client secret
+   changes it from a fully secretless operational assumption to a manually
+   credentialed principal. Record the secret owner and expiration, alert
+   before expiry, rotate it through the Fabric connection, and never place it
+   in notebook code, pipeline parameters, source control, or output logs. A
+   separately managed application service principal is preferable if
+   organizational policy requires clear separation from Fabric-managed
+   workspace-identity lifecycle.
+8. Grant the selected service principal ADLS data-plane access:
+   - In Azure portal, open storage account `<storage-account>`.
+   - Open **Access control (IAM) -> Add -> Add role assignment**.
+   - Select the **Storage Blob Data Reader** role. Azure subscription
+     `Reader`, resource-group `Contributor`, and `Storage Account
+     Contributor` do not grant blob data access.
+   - For **Assign access to**, choose **User, group, or service principal**,
+     then locate the service principal by application ID.
+   - Scope it to `<source-filesystem>` when the portal supports
+     filesystem/container-scoped IAM; otherwise scope it to the storage
+     account.
+   - Wait for role-assignment propagation, then run the access verification
+     below.
+
+   With ADLS hierarchical namespace, Azure RBAC `Storage Blob Data Reader`
+   grants read/list access without additional path ACLs. If policy requires
+   ACL-only access instead, grant execute (`--x`) on the container root and
+   every parent directory, and read (`r--`) on the manifest/video files.
+   Prefer RBAC here because the worker must read many historical paths.
+
+   If the storage account firewall blocks public network access, direct
+   external `abfss://` access requires additional networking validation.
+   Trusted workspace access requires purchased Fabric F capacity and is not
+   supported on Trial capacity.
+
+### 6.2.1 ADLS shortcut data path
+
+This tenant can read ADLS data through a OneLake shortcut but cannot read the
+raw external
+`abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/...` path from the
+notebook runtime. The shortcut is therefore the supported data path; original
+Azure URIs remain event/provenance metadata.
+
+1. Open `people_counter_<environment>` in Lakehouse view.
+2. Under **Files**, select **... -> New shortcut**.
+3. Select **Azure Data Lake Storage Gen2**.
+4. Enter:
+
+   ```text
+   https://<storage-account>.dfs.core.windows.net
+   ```
+
+5. Select the validated service-principal connection.
+6. Select the `<source-filesystem>` filesystem/container root.
+7. Name the shortcut `<shortcut-name>`.
+8. Obtain each environment's authoritative OneLake ABFS root from the
+   shortcut's **Properties**. The tested development root is:
+
+   ```text
+   abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>
+   ```
+
+9. Verify:
+
+   ```python
+   import notebookutils
+
+   shortcut_root = (
+       "abfss://<workspace-id>"
+       "@onelake.dfs.fabric.microsoft.com/"
+       "<lakehouse-id>/Files/<shortcut-name>"
+   )
+   print(
+       notebookutils.fs.head(
+           f"{shortcut_root}/incoming/<manifest-file>",
+           1024 * 1024,
+       )
+   )
+   ```
+
+10. Event-to-shortcut mapping is:
+
+    ```text
+    https://<storage-account>.dfs.core.windows.net/<source-filesystem>/<path>
+    -> <shortcut ABFS root>/<path>
+    ```
+
+    The mapper validates the exact scheme, host, container, and path and
+    rejects query strings, fragments, traversal, encoded separators, and
+    empty relative paths.
+11. Keep Azure Blob Storage as the Eventstream source. OneLake does not emit
+    events for shortcut-backed data, but Azure Storage remains the event
+    producer.
+12. Continue staging videos locally. The worker copies from:
+
+    ```text
+    /lakehouse/default/Files/<shortcut-name>/<path>
+    ```
+
+    to `/tmp`, then opens the staged file with OpenCV. This avoids the
+    documented `notebookutils.fs.cp` limitation for shortcuts targeting an
+    ADLS container root. Direct OpenCV use of the shortcut mount remains a
+    benchmark candidate, not the production default.
+
+Direct OpenCV access to the OneLake `abfss://` URI was tested in the
+development Fabric runtime and failed `VideoCapture.isOpened()`. Do not pass
+OneLake or external ABFS URIs directly to OpenCV. Validate the production
+staging path instead:
+
+```python
+import cv2
+import shutil
+from pathlib import Path
+
+shortcut_name = "<shortcut-name>"
+video_file = "<video-file>"
+shortcut_source = (
+    Path("/lakehouse/default/Files")
+    / shortcut_name
+    / "incoming"
+    / video_file
+)
+staged_video = Path("/tmp") / video_file
+
+if not shortcut_source.is_file():
+    raise FileNotFoundError(shortcut_source)
+
+shutil.copyfile(shortcut_source, staged_video)
+
+capture = cv2.VideoCapture(str(staged_video))
+if not capture.isOpened():
+    raise RuntimeError(f"Could not open staged video: {staged_video}")
+
+frames = 0
+try:
+    while True:
+        success, frame = capture.read()
+        if not success:
+            break
+        frames += 1
+finally:
+    capture.release()
+    staged_video.unlink(missing_ok=True)
+
+print(f"Decoded {frames} frames")
+```
+
+This is the flow implemented by
+[`04_process_video.ipynb`](./04_process_video.ipynb): derive a
+traversal-safe shortcut-mounted path, copy to attempt-local `/tmp`, verify
+size and SHA-256, process the local file, and remove it in `finally`.
+A development validation copied a representative MP4 through this path and
+OpenCV decoded it to end-of-stream. The resulting frame count depends on the
+selected video and is not an acceptance constant. Benchmark staging
+throughput and local disk pressure across representative formats, sizes, and
+concurrent workers before approving backfill concurrency. Direct shortcut URI
+decoding is not a supported candidate for this runtime.
 
 After toggling or changing a parameter cell, reopen the corresponding
 pipeline Notebook activity and reselect/refresh the notebook so Fabric
@@ -545,7 +748,7 @@ moved JSON manifest, not on the video object itself.
    | Field | Value |
    |---|---|
    | **Destination name** | `to_pc_manifest_arrival_activator` |
-   | **Workspace** | Current environment workspace, such as `people-counter-dev` |
+   | **Workspace** | `<workspace-name>` |
    | **Activator** | Select **Create new**, then name it `pc_manifest_arrival_activator` |
    | **Input data format** | `Json` |
    | **Activate ingestion after adding the data source** | Checked |
@@ -594,7 +797,7 @@ resource is the Blob source link. Use this recovery order:
    publish that deletion. Deleting and recreating is supported; updating the
    existing event link is not.
 4. Add a new Azure Blob Storage Events source for
-   `peoplecountingfootage`. Configure the account once and publish it without
+   `<storage-account>`. Configure the account once and publish it without
    reopening/saving the source settings.
 5. Select **Stream events**, generate a new rename event, and confirm raw
    preview data.
@@ -636,6 +839,10 @@ Create `pc-event-intake`:
    [`01_register_event.ipynb`](./01_register_event.ipynb). If it does not
    appear in the activity selector, return to section 6.2, import/save it,
    and attach the default Lakehouse first.
+   In **Settings -> Connection**, select
+   `pc_adls_service_principal_<environment>`. If the dropdown is empty,
+   create the centrally managed service-principal cloud connection from
+   section 6.2, enable code-first Notebook access, then select **Refresh**.
 4. Select the Notebook activity, open **Settings**, and find **Base
    parameters**. For each event/correlation parameter below, select its
    **Value** field, choose **Add dynamic content**, and enter the expression
@@ -659,6 +866,9 @@ Create `pc-event-intake`:
    |---|---|---|
    | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
    | `TABLE_PREFIX` | `String` | `people_counter` |
+   | `SOURCE_STORAGE_ACCOUNT` | `String` | `<storage-account>` |
+   | `SOURCE_CONTAINER` | `String` | `<source-filesystem>` |
+   | `SOURCE_SHORTCUT_ABFS_ROOT` | `String` | Environment shortcut ABFS root from section 6.2.1 |
    | `MAX_ATTEMPTS` | `Int` | `4` |
    | `PRIORITY` | `Int` | `100` |
    | `PIPELINE` | `String` | `rtdetr-osnet` |
@@ -741,8 +951,7 @@ Create `pc-event-intake`:
    - For **Event types**, select
      `Microsoft.Fabric.ItemJobFailed`.
    - For **Event source**, select **By item**.
-   - Select the current environment workspace, such as
-     `people-counter-dev`.
+   - Select `<workspace-name>`.
    - For **Item**, select the `pc-event-intake` Data Pipeline.
    - Do not add another status filter; the selected event type already means
      the item job failed, became stuck, or was canceled.
@@ -792,27 +1001,70 @@ Create `pc-event-intake`:
    - Keep the rejected event receipt as an audit record, or remove it only
      according to the approved development-data cleanup process.
 
+#### Resolve ADLS `403 AccessDeniedException`
+
+An error from `notebookutils.fs.head` containing:
+
+```text
+403 HEAD ... action=getStatus
+This request is not authorized to perform this operation using this permission
+```
+
+means event mapping and URI normalization succeeded, but the pipeline
+execution identity cannot read the manifest. It is not fixed by retrying:
+
+1. Stop the manifest-arrival Activator rule temporarily so it does not create
+   repeated failed pipeline runs.
+2. Configure the `pc-event-intake` Notebook activity **Connection** to use
+   `pc_adls_service_principal_<environment>`, then complete the
+   `Storage Blob Data Reader` assignment from section 6.2 for that service
+   principal. If no Connection override is configured, granting the role to
+   the pipeline's last-modified user is only a temporary development
+   fallback.
+3. Wait for Azure role propagation.
+4. Validate this exact path by running a Notebook activity with the same
+   service-principal Connection:
+
+   ```python
+   import notebookutils
+
+   shortcut_root = (
+       "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/"
+       "<lakehouse-id>/Files/<shortcut-name>"
+   )
+   notebookutils.fs.head(
+       f"{shortcut_root}/incoming/<manifest-file>",
+       1024 * 1024,
+   )
+   ```
+
+5. If it still returns 403, check whether the role was assigned to the wrong
+   user/principal or has an ABAC condition. If no RBAC data role is granted,
+   verify ADLS ACL execute permission on `/` and `/incoming`, plus read
+   permission on the file.
+6. If authorization is correct but access still fails, inspect Storage
+   firewall/private-endpoint and Fabric workspace outbound-access settings.
+7. Restart the Activator rule only after `notebookutils.fs.head` returns the
+   manifest text successfully.
+
 ### 6.5 Activator rule and pipeline action
 
 Return to the Activator item created in section 6.3:
 
-1. In the `people-counter-dev` workspace, open the Activator item
+1. In `<workspace-name>`, open the Activator item
    `pc_manifest_arrival_activator`, then select the **Events** tab.
 2. In **Explorer**, select the event source created by the Eventstream
    destination `to_pc_manifest_arrival_activator`. The center pane should
    show **Live feed**, **Analytics**, and **Manage source** tabs. Confirm that
    recent events contain `api=RenameFile` and the final `destinationUrl`.
 
-   Fabric generates the Activator source name independently from the
-   Eventstream stream/operator names. In the current environment, the
-   recreated source is `azure_storage_events_eventstream-stream`, even
-   though the Eventstream stream is named `videos_storage_stream` and the
-   destination is connected after `filter_json_manifests`. Do not infer
+   Fabric generates `<activator-source-name>` independently from
+   `<eventstream-stream-name>` and the operator names. Do not infer
    destination placement from the Activator source name; verify the edge on
    the Eventstream canvas.
 
    Do not select the Job-events hierarchy
-   `pc-event-intake -> people-counter-dev event ->
+   `pc-event-intake -> <workspace-name> event ->
    alert_pc_event_intake_failed`; that source monitors pipeline failures and
    is separate from manifest arrivals. If Explorer shows only that hierarchy,
    the Eventstream Activator destination is not yet connected/published to
@@ -820,7 +1072,7 @@ Return to the Activator item created in section 6.3:
    `to_pc_manifest_arrival_activator` before continuing.
 
    **Do not start a manifest rule whose Definition pane shows
-   `Monitor -> Event -> people-counter-dev event`.** That is the job-events
+   `Monitor -> Event -> <workspace-name> event`.** That is the job-events
    source. Pointing its action back to `pc-event-intake` could create a
    feedback loop in which pipeline job events start more pipeline runs.
 3. With the manifest-arrival event source selected, choose **New rule** from
@@ -851,7 +1103,7 @@ Return to the Activator item created in section 6.3:
    **Run Pipeline** under **Run Fabric activities**. Do not select Email,
    Run Notebook, or Publish Business event for this rule.
 7. In the OneLake catalog/item picker:
-   - Select workspace `people-counter-dev`.
+   - Select workspace `<workspace-name>`.
    - Select the Data Pipeline `pc-event-intake`.
    - Confirm the selection.
 8. Select **Edit action** or expand the selected pipeline action. Add the six
@@ -878,13 +1130,22 @@ Return to the Activator item created in section 6.3:
    Do not use `data.sourceUrl` or `data.sourceBlobUrl`; they identify the
    pre-rename object. The original `source` plus `id` is the event
    deduplication key.
+
+   Each Value field should contain one dynamic-property token/chip. Fabric
+   can serialize an automatic leading or trailing space around the resolved
+   token value; this is safe because `01_register_event` calls `.strip()` on
+   every event string. Do not type non-whitespace characters such as `@` or
+   quotes before or after the token. After trimming,
+   `MANIFEST_URI.value` must end exactly in `.json`; a value such as
+   `" https://.../manifest.json "` is accepted, while
+   `"https://.../manifest.json@"` is intentionally rejected.
 9. Select **Save**.
 10. Before starting, verify the Definition pane shows all three of these
    values:
 
    | Definition section | Required value |
    |---|---|
-   | **Monitor -> Event** | The source created by `to_pc_manifest_arrival_activator`; currently `azure_storage_events_eventstream-stream` |
+   | **Monitor -> Event** | `<activator-source-name>` created by `to_pc_manifest_arrival_activator` |
    | **Condition -> Operation** | `On every value` |
    | **Action -> Action** | `Run Pipeline` |
 
@@ -916,6 +1177,11 @@ Return to the Activator item created in section 6.3:
 17. Inspect the Notebook activity output:
    - A complete valid manifest should return `QUEUED` or `EXISTING_WORK`.
    - A smoke-test/invalid manifest should fail visibly as `REJECTED`.
+   - A `FileNotFoundException` on the mapped OneLake shortcut path means the
+     event references a destination object that no longer exists. Compare
+     `EVENT_TIME`, `MANIFEST_URI`, and the shortcut contents; Activator
+     **Test action** can reuse an older sampled event and does not recreate
+     its file.
 18. Use these exact names in development, test, and production so deployment
    comparisons and monitoring filters stay consistent. Activator-to-item
    parameter passing is currently Preview and supports scalar string,
@@ -925,11 +1191,37 @@ Return to the Activator item created in section 6.3:
 20. Upload and move one test video/manifest pair twice and verify two event
    receipts resolve to one work item.
 
-The observed 16-byte `manifest.json` is sufficient to prove that rename
-events and filters work, but it is not a valid processing manifest unless it
-contains every required manifest-version-1 field. Replace the smoke-test
-content with the complete manifest contract before testing
-`01_register_event.ipynb`.
+A minimal placeholder manifest is sufficient to prove that rename events and
+filters work, but it is not a valid processing manifest unless it contains
+every required manifest-version-1 field. Replace smoke-test content with the
+complete manifest contract before testing `01_register_event.ipynb`.
+
+For the end-to-end validation, do not rely on an old sampled event:
+
+1. Create `<manifest-file>` with a complete manifest under the producer's
+   staging path.
+2. Rename it once into
+   `<source-filesystem>/incoming/<manifest-file>`.
+3. Verify the exact mapped file exists before waiting for the pipeline:
+
+   ```python
+   import notebookutils
+
+   shortcut_root = (
+       "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/"
+       "<lakehouse-id>/Files/<shortcut-name>"
+   )
+   manifest_path = f"{shortcut_root}/incoming/<manifest-file>"
+
+   assert notebookutils.fs.exists(manifest_path), manifest_path
+   print(notebookutils.fs.head(manifest_path, 1024 * 1024))
+   ```
+
+4. Confirm the resulting pipeline Input has a recent `EVENT_TIME` and a
+   `MANIFEST_URI` ending in that same `<manifest-file>`.
+5. If using **Test action**, explicitly select the new event sample. Prefer a
+   fresh live rename for the final test because sampled events may outlive
+   their referenced blobs.
 
 ### 6.6 Dispatcher pipeline
 
@@ -960,13 +1252,21 @@ date and alert before it expires:
    Set `ACTIVITY_RUN_ID` to a clearly synthetic correlation such as
    `@concat(pipeline().RunId, '/', item().attempt_id)` and leave
    `FABRIC_JOB_INSTANCE_ID` empty for later monitoring reconciliation.
-9. Set the worker Notebook activity retry count to zero. A failed activity
+9. Configure the worker's shortcut parameters as literals:
+
+   | Notebook base parameter | Type | Value |
+   |---|---|---|
+   | `SOURCE_STORAGE_ACCOUNT` | `String` | `<storage-account>` |
+   | `SOURCE_CONTAINER` | `String` | `<source-filesystem>` |
+   | `SOURCE_SHORTCUT_LOCAL_ROOT` | `String` | `/lakehouse/default/Files/<shortcut-name>` |
+
+10. Set the worker Notebook activity retry count to zero. A failed activity
    records `RETRY_WAIT`; a later dispatcher claim creates a fresh attempt ID.
    This prevents an activity timeout from running two executions under the
    same lease.
-10. Set the activity timeout from benchmark p99 runtime by duration bucket,
+11. Set the activity timeout from benchmark p99 runtime by duration bucket,
     with staging and capacity headroom.
-11. Fabric does not document a fixed-schedule no-overlap switch. The
+12. Fabric does not document a fixed-schedule no-overlap switch. The
     dispatcher notebook therefore takes a short global Delta mutex before
     counting active leases and claiming work.
 
@@ -1042,10 +1342,10 @@ separate pipeline named `pc-backfill-register` for the historical load:
 
 1. Create the Fabric Data Pipeline `pc-backfill-register`.
 2. Add one String pipeline parameter named `MANIFEST_GLOB`. A pipeline run
-   supplies one bounded ADLS manifest partition, for example:
+   supplies one bounded OneLake shortcut partition, for example:
 
    ```text
-   abfss://videos@peoplecountingfootage.dfs.core.windows.net/incoming/2025/01/01/*/*.json
+   abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/incoming/<partition-path>/*.json
    ```
 
 3. Add one Notebook activity targeting the imported
@@ -1059,6 +1359,9 @@ separate pipeline named `pc-backfill-register` for the historical load:
    |---|---|---|
    | `MANIFEST_GLOB` | `String` | `@pipeline().parameters.MANIFEST_GLOB` |
    | `REGISTRATION_ID` | `String` | `@pipeline().RunId` |
+   | `SOURCE_STORAGE_ACCOUNT` | `String` | `<storage-account>` |
+   | `SOURCE_CONTAINER` | `String` | `<source-filesystem>` |
+   | `SOURCE_SHORTCUT_NAME` | `String` | `<shortcut-name>` |
    | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
    | `TABLE_PREFIX` | `String` | `people_counter` |
    | `MAX_ATTEMPTS` | `Int` | `4` |
@@ -1291,8 +1594,10 @@ Configure the intake-duration alert before production:
 
 ## 9. Security, privacy, and lifecycle
 
-1. Use managed identities or workspace identities; do not put storage keys or
-   SAS tokens in notebooks.
+1. Use the tenant-validated service-principal Fabric connection for external
+   ADLS access. Store and rotate its secret only through Fabric connection
+   management; do not put client secrets, storage keys, or SAS tokens in
+   notebooks or pipeline parameters.
 2. Grant source read and target write permissions separately.
 3. Keep raw videos in a restricted storage zone. Reports expose aggregates,
    not video URLs, unless the user is explicitly authorized.
@@ -1458,6 +1763,12 @@ The implementation is ready only when all checks pass:
 - [Activity retries](https://learn.microsoft.com/fabric/data-factory/activity-retries)
 - [Notebook activity](https://learn.microsoft.com/fabric/data-factory/notebook-activity)
 - [Create, import, and connect Fabric notebooks](https://learn.microsoft.com/fabric/data-engineering/how-to-use-notebook)
+- [Fabric workspace identity](https://learn.microsoft.com/fabric/security/workspace-identity)
+- [Authenticate with workspace identity](https://learn.microsoft.com/fabric/security/workspace-identity-authenticate)
+- [Trusted workspace access](https://learn.microsoft.com/fabric/security/security-trusted-workspace-access)
+- [Create an ADLS Gen2 shortcut](https://learn.microsoft.com/fabric/onelake/create-adls-shortcut)
+- [Access OneLake shortcuts in Spark](https://learn.microsoft.com/fabric/onelake/access-onelake-shortcuts)
+- [OneLake shortcut overview](https://learn.microsoft.com/fabric/onelake/onelake-shortcuts)
 - [ForEach activity](https://learn.microsoft.com/fabric/data-factory/foreach-activity)
 - [Spark concurrency and queueing](https://learn.microsoft.com/fabric/data-engineering/spark-job-concurrency-and-queueing)
 - [Fabric Spark compute](https://learn.microsoft.com/fabric/data-engineering/spark-compute)
