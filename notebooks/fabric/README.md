@@ -2480,8 +2480,30 @@ Create the Power BI operations report:
    and one filter-direction arrow toward the child. Leave
    `people_counter_gold_operations_hour` disconnected because it is already
    an aggregated hourly fact table.
-7. Create these initial measures. Replace table names in DAX only if a
-   deployment uses a different `TABLE_PREFIX`:
+7. Create the initial DAX measures in the semantic-model editor; do not
+   select **Transform data**. Transform data opens Power Query and is not
+   used for these semantic-model measures.
+
+   For each measure:
+
+   1. Keep the semantic model in **Editing** mode.
+   2. In the Data or Model explorer pane, select
+      `people_counter_video_work`. This becomes the measure's home table for
+      organization; a measure can still reference the other model tables.
+   3. Select **Home -> New measure** in the toolbar. Depending on the current
+      editor layout, you can instead right-click
+      `people_counter_video_work` and select **New measure**.
+   4. In the DAX formula bar, replace the generated text with one complete
+      measure definition below.
+   5. Select the check mark or press Enter to commit it.
+   6. Repeat **New measure** for every definition. Do not paste all measures
+      into one formula bar entry.
+   7. Optionally set their **Display folder** property to
+      `Operations KPIs`.
+   8. Save the semantic model after all measures validate.
+
+   Replace table names in DAX only if a deployment uses a different
+   `TABLE_PREFIX`:
 
    ```DAX
    Queue Depth =
@@ -2545,13 +2567,181 @@ Create the Power BI operations report:
    ```
 
 9. Rename the first report page **Operations** and add:
-   - Cards: Queue Depth, Active Leases, Dead Letter Count, Failed Work Count,
-     Oldest Queue Age Minutes, and Open Reconciliation Errors.
-   - Stacked bar chart: count of `work_id` by `video_work.status`.
-   - Line chart: `gold_operations_hour.hour_utc` by
-     `video_hours_completed`, with a cumulative measure if desired.
-   - Table: terminal/dead-lettered work with `work_id`, asset, source URI,
-     camera/location, last error, attempt count, and queued/completed times.
+   - Create one **Card** visual per operational measure:
+     1. Select a blank area of the report canvas.
+     2. In the **Visualizations** pane, stay on **Build visual** and hover the
+        visual icons until the tooltip identifies **Card** or **Card (new)**.
+        In the current UI, the Card icon displays `123`.
+     3. Select that `123` Card icon. Power BI adds an empty Card to the
+        canvas.
+     4. With that Card selected, open the **Data** pane.
+     5. Expand `people_counter_video_work`.
+     6. Expand the `Operations KPIs` display folder shown in the current UI.
+     7. Select or drag exactly one measure into the Card's **Values** field in
+        the Visualizations pane.
+     8. Resize and position the Card on the first row.
+     9. Repeat from the blank canvas with a new Card for:
+
+        ```text
+        Queue Depth
+        Active Leases
+        Dead Letter Count
+        Failed Work Count
+        Oldest Queue Age Minutes
+        Open Reconciliation Errors
+        ```
+
+     If selecting a measure first creates a different visual automatically,
+     keep that visual selected and select the `123` Card icon to convert it.
+     Do not check all six measures on one selected Card; use six separate
+     Card visuals so each KPI has its own value and title. The measures appear
+     under `people_counter_video_work` because that table was selected as
+     their home table; `Operations KPIs` is only an organizational display
+     folder.
+   - Create the **Work by status** stacked bar chart:
+     1. Select a blank area of the canvas.
+     2. In **Visualizations -> Build visual**, select **Stacked bar chart**
+        (the horizontal bar icon).
+     3. From `people_counter_video_work`, drag:
+
+        | Visual field well | Field |
+        |---|---|
+        | **Y-axis** | `status` |
+        | **X-axis** | `work_id` |
+        | **Legend** | Leave empty |
+        | **Small multiples** | Leave empty |
+
+     4. Open the dropdown for `work_id` in the X-axis field well and set
+        summarization to **Count (Distinct)**. This produces one horizontal
+        bar per status whose length is the number of unique work items.
+     5. Optionally add `attempt_count`, `max_attempts`, and
+        `last_error_category` to **Tooltips**.
+     6. In **Format visual -> General -> Title**, set the title to
+        `Work by status`.
+   - Create the **Hourly completed video hours** line chart:
+     1. Select a blank area of the canvas.
+     2. In **Visualizations -> Build visual**, select **Line chart**.
+     3. Configure:
+
+        | Visual field well | Field |
+        |---|---|
+        | **X-axis** | `people_counter_gold_operations_hour[hour_utc]` |
+        | **Y-axis** | `Completed Video Hours` measure |
+        | **Secondary y-axis** | Leave empty |
+        | **Legend** | Leave empty |
+        | **Small multiples** | Leave empty |
+
+     4. Add these fields from
+        `people_counter_gold_operations_hour` to **Tooltips**:
+        `queued`, `started`, `succeeded`, `failed`,
+        `average_processing_seconds`, and `p95_processing_seconds`.
+     5. In the X-axis formatting, use a **Continuous** date/time axis when
+        available and sort `hour_utc` ascending.
+     6. Set the title to `Hourly completed video hours`.
+
+     The `Completed Video Hours` measure sums
+     `video_hours_completed`; the `hour_utc` axis supplies the hourly filter
+     context, so the line shows the amount completed in each hour rather than
+     the grand total.
+   - Create the **Terminal and dead-lettered work** Table visual using only
+     `people_counter_video_work`:
+     1. Add a **Table** visual.
+     2. From `people_counter_video_work`, add these columns in order:
+
+        ```text
+        work_id
+        asset_id
+        asset_version
+        source_uri
+        camera_id
+        location_id
+        status
+        attempt_count
+        max_attempts
+        queued_at
+        completed_at
+        last_error_category
+        last_error_type
+        last_error_message
+        ```
+
+     3. With the Table selected, open **Filters -> Filters on this visual**.
+     4. Add `people_counter_video_work[status]` and use Basic filtering to
+        select only:
+
+        ```text
+        TERMINAL_FAILED
+        DEAD_LETTERED
+        ```
+
+     5. Sort by `completed_at` descending, with null values last, and set the
+        visual title to `Terminal and dead-lettered work`.
+
+     Use `people_counter_video_work`, not `video_attempts`, because this
+     visual shows the current work state and latest error.
+   - Add an **Attempt History** drill-through page for per-attempt execution
+     details:
+     1. Select the `+` button beside the report page tabs to create a new
+        page, then rename it `Attempt History`.
+     2. Click a blank area of the new page. In the **Visualizations** pane,
+        find **Drill through -> Add drill-through fields here**.
+     3. Drag `people_counter_video_work[work_id]` into the Drill-through
+        field well. Keep **Keep all filters** enabled so camera/location and
+        other report context follows the selected work item.
+     4. Add a Card visual using
+        `people_counter_video_work[work_id]` and title it `Selected work ID`.
+     5. Add Cards for the selected work's `asset_id`, current `status`,
+        `attempt_count`, and `max_attempts`, or place those fields in one
+        compact Table visual.
+     6. Add a Table visual using
+        `people_counter_video_attempts` and include:
+
+        ```text
+        attempt_id
+        status
+        claimed_at
+        staging_started_at
+        inference_started_at
+        writing_started_at
+        completed_at
+        last_heartbeat_at
+        processing_seconds
+        processed_frames
+        total_source_frames
+        effective_sample_fps
+        distinct_people
+        line_in_count
+        line_out_count
+        retryable
+        error_category
+        error_type
+        error_message
+        dispatcher_id
+        pipeline_run_id
+        activity_run_id
+        fabric_job_instance_id
+        sdk_version
+        bundle_manifest_sha256
+        config_sha256
+        input_sha256
+        ```
+
+     7. Sort the attempts table by `claimed_at` descending and title it
+        `Execution attempts`.
+     8. Add another compact Table, or use Tooltips, for source diagnostics:
+        `source_size_bytes`, `source_duration_seconds`, `source_fps`, and
+        `total_source_frames`.
+     9. Power BI normally adds a Back button after a drill-through field is
+        configured. If it does not, select **Buttons -> Back**, place the
+        button in the page header, and label it `Back to Operations`.
+     10. Return to the **Operations** page, right-click a row in
+         **Terminal and dead-lettered work**, and select
+         **Drill through -> Attempt History**.
+     11. Confirm the page shows only attempts whose `work_id` matches the
+         selected work. If it shows unrelated attempts, verify the active
+         one-to-many relationship from `people_counter_video_work[work_id]`
+         to `people_counter_video_attempts[work_id]` and confirm the
+         drill-through field uses the parent table's `work_id`.
    - Table: unresolved reconciliation findings with severity, finding type,
      work ID, attempt ID, first detection, last detection, and details.
 10. Add a **Backfill** page:
