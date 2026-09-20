@@ -2683,17 +2683,46 @@ Create the Power BI operations report:
      details:
      1. Select the `+` button beside the report page tabs to create a new
         page, then rename it `Attempt History`.
-     2. Click a blank area of the new page. In the **Visualizations** pane,
-        find **Drill through -> Add drill-through fields here**.
-     3. Drag `people_counter_video_work[work_id]` into the Drill-through
+     2. Confirm the report is in **Editing** mode and select the
+        `Attempt History` page tab.
+     3. Click a blank area of the page so no visual is selected.
+     4. In the **Visualizations** pane, use the pane's own vertical scrollbar
+        on its far right and scroll below the visual field wells. Expand
+        **Drill through** if it is collapsed; the target box is labeled
+        **Add drill-through fields here**.
+     5. If the Visualizations pane is hidden, enable it from
+        **View -> Panes -> Visualizations**. If it is too narrow, collapse
+        the Filters or Data pane; do not modify the page HTML.
+     6. Drag `people_counter_video_work[work_id]` into the Drill-through
         field well. Keep **Keep all filters** enabled so camera/location and
         other report context follows the selected work item.
-     4. Add a Card visual using
-        `people_counter_video_work[work_id]` and title it `Selected work ID`.
-     5. Add Cards for the selected work's `asset_id`, current `status`,
-        `attempt_count`, and `max_attempts`, or place those fields in one
-        compact Table visual.
-     6. Add a Table visual using
+     7. Add the selected-work Card:
+        - Click a blank area and select the `123` **Card** visual.
+        - Keep the new Card selected.
+        - In the **Data** pane, expand `people_counter_video_work`.
+        - Drag the `work_id` field into the Card's **Values** field well.
+        - If Power BI requires summarization for the text field, open the
+          `work_id` dropdown in Values and select **First**. The drill-through
+          filter ensures only one work ID is in context.
+        - After the field is assigned, open **Format visual -> General ->
+          Title**, turn Title on, and enter `Selected work ID`. The title
+          controls can remain unavailable until the Card contains a field.
+     8. Add one compact Table visual named `Selected work summary`:
+        - Select **Table** in the Visualizations pane.
+        - Add these columns from `people_counter_video_work` in order:
+
+          ```text
+          asset_id
+          status
+          attempt_count
+          max_attempts
+          ```
+
+        - For `attempt_count` and `max_attempts`, open each field dropdown and
+          select **Don't summarize**. The drill-through filter should produce
+          one row for the selected work.
+        - Turn on the visual title and set it to `Selected work summary`.
+     9. Add a Table visual using
         `people_counter_video_attempts` and include:
 
         ```text
@@ -2726,18 +2755,73 @@ Create the Power BI operations report:
         input_sha256
         ```
 
-     7. Sort the attempts table by `claimed_at` descending and title it
-        `Execution attempts`.
-     8. Add another compact Table, or use Tooltips, for source diagnostics:
-        `source_size_bytes`, `source_duration_seconds`, `source_fps`, and
-        `total_source_frames`.
-     9. Power BI normally adds a Back button after a drill-through field is
+     10. In the Table's Columns/Values field well, open each numeric field
+         dropdown and select **Don't summarize** for:
+
+         ```text
+         processing_seconds
+         processed_frames
+         total_source_frames
+         effective_sample_fps
+         distinct_people
+         line_in_count
+         line_out_count
+         ```
+
+         Headers such as `Sum of processing_seconds` indicate incorrect
+         summarization. Failed attempts can have all of these metrics null;
+         implicit Sum measures can suppress otherwise valid attempt rows.
+     11. Sort the attempts table by `claimed_at` descending and title it
+         `Execution attempts`.
+     12. Confirm its row count matches the number of attempts for the selected
+         work. If it remains empty:
+         - Clear **Filters on this visual**.
+         - Temporarily keep only `attempt_id`, `status`, and `claimed_at`.
+         - Confirm those rows appear, then add the remaining columns back in
+           groups.
+         - Verify every field comes from
+           `people_counter_video_attempts`, not a similarly named table.
+     13. Add a compact Table visual named `Source diagnostics by attempt`
+         using `people_counter_video_attempts`:
+         - Select a blank area of the page and select the **Table** visual.
+         - With the Table selected, expand
+           `people_counter_video_attempts` in the **Data** pane.
+         - Add these columns to the Table's **Columns/Values** field well in
+           this order:
+
+           ```text
+           attempt_id
+           claimed_at
+           source_size_bytes
+           source_duration_seconds
+           source_fps
+           total_source_frames
+           ```
+
+         - Open each field dropdown and set **Don't summarize** for:
+
+           ```text
+           source_size_bytes
+           source_duration_seconds
+           source_fps
+           total_source_frames
+           ```
+
+         - Sort by `claimed_at` descending.
+         - Turn on the visual title and set it to
+           `Source diagnostics by attempt`.
+
+         These values are attempt-scoped, so do not source them from
+         `people_counter_video_work`. The drill-through `work_id` filter and
+         active relationship limit the rows to attempts for the selected work
+         item.
+     14. Power BI normally adds a Back button after a drill-through field is
         configured. If it does not, select **Buttons -> Back**, place the
         button in the page header, and label it `Back to Operations`.
-     10. Return to the **Operations** page, right-click a row in
+     15. Return to the **Operations** page, right-click a row in
          **Terminal and dead-lettered work**, and select
          **Drill through -> Attempt History**.
-     11. Confirm the page shows only attempts whose `work_id` matches the
+     16. Confirm the page shows only attempts whose `work_id` matches the
          selected work. If it shows unrelated attempts, verify the active
          one-to-many relationship from `people_counter_video_work[work_id]`
          to `people_counter_video_attempts[work_id]` and confirm the
