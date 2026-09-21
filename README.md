@@ -154,6 +154,9 @@ idempotent Delta merges, failed-attempt snapshots, and a run-status ledger.
 For event-driven ADLS ingestion, bounded dispatch, lease recovery,
 observability, Direct Lake reporting, and large backfills, use the
 [production Fabric implementation plan](notebooks/fabric/README.md).
+For a runnable operator walkthrough from camera catalog creation through
+guarded ADLS publication, use the
+[manifest package operator tutorial](notebooks/manifest_package_operator_tutorial.ipynb).
 
 ### Publish backfill manifests
 
