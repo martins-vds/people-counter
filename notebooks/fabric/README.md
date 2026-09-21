@@ -3510,7 +3510,7 @@ Date, Time, Camera, Location, Video, ModelConfig
 Measures:
 
 ```text
-Entries, Exits, Net Flow, Cumulative Net Flow, Videos Processed,
+Total Entries, Total Exits, Net Flow, Cumulative Net Flow, Videos Processed,
 Video Hours Processed, Distinct Tracks per Video,
 Processing Speed x Real Time, Queued Work, Started Attempts,
 Succeeded Attempts, Failed Attempts, Attempt Success Rate,
@@ -3885,11 +3885,38 @@ Configure the analytical model in Fabric:
       the source IANA timezone as part of each value, so there is no separate
       semantic-model setting that changes these UTC columns into camera-local
       timestamps.
-   8. Use `minute_utc`, `hour_utc`, `captured_at_utc`, and `completed_at` for
-      current report axes and label report titles with `(UTC)` where needed.
-      `people_counter_gold_dim_camera[camera_timezone]` can be shown as
-      descriptive metadata, but it does not convert timestamps.
-   9. Do not add DAX offsets such as `UTCNOW() - 7/24`. Fixed offsets are
+   8. Do **not** create charts during this step. The charts are created later
+      in step 7. At this point, take only these semantic-model actions:
+      - confirm the timestamp columns listed below remain visible in report
+        view;
+      - confirm their data type is **Date/Time**; and
+      - do not transform, offset, or replace their stored UTC values.
+
+      Verify these columns:
+
+      ```text
+      people_counter_gold_flow_minute[minute_utc]
+      people_counter_gold_flow_hour[hour_utc]
+      people_counter_gold_dim_video[captured_at_utc]
+      people_counter_gold_video[completed_at]
+      people_counter_gold_operations_hour[hour_utc]
+      ```
+   9. No report action is required for
+      `people_counter_gold_dim_camera[camera_timezone]` during step 5. Treat
+      it as a text attribute and leave it visible if report authors may need
+      it. It contains an IANA timezone name such as:
+
+      ```text
+      America/Denver
+      ```
+
+      It can be added later to a Camera details Table, Slicer, or Tooltip if
+      that context is useful. Merely adding `camera_timezone` to a visual
+      does not convert `minute_utc`, `hour_utc`, `captured_at_utc`, or
+      `completed_at` into local time.
+   10. Do not create a local-time calculated column or measure in this step.
+      In particular, do not add fixed DAX offsets such as
+      `UTCNOW() - 7/24`. Fixed offsets are
       incorrect across cameras and daylight-saving transitions. Camera-local
       reporting requires local date/time keys materialized upstream from the
       IANA timezone; those columns are outside the current ten-table model.
@@ -3913,17 +3940,20 @@ Configure the analytical model in Fabric:
    2. For Traffic measures, select
       `people_counter_gold_flow_minute` as the home table, select
       **New measure**, and place each measure in the `Traffic KPIs` display
-      folder:
+      folder. Use the `Total Entries` and `Total Exits` names exactly:
+      Power BI does not allow a measure named `Entries` or `Exits` in this
+      home table because the physical `entries` and `exits` columns already
+      use those names, and names are compared without regard to case.
 
       ```DAX
-      Entries =
+      Total Entries =
       SUM(people_counter_gold_flow_minute[entries])
 
-      Exits =
+      Total Exits =
       SUM(people_counter_gold_flow_minute[exits])
 
       Net Flow =
-      [Entries] - [Exits]
+      [Total Entries] - [Total Exits]
 
       Cumulative Net Flow =
       VAR CurrentMinute =
@@ -4057,14 +4087,21 @@ Configure the analytical model in Fabric:
       `Completed Video Hours` as a decimal number with `1` or `2` decimal
       places. These rates describe attempt outcomes recorded in the
       operations aggregate; they are not a distinct-video success rate.
-   5. Do not create Backfill target, remaining-hours, or forecast-completion
-      measures in `pc_analytics_model` yet.
-      `people_counter_gold_operations_hour` contains global hourly totals and
-      has no workload-origin or backfill-batch key. A measure over that table
-      cannot distinguish historical backfill from live intake, retries, or
-      operator replay. Add a governed workload-origin key to the operational
-      fact before presenting those global totals as backfill progress.
-   6. Create freshness and activity-age measures under
+   **Current limitation — no action in this report setup:** Do not select
+   **New measure** for Backfill target, remaining-hours, or
+   forecast-completion measures. Skip those measures and continue directly
+   to the freshness measures below.
+
+   `people_counter_gold_operations_hour` contains global hourly totals and
+   cannot distinguish historical backfill from live intake, retries, or
+   operator replay. Supporting a true Backfill forecast requires future
+   upstream work: add a governed workload-origin or backfill-batch key to the
+   control and gold tables, populate it in the registration and aggregation
+   notebooks, rebuild the affected gold partitions, and add the new
+   relationship to the semantic model. That work is outside the current
+   ten-table report configuration.
+
+   5. Create freshness and activity-age measures under
       `people_counter_gold_operations_hour` and place them in the
       `Data Quality KPIs` display folder:
 
@@ -4124,7 +4161,7 @@ Configure the analytical model in Fabric:
       `people_counter_gold_video` does not have a `refreshed_at` column. A
       blank component means that fact has no rows and should be investigated
       separately rather than interpreted as fresh.
-   7. Wait for the web model editor to autosave each committed measure, select
+   6. Wait for the web model editor to autosave each committed measure, select
       **Refresh**, and confirm no orange Direct Lake warning icons remain.
 
 7. Create the analytical report and its pages:
@@ -4135,31 +4172,63 @@ Configure the analytical model in Fabric:
       pc_analytics_report
       ```
 
-   2. Create the **Traffic** page:
+   2. Use this timestamp mapping while building the report pages:
+
+      | Reporting question | Use this timestamp | Example visual title |
+      |---|---|---|
+      | When did entries and exits occur at minute grain? | `people_counter_gold_flow_minute[minute_utc]` | `Entries and exits by minute (UTC)` |
+      | When did entries and exits occur at hourly grain? | `people_counter_gold_flow_hour[hour_utc]` | `Traffic by hour (UTC)` |
+      | When was a source video captured? | `people_counter_gold_dim_video[captured_at_utc]` | `Videos by capture time (UTC)` |
+      | When did video processing complete? | `people_counter_gold_video[completed_at]` | `Videos by completion time (UTC)` |
+      | When were jobs queued, started, or completed? | `people_counter_gold_operations_hour[hour_utc]` | `Hourly operational outcomes (UTC)` |
+
+      This is a reference for the pages below, not a requirement to create
+      five additional charts. Use the timestamp that matches each visual's
+      question, place it on the **X-axis**, use a **Continuous** axis when
+      instructed, and retain `(UTC)` in the title.
+   3. Create the **Traffic** page:
       - Rename the first report page to `Traffic`.
-      - Add three separate `123` Card visuals with:
+      - Add three separate `123` Card visuals using the Traffic measures:
 
         ```text
-        Entries
-        Exits
-        Net Flow
+        people_counter_gold_flow_minute
+          -> Traffic KPIs
+             -> Total Entries
+             -> Total Exits
+             -> Net Flow
         ```
+
+        For each Card:
+        1. Select a blank area of the canvas and select the `123` **Card**
+           visual.
+        2. Keep that Card selected.
+        3. In the **Data** pane, expand
+           `people_counter_gold_flow_minute`, then expand the
+           `Traffic KPIs` display folder.
+        4. Drag exactly one measure—`Total Entries`, `Total Exits`, or
+           `Net Flow`—into the Card's **Values** or **Data** field well.
+        5. Select a blank canvas area and repeat for the next measure.
+
+        Use the calculator-icon measures from `Traffic KPIs`. Do not drag the
+        raw lowercase `entries`, `exits`, or `net_flow` columns into these
+        Cards, and do not put all three measures into one Card.
 
       - Add the traffic-over-time Line chart:
 
         | Visual field well | Field |
         |---|---|
         | X-axis | `people_counter_gold_flow_minute[minute_utc]` |
-        | Y-axis | `Entries`, `Exits` |
+        | Y-axis | `people_counter_gold_flow_minute -> Traffic KPIs -> Total Entries`; `people_counter_gold_flow_minute -> Traffic KPIs -> Total Exits` |
         | Secondary y-axis | Empty |
         | Legend | Empty; the two measure names become the series |
-        | Tooltips | `Net Flow` |
+        | Tooltips | `people_counter_gold_flow_minute -> Traffic KPIs -> Net Flow` |
 
         Set the X-axis to **Continuous**, sort by `minute_utc` ascending, and
         title the visual `Entries and exits by minute (UTC)`.
       - Add a second Line chart with
         `people_counter_gold_flow_minute[minute_utc]` on the X-axis and
-        `Cumulative Net Flow` on the Y-axis. Title it
+        `people_counter_gold_flow_minute -> Traffic KPIs ->
+        Cumulative Net Flow` on the Y-axis. Title it
         `Cumulative net flow (UTC)`.
       - Add a Matrix visual for peak traffic:
 
@@ -4167,48 +4236,105 @@ Configure the analytical model in Fabric:
         |---|---|
         | Rows | `people_counter_gold_dim_date[day_name]` |
         | Columns | `people_counter_gold_dim_time[hour_label]` |
-        | Values | `Entries` |
+        | Values | `people_counter_gold_flow_minute -> Traffic KPIs -> Total Entries` measure |
 
         The sort settings from step 5 keep Monday through Sunday and
         `00:00` through `23:00` in chronological order. Optionally apply
-        background-color conditional formatting to `Entries`.
+        background-color conditional formatting to the `Total Entries`
+        measure. In **Format visual -> General -> Title**, turn **Title** on
+        and set **Title text** to
+        `Entries by weekday and hour (UTC)`.
       - Add a Clustered bar chart:
 
         | Visual field well | Field |
         |---|---|
         | Y-axis | `people_counter_gold_dim_camera[camera_id]` |
-        | X-axis | `Entries`, `Exits` |
+        | X-axis | `people_counter_gold_flow_minute -> Traffic KPIs -> Total Entries`; `people_counter_gold_flow_minute -> Traffic KPIs -> Total Exits` |
         | Legend | Empty; measure names become the series |
 
         Title it `Traffic by camera`.
       - Add separate Slicer visuals for:
 
-        ```text
-        people_counter_gold_dim_date[date_key]
-        people_counter_gold_dim_location[location_id]
-        people_counter_gold_dim_camera[camera_id]
-        ```
+        | Source field | Slicer style | Title |
+        |---|---|---|
+        | `people_counter_gold_dim_date[date_key]` | Between | `Date range (UTC)` |
+        | `people_counter_gold_dim_location[location_id]` | Dropdown | `Location` |
+        | `people_counter_gold_dim_camera[camera_id]` | Dropdown | `Camera` |
 
-        Use **Between** for Date and **Dropdown** for Location and Camera.
-   3. Create the **Video processing** page:
+        For each Slicer, open **Format visual -> General -> Title**, turn
+        **Title** on, and enter the title shown above. Leave all values
+        selected initially.
+   4. Create the **Video processing** page:
       - Add a new page and name it `Video processing`.
-      - Add four separate Card visuals using:
+      - Add four separate `123` Card visuals using the measures under:
 
         ```text
-        Videos Processed
-        Video Hours Processed
-        Distinct Tracks per Video
-        Processing Speed x Real Time
+        people_counter_gold_video
+          -> Video KPIs
+             -> Videos Processed
+             -> Video Hours Processed
+             -> Distinct Tracks per Video
+             -> Processing Speed x Real Time
         ```
+
+        Use one Card per measure:
+
+        1. Select a blank area of the `Video processing` page.
+        2. In **Visualizations -> Build visual**, select the `123` icon whose
+           tooltip is **Card** or **Card (new)**.
+        3. Keep the new empty Card selected.
+        4. In the **Data** pane, expand `people_counter_gold_video`, then
+           expand the `Video KPIs` display folder.
+        5. Drag exactly one calculator-icon measure into the Card's
+           **Values** or **Data** field well.
+        6. Open **Format visual -> General -> Title**, turn **Title** on, and
+           use the corresponding title:
+
+           | Measure | Card title |
+           |---|---|
+           | `Videos Processed` | `Videos processed` |
+           | `Video Hours Processed` | `Video hours processed` |
+           | `Distinct Tracks per Video` | `Average distinct tracks per video` |
+           | `Processing Speed x Real Time` | `Processing speed (x real time)` |
+
+        7. Select a blank canvas area before adding the next Card so the next
+           measure is not added to the currently selected Card.
+        8. Repeat until all four Cards exist, then arrange them next to each
+           other on the first row.
+
+        Use the measures from `Video KPIs`, not the raw
+        `video_duration_seconds`, `processing_seconds`, `distinct_people`, or
+        `speed_x_realtime` columns. Do not put all four measures in one Card.
+        Number formats come from the measures configured in step 6:
+        - `Videos Processed`: whole number.
+        - `Video Hours Processed`: `1` or `2` decimal places.
+        - `Distinct Tracks per Video`: `1` decimal place.
+        - `Processing Speed x Real Time`: `2` decimal places.
+
+        These Cards can be blank until at least one successfully committed
+        video has been written to `people_counter_gold_video`.
 
       - Add a Line chart:
 
         | Visual field well | Field |
         |---|---|
         | X-axis | `people_counter_gold_dim_date[date_key]` |
-        | Y-axis | `Videos Processed` |
-        | Secondary y-axis | `Video Hours Processed` |
+        | Y-axis | `people_counter_gold_video -> Video KPIs -> Videos Processed` measure |
+        | Secondary y-axis | `people_counter_gold_video -> Video KPIs -> Video Hours Processed` measure |
         | Legend | Empty |
+
+        In the **Data** pane:
+        1. Expand `people_counter_gold_dim_date` and drag `date_key` to the
+           **X-axis**.
+        2. Expand `people_counter_gold_video`, then expand `Video KPIs`.
+        3. Drag the calculator-icon `Videos Processed` measure to the
+           **Y-axis**.
+        4. Drag the calculator-icon `Video Hours Processed` measure to the
+           **Secondary y-axis**.
+
+        Do not use `people_counter_gold_video[video_duration_seconds]` as a
+        replacement for `Video Hours Processed`; the measure performs the
+        required seconds-to-hours conversion.
 
         Sort by date ascending and title it `Processed videos by capture
         date`.
@@ -4230,21 +4356,109 @@ Configure the analytical model in Fabric:
         Set numeric detail columns to **Don't summarize**, sort by
         `captured_at_utc` descending, and title it
         `Video processing details`.
-      - Add Dropdown slicers for Camera, Location,
-        `people_counter_gold_dim_model_config[pipeline]`, and
-        `people_counter_gold_dim_model_config[detector_model]`.
-   4. Create the **Operations** page:
-      - Add separate Cards for `Queued Work`, `Started Attempts`,
-        `Succeeded Attempts`, `Failed Attempts`, `Attempt Success Rate`, and
-        `Attempt Failure Rate`.
+      - Add four separate Slicer visuals:
+
+        | Source field | Slicer style | Title |
+        |---|---|---|
+        | `people_counter_gold_dim_camera[camera_id]` | Dropdown | `Camera` |
+        | `people_counter_gold_dim_location[location_id]` | Dropdown | `Location` |
+        | `people_counter_gold_dim_model_config[pipeline]` | Dropdown | `Pipeline` |
+        | `people_counter_gold_dim_model_config[detector_model]` | Dropdown | `Detector model` |
+
+        For each Slicer:
+        1. Select a blank area of the `Video processing` page and add a
+           **Slicer** visual.
+        2. Drag the exact dimension field shown above into the Slicer's
+           **Field** well.
+        3. Set the Slicer style to **Dropdown**.
+        4. Open **Format visual -> General -> Title**, turn **Title** on, and
+           enter the title shown above.
+        5. Leave all values selected initially.
+
+        Use the Camera and Location fields from their dimension tables, not
+        `people_counter_gold_video[camera_id]` or
+        `people_counter_gold_video[location_id]`. Dimension slicers are the
+        shared filtering surface and can filter related facts through the
+        active relationships.
+   5. Create the **Operations** page:
+      - Add six separate `123` Card visuals using the measures under:
+
+        ```text
+        people_counter_gold_operations_hour
+          -> Operations KPIs
+             -> Queued Work
+             -> Started Attempts
+             -> Succeeded Attempts
+             -> Failed Attempts
+             -> Attempt Success Rate
+             -> Attempt Failure Rate
+        ```
+
+        Use one Card per measure:
+
+        1. Select a blank area of the `Operations` page.
+        2. In **Visualizations -> Build visual**, select the `123` icon whose
+           tooltip is **Card** or **Card (new)**.
+        3. Keep the new empty Card selected.
+        4. In the **Data** pane, expand
+           `people_counter_gold_operations_hour`, then expand the
+           `Operations KPIs` display folder.
+        5. Drag exactly one calculator-icon measure into the Card's
+           **Values** or **Data** field well.
+        6. Open **Format visual -> General -> Title**, turn **Title** on, and
+           use the corresponding title:
+
+           | Measure | Card title | Expected format |
+           |---|---|---|
+           | `Queued Work` | `Queued work` | Whole number |
+           | `Started Attempts` | `Started attempts` | Whole number |
+           | `Succeeded Attempts` | `Succeeded attempts` | Whole number |
+           | `Failed Attempts` | `Failed attempts` | Whole number |
+           | `Attempt Success Rate` | `Attempt success rate` | Percentage |
+           | `Attempt Failure Rate` | `Attempt failure rate` | Percentage |
+
+        7. Select a blank canvas area before adding the next Card so the next
+           measure is not added to the current Card.
+        8. Repeat until all six Cards exist. Arrange the four count Cards
+           together and the two percentage Cards together.
+
+        Use the calculator-icon measures from `Operations KPIs`, not the raw
+        lowercase `queued`, `started`, `succeeded`, or `failed` columns. Do
+        not put all six measures into one Card. Percentage formatting comes
+        from the measures configured in step 6; if a rate appears as a
+        decimal such as `0.5`, return to the semantic model and format that
+        measure as Percentage rather than multiplying it by 100 in the
+        visual.
+
+        These Cards show global operational totals. Camera and Location
+        filters do not affect them because
+        `people_counter_gold_operations_hour` has no camera or location
+        grain.
       - Add an hourly Line chart:
 
         | Visual field well | Field |
         |---|---|
         | X-axis | `people_counter_gold_operations_hour[hour_utc]` |
-        | Y-axis | `Queued Work`, `Started Attempts`, `Succeeded Attempts`, `Failed Attempts` |
+        | Y-axis | `people_counter_gold_operations_hour -> Operations KPIs -> Queued Work`; `Started Attempts`; `Succeeded Attempts`; `Failed Attempts` |
         | Secondary y-axis | Empty |
         | Legend | Empty |
+
+        In the **Data** pane:
+        1. Expand `people_counter_gold_operations_hour`.
+        2. Drag the `hour_utc` column to the **X-axis**.
+        3. Under the same table, expand the `Operations KPIs` display folder.
+        4. Drag these four calculator-icon measures to the **Y-axis**:
+
+           ```text
+           Queued Work
+           Started Attempts
+           Succeeded Attempts
+           Failed Attempts
+           ```
+
+        Do not use the raw lowercase `queued`, `started`, `succeeded`, or
+        `failed` columns for this chart. Leave **Legend** empty; Power BI uses
+        the four measure names as the series labels.
 
         Use a continuous UTC axis, sort ascending, and title it
         `Hourly operational outcomes`.
@@ -4253,70 +4467,241 @@ Configure the analytical model in Fabric:
       - Do not add Camera or Location slicers to this page expecting them to
         filter operations. `people_counter_gold_operations_hour` is global
         and has no camera/location grain.
-   5. Create the **Throughput** page:
-      - Add separate Cards for `Completed Video Hours`, `Videos Processed`,
-        `Video Hours Processed`, and `Processing Speed x Real Time`.
-      - Add a Line chart with
-        `people_counter_gold_operations_hour[hour_utc]` on the X-axis and
-        `Completed Video Hours` on the Y-axis. Use a continuous UTC axis,
-        sort ascending, and title it `Hourly completed video hours`.
-      - Add another Line chart with the same X-axis and `Queued Work`,
-        `Started Attempts`, `Succeeded Attempts`, and `Failed Attempts` on the
-        Y-axis. Title it `Hourly processing outcomes`.
-      - Add a **Between** Date Slicer using
-        `people_counter_gold_dim_date[date_key]`.
-      - Do not title this page `Backfill` or add a completion forecast. The
-        current global operations fact does not identify which work belongs
-        to a backfill batch.
-   6. Create the **Data quality** page:
-      - Add separate Cards for:
+   6. Create the **Throughput** page:
+      1. Select the `+` page button and rename the new page `Throughput`.
+      2. Add four separate `123` Card visuals. The Cards use measures from two
+         home tables:
 
-        ```text
-        Data Freshness Minutes
-        Flow Data Freshness Minutes
-        Operations Data Freshness Minutes
-        Latest Video Completion Age Minutes
-        Videos Missing Required Metrics
-        ```
+         | Measure path | Card title | Format |
+         |---|---|---|
+         | `people_counter_gold_operations_hour -> Operations KPIs -> Completed Video Hours` | `Completed video hours (completion date)` | Decimal, `1` or `2` places |
+         | `people_counter_gold_video -> Video KPIs -> Videos Processed` | `Videos processed (capture date)` | Whole number |
+         | `people_counter_gold_video -> Video KPIs -> Video Hours Processed` | `Video hours processed (capture date)` | Decimal, `1` or `2` places |
+         | `people_counter_gold_video -> Video KPIs -> Processing Speed x Real Time` | `Processing speed (x real time)` | Decimal, `2` places |
 
-      - Add a Table visual from
-        `people_counter_gold_dim_model_config` with:
+         Create each Card separately:
+         1. Select a blank canvas area and add the `123` **Card** visual.
+         2. Keep that Card selected.
+         3. In the **Data** pane, expand the measure's home table and display
+            folder shown above.
+         4. Drag exactly one calculator-icon measure into **Values** or
+            **Data**.
+         5. Open **Format visual -> General -> Title**, turn **Title** on,
+            and enter the title shown above.
+         6. Select a blank canvas area before creating the next Card.
 
-        ```text
-        config_sha256
-        pipeline
-        detector_model
-        sample_fps
-        detection_threshold
-        batch_size
-        first_capture_utc
-        last_capture_utc
-        video_count
-        ```
+         Do not use the raw `video_hours_completed`,
+         `video_duration_seconds`, or `speed_x_realtime` columns, and do not
+         add all four measures to one Card.
+      3. Add the **Hourly completed video hours** Line chart:
 
-        Set numeric configuration fields to **Don't summarize** and title it
-        `Observed model configurations`.
-      - Add a second Table with these columns:
+         | Visual field well | Field |
+         |---|---|
+         | X-axis | `people_counter_gold_operations_hour[hour_utc]` |
+         | Y-axis | `people_counter_gold_operations_hour -> Operations KPIs -> Completed Video Hours` measure |
+         | Secondary y-axis | Empty |
+         | Legend | Empty |
+         | Tooltips | `people_counter_gold_operations_hour -> Operations KPIs -> Succeeded Attempts`; `people_counter_gold_operations_hour -> Operations KPIs -> Failed Attempts` |
 
-        ```text
-        people_counter_gold_dim_video[work_id]
-        people_counter_gold_dim_video[asset_id]
-        people_counter_gold_dim_camera[camera_id]
-        people_counter_gold_dim_location[location_id]
-        people_counter_gold_dim_video[captured_at_utc]
-        people_counter_gold_video[video_duration_seconds]
-        people_counter_gold_video[processing_seconds]
-        people_counter_gold_video[distinct_people]
-        ```
+         In the **Data** pane:
+         1. Expand `people_counter_gold_operations_hour`.
+         2. Drag `hour_utc` to the **X-axis**.
+         3. Expand `Operations KPIs`.
+         4. Drag the calculator-icon `Completed Video Hours` measure to the
+            **Y-axis**.
+         5. Drag `Succeeded Attempts` and `Failed Attempts` from the same
+            display folder to **Tooltips**.
 
-        Add
-        `Missing Required Metrics Flag` to **Filters on this visual**, set it
-        to `is 1`, and leave it out of the displayed Table columns. Title the
-        visual `Videos with missing processing metrics`.
-   7. Do not create a **Dwell** page yet. The current gold model does not
+         In **Format visual**:
+         - Set the X-axis type to **Continuous** when available.
+         - Sort by `hour_utc` ascending.
+         - Under **General -> Title**, set the title to
+           `Hourly completed video hours (UTC)`.
+      4. Add the **Hourly processing outcomes** Line chart:
+
+         | Visual field well | Field |
+         |---|---|
+         | X-axis | `people_counter_gold_operations_hour[hour_utc]` |
+         | Y-axis | `people_counter_gold_operations_hour -> Operations KPIs -> Queued Work`; `people_counter_gold_operations_hour -> Operations KPIs -> Started Attempts`; `people_counter_gold_operations_hour -> Operations KPIs -> Succeeded Attempts`; `people_counter_gold_operations_hour -> Operations KPIs -> Failed Attempts` |
+         | Secondary y-axis | Empty |
+         | Legend | Empty; measure names become the series |
+
+         In the **Data** pane:
+         1. Expand `people_counter_gold_operations_hour`.
+         2. Drag `hour_utc` to the **X-axis**.
+         3. Expand `Operations KPIs`.
+         4. Drag the four calculator-icon measures listed above to the
+            **Y-axis**.
+
+         Leave **Legend** empty. Set the X-axis to **Continuous**, sort by
+         `hour_utc` ascending, and set the title to
+         `Hourly processing outcomes (UTC)`.
+      5. Add a Date Slicer:
+
+         | Source field | Slicer style | Title |
+         |---|---|---|
+         | `people_counter_gold_dim_date[date_key]` | Between | `Date range (UTC)` |
+
+         Add a **Slicer** visual, drag `date_key` into its **Field** well, set
+         the style to **Between**, turn the visual title on, and enter
+         `Date range (UTC)`. Leave the full range selected initially.
+      6. Understand how the shared Date slicer affects this page:
+         - It filters `people_counter_gold_operations_hour` through
+           `operation_date`, so `Completed Video Hours` and both Line charts
+           are filtered by the operation/completion date.
+         - It filters `people_counter_gold_video` through `capture_date`, so
+           `Videos Processed`, `Video Hours Processed`, and
+           `Processing Speed x Real Time` are filtered by source-video
+           capture date.
+         - A video captured on one date and completed on another can therefore
+           appear in different date selections depending on the measure.
+           The Card titles state which date role applies.
+      7. Do not add Camera or Location slicers to this page. They would filter
+         the Video Cards but not the two global Operations charts, producing
+         a page where visuals respond inconsistently.
+      8. Do not title this page `Backfill` or add target, remaining-hours, or
+         completion-forecast Cards. The current global operations fact cannot
+         identify which work belongs to a backfill batch.
+      9. Validate the page:
+         - With no Date filter, `Completed Video Hours` and
+           `Video Hours Processed` should normally be close when all
+           successful-video partitions are current. Investigate material
+           differences rather than assuming the measures are interchangeable.
+         - Changing the Date range should update the Cards and charts
+           according to the two date roles described above.
+         - With the current empty successful-video dataset, Video Cards can be
+           blank and the operational visuals can contain only non-success
+           activity.
+   7. Create the **Data quality** page:
+      1. Select the `+` page button and rename the new page `Data quality`.
+      2. Add five separate `123` Card visuals. Four measures are under the
+         Operations fact and one is under the Video fact:
+
+         | Measure path | Card title | Format |
+         |---|---|---|
+         | `people_counter_gold_operations_hour -> Data Quality KPIs -> Data Freshness Minutes` | `Overall data freshness (minutes)` | Whole number |
+         | `people_counter_gold_operations_hour -> Data Quality KPIs -> Flow Data Freshness Minutes` | `Flow data freshness (minutes)` | Whole number |
+         | `people_counter_gold_operations_hour -> Data Quality KPIs -> Operations Data Freshness Minutes` | `Operations data freshness (minutes)` | Whole number |
+         | `people_counter_gold_operations_hour -> Data Quality KPIs -> Latest Video Completion Age Minutes` | `Latest video completion age (minutes)` | Whole number |
+         | `people_counter_gold_video -> Video KPIs -> Videos Missing Required Metrics` | `Videos missing required metrics` | Whole number |
+
+         Create each Card separately:
+         1. Select a blank canvas area and add the `123` **Card** visual.
+         2. Keep that Card selected.
+         3. In the **Data** pane, expand the home table and display folder
+            shown above.
+         4. Drag exactly one calculator-icon measure into **Values** or
+            **Data**.
+         5. Open **Format visual -> General -> Title**, turn **Title** on,
+            and enter the title shown above.
+         6. Select a blank canvas area before creating the next Card.
+
+         Do not use raw `refreshed_at` or `completed_at` columns as Card
+         values. The four age/freshness measures ignore page filters so they
+         report global recency. A blank Card means its source fact has no
+         applicable rows; it does not mean zero minutes old.
+      3. Add the **Observed model configurations** Table:
+         1. Select a blank canvas area and add a **Table** visual.
+         2. In the **Data** pane, expand
+            `people_counter_gold_dim_model_config`.
+         3. Add these columns to the Table's **Columns** or **Values** field
+            well in this order:
+
+            ```text
+            config_sha256
+            pipeline
+            detector_model
+            sample_fps
+            detection_threshold
+            batch_size
+            first_capture_utc
+            last_capture_utc
+            video_count
+            ```
+
+         4. Open each numeric field's dropdown and select
+            **Don't summarize**:
+
+            ```text
+            sample_fps
+            detection_threshold
+            batch_size
+            video_count
+            ```
+
+            `video_count` is already the count stored for that configuration;
+            summing it again in a detail Table would be misleading.
+         5. Sort by `last_capture_utc` descending.
+         6. Open **Format visual -> General -> Title**, turn **Title** on,
+            and enter `Observed model configurations`.
+         7. Do not add hidden `config_json` or `counting_line_json` unless raw
+            configuration diagnostics are specifically required.
+      4. Add the **Videos with missing processing metrics** Table:
+         1. Select a blank canvas area and add a second **Table** visual.
+         2. Add these fields in order:
+
+            ```text
+            people_counter_gold_dim_video[work_id]
+            people_counter_gold_dim_video[asset_id]
+            people_counter_gold_dim_camera[camera_id]
+            people_counter_gold_dim_location[location_id]
+            people_counter_gold_dim_video[captured_at_utc]
+            people_counter_gold_video[video_duration_seconds]
+            people_counter_gold_video[processing_seconds]
+            people_counter_gold_video[distinct_people]
+            ```
+
+         3. For `video_duration_seconds`, `processing_seconds`, and
+            `distinct_people`, open the field dropdown and select
+            **Don't summarize**.
+         4. Sort by
+            `people_counter_gold_dim_video[captured_at_utc]` descending.
+         5. Click the second Table visual on the canvas—the one containing
+            `work_id`, `asset_id`, and the processing metric columns. Confirm
+            that its selection border is visible. Do not select the
+            `Observed model configurations` Table or one of the Cards.
+         6. In the **Filters** pane, confirm the section says
+            **Filters on this visual** for the selected second Table.
+         7. In the **Data** pane, expand
+            `people_counter_gold_video -> Video KPIs`.
+         8. Drag the calculator-icon `Missing Required Metrics Flag` measure
+            into **Filters on this visual**—usually the
+            **Add data fields here** target. Do not drag it into the Table's
+            **Columns** or **Values** field well, and do not display it as a
+            Table column.
+         9. In the new `Missing Required Metrics Flag` filter card, choose
+            advanced or numeric filtering and set:
+
+            ```text
+            is 1
+            ```
+
+         10. Open **Format visual -> General -> Title**, turn **Title** on,
+            and enter `Videos with missing processing metrics`.
+      5. Do not add Date, Camera, or Location slicers to this page:
+         - the freshness/age measures intentionally ignore filters;
+         - the ModelConfig dimension is global in the current model; and
+         - adding slicers would make only the missing-metrics Card and Table
+           respond, which would make the page behavior inconsistent.
+      6. Validate the page:
+         - `Data Freshness Minutes` should equal the larger nonblank value of
+           `Flow Data Freshness Minutes` and
+           `Operations Data Freshness Minutes`.
+         - Freshness and age values should not be negative. A negative value
+           indicates clock or timestamp problems.
+         - `Videos Missing Required Metrics` should match the number of
+           distinct `work_id` rows displayed in the filtered missing-metrics
+           Table.
+         - Each row in `Observed model configurations` should represent one
+           unique `config_sha256`.
+         - With the current Lakehouse state, the Video completion-age Card,
+           both Tables, and the missing-metrics Card can be blank because no
+           video has successfully committed. Do not replace blanks with zero
+           merely to make the page appear populated.
+   8. Do not create a **Dwell** page yet. The current gold model does not
       contain a committed person-dwell fact, so a dwell distribution or
       percentile visual would be unsupported.
-   8. Save the report. Because the current Lakehouse has no successfully
+   9. Save the report. Because the current Lakehouse has no successfully
       committed videos, video-, traffic-, camera-, location-, and
       configuration-based visuals can initially be blank. The Time dimension
       still has 1,440 rows and the Date dimension has its seed date; those
