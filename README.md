@@ -155,6 +155,34 @@ For event-driven ADLS ingestion, bounded dispatch, lease recovery,
 observability, Direct Lake reporting, and large backfills, use the
 [production Fabric implementation plan](notebooks/fabric/README.md).
 
+### Publish backfill manifests
+
+The optional producer-side publisher generates manifests from a reviewed
+camera catalog, uploads videos through ADLS staging, and atomically moves each
+manifest into `incoming/` after its video:
+
+```bash
+uv sync --extra publisher
+
+uv run --extra publisher people-counter-publish-manifests \
+  --catalog config/camera_catalog.csv \
+  --inventory config/video_inventory.csv \
+  --video-root /mnt/source-videos \
+  --partition-prefix north-entrance/camera-17/ \
+  --storage-account <storage-account> \
+  --filesystem <source-filesystem> \
+  --checkpoint state/camera-17.sqlite3 \
+  --rejection-report state/camera-17-rejections.csv
+```
+
+The host must also provide `ffprobe` from an approved FFmpeg installation.
+Run the same command with `--dry-run` and without the Azure destination
+arguments to validate catalog matching, capture times, hashes, dimensions,
+and durations before publication. See the
+[camera catalog and publisher runbook](notebooks/fabric/README.md#71-create-the-camera-metadata-catalog)
+for the complete CSV schema, Azure identity requirements, retry behavior, and
+backfill registration procedure.
+
 ### Build CPU or GPU deployment bundles
 
 The [bundle generator](scripts/build_sdk_bundle.py) builds the SDK wheel,
@@ -286,7 +314,7 @@ person for up to 30 seconds.
 Run the focused tracking and frame-reader regressions with:
 
 ```bash
-uv run --extra cpu python -m unittest discover -s tests -v
+uv run --extra cpu --extra publisher python -m unittest discover -s tests -v
 ```
 
 Supervision is MIT licensed. RF-DETR code and RF-DETR Large weights are

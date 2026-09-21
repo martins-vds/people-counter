@@ -30,6 +30,7 @@ dev = [
 people-counter = "people_counter.cli:main"
 people-counter-rtdetr = "people_counter.cli:rtdetr_osnet_main"
 people-counter-rfdetr = "people_counter.cli:rfdetr_botsort_main"
+people-counter-publish-manifests = "people_counter.manifest_publisher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -64,6 +65,10 @@ experiments = [
     "jupyterlab>=4.4.0",
     "matplotlib>=3.8.0",
     "pandas>=2.2.0",
+]
+publisher = [
+    "azure-identity>=1.17.0,<2",
+    "azure-storage-file-datalake>=12.16.0,<13",
 ]
 
 [tool.uv]
