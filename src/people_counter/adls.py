@@ -256,7 +256,6 @@ class AzureDataLakeStorage:
         try:
             self._file_client(source_path).rename_file(
                 f"{self._filesystem}/{destination_path}",
-                etag="*",
                 match_condition=MatchConditions.IfMissing,
             )
         except (ResourceExistsError, ResourceModifiedError) as error:

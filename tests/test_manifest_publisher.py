@@ -1646,11 +1646,28 @@ class AzureDataLakeStorageTests(unittest.TestCase):
 
         _, destination, kwargs = filesystem.renames[0]
         self.assertEqual(destination, "footage/incoming/video.mp4")
-        self.assertEqual(kwargs["etag"], "*")
+        self.assertNotIn("etag", kwargs)
         self.assertIs(
             kwargs["match_condition"],
             MatchConditions.IfMissing,
         )
+
+    def test_rename_rejects_existing_destination_before_server_call(self):
+        filesystem = FakeFileSystem()
+        filesystem.objects["staging/video.mp4"] = (VIDEO_BYTES, '"source"')
+        filesystem.objects["incoming/video.mp4"] = (
+            VIDEO_BYTES,
+            '"destination"',
+        )
+        storage = self.storage(filesystem)
+
+        with self.assertRaisesRegex(
+            PublicationConflictError,
+            "Destination already exists: incoming/video.mp4",
+        ):
+            storage.rename("staging/video.mp4", "incoming/video.mp4")
+
+        self.assertEqual(filesystem.renames, [])
 
     def test_upload_and_read_manifest_bytes(self):
         filesystem = FakeFileSystem()
