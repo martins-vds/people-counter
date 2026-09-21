@@ -59,12 +59,13 @@ Run or deploy the notebooks in this order:
 | [`04_process_video.ipynb`](./04_process_video.ipynb) | Owns a lease, processes one video sequentially, writes attempt-scoped output, and publishes the committed attempt | Once per claimed work item |
 | [`05_watchdog_recovery.ipynb`](./05_watchdog_recovery.ipynb) | Requeues expired retryable leases and dead-letters exhausted work | Every five minutes |
 | [`06_reconcile_publication.ipynb`](./06_reconcile_publication.ipynb) | Detects ledger/output/job-correlation anomalies and records reconciliation findings | Every 15 minutes and after releases |
-| [`07_build_gold_aggregates.ipynb`](./07_build_gold_aggregates.ipynb) | Builds minute, hour, camera, and operational aggregates for Direct Lake reports | Incrementally after committed work |
+| [`07_build_gold_aggregates.ipynb`](./07_build_gold_aggregates.ipynb) | Builds minute-flow, hourly-flow, video, and operational facts for Direct Lake reports | Incrementally after committed work |
 | [`08_capacity_benchmark.ipynb`](./08_capacity_benchmark.ipynb) | Measures processing speed and calculates the minimum parallelism for the 30-day target | Before selecting capacity and after model/runtime changes |
 | [`09_maintain_delta.ipynb`](./09_maintain_delta.ipynb) | Removes expired uncommitted output and runs reviewed Delta optimization/vacuum | Daily or weekly according to retention policy |
 | [`10_replay_work.ipynb`](./10_replay_work.ipynb) | Audits and requeues one terminal/dead-lettered work item | Operator-approved incident recovery |
 | [`11_validate_observability.ipynb`](./11_validate_observability.ipynb) | Validates running-job, queue, burn-down, flow, and camera-level reporting data | Before dashboard release and during incident diagnosis |
 | [`12_plan_gold_refresh.ipynb`](./12_plan_gold_refresh.ipynb) | Discovers date partitions changed within a lookback window for gold refresh | At the start of every gold-refresh pipeline run |
+| [`13_build_analytics_dimensions.ipynb`](./13_build_analytics_dimensions.ipynb) | Builds physical Date, Time, Camera, Location, Video, and ModelConfig Delta dimensions | After gold fact partitions finish refreshing |
 
 The earlier
 [`fabric_retry_safe_pipeline.ipynb`](../fabric_retry_safe_pipeline.ipynb) is a
@@ -101,7 +102,9 @@ flowchart LR
     OT --> CV
     OL --> CV
     CV --> G[07 gold aggregates]
+    G --> D[13 analytics dimensions]
     G --> SM[Direct Lake semantic model]
+    D --> SM
     SM --> BI[Power BI analytical report]
 
     MON[Workspace monitoring Eventhouse] --> RT[Real-Time Dashboard]
@@ -162,6 +165,12 @@ Required fields are `schema_version`, `asset_id`, `asset_version`,
 `location_id`, `captured_at_utc`, `camera_timezone`, `counting_line`, and
 `expected_sha256`. Reversing the counting-line endpoints reverses `in` and
 `out`.
+
+Treat `camera_id` as the stable identity of one physical camera placement.
+It must map to exactly one `location_id` and one IANA `camera_timezone`.
+When a camera is moved to another location or its timezone identity changes,
+publish subsequent manifests with a new `camera_id`. The analytics-dimension
+build fails visibly rather than combining conflicting camera identities.
 
 Logical identities:
 
@@ -406,6 +415,12 @@ people_counter_gold_flow_minute
 people_counter_gold_flow_hour
 people_counter_gold_video
 people_counter_gold_operations_hour
+people_counter_gold_dim_date
+people_counter_gold_dim_time
+people_counter_gold_dim_camera
+people_counter_gold_dim_location
+people_counter_gold_dim_video
+people_counter_gold_dim_model_config
 ```
 
 Partition large attempt/output tables by a derived capture date, not by
@@ -1532,11 +1547,12 @@ Do not manually calculate `FLOW_DATE`, `CAPTURE_DATE`, or `OPERATION_DATE`.
 The planner discovers recently affected dates.
 
 1. Create a Data Pipeline named `pc-gold-refresh`.
-2. Create one pipeline parameter:
+2. Create these pipeline parameters:
 
    | Parameter | Type | Default |
    |---|---|---:|
    | `LOOKBACK_HOURS` | `Int` | `48` |
+   | `FULL_REBUILD_DIMENSIONS` | `Bool` | `false` |
 
 3. Add a Notebook activity named `PlanGoldRefresh`.
 4. Target
@@ -1596,11 +1612,68 @@ The planner discovers recently affected dates.
     | Max interval | `600` seconds |
     | Retry conditions | Empty |
 
-14. Save and run manually with `LOOKBACK_HOURS=48`.
-15. Verify `PlanGoldRefresh` output contains `partition_count` and `items`,
-    and verify the corresponding `people_counter_gold_*` partitions.
-16. If existing completed work is older than 48 hours, temporarily increase
-    `LOOKBACK_HOURS`, run once, and restore it to `48`.
+14. Outside the ForEach, add a Notebook activity named
+    `BuildAnalyticsDimensions`.
+15. Connect the **On success** output of `ForEachGoldPartition` to
+    `BuildAnalyticsDimensions`. Do not place this activity inside the
+    ForEach: all affected fact partitions must finish before dimensions are
+    rebuilt.
+16. Target
+    [`13_build_analytics_dimensions.ipynb`](./13_build_analytics_dimensions.ipynb).
+17. Configure its base parameters:
+
+    | Parameter | Type | Value |
+    |---|---|---|
+    | `LOOKBACK_HOURS` | `Int` | `@pipeline().parameters.LOOKBACK_HOURS` |
+    | `FULL_REBUILD` | `Bool` | `@pipeline().parameters.FULL_REBUILD_DIMENSIONS` |
+    | `DATABASE` | `String` | Empty |
+    | `TABLE_PREFIX` | `String` | `people_counter` |
+
+18. Configure `BuildAnalyticsDimensions` General settings:
+
+    | Setting | Value |
+    |---|---|
+    | Timeout | `0.01:00:00` |
+    | Enable retries | Yes |
+    | Retry | `2` |
+    | Interval type | Increasing Delay |
+    | Initial interval | `60` seconds |
+    | Max interval | `300` seconds |
+    | Retry conditions | Empty |
+
+19. Before the first dimension run in an existing environment, rerun
+    [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb). This
+    creates the six dimension tables and adds `time_key` and
+    `config_sha256` relationship columns to the existing gold fact tables.
+    Rerun behavior during this upgrade is:
+    - Notebook `00` uses `mode("ignore")` for existing Delta tables, adds only
+      missing relationship columns, re-creates the three committed views, and
+      inserts the registration-lock seed only if it is absent. It does not
+      truncate existing tables or reset work status.
+    - Notebook `07` validates its three required dates and replaces only the
+      matching `FLOW_DATE`, `CAPTURE_DATE`, and `OPERATION_DATE` partitions.
+      Other partitions are untouched. Running it again for the same dates is
+      idempotent when the committed source data has not changed, except for
+      `refreshed_at`. Supplying an incorrect date can replace that date's
+      partition with an empty result, so normally run it through
+      `pc-gold-refresh` instead of manually.
+    - Notebook `09` is not required to create or populate dimensions. With
+      `RUN_VACUUM=false`, it deletes expired **uncommitted** attempt output
+      according to `UNCOMMITTED_RETENTION_DAYS` and optimizes recent
+      capture-date partitions; committed output is retained. With
+      `RUN_VACUUM=true`, it also permanently removes obsolete Delta files
+      older than the approved retention period, reducing available time
+      travel. Keep `RUN_VACUUM=false` during this upgrade.
+20. Save and run manually with `LOOKBACK_HOURS=48` and
+    `FULL_REBUILD_DIMENSIONS=true`. The dimension notebook also performs a
+    full video-dimension build automatically when its target table is empty.
+21. Verify `PlanGoldRefresh` output contains `partition_count` and `items`.
+    Verify the corresponding `people_counter_gold_*` fact partitions and all
+    six `people_counter_gold_dim_*` tables.
+22. If existing completed work is older than 48 hours, temporarily increase
+    `LOOKBACK_HOURS` enough to rebuild every historical gold fact partition,
+    run with `FULL_REBUILD_DIMENSIONS=true`, and then restore
+    `LOOKBACK_HOURS` to `48` and `FULL_REBUILD_DIMENSIONS` to `false`.
 
 #### 6.7.4 Create `pc-delta-maintenance`
 
@@ -2487,20 +2560,30 @@ Create the Power BI operations report:
    For each measure:
 
    1. Keep the semantic model in **Editing** mode.
-   2. In the Data or Model explorer pane, select
-      `people_counter_video_work`. This becomes the measure's home table for
-      organization; a measure can still reference the other model tables.
-   3. Select **Home -> New measure** in the toolbar. Depending on the current
-      editor layout, you can instead right-click
-      `people_counter_video_work` and select **New measure**.
-   4. In the DAX formula bar, replace the generated text with one complete
-      measure definition below.
-   5. Select the check mark or press Enter to commit it.
-   6. Repeat **New measure** for every definition. Do not paste all measures
-      into one formula bar entry.
-   7. Optionally set their **Display folder** property to
+   2. For `Queue Depth`, `Active Leases`, `Dead Letter Count`,
+      `Failed Work Count`, `Oldest Queue Age Minutes`, and
+      `Open Reconciliation Errors`, select
+      `people_counter_video_work` as the home table and use display folder
       `Operations KPIs`.
-   8. Save the semantic model after all measures validate.
+   3. For `Completed Video Hours`, select
+      `people_counter_gold_operations_hour` as the home table and use display
+      folder `Backfill KPIs`.
+   4. Select **Home -> New measure** in the toolbar. Depending on the current
+      editor layout, you can instead right-click the intended home table and
+      select **New measure**.
+   5. In the DAX formula bar, replace the generated text with one complete
+      measure definition below.
+   6. Select the check mark or press Enter to commit it.
+   7. Repeat **New measure** for every definition. Do not paste all measures
+      into one formula bar entry.
+   8. Set each measure's **Display folder** property to the folder specified
+      above.
+   9. Save the semantic model after all measures validate.
+
+   If `Completed Video Hours` was already created under
+   `people_counter_video_work`, select the measure and change its **Home
+   table** property to `people_counter_gold_operations_hour`, then set its
+   display folder to `Backfill KPIs`; do not create a duplicate measure.
 
    Replace table names in DAX only if a deployment uses a different
    `TABLE_PREFIX`:
@@ -2828,17 +2911,227 @@ Create the Power BI operations report:
          drill-through field uses the parent table's `work_id`.
    - Table: unresolved reconciliation findings with severity, finding type,
      work ID, attempt ID, first detection, last detection, and details.
-10. Add a **Backfill** page:
-    - Completed Video Hours card.
-    - Hourly completed video-hours line chart.
-    - Queued/started/succeeded/failed series from
-      `people_counter_gold_operations_hour`.
-    - Cards for remaining hours and forecast completion after those measures
-      are added.
-11. Add slicers for status, camera, location, capture date, and completion
-    date where the selected tables provide those fields.
-12. Apply model-level row-level security for authorized locations/cameras
-    before sharing.
+10. Add and configure the **Backfill** page:
+    1. Return to `pc_operations_model`, select
+       `people_counter_gold_operations_hour` as the home table, and add these
+       measures to the `Backfill KPIs` display folder:
+
+       ```DAX
+       Backfill Target Video Hours =
+       200000.0
+
+       Backfill Completed Video Hours =
+       CALCULATE(
+           [Completed Video Hours],
+           REMOVEFILTERS(people_counter_gold_operations_hour)
+       )
+
+       Remaining Video Hours =
+       MAX(
+           0.0,
+           [Backfill Target Video Hours]
+               - [Backfill Completed Video Hours]
+       )
+
+       Backfill Start UTC =
+       CALCULATE(
+           MIN(people_counter_gold_operations_hour[hour_utc]),
+           REMOVEFILTERS(people_counter_gold_operations_hour)
+       )
+
+       Average Video Hours Per Wall Hour =
+       VAR StartedAt = [Backfill Start UTC]
+       VAR ElapsedHours =
+           IF(
+               ISBLANK(StartedAt),
+               BLANK(),
+               MAX(1, DATEDIFF(StartedAt, UTCNOW(), HOUR))
+           )
+       RETURN
+           DIVIDE([Backfill Completed Video Hours], ElapsedHours)
+
+       Forecast Completion UTC =
+       VAR RatePerHour = [Average Video Hours Per Wall Hour]
+       VAR RemainingHours = [Remaining Video Hours]
+       RETURN
+           IF(
+               RatePerHour > 0,
+               UTCNOW() + DIVIDE(RemainingHours, RatePerHour * 24.0),
+               BLANK()
+           )
+       ```
+
+       Immediately after creating the measures, configure their model formats
+       while still editing `pc_operations_model`:
+
+       1. Select `Backfill Completed Video Hours`, set its format to
+          **Decimal number**, and set decimal places to `1` or `2`.
+       2. Select `Remaining Video Hours`, set its format to
+          **Decimal number**, and use the same number of decimal places.
+       3. Select `Forecast Completion UTC` and set its format to
+          **Date/Time**.
+
+       The current `123` Card visual does not expose display-unit or
+       decimal-place controls under **Callout -> Value**, so the Cards use
+       these model formats. Change `Backfill Target Video Hours` only when the
+       approved target differs from 200,000 hours.
+    2. Return to `pc_operations_report`, select the `+` page button, and
+       rename the page `Backfill`.
+    3. Add three separate `123` Card visuals. Each Card must contain exactly
+       one measure:
+
+       1. Create the **Completed video hours** Card:
+          - Select a blank area of the `Backfill` page canvas.
+          - In **Visualizations -> Build visual**, hover over the visual icons
+            and select the `123` icon whose tooltip is **Card** or
+            **Card (new)**.
+          - Keep the new empty Card selected.
+          - In the **Data** pane, expand
+            `people_counter_gold_operations_hour`, then expand the
+            `Backfill KPIs` display folder.
+          - Drag `Backfill Completed Video Hours` into the Card's
+            **Values** field well. If the current UI labels that well
+            **Data**, use **Data** instead. Drag the measure itself, not
+            `completed_video_seconds` or another table column.
+          - After the measure has been added, select
+            **Visualizations -> Format visual** (paintbrush icon), expand
+            **General -> Title**, turn **Title** on, and enter
+            `Completed video hours` in **Title text**. The title settings may
+            not appear until the Card contains a measure.
+
+       2. Create the **Remaining video hours** Card:
+          - Select a blank canvas area so the first Card is no longer the
+            active visual, then select the `123` **Card** icon again. This
+            creates a second Card instead of adding another value to the
+            first one.
+          - From
+            `people_counter_gold_operations_hour -> Backfill KPIs`, drag
+            `Remaining Video Hours` into **Values** (or **Data**).
+          - Open **Format visual -> General -> Title**, turn **Title** on,
+            and set **Title text** to `Remaining video hours`.
+
+       3. Create the **Forecast completion (UTC)** Card:
+          - Select a blank canvas area and add a third `123` **Card** visual.
+          - From
+            `people_counter_gold_operations_hour -> Backfill KPIs`, drag
+            `Forecast Completion UTC` into **Values** (or **Data**).
+          - Open **Format visual -> General -> Title**, turn **Title** on,
+            and set **Title text** to `Forecast completion (UTC)`.
+          - A blank value is expected until completed video hours exist and
+            `Average Video Hours Per Wall Hour` is greater than zero.
+
+       Arrange the three Cards next to each other on the first row of the
+       page. Do not select all three measures while one Card is active; that
+       would create one multi-value Card rather than three independent KPI
+       Cards. If selecting a measure first creates another visual type, keep
+       that visual selected and select the `123` Card icon to convert it.
+    4. Add the **Hourly completed video hours** Line chart:
+
+       | Visual field well | Field |
+       |---|---|
+       | X-axis | `people_counter_gold_operations_hour[hour_utc]` |
+       | Y-axis | `people_counter_video_work -> Operations KPIs -> Completed Video Hours` measure |
+       | Secondary y-axis | Empty |
+       | Legend | Empty |
+
+       In the **Data** pane, expand `people_counter_video_work`, expand the
+       `Operations KPIs` display folder, and drag `Completed Video Hours` to
+       the **Y-axis**. Use the original measure defined earlier:
+
+       ```DAX
+       Completed Video Hours =
+       SUM(people_counter_gold_operations_hour[video_hours_completed])
+       ```
+
+       The measure appears under `people_counter_video_work` ->
+       `Operations KPIs` because `people_counter_video_work` is its home table
+       and `Operations KPIs` is its display folder. Its DAX can still read
+       `people_counter_gold_operations_hour`.
+
+       Do **not** use `Backfill Completed Video Hours` on this chart.
+       `Completed Video Hours` respects the `hour_utc` axis filter and
+       therefore shows the video hours completed during each hour.
+       `Backfill Completed Video Hours` removes all filters from
+       `people_counter_gold_operations_hour`, so it is appropriate for the
+       grand-total Card but would repeat the same grand total at every point
+       on the hourly line.
+
+       Use a continuous X-axis, sort ascending, and add `succeeded`, `failed`,
+       and `p95_processing_seconds` as Tooltips.
+    5. Add a second Line chart titled `Hourly work outcomes`:
+
+       | Visual field well | Field |
+       |---|---|
+       | X-axis | `people_counter_gold_operations_hour[hour_utc]` |
+       | Y-axis | `queued`, `started`, `succeeded`, `failed` |
+       | Secondary y-axis | Empty |
+       | Legend | Leave empty; Power BI uses the four value names as series |
+
+       Set each numeric field to **Sum**, use a continuous X-axis, and sort
+       ascending.
+    6. Confirm the cards agree with
+       `11_validate_observability.ipynb` and that the hourly charts use the
+       same date range.
+11. Add page-appropriate slicers:
+    - On the **Operations** page, add one Slicer visual per field:
+
+      | Slicer | Source field | Style/default |
+      |---|---|---|
+      | Status | `people_counter_video_work[status]` | Dropdown; all selected |
+      | Camera | `people_counter_video_work[camera_id]` | Dropdown; all selected |
+      | Location | `people_counter_video_work[location_id]` | Dropdown; all selected |
+      | Capture date | `people_counter_video_work[capture_date]` | Between |
+      | Completion date | `people_counter_video_work[completed_at]` | Between or Relative date |
+
+      For each slicer, select a blank canvas area, select the **Slicer**
+      visual, drag the source field into its Field well, and set the title.
+      Keep these slicers page-scoped initially.
+    - Do not add those `video_work` slicers to the **Backfill** page expecting
+      them to filter the hourly gold charts.
+      `people_counter_gold_operations_hour` is intentionally disconnected
+      from `video_work`.
+    - On the **Backfill** page, add one date Slicer using
+      `people_counter_gold_operations_hour[operation_date]`, with style
+      **Between**. It filters the hourly backfill visuals only.
+    - The **Attempt History** page inherits the selected work through
+      drill-through; do not add another work-status slicer there.
+12. Apply model-level row-level security before sharing:
+    1. Open `pc_operations_model` in Editing mode and select
+       **Manage roles**.
+    2. Create a role for an authorized scope, for example
+       `Location_<location-id>`.
+    3. Select `people_counter_video_work` and enter a table filter such as:
+
+       ```DAX
+       [location_id] = "<authorized-location-id>"
+       ```
+
+       For a role restricted to both location and camera, use:
+
+       ```DAX
+       [location_id] = "<authorized-location-id>"
+           && [camera_id] IN {
+               "<authorized-camera-id-1>",
+               "<authorized-camera-id-2>"
+           }
+       ```
+
+    4. Save the role. The active single-direction relationships propagate the
+       `video_work` filter to attempts, receipts, reconciliation findings, and
+       replay requests.
+    5. Use **Test as role** and verify that Operations and Attempt History
+       show only authorized work.
+    6. In the Fabric workspace, open the semantic model's **Security** or
+       **Manage roles** page and assign an Entra security group to the role.
+       Prefer groups over individual users.
+    7. Give restricted report consumers the **Viewer** role or distribute the
+       report through an app. Workspace Admin, Member, and Contributor users
+       can bypass RLS and must not be used to validate consumer restrictions.
+    8. `people_counter_gold_operations_hour` is disconnected and contains
+       global aggregates, so the location/camera role does not filter the
+       Backfill page. If restricted users must not see global totals, publish
+       a separate restricted report/model built from location-grain gold
+       tables; hiding the Backfill page is not a security boundary.
 13. Save and publish `pc_operations_report`. Reconcile several report values
     against the output from `11_validate_observability.ipynb`.
 
@@ -2880,23 +3173,163 @@ Configure the analytical model in Fabric:
 
 1. Open `<lakehouse-name>` in Lakehouse view and verify all
    `people_counter_gold_*` physical Delta tables are visible under
-   **Tables**.
-2. Select **New semantic model**, choose **Direct Lake on OneLake**, and add
-   the four gold tables. Do not choose Direct Lake on SQL; this model does not
-   use SQL views or SQL-endpoint security, and OneLake mode avoids
-   DirectQuery fallback. New Lakehouses do not automatically create this
-   model.
-3. Create Date, Time, Camera, Location, and Video dimensions. Relate them to
-   the gold facts with one-to-many, single-direction relationships.
-4. Mark the Date table and set UTC as the storage time zone. Add local-time
+   **Tables**. If the six `people_counter_gold_dim_*` tables are missing,
+   rerun [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb)
+   and then run
+   [`13_build_analytics_dimensions.ipynb`](./13_build_analytics_dimensions.ipynb)
+   once with `FULL_REBUILD=true`.
+2. Select **New semantic model** and name it:
+
+   ```text
+   pc_analytics_model
+   ```
+
+   Choose **Direct Lake on OneLake** and select all ten physical Delta tables:
+
+   ```text
+   people_counter_gold_flow_minute
+   people_counter_gold_flow_hour
+   people_counter_gold_video
+   people_counter_gold_operations_hour
+   people_counter_gold_dim_date
+   people_counter_gold_dim_time
+   people_counter_gold_dim_camera
+   people_counter_gold_dim_location
+   people_counter_gold_dim_video
+   people_counter_gold_dim_model_config
+   ```
+
+   Do not reuse `pc_operations_model`: that model supports operational ledger
+   and backfill monitoring, while `pc_analytics_model` supports curated
+   business analytics over the gold tables. Do not choose Direct Lake on SQL;
+   this model does not use SQL views or SQL-endpoint security, and OneLake
+   mode avoids DirectQuery fallback. New Lakehouses do not automatically
+   create this model.
+
+   If `pc_analytics_model` was already created with only the four fact tables,
+   open it with **Open data model**, switch to **Editing** mode, select
+   **OneLake catalog** on the ribbon, and add the six
+   `people_counter_gold_dim_*` tables. Select **Refresh** on the modeling
+   ribbon afterward so the model synchronizes the latest fact-table columns.
+3. Understand the physical dimension tables; do not create DAX calculated
+   tables for these entities:
+
+   - A **fact table** contains repeatable measurements at a declared grain.
+     For example, `people_counter_gold_flow_hour` has one row per UTC hour,
+     camera, and location, with numeric `entries`, `exits`, and `net_flow`
+     values.
+   - A **dimension table** is a small descriptive lookup with one row per
+     unique key. Report slicers and axis labels come from dimensions; their
+     relationships filter the matching rows in the fact tables.
+   - [`13_build_analytics_dimensions.ipynb`](./13_build_analytics_dimensions.ipynb)
+     creates these dimensions as physical Delta tables so the model remains
+     Direct Lake on OneLake:
+
+     | Semantic role | Physical table | One row per | Use in reports |
+     |---|---|---|---|
+     | Date | `people_counter_gold_dim_date` | UTC calendar date | Year, quarter, month, week, weekday, and date slicers |
+     | Time | `people_counter_gold_dim_time` | Minute of day (`0` through `1439`) | Hour, minute, and day-part grouping |
+     | Camera | `people_counter_gold_dim_camera` | `camera_id` | Camera and camera-timezone slicers |
+     | Location | `people_counter_gold_dim_location` | `location_id` | Location slicers and location-level RLS |
+     | Video | `people_counter_gold_dim_video` | `work_id` | Asset, capture, and individual-video drill-through |
+     | ModelConfig | `people_counter_gold_dim_model_config` | `config_sha256` | Pipeline, detector, sample-rate, threshold, and configuration comparison |
+
+     Camera and Location currently use their IDs as labels because the
+     manifest contract does not contain friendly names. Add governed display
+     names to these physical dimensions later if the source system provides
+     them; do not type aliases manually into individual reports.
+4. Create the relationships in the semantic model:
+
+   1. Keep `pc_analytics_model` in **Editing** mode and open **Model** view.
+   2. Create each relationship by dragging the dimension key onto the
+      corresponding fact key. If drag-and-drop is unavailable, use
+      **Manage relationships -> New relationship** and select the same two
+      columns.
+   3. Create the Date relationships:
+
+      | From: dimension key (`1`) | To: fact key (`*`) |
+      |---|---|
+      | `people_counter_gold_dim_date[date_key]` | `people_counter_gold_flow_minute[flow_date]` |
+      | `people_counter_gold_dim_date[date_key]` | `people_counter_gold_flow_hour[flow_date]` |
+      | `people_counter_gold_dim_date[date_key]` | `people_counter_gold_video[capture_date]` |
+      | `people_counter_gold_dim_date[date_key]` | `people_counter_gold_operations_hour[operation_date]` |
+
+   4. Create the Time relationships:
+
+      | From: dimension key (`1`) | To: fact key (`*`) |
+      |---|---|
+      | `people_counter_gold_dim_time[time_key]` | `people_counter_gold_flow_minute[time_key]` |
+      | `people_counter_gold_dim_time[time_key]` | `people_counter_gold_flow_hour[time_key]` |
+      | `people_counter_gold_dim_time[time_key]` | `people_counter_gold_video[time_key]` |
+      | `people_counter_gold_dim_time[time_key]` | `people_counter_gold_operations_hour[time_key]` |
+
+   5. Create the Camera relationships:
+
+      | From: dimension key (`1`) | To: fact key (`*`) |
+      |---|---|
+      | `people_counter_gold_dim_camera[camera_id]` | `people_counter_gold_flow_minute[camera_id]` |
+      | `people_counter_gold_dim_camera[camera_id]` | `people_counter_gold_flow_hour[camera_id]` |
+      | `people_counter_gold_dim_camera[camera_id]` | `people_counter_gold_video[camera_id]` |
+
+   6. Create the Location relationships:
+
+      | From: dimension key (`1`) | To: fact key (`*`) |
+      |---|---|
+      | `people_counter_gold_dim_location[location_id]` | `people_counter_gold_flow_minute[location_id]` |
+      | `people_counter_gold_dim_location[location_id]` | `people_counter_gold_flow_hour[location_id]` |
+      | `people_counter_gold_dim_location[location_id]` | `people_counter_gold_video[location_id]` |
+
+   7. Create the ModelConfig relationship:
+
+      | From: dimension key (`1`) | To: fact key (`*`) |
+      |---|---|
+      | `people_counter_gold_dim_model_config[config_sha256]` | `people_counter_gold_video[config_sha256]` |
+
+   8. Create the Video relationship:
+
+      | From | To |
+      |---|---|
+      | `people_counter_gold_dim_video[work_id]` | `people_counter_gold_video[work_id]` |
+
+      Both tables contain one row per successfully committed `work_id`, so
+      Power BI should detect **One-to-one** cardinality. Power BI enforces
+      bidirectional filtering for a one-to-one relationship; this is the only
+      exception to the single-direction rule in this model.
+   9. For every one-to-many relationship, set:
+      - **Cardinality**: `One to many (1:*)`
+      - **Cross-filter direction**: `Single`, from dimension to fact
+      - **Make this relationship active**: checked
+      - **Assume referential integrity**: unchecked
+   10. Do not relate Camera directly to Location and do not relate Date or
+       Time directly to Video. Those extra paths would make filtering
+       ambiguous because each dimension already filters the fact tables
+       independently.
+   11. Confirm each relationship shows `1` on the
+       `people_counter_gold_dim_*` side and `*` on the fact side. A
+       many-to-many result means the dimension build is invalid; rerun
+       notebook `13` and investigate duplicate keys rather than accepting
+       many-to-many cardinality.
+5. Mark the Date table and set UTC as the storage time zone. Add local-time
    display columns from the manifest's IANA camera timezone; do not rewrite
    fact timestamps.
-5. Add the measures listed below and format counts as whole numbers,
+6. Add the measures listed below and format counts as whole numbers,
    durations as seconds/minutes, and rates explicitly.
-6. Build separate **Operations**, **Backfill**, **Traffic**, **Dwell**, and
+7. Build separate **Operations**, **Backfill**, **Traffic**, **Dwell**, and
    **Data quality** report pages.
-7. Apply row-level security by authorized `location_id`/`camera_id`.
-8. Validate each report result against
+8. Apply row-level security by authorized `location_id`/`camera_id`:
+   - Put location filters on
+     `people_counter_gold_dim_location[location_id]` and camera filters on
+     `people_counter_gold_dim_camera[camera_id]`. The active
+     dimension-to-fact relationships propagate those filters to the flow and
+     video facts.
+   - `people_counter_gold_operations_hour` is intentionally global and has no
+     camera or location key. Camera/location RLS does **not** filter it.
+   - If restricted consumers must not see global queue, throughput, or
+     backfill totals, remove `people_counter_gold_operations_hour` from their
+     semantic model and publish global operations through a separate model
+     restricted to authorized operations staff. Hiding a report page is not
+     a security boundary.
+9. Validate each report result against
    [`11_validate_observability.ipynb`](./11_validate_observability.ipynb)
    before publishing the app.
 
