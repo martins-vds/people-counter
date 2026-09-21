@@ -3510,22 +3510,30 @@ Date, Time, Camera, Location, Video, ModelConfig
 Measures:
 
 ```text
-Entries, Exits, NetFlow, VideosProcessed, VideoHoursProcessed,
-DistinctTracksPerVideo, AverageDwellSeconds, P50DwellSeconds,
-P95DwellSeconds, ProcessingFPS, ProcessingSpeedXRealTime,
-SuccessRate, FailureRate, DataFreshnessMinutes
+Entries, Exits, Net Flow, Cumulative Net Flow, Videos Processed,
+Video Hours Processed, Distinct Tracks per Video,
+Processing Speed x Real Time, Queued Work, Started Attempts,
+Succeeded Attempts, Failed Attempts, Attempt Success Rate,
+Attempt Failure Rate, Completed Video Hours, Data Freshness Minutes
 ```
 
 Recommended visuals:
 
 - entries and exits by observation time;
-- cumulative flow and estimated occupancy;
+- cumulative net flow;
 - peak traffic by hour and weekday;
 - camera/location comparison;
-- dwell-duration distribution;
 - distinct tracks per video;
-- completed video-hours and forecast completion;
+- completed video-hours and processing throughput;
 - data-quality and freshness indicators.
+
+Do not create `Average Dwell Seconds`, `P50 Dwell Seconds`,
+`P95 Dwell Seconds`, or `Processing FPS` in this version of the analytical
+model. The ten selected tables do not contain person-level dwell rows,
+processed-frame counts, or the other source fields needed to calculate those
+measures correctly. Do not substitute `distinct_people` for dwell or
+`speed_x_realtime` for FPS. Add those measures only after a committed
+person-dwell fact and processing-frame metrics are added to the gold layer.
 
 Configure the analytical model in Fabric:
 
@@ -3536,39 +3544,42 @@ Configure the analytical model in Fabric:
    and then run
    [`13_build_analytics_dimensions.ipynb`](./13_build_analytics_dimensions.ipynb)
    once with `FULL_REBUILD=true`.
-2. Select **New semantic model** and name it:
+2. Create the analytical semantic model:
 
-   ```text
-   pc_analytics_model
-   ```
+   1. Keep `<lakehouse-name>` open in Lakehouse view.
+   2. Select **New semantic model**.
+   3. Enter this name:
 
-   Choose **Direct Lake on OneLake** and select all ten physical Delta tables:
+      ```text
+      pc_analytics_model
+      ```
 
-   ```text
-   people_counter_gold_flow_minute
-   people_counter_gold_flow_hour
-   people_counter_gold_video
-   people_counter_gold_operations_hour
-   people_counter_gold_dim_date
-   people_counter_gold_dim_time
-   people_counter_gold_dim_camera
-   people_counter_gold_dim_location
-   people_counter_gold_dim_video
-   people_counter_gold_dim_model_config
-   ```
+   4. Choose **Direct Lake on OneLake**.
+   5. Select all ten physical Delta tables:
+
+      ```text
+      people_counter_gold_flow_minute
+      people_counter_gold_flow_hour
+      people_counter_gold_video
+      people_counter_gold_operations_hour
+      people_counter_gold_dim_date
+      people_counter_gold_dim_time
+      people_counter_gold_dim_camera
+      people_counter_gold_dim_location
+      people_counter_gold_dim_video
+      people_counter_gold_dim_model_config
+      ```
+
+   6. Confirm the selection to create the model.
+   7. If the model opens in **Viewing** mode, switch to **Editing** mode in
+      the upper-right corner.
+   8. Confirm all ten table cards appear before continuing to step 3.
 
    Do not reuse `pc_operations_model`: that model supports operational ledger
    and backfill monitoring, while `pc_analytics_model` supports curated
    business analytics over the gold tables. Do not choose Direct Lake on SQL;
    this model does not use SQL views or SQL-endpoint security, and OneLake
-   mode avoids DirectQuery fallback. New Lakehouses do not automatically
-   create this model.
-
-   If `pc_analytics_model` was already created with only the four fact tables,
-   open it with **Open data model**, switch to **Editing** mode, select
-   **OneLake catalog** on the ribbon, and add the six
-   `people_counter_gold_dim_*` tables. Select **Refresh** on the modeling
-   ribbon afterward so the model synchronizes the latest fact-table columns.
+   mode avoids DirectQuery fallback.
 3. Understand the physical dimension tables; do not create DAX calculated
    tables for these entities:
 
@@ -3605,49 +3616,49 @@ Configure the analytical model in Fabric:
       columns.
    3. Create the Date relationships:
 
-      | From: dimension key (`1`) | To: fact key (`*`) |
-      |---|---|
-      | `people_counter_gold_dim_date[date_key]` | `people_counter_gold_flow_minute[flow_date]` |
-      | `people_counter_gold_dim_date[date_key]` | `people_counter_gold_flow_hour[flow_date]` |
-      | `people_counter_gold_dim_date[date_key]` | `people_counter_gold_video[capture_date]` |
-      | `people_counter_gold_dim_date[date_key]` | `people_counter_gold_operations_hour[operation_date]` |
+      | From table | From column | To table | To column | Cardinality |
+      |---|---|---|---|---|
+      | `people_counter_gold_dim_date` | `date_key` | `people_counter_gold_flow_minute` | `flow_date` | One to many (`1:*`) |
+      | `people_counter_gold_dim_date` | `date_key` | `people_counter_gold_flow_hour` | `flow_date` | One to many (`1:*`) |
+      | `people_counter_gold_dim_date` | `date_key` | `people_counter_gold_video` | `capture_date` | One to many (`1:*`) |
+      | `people_counter_gold_dim_date` | `date_key` | `people_counter_gold_operations_hour` | `operation_date` | One to many (`1:*`) |
 
    4. Create the Time relationships:
 
-      | From: dimension key (`1`) | To: fact key (`*`) |
-      |---|---|
-      | `people_counter_gold_dim_time[time_key]` | `people_counter_gold_flow_minute[time_key]` |
-      | `people_counter_gold_dim_time[time_key]` | `people_counter_gold_flow_hour[time_key]` |
-      | `people_counter_gold_dim_time[time_key]` | `people_counter_gold_video[time_key]` |
-      | `people_counter_gold_dim_time[time_key]` | `people_counter_gold_operations_hour[time_key]` |
+      | From table | From column | To table | To column | Cardinality |
+      |---|---|---|---|---|
+      | `people_counter_gold_dim_time` | `time_key` | `people_counter_gold_flow_minute` | `time_key` | One to many (`1:*`) |
+      | `people_counter_gold_dim_time` | `time_key` | `people_counter_gold_flow_hour` | `time_key` | One to many (`1:*`) |
+      | `people_counter_gold_dim_time` | `time_key` | `people_counter_gold_video` | `time_key` | One to many (`1:*`) |
+      | `people_counter_gold_dim_time` | `time_key` | `people_counter_gold_operations_hour` | `time_key` | One to many (`1:*`) |
 
    5. Create the Camera relationships:
 
-      | From: dimension key (`1`) | To: fact key (`*`) |
-      |---|---|
-      | `people_counter_gold_dim_camera[camera_id]` | `people_counter_gold_flow_minute[camera_id]` |
-      | `people_counter_gold_dim_camera[camera_id]` | `people_counter_gold_flow_hour[camera_id]` |
-      | `people_counter_gold_dim_camera[camera_id]` | `people_counter_gold_video[camera_id]` |
+      | From table | From column | To table | To column | Cardinality |
+      |---|---|---|---|---|
+      | `people_counter_gold_dim_camera` | `camera_id` | `people_counter_gold_flow_minute` | `camera_id` | One to many (`1:*`) |
+      | `people_counter_gold_dim_camera` | `camera_id` | `people_counter_gold_flow_hour` | `camera_id` | One to many (`1:*`) |
+      | `people_counter_gold_dim_camera` | `camera_id` | `people_counter_gold_video` | `camera_id` | One to many (`1:*`) |
 
    6. Create the Location relationships:
 
-      | From: dimension key (`1`) | To: fact key (`*`) |
-      |---|---|
-      | `people_counter_gold_dim_location[location_id]` | `people_counter_gold_flow_minute[location_id]` |
-      | `people_counter_gold_dim_location[location_id]` | `people_counter_gold_flow_hour[location_id]` |
-      | `people_counter_gold_dim_location[location_id]` | `people_counter_gold_video[location_id]` |
+      | From table | From column | To table | To column | Cardinality |
+      |---|---|---|---|---|
+      | `people_counter_gold_dim_location` | `location_id` | `people_counter_gold_flow_minute` | `location_id` | One to many (`1:*`) |
+      | `people_counter_gold_dim_location` | `location_id` | `people_counter_gold_flow_hour` | `location_id` | One to many (`1:*`) |
+      | `people_counter_gold_dim_location` | `location_id` | `people_counter_gold_video` | `location_id` | One to many (`1:*`) |
 
    7. Create the ModelConfig relationship:
 
-      | From: dimension key (`1`) | To: fact key (`*`) |
-      |---|---|
-      | `people_counter_gold_dim_model_config[config_sha256]` | `people_counter_gold_video[config_sha256]` |
+      | From table | From column | To table | To column | Cardinality |
+      |---|---|---|---|---|
+      | `people_counter_gold_dim_model_config` | `config_sha256` | `people_counter_gold_video` | `config_sha256` | One to many (`1:*`) |
 
    8. Create the Video relationship:
 
-      | From | To |
-      |---|---|
-      | `people_counter_gold_dim_video[work_id]` | `people_counter_gold_video[work_id]` |
+      | From table | From column | To table | To column | Cardinality |
+      |---|---|---|---|---|
+      | `people_counter_gold_dim_video` | `work_id` | `people_counter_gold_video` | `work_id` | One to one (`1:1`) |
 
       Both tables contain one row per successfully committed `work_id`, so
       Power BI should detect **One-to-one** cardinality. Power BI enforces
@@ -3667,26 +3678,820 @@ Configure the analytical model in Fabric:
        many-to-many result means the dimension build is invalid; rerun
        notebook `13` and investigate duplicate keys rather than accepting
        many-to-many cardinality.
-5. Mark the Date table and set UTC as the storage time zone. Add local-time
-   display columns from the manifest's IANA camera timezone; do not rewrite
-   fact timestamps.
-6. Add the measures listed below and format counts as whole numbers,
-   durations as seconds/minutes, and rates explicitly.
-7. Build separate **Operations**, **Backfill**, **Traffic**, **Dwell**, and
-   **Data quality** report pages.
-8. Apply row-level security by authorized `location_id`/`camera_id`:
-   - Put location filters on
-     `people_counter_gold_dim_location[location_id]` and camera filters on
-     `people_counter_gold_dim_camera[camera_id]`. The active
-     dimension-to-fact relationships propagate those filters to the flow and
-     video facts.
-   - `people_counter_gold_operations_hour` is intentionally global and has no
-     camera or location key. Camera/location RLS does **not** filter it.
-   - If restricted consumers must not see global queue, throughput, or
-     backfill totals, remove `people_counter_gold_operations_hour` from their
-     semantic model and publish global operations through a separate model
-     restricted to authorized operations staff. Hiding a report page is not
-     a security boundary.
+   12. Select **Refresh** on the semantic-model modeling ribbon and wait for
+       it to complete. Direct Lake table cards can temporarily show an orange
+       warning triangle after the model or its relationships are created. Its
+       tooltip warns that DAX queries might fall back to DirectQuery or fail
+       until the model is refreshed.
+   13. Confirm the orange warning triangles disappear after the refresh. If
+       they remain, do not continue to report creation:
+       - Open the semantic model's refresh history and resolve any failed
+         refresh.
+       - Confirm the model is **Direct Lake on OneLake** and that every
+         selected item is a physical Delta table rather than a SQL endpoint
+         view.
+       - Confirm the attached capacity is running and has sufficient
+         resources.
+
+       An empty fact or dimension table does not by itself require changing
+       the relationship definitions above.
+5. Configure the Date and Time dimensions:
+
+   1. Keep `pc_analytics_model` in **Editing** mode.
+   2. Select the `people_counter_gold_dim_date` table in Model view or Model
+      explorer.
+   3. Use **Mark as date table** and select `date_key` as the date column.
+      Depending on the current Fabric UI, **Mark as date table** appears in
+      the table's ribbon action or its Properties pane after the table is
+      selected.
+   4. Configure the Date columns. In this step, **configure** means reviewing
+      and setting column metadata in `pc_analytics_model`; it does not mean
+      selecting **Transform data**, editing the Delta table, or changing the
+      stored values:
+
+      1. Expand `people_counter_gold_dim_date` in **Model explorer**.
+      2. Select one column at a time. The column's settings appear in the
+         **Properties** pane.
+      3. Verify the **Data type** shown in the table below. Notebook `13`
+         already writes these physical Delta types, so normally no data-type
+         change is required. If a type does not match, stop and refresh the
+         semantic model; do not coerce an incorrectly synchronized Direct
+         Lake column just to continue.
+      4. Perform only these required changes:
+         - Select `date_key`; verify **Data type** is **Date**, then set its
+           display **Format** to `yyyy-MM-dd` if a custom format field is
+           available. If the UI only provides named date formats, choose an
+           unambiguous year-month-day format.
+         - Select `month_name`; set **Sort by column** to
+           `calendar_month`.
+         - Select `month_short_name`; set **Sort by column** to
+           `calendar_month`.
+         - Select `day_name`; set **Sort by column** to
+           `iso_day_of_week`.
+         - Select `refreshed_at`; turn **Is hidden** on, or use its context
+           menu and select **Hide in report view**.
+      5. The remaining Date columns require no property change after their
+         data types are verified. They are retained for report grouping and
+         sorting.
+
+      Use this table as the verification checklist:
+
+      | Column | Data type/format | Additional setting |
+      |---|---|---|
+      | `date_key` | Date; `yyyy-MM-dd` | Date-table key |
+      | `calendar_year` | Whole number | None |
+      | `calendar_quarter` | Whole number | None |
+      | `calendar_month` | Whole number | None |
+      | `month_name` | Text | Sort by `calendar_month` |
+      | `month_short_name` | Text | Sort by `calendar_month` |
+      | `year_month` | Text | Already sorts chronologically as `yyyy-MM` |
+      | `day_of_month` | Whole number | None |
+      | `iso_day_of_week` | Whole number | Monday=`1`, Sunday=`7` |
+      | `day_name` | Text | Sort by `iso_day_of_week` |
+      | `iso_week_year` | Whole number | Use with ISO week, not `calendar_year` |
+      | `iso_week_of_year` | Whole number | None |
+      | `iso_year_week` | Text | Use for weekly chart axes |
+      | `is_weekend` | True/False | None |
+      | `refreshed_at` | Date/Time | Hide in report view |
+
+      After applying the three sort settings, select each text column again
+      and confirm its **Sort by column** property shows the expected numeric
+      field. Do not sort month or weekday names alphabetically.
+   5. Select `people_counter_gold_dim_time` and configure its model metadata:
+
+      1. Expand the table in **Model explorer** and select one column at a
+         time.
+      2. Verify the data types in the checklist below.
+      3. Apply only these property changes:
+         - Select `time_label`; set **Sort by column** to `time_key`.
+         - Select `hour_label`; set **Sort by column** to `hour_24`.
+         - Select `time_key`; turn **Is hidden** on after its relationships
+           have been created and verified.
+         - Select `refreshed_at`; turn **Is hidden** on.
+      4. No property change is required for `hour_24`.
+         It is a whole-number field containing `0` through `23`. Use it as a
+         visual axis, row, column, or grouping field when the report should
+         display numeric hours such as `0`, `1`, ..., `23`.
+      5. Use `hour_label` instead when the report should display formatted
+         hour labels such as `00:00`, `01:00`, ..., `23:00`.
+         Its **Sort by column = hour_24** setting keeps those labels in
+         chronological order.
+
+      | Column | Data type/format | Additional setting |
+      |---|---|---|
+      | `time_key` | Whole number | Hide in report view after relationships exist |
+      | `hour_24` | Whole number | No property change; use for `0`-through-`23` report grouping |
+      | `minute_of_hour` | Whole number | None |
+      | `time_label` | Text | Sort by `time_key` |
+      | `hour_label` | Text | Sort by `hour_24` |
+      | `day_part` | Text | Use as a category; default order is alphabetical |
+      | `refreshed_at` | Date/Time | Hide in report view |
+
+   6. Hide technical and duplicate relationship fields from report authors.
+      Hiding means turning **Is hidden** on in the column's Properties, or
+      selecting **Hide in report view** from its context menu. Do not delete
+      these columns.
+
+      1. First confirm every relationship in step 4:
+         - the relationship is present and active;
+         - the dimension is on the `1` side and the fact is on the `*` side,
+           except for the documented Video `1:1` relationship;
+         - cross-filter direction is correct; and
+         - the orange Direct Lake warnings disappear after **Refresh**.
+
+         After those checks, relationship columns can be hidden without
+         disabling their relationships.
+      2. Hide all copies of the technical `time_key`:
+
+         ```text
+         people_counter_gold_dim_time[time_key]
+         people_counter_gold_flow_minute[time_key]
+         people_counter_gold_flow_hour[time_key]
+         people_counter_gold_video[time_key]
+         people_counter_gold_operations_hour[time_key]
+         ```
+
+         `time_key` is the integer minute-of-day key used to join facts to
+         the Time dimension. Report authors should use
+         `people_counter_gold_dim_time[time_label]`, `hour_label`,
+         `hour_24`, or `day_part` instead.
+      3. In `people_counter_gold_dim_model_config`, hide:
+
+         ```text
+         config_json
+         counting_line_json
+         ```
+
+         `config_json` is the full canonical SDK configuration serialized as
+         JSON. `counting_line_json` contains the raw counting-line
+         coordinates. Keep the parsed report-friendly columns visible:
+
+         ```text
+         pipeline
+         detector_model
+         device_variant
+         device
+         batch_size
+         sample_fps
+         detection_threshold
+         use_fp16
+         camera_motion_compensation
+         ```
+
+         Leave the two JSON columns visible only when report authors need raw
+         configuration diagnostics. Hiding them does not remove the data from
+         the Delta table.
+      4. Hide these duplicated relationship keys on the fact tables:
+
+         | Fact table | Hide these fact columns | Use this dimension field in slicers/grouping |
+         |---|---|---|
+         | `people_counter_gold_flow_minute` | `flow_date` | `people_counter_gold_dim_date[date_key]` |
+         | `people_counter_gold_flow_minute` | `camera_id` | `people_counter_gold_dim_camera[camera_id]` |
+         | `people_counter_gold_flow_minute` | `location_id` | `people_counter_gold_dim_location[location_id]` |
+         | `people_counter_gold_flow_hour` | `flow_date` | `people_counter_gold_dim_date[date_key]` |
+         | `people_counter_gold_flow_hour` | `camera_id` | `people_counter_gold_dim_camera[camera_id]` |
+         | `people_counter_gold_flow_hour` | `location_id` | `people_counter_gold_dim_location[location_id]` |
+         | `people_counter_gold_video` | `work_id` | `people_counter_gold_dim_video[work_id]` |
+         | `people_counter_gold_video` | `capture_date` | `people_counter_gold_dim_date[date_key]` |
+         | `people_counter_gold_video` | `camera_id` | `people_counter_gold_dim_camera[camera_id]` |
+         | `people_counter_gold_video` | `location_id` | `people_counter_gold_dim_location[location_id]` |
+         | `people_counter_gold_video` | `config_sha256` | `people_counter_gold_dim_model_config[config_sha256]` |
+         | `people_counter_gold_operations_hour` | `operation_date` | `people_counter_gold_dim_date[date_key]` |
+
+         These fact columns duplicate the business keys exposed by the
+         dimension tables. Leaving both visible makes it easy to build a
+         slicer from the fact copy, which may not filter the other fact
+         tables. Dimension fields are the shared filtering surface.
+      5. Keep the fact timestamp columns visible:
+
+         ```text
+         people_counter_gold_flow_minute[minute_utc]
+         people_counter_gold_flow_hour[hour_utc]
+         people_counter_gold_video[captured_at_utc]
+         people_counter_gold_video[completed_at]
+         people_counter_gold_operations_hour[hour_utc]
+         ```
+
+         These are not duplicate relationship keys. They are needed for
+         continuous UTC chart axes and detailed tables.
+      6. Hide `refreshed_at` in every table where it exists unless report
+         authors need to inspect raw refresh timestamps. Use the freshness
+         measures from step 6 instead of adding raw `refreshed_at` columns to
+         business visuals.
+
+      Hiding is a report-authoring convenience, not a security control. Hidden
+      columns remain queryable and continue participating in relationships.
+   7. Keep all fact timestamps in UTC. Power BI Date/Time columns do not store
+      the source IANA timezone as part of each value, so there is no separate
+      semantic-model setting that changes these UTC columns into camera-local
+      timestamps.
+   8. Use `minute_utc`, `hour_utc`, `captured_at_utc`, and `completed_at` for
+      current report axes and label report titles with `(UTC)` where needed.
+      `people_counter_gold_dim_camera[camera_timezone]` can be shown as
+      descriptive metadata, but it does not convert timestamps.
+   9. Do not add DAX offsets such as `UTCNOW() - 7/24`. Fixed offsets are
+      incorrect across cameras and daylight-saving transitions. Camera-local
+      reporting requires local date/time keys materialized upstream from the
+      IANA timezone; those columns are outside the current ten-table model.
+
+6. Create and format the supported analytical measures:
+
+   1. Use this sequence for every measure below:
+      1. Keep `pc_analytics_model` in **Editing** mode.
+      2. In Model explorer, select the table specified as the measure's home
+         table.
+      3. Select **New measure** from the modeling ribbon or the table's
+         context menu.
+      4. Replace the placeholder expression in the formula bar with one DAX
+         definition.
+      5. Commit it with the formula-bar check mark or Enter and wait for the
+         web model editor to finish autosaving.
+      6. Select the new measure and set its **Home table**, **Display folder**,
+         format, and decimal places in Properties.
+      7. Repeat for the next definition. Do not paste several measure
+         definitions into one formula bar; it accepts one at a time.
+   2. For Traffic measures, select
+      `people_counter_gold_flow_minute` as the home table, select
+      **New measure**, and place each measure in the `Traffic KPIs` display
+      folder:
+
+      ```DAX
+      Entries =
+      SUM(people_counter_gold_flow_minute[entries])
+
+      Exits =
+      SUM(people_counter_gold_flow_minute[exits])
+
+      Net Flow =
+      [Entries] - [Exits]
+
+      Cumulative Net Flow =
+      VAR CurrentMinute =
+          MAX(people_counter_gold_flow_minute[minute_utc])
+      RETURN
+          CALCULATE(
+              [Net Flow],
+              FILTER(
+                  ALLSELECTED(
+                      people_counter_gold_flow_minute[minute_utc]
+                  ),
+                  people_counter_gold_flow_minute[minute_utc]
+                      <= CurrentMinute
+              )
+          )
+      ```
+
+      Format all four as whole numbers. `Cumulative Net Flow` is the running
+      sum inside the current report selection. Do not label it occupancy
+      unless an approved initial occupancy and consistent line direction are
+      also applied.
+   3. For Video measures, select `people_counter_gold_video` as the home
+      table and place the measures in the `Video KPIs` display folder:
+
+      ```DAX
+      Videos Processed =
+      DISTINCTCOUNT(people_counter_gold_video[work_id])
+
+      Video Hours Processed =
+      DIVIDE(
+          SUM(people_counter_gold_video[video_duration_seconds]),
+          3600.0
+      )
+
+      Distinct Tracks per Video =
+      AVERAGE(people_counter_gold_video[distinct_people])
+
+      Processing Speed x Real Time =
+      DIVIDE(
+          SUM(people_counter_gold_video[video_duration_seconds]),
+          SUM(people_counter_gold_video[processing_seconds])
+      )
+
+      Videos Missing Required Metrics =
+      CALCULATE(
+          DISTINCTCOUNT(people_counter_gold_video[work_id]),
+          FILTER(
+              people_counter_gold_video,
+              ISBLANK(
+                  people_counter_gold_video[video_duration_seconds]
+              )
+                  || ISBLANK(
+                      people_counter_gold_video[processing_seconds]
+                  )
+                  || ISBLANK(
+                      people_counter_gold_video[distinct_people]
+                  )
+          )
+      )
+
+      Missing Required Metrics Flag =
+      VAR MissingDuration =
+          ISBLANK(
+              MAX(
+                  people_counter_gold_video[video_duration_seconds]
+              )
+          )
+      VAR MissingProcessing =
+          ISBLANK(
+              MAX(people_counter_gold_video[processing_seconds])
+          )
+      VAR MissingTracks =
+          ISBLANK(
+              MAX(people_counter_gold_video[distinct_people])
+          )
+      RETURN
+          IF(
+              MissingDuration || MissingProcessing || MissingTracks,
+              1,
+              0
+          )
+      ```
+
+      Format:
+      - `Videos Processed`, `Videos Missing Required Metrics`, and
+        `Missing Required Metrics Flag`: whole number.
+      - `Video Hours Processed`: decimal number with `1` or `2` decimals.
+      - `Distinct Tracks per Video`: decimal number with `1` decimal.
+      - `Processing Speed x Real Time`: decimal number with `2` decimals.
+
+      `Distinct Tracks per Video` is an average of the per-video
+      `distinct_people` value. Do not sum tracker IDs across videos or cameras
+      and describe the result as unique humans.
+   4. For Operations measures, select
+      `people_counter_gold_operations_hour` as the home table and place these
+      measures in the `Operations KPIs` display folder:
+
+      ```DAX
+      Queued Work =
+      SUM(people_counter_gold_operations_hour[queued])
+
+      Started Attempts =
+      SUM(people_counter_gold_operations_hour[started])
+
+      Succeeded Attempts =
+      SUM(people_counter_gold_operations_hour[succeeded])
+
+      Failed Attempts =
+      SUM(people_counter_gold_operations_hour[failed])
+
+      Attempt Success Rate =
+      DIVIDE(
+          [Succeeded Attempts],
+          [Succeeded Attempts] + [Failed Attempts]
+      )
+
+      Attempt Failure Rate =
+      DIVIDE(
+          [Failed Attempts],
+          [Succeeded Attempts] + [Failed Attempts]
+      )
+
+      Completed Video Hours =
+      SUM(
+          people_counter_gold_operations_hour[video_hours_completed]
+      )
+      ```
+
+      Format the four count measures as whole numbers, both rates as
+      percentages with `1` or `2` decimal places, and
+      `Completed Video Hours` as a decimal number with `1` or `2` decimal
+      places. These rates describe attempt outcomes recorded in the
+      operations aggregate; they are not a distinct-video success rate.
+   5. Do not create Backfill target, remaining-hours, or forecast-completion
+      measures in `pc_analytics_model` yet.
+      `people_counter_gold_operations_hour` contains global hourly totals and
+      has no workload-origin or backfill-batch key. A measure over that table
+      cannot distinguish historical backfill from live intake, retries, or
+      operator replay. Add a governed workload-origin key to the operational
+      fact before presenting those global totals as backfill progress.
+   6. Create freshness and activity-age measures under
+      `people_counter_gold_operations_hour` and place them in the
+      `Data Quality KPIs` display folder:
+
+      ```DAX
+      Flow Data Freshness Minutes =
+      VAR LatestRefresh =
+          CALCULATE(
+              MAX(people_counter_gold_flow_minute[refreshed_at]),
+              REMOVEFILTERS()
+          )
+      RETURN
+          IF(
+              ISBLANK(LatestRefresh),
+              BLANK(),
+              DATEDIFF(LatestRefresh, UTCNOW(), MINUTE)
+          )
+
+      Latest Video Completion Age Minutes =
+      VAR LatestCompletion =
+          CALCULATE(
+              MAX(people_counter_gold_video[completed_at]),
+              REMOVEFILTERS()
+          )
+      RETURN
+          IF(
+              ISBLANK(LatestCompletion),
+              BLANK(),
+              DATEDIFF(LatestCompletion, UTCNOW(), MINUTE)
+          )
+
+      Operations Data Freshness Minutes =
+      VAR LatestRefresh =
+          CALCULATE(
+              MAX(
+                  people_counter_gold_operations_hour[refreshed_at]
+              ),
+              REMOVEFILTERS()
+          )
+      RETURN
+          IF(
+              ISBLANK(LatestRefresh),
+              BLANK(),
+              DATEDIFF(LatestRefresh, UTCNOW(), MINUTE)
+          )
+
+      Data Freshness Minutes =
+      MAX(
+          [Flow Data Freshness Minutes],
+          [Operations Data Freshness Minutes]
+      )
+      ```
+
+      Format all four measures as whole numbers. They intentionally ignore
+      page filters. `Data Freshness Minutes` reports the older of the latest
+      flow and operations refreshes. `Latest Video Completion Age Minutes`
+      measures business activity age, not table-refresh age, because
+      `people_counter_gold_video` does not have a `refreshed_at` column. A
+      blank component means that fact has no rows and should be investigated
+      separately rather than interpreted as fresh.
+   7. Wait for the web model editor to autosave each committed measure, select
+      **Refresh**, and confirm no orange Direct Lake warning icons remain.
+
+7. Create the analytical report and its pages:
+
+   1. From `pc_analytics_model`, select **New report** and name it:
+
+      ```text
+      pc_analytics_report
+      ```
+
+   2. Create the **Traffic** page:
+      - Rename the first report page to `Traffic`.
+      - Add three separate `123` Card visuals with:
+
+        ```text
+        Entries
+        Exits
+        Net Flow
+        ```
+
+      - Add the traffic-over-time Line chart:
+
+        | Visual field well | Field |
+        |---|---|
+        | X-axis | `people_counter_gold_flow_minute[minute_utc]` |
+        | Y-axis | `Entries`, `Exits` |
+        | Secondary y-axis | Empty |
+        | Legend | Empty; the two measure names become the series |
+        | Tooltips | `Net Flow` |
+
+        Set the X-axis to **Continuous**, sort by `minute_utc` ascending, and
+        title the visual `Entries and exits by minute (UTC)`.
+      - Add a second Line chart with
+        `people_counter_gold_flow_minute[minute_utc]` on the X-axis and
+        `Cumulative Net Flow` on the Y-axis. Title it
+        `Cumulative net flow (UTC)`.
+      - Add a Matrix visual for peak traffic:
+
+        | Visual field well | Field |
+        |---|---|
+        | Rows | `people_counter_gold_dim_date[day_name]` |
+        | Columns | `people_counter_gold_dim_time[hour_label]` |
+        | Values | `Entries` |
+
+        The sort settings from step 5 keep Monday through Sunday and
+        `00:00` through `23:00` in chronological order. Optionally apply
+        background-color conditional formatting to `Entries`.
+      - Add a Clustered bar chart:
+
+        | Visual field well | Field |
+        |---|---|
+        | Y-axis | `people_counter_gold_dim_camera[camera_id]` |
+        | X-axis | `Entries`, `Exits` |
+        | Legend | Empty; measure names become the series |
+
+        Title it `Traffic by camera`.
+      - Add separate Slicer visuals for:
+
+        ```text
+        people_counter_gold_dim_date[date_key]
+        people_counter_gold_dim_location[location_id]
+        people_counter_gold_dim_camera[camera_id]
+        ```
+
+        Use **Between** for Date and **Dropdown** for Location and Camera.
+   3. Create the **Video processing** page:
+      - Add a new page and name it `Video processing`.
+      - Add four separate Card visuals using:
+
+        ```text
+        Videos Processed
+        Video Hours Processed
+        Distinct Tracks per Video
+        Processing Speed x Real Time
+        ```
+
+      - Add a Line chart:
+
+        | Visual field well | Field |
+        |---|---|
+        | X-axis | `people_counter_gold_dim_date[date_key]` |
+        | Y-axis | `Videos Processed` |
+        | Secondary y-axis | `Video Hours Processed` |
+        | Legend | Empty |
+
+        Sort by date ascending and title it `Processed videos by capture
+        date`.
+      - Add a Table visual with these columns in order:
+
+        ```text
+        people_counter_gold_dim_video[work_id]
+        people_counter_gold_dim_video[asset_id]
+        people_counter_gold_dim_video[asset_version]
+        people_counter_gold_dim_camera[camera_id]
+        people_counter_gold_dim_location[location_id]
+        people_counter_gold_dim_video[captured_at_utc]
+        people_counter_gold_video[video_duration_seconds]
+        people_counter_gold_video[processing_seconds]
+        people_counter_gold_video[speed_x_realtime]
+        people_counter_gold_video[distinct_people]
+        ```
+
+        Set numeric detail columns to **Don't summarize**, sort by
+        `captured_at_utc` descending, and title it
+        `Video processing details`.
+      - Add Dropdown slicers for Camera, Location,
+        `people_counter_gold_dim_model_config[pipeline]`, and
+        `people_counter_gold_dim_model_config[detector_model]`.
+   4. Create the **Operations** page:
+      - Add separate Cards for `Queued Work`, `Started Attempts`,
+        `Succeeded Attempts`, `Failed Attempts`, `Attempt Success Rate`, and
+        `Attempt Failure Rate`.
+      - Add an hourly Line chart:
+
+        | Visual field well | Field |
+        |---|---|
+        | X-axis | `people_counter_gold_operations_hour[hour_utc]` |
+        | Y-axis | `Queued Work`, `Started Attempts`, `Succeeded Attempts`, `Failed Attempts` |
+        | Secondary y-axis | Empty |
+        | Legend | Empty |
+
+        Use a continuous UTC axis, sort ascending, and title it
+        `Hourly operational outcomes`.
+      - Add a Date Slicer using
+        `people_counter_gold_dim_date[date_key]`.
+      - Do not add Camera or Location slicers to this page expecting them to
+        filter operations. `people_counter_gold_operations_hour` is global
+        and has no camera/location grain.
+   5. Create the **Throughput** page:
+      - Add separate Cards for `Completed Video Hours`, `Videos Processed`,
+        `Video Hours Processed`, and `Processing Speed x Real Time`.
+      - Add a Line chart with
+        `people_counter_gold_operations_hour[hour_utc]` on the X-axis and
+        `Completed Video Hours` on the Y-axis. Use a continuous UTC axis,
+        sort ascending, and title it `Hourly completed video hours`.
+      - Add another Line chart with the same X-axis and `Queued Work`,
+        `Started Attempts`, `Succeeded Attempts`, and `Failed Attempts` on the
+        Y-axis. Title it `Hourly processing outcomes`.
+      - Add a **Between** Date Slicer using
+        `people_counter_gold_dim_date[date_key]`.
+      - Do not title this page `Backfill` or add a completion forecast. The
+        current global operations fact does not identify which work belongs
+        to a backfill batch.
+   6. Create the **Data quality** page:
+      - Add separate Cards for:
+
+        ```text
+        Data Freshness Minutes
+        Flow Data Freshness Minutes
+        Operations Data Freshness Minutes
+        Latest Video Completion Age Minutes
+        Videos Missing Required Metrics
+        ```
+
+      - Add a Table visual from
+        `people_counter_gold_dim_model_config` with:
+
+        ```text
+        config_sha256
+        pipeline
+        detector_model
+        sample_fps
+        detection_threshold
+        batch_size
+        first_capture_utc
+        last_capture_utc
+        video_count
+        ```
+
+        Set numeric configuration fields to **Don't summarize** and title it
+        `Observed model configurations`.
+      - Add a second Table with these columns:
+
+        ```text
+        people_counter_gold_dim_video[work_id]
+        people_counter_gold_dim_video[asset_id]
+        people_counter_gold_dim_camera[camera_id]
+        people_counter_gold_dim_location[location_id]
+        people_counter_gold_dim_video[captured_at_utc]
+        people_counter_gold_video[video_duration_seconds]
+        people_counter_gold_video[processing_seconds]
+        people_counter_gold_video[distinct_people]
+        ```
+
+        Add
+        `Missing Required Metrics Flag` to **Filters on this visual**, set it
+        to `is 1`, and leave it out of the displayed Table columns. Title the
+        visual `Videos with missing processing metrics`.
+   7. Do not create a **Dwell** page yet. The current gold model does not
+      contain a committed person-dwell fact, so a dwell distribution or
+      percentile visual would be unsupported.
+   8. Save the report. Because the current Lakehouse has no successfully
+      committed videos, video-, traffic-, camera-, location-, and
+      configuration-based visuals can initially be blank. The Time dimension
+      still has 1,440 rows and the Date dimension has its seed date; those
+      rows alone do not create analytical facts.
+8. Apply row-level security before sharing the analytical report:
+
+   1. Decide whether the intended audience is allowed to see global
+      operational totals:
+      - `people_counter_gold_operations_hour` has no `location_id` or
+        `camera_id`, so location/camera RLS cannot filter it.
+      - If the audience **is allowed** to see global queued, started,
+        succeeded, failed, and completed-hour totals, continue with
+        `pc_analytics_model`. The Traffic and Video data will be scoped, but
+        the Operations and Throughput pages remain global.
+      - If the audience **is not allowed** to see global operations, do not
+        share `pc_analytics_model` or `pc_analytics_report` with that
+        audience. Create a separate restricted semantic model that excludes
+        `people_counter_gold_operations_hour`, and a restricted report that
+        omits the Operations and Throughput pages and all measures whose home
+        table is `people_counter_gold_operations_hour`.
+
+        Do not merely hide those pages. Hidden report pages and hidden model
+        fields are not security boundaries.
+   2. In the workspace, open `pc_analytics_model`, select
+      **Open data model**, and switch to **Editing** mode.
+   3. Select **Manage roles** from the modeling ribbon. If it is not visible
+      on the ribbon, open the model's security or role-management action from
+      its context menu.
+   4. Create a role for one complete authorized scope. Use a descriptive name
+      without spaces, for example:
+
+      ```text
+      Analytics_Location_north_entrance
+      ```
+
+      Role names are labels only; the DAX expressions below enforce access.
+   5. For a role authorized to one location, add a filter to each of these
+      three dimension tables. Replace `<authorized-location-id>` with the
+      exact stored `location_id`.
+
+      **`people_counter_gold_dim_location`**
+
+      ```DAX
+      [location_id] = "<authorized-location-id>"
+      ```
+
+      **`people_counter_gold_dim_camera`**
+
+      ```DAX
+      [location_id] = "<authorized-location-id>"
+      ```
+
+      **`people_counter_gold_dim_video`**
+
+      ```DAX
+      [location_id] = "<authorized-location-id>"
+      ```
+
+      Filter all three dimensions:
+      - Location filters the shared location slicer and related flow/video
+        facts.
+      - Camera prevents an unfiltered Camera slicer from listing camera IDs
+        belonging to other locations.
+      - Video protects asset IDs, versions, work IDs, and capture timestamps
+        exposed directly by the Video dimension.
+   6. For a role authorized to selected cameras within one location, use:
+
+      **`people_counter_gold_dim_location`**
+
+      ```DAX
+      [location_id] = "<authorized-location-id>"
+      ```
+
+      **`people_counter_gold_dim_camera`**
+
+      ```DAX
+      [location_id] = "<authorized-location-id>"
+          && [camera_id] IN {
+              "<authorized-camera-id-1>",
+              "<authorized-camera-id-2>"
+          }
+      ```
+
+      **`people_counter_gold_dim_video`**
+
+      ```DAX
+      [location_id] = "<authorized-location-id>"
+          && [camera_id] IN {
+              "<authorized-camera-id-1>",
+              "<authorized-camera-id-2>"
+          }
+      ```
+
+      Use the exact IDs stored in the dimensions. Do not use report display
+      labels or partial string matching.
+   7. For a role authorized to several complete locations, use the same
+      allowed set on all three dimensions:
+
+      **`people_counter_gold_dim_location`**
+
+      ```DAX
+      [location_id] IN {
+          "<authorized-location-id-1>",
+          "<authorized-location-id-2>"
+      }
+      ```
+
+      **`people_counter_gold_dim_camera`**
+
+      ```DAX
+      [location_id] IN {
+          "<authorized-location-id-1>",
+          "<authorized-location-id-2>"
+      }
+      ```
+
+      **`people_counter_gold_dim_video`**
+
+      ```DAX
+      [location_id] IN {
+          "<authorized-location-id-1>",
+          "<authorized-location-id-2>"
+      }
+      ```
+   8. Do not add duplicate RLS filters directly to
+      `people_counter_gold_flow_minute`,
+      `people_counter_gold_flow_hour`, or `people_counter_gold_video`. The
+      active dimension-to-fact relationships propagate the security filters
+      to those facts.
+   9. Date and Time are shared non-sensitive lookup dimensions and do not
+      require location/camera filters. ModelConfig remains global descriptive
+      metadata in this model; if configuration hashes, model choices, or
+      thresholds must also be isolated by location, exclude ModelConfig from
+      the restricted model until a governed authorization relationship is
+      implemented.
+   10. Save the role. Fabric web modeling may autosave after each filter;
+       wait until the role editor confirms the changes before leaving it.
+   11. Test the role before assigning users:
+       1. Select **Test as role** or **View as**.
+       2. Select only the new role.
+       3. Open `pc_analytics_report`.
+       4. Verify Location and Camera slicers list only allowed values.
+       5. Verify the Video processing table contains only allowed work and
+          assets.
+       6. Verify Traffic totals change to the authorized scope.
+       7. If using the full model, verify that Operations and Throughput
+          remain global and confirm that this is intentional for the
+          audience.
+       8. Verify a known unauthorized location, camera, work ID, and asset ID
+          cannot be displayed.
+
+       The current Lakehouse has no successfully committed video rows, so an
+       all-blank test is not sufficient evidence that RLS works. Repeat the
+       test after at least one allowed and one denied camera have committed
+       data.
+   12. Exit role testing before editing the model again.
+   13. Assign users through an Entra security group:
+       1. Return to the workspace.
+       2. Open the `pc_analytics_model` context menu.
+       3. Select **Security** or **Manage roles**.
+       4. Open the role, add the approved Entra security group, and save.
+       5. Prefer groups over individual user assignments so access changes
+          remain auditable outside Power BI.
+   14. Share the report through a Fabric/Power BI app or give restricted
+       consumers the workspace **Viewer** role. Do not give restricted
+       consumers workspace **Admin**, **Member**, or **Contributor** access;
+       those roles can bypass RLS.
+   15. A user who belongs to multiple RLS roles receives the union of those
+       roles' allowed rows. Do not create a separate “deny” role expecting it
+       to override an allow role.
+   16. The current model uses static roles. For many locations or frequently
+       changing assignments, add a governed user-to-location/camera
+       authorization table and then implement dynamic RLS with
+       `USERPRINCIPALNAME()`. Do not add a dynamic expression without that
+       mapping table.
 9. Validate each report result against
    [`11_validate_observability.ipynb`](./11_validate_observability.ipynb)
    before publishing the app.
@@ -3879,7 +4684,9 @@ The implementation is ready only when all checks pass:
 - Every Fabric job correlates to a pipeline run and application attempt.
 - Running count, queue depth, queue age, retries, and dead letters are visible.
 - Failure and stale-heartbeat alerts fire and resolve.
-- Backfill burn-down forecasts the completion date.
+- After a workload-origin/backfill-batch key is added to the gold operations
+  fact, backfill burn-down forecasts the completion date without including
+  live intake or replay work.
 
 ### Analytics
 
