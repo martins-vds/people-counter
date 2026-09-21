@@ -157,28 +157,37 @@ observability, Direct Lake reporting, and large backfills, use the
 
 ### Publish backfill manifests
 
-The optional producer-side publisher generates manifests from a reviewed
-camera catalog, uploads videos through ADLS staging, and atomically moves each
-manifest into `incoming/` after its video:
+Preparation and publication are separate. First generate a
+destination-independent manifest package without Azure access:
 
 ```bash
 uv sync --extra publisher
 
-uv run --extra publisher people-counter-publish-manifests \
+uv run prepare-manifests \
   --catalog config/camera_catalog.csv \
-  --inventory config/video_inventory.csv \
   --video-root /mnt/source-videos \
   --partition-prefix north-entrance/camera-17/ \
+  --output-dir prepared/camera-17
+```
+
+Later, the same or a different operator can publish that package:
+
+```bash
+uv run --extra publisher publish-manifests \
+  --manifest-package-dir prepared/camera-17 \
+  --video-root /mnt/source-videos \
   --storage-account <storage-account> \
   --filesystem <source-filesystem> \
-  --checkpoint state/camera-17.sqlite3 \
-  --rejection-report state/camera-17-rejections.csv
+  --checkpoint state/camera-17-publication.sqlite3
 ```
 
 The host must also provide `ffprobe` from an approved FFmpeg installation.
-Run the same command with `--dry-run` and without the Azure destination
-arguments to validate catalog matching, capture times, hashes, dimensions,
-and durations before publication. See the
+Preparation writes `manifest-package.json`, prepared JSON manifests,
+generated inventory, rejection report, summary, and checkpoint under
+`--output-dir`; it does not copy videos. Provide `--inventory` only for files
+whose capture time cannot be recovered from embedded metadata or a configured
+filename rule. Publication validates all package checksums and the exact video
+bytes before creating final manifests with destination URIs and ETags. See the
 [camera catalog and publisher runbook](notebooks/fabric/README.md#71-create-the-camera-metadata-catalog)
 for the complete CSV schema, Azure identity requirements, retry behavior, and
 backfill registration procedure.

@@ -30,7 +30,8 @@ dev = [
 people-counter = "people_counter.cli:main"
 people-counter-rtdetr = "people_counter.cli:rtdetr_osnet_main"
 people-counter-rfdetr = "people_counter.cli:rfdetr_botsort_main"
-people-counter-publish-manifests = "people_counter.manifest_publisher:main"
+prepare-manifests = "people_counter.manifest_publisher:prepare_main"
+publish-manifests = "people_counter.manifest_publisher:publish_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

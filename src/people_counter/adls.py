@@ -13,6 +13,14 @@ from people_counter.manifest import ManifestPublisherError
 class PublicationConflictError(ManifestPublisherError):
     """Raised when an existing remote object conflicts with intended output."""
 
+    reason_code = "PUBLICATION_CONFLICT"
+    suggested_action = (
+        "Inspect the existing staging/incoming object and checkpoint. Do not "
+        "overwrite incoming data; resolve the ownership or identity conflict "
+        "before retrying."
+    )
+    retryable = True
+
 
 @dataclass(frozen=True)
 class RemoteObject:
@@ -24,6 +32,7 @@ class PublicationStorage(Protocol):
     def stat(self, path: str) -> RemoteObject | None: ...
 
     def read_bytes(self, path: str) -> bytes: ...
+    def sha256(self, path: str) -> str: ...
 
     def upload_file(
         self,
@@ -112,6 +121,17 @@ class AzureDataLakeStorage:
             raise PublicationConflictError(f"Remote object does not exist: {path}")
         return bytes(client.download_file().readall())
 
+    def sha256(self, path: str) -> str:
+        client = self._file_client(path)
+        if not client.exists():
+            raise PublicationConflictError(
+                f"Remote object does not exist: {path}"
+            )
+        digest = hashlib.sha256()
+        for chunk in client.download_file().chunks():
+            digest.update(chunk)
+        return digest.hexdigest()
+
     def upload_file(
         self,
         local_path: Path,
@@ -138,6 +158,29 @@ class AzureDataLakeStorage:
             client.create_file(
                 content_settings=ContentSettings(content_type=content_type)
             )
+        elif offset:
+            local_prefix = hashlib.sha256()
+            with local_path.open("rb") as prefix_source:
+                remaining = offset
+                while remaining:
+                    chunk = prefix_source.read(
+                        min(self._chunk_size, remaining)
+                    )
+                    if not chunk:
+                        break
+                    local_prefix.update(chunk)
+                    remaining -= len(chunk)
+            if (
+                remaining
+                or local_prefix.hexdigest() != self.sha256(remote_path)
+            ):
+                client.delete_file()
+                client.create_file(
+                    content_settings=ContentSettings(
+                        content_type=content_type
+                    )
+                )
+                offset = 0
         digest = hashlib.sha256()
         local_offset = 0
         with local_path.open("rb") as source:

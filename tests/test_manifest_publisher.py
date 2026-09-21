@@ -1,5 +1,7 @@
 import csv
+import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -10,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from people_counter.adls import (
     AzureDataLakeStorage,
@@ -19,8 +21,11 @@ from people_counter.adls import (
 )
 from people_counter.manifest import (
     CatalogError,
+    InventoryEntry,
     ManifestPublisherError,
     VideoInspection,
+    _compile_capture_pattern,
+    _resolve_capture_time,
     build_manifest_plan,
     inspect_video,
     load_camera_catalog,
@@ -29,12 +34,20 @@ from people_counter.manifest import (
     match_catalog_entry,
 )
 from people_counter.manifest_publisher import (
+    ManifestPackagePublishConfig,
     PublisherConfig,
     PublishSummary,
+    build_prepare_parser,
     build_parser,
+    build_publish_parser,
     discover_videos,
+    load_manifest_package_plans,
     main,
+    prepare_main,
+    publish_manifest_package,
+    publish_main,
     run_publisher,
+    validate_manifest_package,
 )
 
 
@@ -56,6 +69,8 @@ CATALOG_FIELDS = (
     "effective_from_utc",
     "effective_to_utc",
 )
+VIDEO_BYTES = b"video"
+VIDEO_SHA256 = hashlib.sha256(VIDEO_BYTES).hexdigest()
 
 
 class FakeStorage:
@@ -73,6 +88,9 @@ class FakeStorage:
     def read_bytes(self, path):
         return self.objects[path][0]
 
+    def sha256(self, path):
+        return hashlib.sha256(self.objects[path][0]).hexdigest()
+
     def upload_file(
         self,
         local_path,
@@ -86,7 +104,7 @@ class FakeStorage:
         self.assert_upload_matches = (
             len(content) == expected_size
             and expected_sha256
-            == "a" * 64
+            == VIDEO_SHA256
         )
         existing = self.objects.get(remote_path)
         if existing is not None and existing[0] != content:
@@ -131,12 +149,12 @@ def write_catalog(
         "capture_time_source": capture_time_source,
         "capture_time_regex": (
             r"(?P<captured_at_utc>\d{8}T\d{6}Z)"
-            if capture_time_source == "filename_utc"
+            if capture_time_source in {"auto", "filename_utc"}
             else ""
         ),
         "capture_time_format": (
             "%Y%m%dT%H%M%SZ"
-            if capture_time_source == "filename_utc"
+            if capture_time_source in {"auto", "filename_utc"}
             else ""
         ),
         "effective_from_utc": "2026-01-01T00:00:00Z",
@@ -167,7 +185,7 @@ def inspection(path):
     del path
     return VideoInspection(
         size_bytes=5,
-        sha256="a" * 64,
+        sha256=VIDEO_SHA256,
         width=1920,
         height=1080,
         duration_seconds=30.0,
@@ -175,6 +193,95 @@ def inspection(path):
 
 
 class ManifestCatalogTests(unittest.TestCase):
+    def test_capture_pattern_contract(self):
+        base = {
+            "capture_time_regex": "",
+            "capture_time_format": "",
+        }
+        self.assertEqual(
+            _compile_capture_pattern(base, 2, "auto"),
+            (None, None),
+        )
+        self.assertEqual(
+            _compile_capture_pattern(base, 2, "embedded"),
+            (None, None),
+        )
+        with self.assertRaisesRegex(
+            CatalogError,
+            "must be provided together",
+        ):
+            _compile_capture_pattern(
+                {
+                    **base,
+                    "capture_time_regex": (
+                        r"(?P<captured_at_utc>\d+)"
+                    ),
+                },
+                2,
+                "auto",
+            )
+        with self.assertRaisesRegex(CatalogError, "invalid capture_time_regex"):
+            _compile_capture_pattern(
+                {
+                    "capture_time_regex": "(",
+                    "capture_time_format": "%Y",
+                },
+                2,
+                "filename_utc",
+            )
+        with self.assertRaisesRegex(CatalogError, "must define captured_at_utc"):
+            _compile_capture_pattern(
+                {
+                    "capture_time_regex": r"(?P<wrong>\d+)",
+                    "capture_time_format": "%Y",
+                },
+                2,
+                "filename_utc",
+            )
+        with self.assertRaisesRegex(
+            CatalogError,
+            "must be auto, embedded, filename_utc, or inventory",
+        ):
+            _compile_capture_pattern(base, 2, "unsupported")
+
+    def test_capture_time_resolution_precedence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = Path(directory) / "catalog.csv"
+            write_catalog(catalog_path, capture_time_source="auto")
+            entry = load_camera_catalog(catalog_path)[0]
+        inventory_time = datetime(
+            2026,
+            2,
+            3,
+            4,
+            5,
+            6,
+            tzinfo=timezone.utc,
+        )
+        inventory_entry = InventoryEntry(captured_at_utc=inventory_time)
+
+        resolved, source = _resolve_capture_time(
+            entry,
+            "north/camera-17/clip.mp4",
+            inventory_entry,
+            ("not-a-timestamp",),
+        )
+        self.assertEqual((resolved, source), (inventory_time, "inventory_override"))
+        resolved, source = _resolve_capture_time(
+            entry,
+            "north/camera-17/clip.mp4",
+            None,
+            ("2026-02-03T04:05:06Z",),
+        )
+        self.assertEqual((resolved, source), (inventory_time, "embedded"))
+        resolved, source = _resolve_capture_time(
+            entry,
+            "north/camera-17/20260203T040506Z.mp4",
+            None,
+            (),
+        )
+        self.assertEqual((resolved, source), (inventory_time, "filename"))
+
     def test_catalog_and_inventory_build_deterministic_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -217,17 +324,25 @@ class ManifestCatalogTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(plan.asset_id, "source-asset-1")
-        self.assertEqual(plan.asset_version, "source-version-2")
+        self.assertEqual(
+            plan.asset_id,
+            hashlib.sha256(
+                b"north/camera-17/clip.mp4"
+            ).hexdigest(),
+        )
+        self.assertEqual(plan.asset_version, VIDEO_SHA256)
         self.assertEqual(
             plan.incoming_video_path,
-            "incoming/2026/02/03/source-version-2/clip.mp4",
+            (
+                f"incoming/2026/02/03/{plan.asset_id}/"
+                f"{VIDEO_SHA256}/clip.mp4"
+            ),
         )
         self.assertEqual(payload["source_etag"], '"etag"')
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["asset_id"], "source-asset-1")
-        self.assertEqual(payload["asset_version"], "source-version-2")
-        self.assertEqual(payload["expected_sha256"], "a" * 64)
+        self.assertEqual(payload["asset_id"], plan.asset_id)
+        self.assertEqual(payload["asset_version"], VIDEO_SHA256)
+        self.assertEqual(payload["expected_sha256"], VIDEO_SHA256)
         self.assertEqual(payload["expected_size_bytes"], 5)
         self.assertEqual(payload["camera_id"], "camera-17")
         self.assertEqual(payload["location_id"], "north-entrance")
@@ -240,7 +355,8 @@ class ManifestCatalogTests(unittest.TestCase):
             payload["video_uri"],
             (
                 "abfss://footage@account.dfs.core.windows.net/"
-                "incoming/2026/02/03/source-version-2/clip.mp4"
+                f"incoming/2026/02/03/{plan.asset_id}/"
+                f"{VIDEO_SHA256}/clip.mp4"
             ),
         )
 
@@ -272,9 +388,9 @@ class ManifestCatalogTests(unittest.TestCase):
                 inspector=inspection,
             )
 
-        self.assertEqual(first.asset_id, first.relative_path)
+        self.assertEqual(len(first.asset_id), 64)
         self.assertEqual(first.asset_version, second.asset_version)
-        self.assertEqual(len(first.asset_version), 64)
+        self.assertEqual(first.asset_version, VIDEO_SHA256)
         self.assertEqual(
             first.captured_at_utc,
             datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc),
@@ -312,7 +428,7 @@ class ManifestCatalogTests(unittest.TestCase):
             with self.assertRaisesRegex(CatalogError, "duplicate path"):
                 load_video_inventory(inventory_path)
 
-    def test_inventory_rejects_path_traversal_asset_version(self):
+    def test_inventory_ignores_legacy_asset_identity_columns(self):
         with tempfile.TemporaryDirectory() as directory:
             inventory_path = Path(directory) / "inventory.csv"
             write_inventory(
@@ -327,8 +443,81 @@ class ManifestCatalogTests(unittest.TestCase):
                 ],
             )
 
-            with self.assertRaisesRegex(CatalogError, "not path-safe"):
-                load_video_inventory(inventory_path)
+            loaded = load_video_inventory(inventory_path)
+
+        self.assertEqual(
+            loaded["north/camera-17/clip.mp4"].captured_at_utc,
+            datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc),
+        )
+
+    def test_auto_capture_time_prefers_embedded_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog_path = root / "catalog.csv"
+            video = root / "north/camera-17/clip.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+            write_catalog(catalog_path, capture_time_source="auto")
+            embedded = datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+
+            plan = build_manifest_plan(
+                video,
+                root,
+                load_camera_catalog(catalog_path),
+                {},
+                staging_prefix="staging",
+                incoming_prefix="incoming",
+                inspector=lambda _: replace(
+                    inspection(video),
+                    embedded_capture_times=(
+                        embedded.isoformat().replace("+00:00", "Z"),
+                    ),
+                ),
+            )
+
+        self.assertEqual(plan.captured_at_utc, embedded)
+
+    def test_auto_inventory_override_ignores_invalid_embedded_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog_path = root / "catalog.csv"
+            inventory_path = root / "inventory.csv"
+            video = root / "north/camera-17/clip.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+            write_catalog(catalog_path, capture_time_source="auto")
+            write_inventory(
+                inventory_path,
+                [
+                    {
+                        "video_relative_path": (
+                            "north/camera-17/clip.mp4"
+                        ),
+                        "captured_at_utc": "2026-02-03T04:05:06Z",
+                        "asset_id": "",
+                        "asset_version": "",
+                    }
+                ],
+            )
+
+            plan = build_manifest_plan(
+                video,
+                root,
+                load_camera_catalog(catalog_path),
+                load_video_inventory(inventory_path),
+                staging_prefix="staging",
+                incoming_prefix="incoming",
+                inspector=lambda _: replace(
+                    inspection(video),
+                    embedded_capture_times=("not-a-timestamp",),
+                ),
+            )
+
+        self.assertEqual(plan.capture_time_source, "inventory_override")
+        self.assertEqual(
+            plan.captured_at_utc,
+            datetime(2026, 2, 3, 4, 5, 6, tzinfo=timezone.utc),
+        )
 
     def test_catalog_matching_reports_missing_prefix_and_filename_time(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -336,11 +525,12 @@ class ManifestCatalogTests(unittest.TestCase):
             write_catalog(catalog_path)
             entry = load_camera_catalog(catalog_path)[0]
 
-            with self.assertRaisesRegex(
-                ManifestPublisherError,
-                "No camera catalog row",
-            ):
+            with self.assertRaises(ManifestPublisherError) as raised:
                 match_catalog_entry("other/clip.mp4", [entry], {})
+            self.assertEqual(
+                raised.exception.reason_code,
+                "NO_CAMERA_MATCH",
+            )
             with self.assertRaisesRegex(
                 ManifestPublisherError,
                 "Filename does not match",
@@ -375,6 +565,54 @@ class ManifestCatalogTests(unittest.TestCase):
                     {},
                 )
 
+    def test_effective_range_error_wins_when_any_timestamp_resolves(self):
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = Path(directory) / "catalog.csv"
+            write_catalog(catalog_path)
+            base = load_camera_catalog(catalog_path)[0]
+        old_entry = replace(
+            base,
+            capture_time_regex=re.compile(
+                r"old_(?P<captured_at_utc>\d{8}T\d{6}Z)"
+            ),
+            effective_to_utc=datetime(
+                2027,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            ),
+        )
+        new_entry = replace(
+            base,
+            capture_time_regex=re.compile(
+                r"new_(?P<captured_at_utc>\d{8}T\d{6}Z)"
+            ),
+            effective_from_utc=datetime(
+                2027,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            ),
+            effective_to_utc=datetime(
+                2027,
+                6,
+                1,
+                tzinfo=timezone.utc,
+            ),
+        )
+
+        with self.assertRaises(ManifestPublisherError) as raised:
+            match_catalog_entry(
+                "north/camera-17/new_20280101T000000Z.mp4",
+                [old_entry, new_entry],
+                {},
+            )
+
+        self.assertEqual(
+            raised.exception.reason_code,
+            "CAMERA_EFFECTIVE_RANGE_MISMATCH",
+        )
+
 
 class ManifestPublisherTests(unittest.TestCase):
     def setUp(self):
@@ -401,8 +639,28 @@ class ManifestPublisherTests(unittest.TestCase):
             incoming_prefix="incoming",
             checkpoint_path=self.root / "checkpoint.sqlite3",
             rejection_report_path=self.root / "rejections.csv",
+            generated_inventory_report_path=(
+                self.root / "generated-inventory.csv"
+            ),
             max_files=1000,
             dry_run=dry_run,
+            summary_report_path=self.root / "summary.json",
+        )
+
+    def package_publish_config(self, package_dir):
+        return ManifestPackagePublishConfig(
+            manifest_package_dir=package_dir,
+            video_root=self.root,
+            storage_account="account",
+            filesystem="footage",
+            staging_prefix="staging",
+            incoming_prefix="incoming",
+            checkpoint_path=self.root / "publication.sqlite3",
+            rejection_report_path=(
+                self.root / "publication-rejections.csv"
+            ),
+            summary_report_path=self.root / "publication-summary.json",
+            chunk_size=8 * 1024 * 1024,
         )
 
     def test_publisher_moves_video_before_manifest_and_is_idempotent(self):
@@ -509,7 +767,16 @@ class ManifestPublisherTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(report), 1)
-        self.assertIn("Published manifest conflicts", report[0]["error"])
+        self.assertEqual(report[0]["reason_code"], "PUBLICATION_CONFLICT")
+        self.assertIn(
+            "Published manifest conflicts",
+            report[0]["explanation"],
+        )
+        self.assertIn("Do not overwrite", report[0]["suggested_action"])
+        with config.generated_inventory_report_path.open(
+            encoding="utf-8"
+        ) as handle:
+            self.assertEqual(list(csv.DictReader(handle)), [])
 
     def test_retry_after_video_rename_publishes_only_manifest(self):
         storage = FakeStorage()
@@ -574,6 +841,34 @@ class ManifestPublisherTests(unittest.TestCase):
         self.assertEqual(summary.published, 0)
         self.assertEqual(summary.rejected, 0)
         self.assertEqual(summary.total_video_duration_seconds, 30.0)
+        with self.config().generated_inventory_report_path.open(
+            encoding="utf-8"
+        ) as handle:
+            generated = next(csv.DictReader(handle))
+        self.assertEqual(
+            generated["video_relative_path"],
+            "north/camera-17/20260203T040506Z.mp4",
+        )
+        self.assertEqual(generated["capture_time_source"], "filename")
+        self.assertEqual(generated["asset_version"], VIDEO_SHA256)
+        persisted_summary = json.loads(
+            self.config(dry_run=True).summary_report_path.read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(persisted_summary["planned"], 1)
+
+    def test_generated_inventory_creates_nested_parent(self):
+        config = replace(
+            self.config(dry_run=True),
+            generated_inventory_report_path=(
+                self.root / "nested/reports/inventory.csv"
+            ),
+        )
+
+        run_publisher(config, storage=None, inspector=inspection)
+
+        self.assertTrue(config.generated_inventory_report_path.is_file())
 
     def test_global_inventory_allows_rows_outside_partition(self):
         inventory_path = self.root / "inventory.csv"
@@ -644,30 +939,308 @@ class ManifestPublisherTests(unittest.TestCase):
         self.assertEqual(summary.discovered, 2)
         self.assertEqual(summary.planned, 1)
         self.assertEqual(summary.rejected, 1)
+        self.assertEqual(
+            summary.rejections_by_reason,
+            {"CATALOG_INVALID": 1},
+        )
 
-    def test_parser_requires_adls_destination_only_for_publication(self):
-        parser = build_parser()
-        dry_run = parser.parse_args(
+    def test_missing_capture_time_has_actionable_grouped_rejection(self):
+        self.video.unlink()
+        video = self.video.with_name("clip.mp4")
+        video.write_bytes(b"video")
+        write_catalog(self.catalog_path, capture_time_source="auto")
+
+        summary = run_publisher(
+            self.config(dry_run=True),
+            storage=None,
+            inspector=inspection,
+        )
+
+        self.assertEqual(
+            summary.rejections_by_reason,
+            {"CAPTURE_TIME_FILENAME_MISMATCH": 1},
+        )
+        self.assertEqual(
+            summary.rejections_by_camera,
+            {"camera-17": 1},
+        )
+        with self.config().rejection_report_path.open(
+            encoding="utf-8"
+        ) as handle:
+            rejection = next(csv.DictReader(handle))
+        self.assertEqual(
+            rejection["reason_code"],
+            "CAPTURE_TIME_FILENAME_MISMATCH",
+        )
+        self.assertEqual(rejection["field"], "captured_at_utc")
+        self.assertIn("Correct capture_time_regex", rejection["suggested_action"])
+        persisted_summary = json.loads(
+            self.config().summary_report_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            persisted_summary["rejections_by_reason"],
+            {"CAPTURE_TIME_FILENAME_MISMATCH": 1},
+        )
+
+    def test_validate_manifest_package_and_publish_are_separate(self):
+        package_dir = self.root / "prepared-output"
+        prepare_config = replace(
+            self.config(dry_run=True),
+            output_dir=package_dir,
+        )
+        prepared_summary = run_publisher(
+            prepare_config,
+            storage=None,
+            inspector=inspection,
+        )
+        index = json.loads(
+            (package_dir / "manifest-package.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        prepared_path = (
+            package_dir
+            / index["entries"][0]["prepared_manifest_path"]
+        )
+        prepared_payload = json.loads(
+            prepared_path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(prepared_summary.planned, 1)
+        self.assertTrue(index["complete"])
+        self.assertEqual(index["prepared"], 1)
+        self.assertNotIn("source_etag", prepared_payload)
+        self.assertNotIn("video_uri", prepared_payload)
+        self.assertFalse(any(package_dir.rglob("*.mp4")))
+
+        publish_config = self.package_publish_config(package_dir)
+        validated_package = validate_manifest_package(publish_config)
+        storage = FakeStorage()
+        published_summary = publish_manifest_package(
+            publish_config,
+            storage,
+            validated_package=validated_package,
+        )
+        final_manifest_path = next(
+            path for path in storage.objects if path.endswith(".json")
+        )
+        final_payload = json.loads(storage.objects[final_manifest_path][0])
+
+        self.assertEqual(published_summary.published, 1)
+        self.assertEqual(final_payload["source_etag"], '"video-etag"')
+        self.assertTrue(
+            final_payload["video_uri"].startswith(
+                "abfss://footage@account.dfs.core.windows.net/incoming/"
+            )
+        )
+
+    def test_package_checksum_tampering_is_rejected_before_publication(self):
+        package_dir = self.root / "prepared-output"
+        run_publisher(
+            replace(
+                self.config(dry_run=True),
+                output_dir=package_dir,
+            ),
+            storage=None,
+            inspector=inspection,
+        )
+        index = json.loads(
+            (package_dir / "manifest-package.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        prepared_path = (
+            package_dir
+            / index["entries"][0]["prepared_manifest_path"]
+        )
+        prepared_path.write_text("{}\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ManifestPublisherError,
+            "checksum mismatch",
+        ):
+            load_manifest_package_plans(
+                self.package_publish_config(package_dir)
+            )
+
+    def test_changed_source_video_is_rejected_before_publication(self):
+        package_dir = self.root / "prepared-output"
+        run_publisher(
+            replace(
+                self.config(dry_run=True),
+                output_dir=package_dir,
+            ),
+            storage=None,
+            inspector=inspection,
+        )
+        self.video.write_bytes(b"videx")
+
+        with self.assertRaisesRegex(
+            ManifestPublisherError,
+            "checksum changed",
+        ):
+            load_manifest_package_plans(
+                self.package_publish_config(package_dir)
+            )
+
+    def test_unexpected_preparation_failure_marks_package_incomplete(self):
+        second = self.video.with_name("20260203T050506Z.mp4")
+        second.write_bytes(VIDEO_BYTES)
+        package_dir = self.root / "prepared-output"
+        calls = 0
+
+        def fail_second(path):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("unexpected probe failure")
+            return inspection(path)
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected probe failure"):
+            run_publisher(
+                replace(
+                    self.config(dry_run=True),
+                    output_dir=package_dir,
+                ),
+                storage=None,
+                inspector=fail_second,
+            )
+
+        index = json.loads(
+            (package_dir / "manifest-package.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertFalse(index["complete"])
+        self.assertEqual(index["discovered"], 2)
+        self.assertEqual(index["prepared"], 1)
+
+    def test_failed_preparation_rerun_invalidates_previous_index(self):
+        package_dir = self.root / "prepared-output"
+        config = replace(
+            self.config(dry_run=True),
+            output_dir=package_dir,
+        )
+        run_publisher(config, storage=None, inspector=inspection)
+        index_path = package_dir / "manifest-package.json"
+        self.assertTrue(index_path.is_file())
+
+        with self.assertRaises(FileNotFoundError):
+            run_publisher(
+                replace(
+                    config,
+                    catalog_path=self.root / "missing-catalog.csv",
+                ),
+                storage=None,
+                inspector=inspection,
+            )
+
+        self.assertFalse(index_path.exists())
+
+    def test_incomplete_package_cannot_be_published(self):
+        package_dir = self.root / "prepared-output"
+        self.video.unlink()
+        self.video.with_name("clip.mp4").write_bytes(b"video")
+        run_publisher(
+            replace(
+                self.config(dry_run=True),
+                output_dir=package_dir,
+            ),
+            storage=None,
+            inspector=inspection,
+        )
+
+        with self.assertRaisesRegex(
+            ManifestPublisherError,
+            "Manifest package is incomplete",
+        ):
+            load_manifest_package_plans(
+                self.package_publish_config(package_dir)
+            )
+
+    def test_manifest_package_header_validation(self):
+        package_dir = self.root / "prepared-output"
+        run_publisher(
+            replace(
+                self.config(dry_run=True),
+                output_dir=package_dir,
+            ),
+            storage=None,
+            inspector=inspection,
+        )
+        index_path = package_dir / "manifest-package.json"
+        valid = json.loads(index_path.read_text(encoding="utf-8"))
+        cases = (
+            (
+                ["not-an-object"],
+                "one JSON object",
+            ),
+            (
+                {**valid, "manifest_package_version": 999},
+                "version is unsupported",
+            ),
+            (
+                {**valid, "planning_contract_version": "old"},
+                "planning contract is unsupported",
+            ),
+            (
+                {**valid, "entries": []},
+                "contains no prepared entries",
+            ),
+        )
+        for payload, message in cases:
+            with self.subTest(message=message):
+                index_path.write_text(
+                    json.dumps(payload),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ManifestPublisherError,
+                    message,
+                ):
+                    load_manifest_package_plans(
+                        self.package_publish_config(package_dir)
+                    )
+
+    def test_prepare_and_publish_parsers_have_separate_contracts(self):
+        prepared = build_prepare_parser().parse_args(
             [
                 "--catalog",
                 str(self.catalog_path),
                 "--video-root",
                 str(self.root),
-                "--dry-run",
+                "--output-dir",
+                str(self.root / "prepared-output"),
+            ]
+        )
+        published = build_publish_parser().parse_args(
+            [
+                "--manifest-package-dir",
+                str(self.root / "prepared-output"),
+                "--video-root",
+                str(self.root),
+                "--storage-account",
+                "account123",
+                "--filesystem",
+                "footage",
             ]
         )
 
-        self.assertTrue(dry_run.dry_run)
-        self.assertIsNone(dry_run.storage_account)
-        self.assertIsNone(dry_run.filesystem)
+        self.assertEqual(
+            prepared.output_dir,
+            self.root / "prepared-output",
+        )
+        self.assertFalse(hasattr(prepared, "storage_account"))
+        self.assertEqual(published.storage_account, "account123")
+        self.assertFalse(hasattr(published, "catalog"))
 
     def test_parser_validates_storage_names(self):
         parser = build_parser()
         with self.assertRaises(SystemExit):
             parser.parse_args(
                 [
-                    "--catalog",
-                    str(self.catalog_path),
+                    "--manifest-package-dir",
+                    str(self.root / "prepared-output"),
                     "--video-root",
                     str(self.root),
                     "--storage-account",
@@ -677,7 +1250,7 @@ class ManifestPublisherTests(unittest.TestCase):
                 ]
             )
 
-    def test_main_runs_dry_run_without_loading_azure(self):
+    def test_prepare_main_runs_without_loading_azure(self):
         summary = PublishSummary(
             generator_version="0.1.0",
             catalog_sha256="a" * 64,
@@ -694,13 +1267,14 @@ class ManifestPublisherTests(unittest.TestCase):
             ) as azure_storage,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
-            exit_code = main(
+            exit_code = prepare_main(
                 [
                     "--catalog",
                     str(self.catalog_path),
                     "--video-root",
                     str(self.root),
-                    "--dry-run",
+                    "--output-dir",
+                    str(self.root / "prepared-output"),
                 ]
             )
 
@@ -711,23 +1285,29 @@ class ManifestPublisherTests(unittest.TestCase):
             "a" * 64,
         )
         self.assertIsNone(run.call_args.kwargs["storage"])
+        self.assertTrue(run.call_args.args[0].dry_run)
 
-    def test_main_builds_azure_storage_and_returns_two_for_rejections(self):
+    def test_publish_main_validates_then_builds_azure_storage(self):
         summary = PublishSummary(rejected=1)
+        validated_package = MagicMock()
         with (
             patch(
-                "people_counter.manifest_publisher.run_publisher",
+                "people_counter.manifest_publisher.validate_manifest_package",
+                return_value=validated_package,
+            ) as load,
+            patch(
+                "people_counter.manifest_publisher.publish_manifest_package",
                 return_value=summary,
-            ) as run,
+            ) as publish,
             patch(
                 "people_counter.manifest_publisher.AzureDataLakeStorage"
             ) as azure_storage,
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            exit_code = main(
+            exit_code = publish_main(
                 [
-                    "--catalog",
-                    str(self.catalog_path),
+                    "--manifest-package-dir",
+                    str(self.root / "prepared-output"),
                     "--video-root",
                     str(self.root),
                     "--storage-account",
@@ -736,7 +1316,6 @@ class ManifestPublisherTests(unittest.TestCase):
                     "footage",
                     "--chunk-size-mib",
                     "4",
-                    "--rehash",
                 ]
             )
 
@@ -746,8 +1325,11 @@ class ManifestPublisherTests(unittest.TestCase):
             "footage",
             chunk_size=4 * 1024 * 1024,
         )
-        config = run.call_args.args[0]
-        self.assertTrue(config.rehash)
+        load.assert_called_once()
+        self.assertIs(
+            publish.call_args.kwargs["validated_package"],
+            validated_package,
+        )
 
     def test_main_requires_destination_for_publication(self):
         with (
@@ -756,8 +1338,8 @@ class ManifestPublisherTests(unittest.TestCase):
         ):
             main(
                 [
-                    "--catalog",
-                    str(self.catalog_path),
+                    "--manifest-package-dir",
+                    str(self.root / "prepared-output"),
                     "--video-root",
                     str(self.root),
                 ]
@@ -843,6 +1425,7 @@ class VideoInspectionTests(unittest.TestCase):
                 result = inspect_video(Path(video.name))
 
         self.assertEqual(result.duration_seconds, 31.25)
+        self.assertEqual(result.embedded_capture_times, ())
 
     def test_inspection_prefers_valid_stream_duration(self):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
@@ -871,6 +1454,41 @@ class VideoInspectionTests(unittest.TestCase):
                 result = inspect_video(Path(video.name))
 
         self.assertEqual(result.duration_seconds, 29.75)
+
+    def test_inspection_extracts_embedded_creation_time(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            Path(video.name).write_bytes(b"video")
+            completed = subprocess.CompletedProcess(
+                args=["ffprobe"],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "width": 1920,
+                                "height": 1080,
+                                "tags": {
+                                    "creation_time": (
+                                        "2023-09-26T12:18:09.000000Z"
+                                    )
+                                },
+                            }
+                        ],
+                        "format": {"duration": "30.0", "tags": {}},
+                    }
+                ),
+                stderr="",
+            )
+            with patch(
+                "people_counter.manifest.subprocess.run",
+                return_value=completed,
+            ):
+                result = inspect_video(Path(video.name))
+
+        self.assertEqual(
+            result.embedded_capture_times,
+            ("2023-09-26T12:18:09.000000Z",),
+        )
 
 
 class FakeFileClient:
@@ -902,7 +1520,13 @@ class FakeFileClient:
 
     def download_file(self):
         content = self.filesystem.objects[self.path][0]
-        return SimpleNamespace(readall=lambda: content)
+        return SimpleNamespace(
+            readall=lambda: content,
+            chunks=lambda: iter((content,)),
+        )
+
+    def delete_file(self):
+        self.filesystem.objects.pop(self.path)
 
     def rename_file(self, destination, **kwargs):
         self.filesystem.renames.append((self.path, destination, kwargs))
@@ -989,6 +1613,27 @@ class AzureDataLakeStorageTests(unittest.TestCase):
             [flush[1] for flush in filesystem.flushes],
             [4, 5],
         )
+
+    def test_upload_file_replaces_mismatched_staged_prefix(self):
+        filesystem = FakeFileSystem()
+        filesystem.objects["staging/video.mp4"] = (b"xxxxx", '"etag"')
+        storage = self.storage(filesystem)
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            Path(video.name).write_bytes(VIDEO_BYTES)
+
+            storage.upload_file(
+                Path(video.name),
+                "staging/video.mp4",
+                "video/mp4",
+                len(VIDEO_BYTES),
+                VIDEO_SHA256,
+            )
+
+        self.assertEqual(
+            filesystem.objects["staging/video.mp4"][0],
+            VIDEO_BYTES,
+        )
+        self.assertEqual(filesystem.appends[0][1], 0)
 
     def test_rename_uses_server_side_if_missing_condition(self):
         from azure.core import MatchConditions

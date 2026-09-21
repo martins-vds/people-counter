@@ -11,8 +11,9 @@ The design assumes:
 
 - producers upload a video under `staging/`, move the completed video into
   `incoming/`, then move its JSON manifest into `incoming/` last;
-- producers generate manifests from a reviewed camera catalog and video
-  inventory; operators do not author one manifest per video;
+- producers generate manifests from a reviewed camera catalog and automatic
+  video discovery; operators provide only exceptional capture-time overrides
+  that code cannot derive;
 - the manifest is the authoritative source of camera, location, capture time,
   immutable asset version, and expected video metadata;
 - Fabric-native compute is used;
@@ -71,10 +72,11 @@ Run or deploy the notebooks in this order:
 
 Manifest generation is a producer-side responsibility, not another Fabric
 inference notebook. For a large historical load, use the
-`people-counter-publish-manifests` Python command described in section 7.2 to
-turn a reviewed camera catalog and video inventory into manifest version 1
-files. The command is shipped by this repository under the optional
-`publisher` dependency extra.
+`prepare-manifests` command described in section 7.2 to turn a
+reviewed camera catalog and automatically discovered video metadata into a
+destination-independent manifest package. A later
+`publish-manifests` run validates that package and publishes
+the final manifests.
 
 The earlier
 [`fabric_retry_safe_pipeline.ipynb`](../fabric_retry_safe_pipeline.ipynb) is a
@@ -137,12 +139,13 @@ event bursts from starting an unbounded number of model-heavy notebooks.
 ### Required publication sequence
 
 1. Upload
-   `staging/<content-sha256>/<asset-version>/<name>.mp4`.
+   `staging/<asset-id>/<asset-version>/<name>.mp4`.
 2. Upload
-   `staging/<content-sha256>/<asset-version>/<name>.json`.
+   `staging/<asset-id>/<asset-version>/<name>.json`.
 3. Complete multipart/block upload and calculate the final size, ETag/version,
    and required SHA-256.
-4. Move the video to `incoming/<yyyy>/<mm>/<dd>/<asset-version>/<name>.mp4`.
+4. Move the video to
+   `incoming/<yyyy>/<mm>/<dd>/<asset-id>/<asset-version>/<name>.mp4`.
 5. Move the manifest to the same `incoming/` folder **last**.
 6. Never mutate an object in `incoming/`. Corrections use a new
    `asset_version`.
@@ -157,7 +160,7 @@ Therefore a manifest event means the referenced video is ready.
   "schema_version": 1,
   "asset_id": "camera-17_20260917T210000Z_0001",
   "asset_version": "01K5EDQ4AJ7MYW6W8F6Y8B4SCP",
-  "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/incoming/2026/09/17/<asset-version>/<video-file>",
+  "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/incoming/2026/09/17/<asset-id>/<asset-version>/<video-file>",
   "source_etag": "0x8DEE...",
   "expected_size_bytes": 2489912034,
   "expected_sha256": "required-lowercase-hex-sha256",
@@ -719,10 +722,10 @@ moved JSON manifest, not on the video object itself.
 4. Before adding a Filter node, generate a live schema-bootstrap event:
    - Start/connect the Eventstream source and leave the canvas open.
    - Create a valid manifest under
-     `staging/<content-sha256>/<asset-version>/<name>.json` for one of the
+     `staging/<asset-id>/<asset-version>/<name>.json` for one of the
      existing videos.
    - Rename/move that manifest into
-     `incoming/<yyyy>/<mm>/<dd>/<asset-version>/<name>.json`.
+     `incoming/<yyyy>/<mm>/<dd>/<asset-id>/<asset-version>/<name>.json`.
    - Select the source or stream node, set preview to **Last hour**, and
      refresh. Wait until the CloudEvent fields appear.
    - Only then connect/configure the Filter nodes. The Filter field selector
@@ -1964,9 +1967,9 @@ of a backfill run. Use this schema:
 | `counting_line_y1` | Yes | First endpoint Y coordinate |
 | `counting_line_x2` | Yes | Second endpoint X coordinate |
 | `counting_line_y2` | Yes | Second endpoint Y coordinate |
-| `capture_time_source` | Yes | `filename_utc` or `inventory` |
-| `capture_time_regex` | Conditional | Python regular expression with one named group `captured_at_utc`; required for `filename_utc` |
-| `capture_time_format` | Conditional | `datetime.strptime` format for the named timestamp group; required for `filename_utc` |
+| `capture_time_source` | Yes | `auto` (recommended), `embedded`, `filename_utc`, or `inventory` |
+| `capture_time_regex` | Conditional | Python regular expression with one named group `captured_at_utc`; required for `filename_utc` and optional fallback for `auto` |
+| `capture_time_format` | Conditional | `datetime.strptime` format paired with `capture_time_regex` |
 | `effective_from_utc` | Yes | Inclusive UTC start of this camera/configuration row |
 | `effective_to_utc` | No | Exclusive UTC end; blank means still effective |
 
@@ -1974,8 +1977,8 @@ Example:
 
 ```csv
 catalog_version,source_path_prefix,camera_id,location_id,camera_timezone,frame_width,frame_height,counting_line_x1,counting_line_y1,counting_line_x2,counting_line_y2,capture_time_source,capture_time_regex,capture_time_format,effective_from_utc,effective_to_utc
-1,north-entrance/camera-17/,camera-17,north-entrance,America/Denver,1920,1080,0,540,1919,540,filename_utc,(?P<captured_at_utc>\d{8}T\d{6}Z),%Y%m%dT%H%M%SZ,2026-01-01T00:00:00Z,
-1,south-entrance/camera-18/,camera-18,south-entrance,America/Denver,1920,1080,0,540,1919,540,inventory,,,2026-01-01T00:00:00Z,
+1,north-entrance/camera-17/,camera-17,north-entrance,America/Denver,1920,1080,0,540,1919,540,auto,(?P<captured_at_utc>\d{8}T\d{6}Z),%Y%m%dT%H%M%SZ,2026-01-01T00:00:00Z,
+1,south-entrance/camera-18/,camera-18,south-entrance,America/Denver,1920,1080,0,540,1919,540,embedded,,,2026-01-01T00:00:00Z,
 ```
 
 Apply these catalog rules:
@@ -1993,36 +1996,49 @@ Apply these catalog rules:
 5. Add a new effective-dated row when resolution or counting-line
    configuration changes. Do not rewrite the catalog used by an active or
    completed backfill.
-6. Prefer UTC timestamps embedded in filenames. Do not infer capture time
-   from blob creation time, last-modified time, or an ambiguous local wall
-   clock.
+6. Use `capture_time_source=auto` unless policy requires one authoritative
+   source. `auto` checks an optional inventory override first, then embedded
+   stream/container `creation_time`, then the configured filename rule.
+   `embedded`, `filename_utc`, and `inventory` require that specific source.
+7. Do not infer capture time from blob creation time, last-modified time,
+   upload time, or an ambiguous local wall clock. If no trustworthy source is
+   available, the generator rejects only that video with actionable
+   remediation.
 
-When `capture_time_source=inventory`, create a separate
-`video_inventory.csv` with exactly one row per video:
+The generator recursively discovers videos itself. Do not create a complete
+per-video inventory for the backfill. After a dry run, create an optional
+`video_inventory.csv` containing only timestamp exceptions that could not be
+resolved from embedded metadata or filename rules:
 
 ```csv
 video_relative_path,captured_at_utc
-south-entrance/camera-18/clip-000001.mp4,2026-01-02T07:00:00Z
-south-entrance/camera-18/clip-000002.mp4,2026-01-02T07:30:00Z
+south-entrance/camera-18/legacy-clip-0042.mp4,2026-01-02T07:00:00Z
 ```
 
 Paths use the same normalization rules as `source_path_prefix`, and every
-timestamp must contain an explicit UTC `Z` or numeric offset. Reject duplicate
-paths, missing videos, inventory rows without files, and files without
-inventory rows. If an authoritative source system already exports immutable
-asset IDs or versions, extend the inventory with those fields and preserve
-them. Otherwise the generator uses the normalized relative path as
-`asset_id` and
-`SHA256(relative-path + "\n" + lowercase-content-SHA256)` as the
-deterministic `asset_version`. Including the relative path prevents two
-same-named, byte-identical videos from different source paths from sharing a
-publication directory.
+timestamp must contain an explicit UTC `Z` or numeric offset. The generator
+rejects duplicate paths and inventory rows without a matching file in the
+selected partition.
+
+The generator always derives identity:
+
+```text
+asset_id      = SHA256(normalized source-relative path)
+asset_version = SHA256(video bytes)
+```
+
+`asset_id` represents the logical source path and remains stable when that
+path's content is corrected. `asset_version` is the content version: changing
+one byte creates a new version and therefore a new work item. The incoming
+path contains both identifiers so byte-identical, same-named videos from
+different source paths cannot collide. The optional inventory does not
+override either identity.
 
 Before generating manifests, validate and sign off:
 
 - the count of catalog rows and distinct cameras;
 - the camera-to-location and camera-to-timezone mappings;
-- path-prefix uniqueness and full inventory coverage;
+- path-prefix uniqueness and full discovered-video coverage;
 - timestamp parsing at daylight-saving boundaries;
 - counting-line coordinates and direction on a sample frame from every
   catalog row; and
@@ -2031,12 +2047,18 @@ Before generating manifests, validate and sign off:
 Retain the reviewed catalog, optional inventory, their SHA-256 values, the
 reviewer, and approval time with the backfill run record.
 
-### 7.2 Run the manifest-generation and publication job
+### 7.2 Prepare and publish a manifest package
 
-The generator is the `people-counter-publish-manifests` regular,
-non-interactive Python command. Run it on a durable producer-side host or
-build agent with access to the source videos and ADLS. It is intentionally not
-an interactive Jupyter notebook:
+Manifest preparation and storage publication are separate non-interactive
+Python commands:
+
+- `prepare-manifests` requires the camera catalog and local
+  source videos, but no Azure identity or destination details;
+- `publish-manifests` requires a completed manifest package,
+  the same source-video directory tree, and ADLS write access.
+
+They may be run by different operators or by the same operator at different
+times. Neither command is an interactive Jupyter notebook:
 
 - hashing is cheapest while the files are local and already being read for
   upload;
@@ -2044,8 +2066,10 @@ an interactive Jupyter notebook:
   browser session alive;
 - the producer can test and version the catalog/parser with normal automated
   tests; and
-- Fabric keeps read-only access to source footage while a separately managed
-  publisher identity receives narrowly scoped write permission.
+- preparation can run in an environment with no production storage access;
+  and
+- Fabric keeps read-only access to source footage while only the publication
+  operator receives narrowly scoped write permission.
 
 Install the publisher dependencies:
 
@@ -2058,7 +2082,8 @@ confirm `ffprobe -version` succeeds. The publisher invokes `ffprobe` without a
 shell to obtain authoritative video duration and dimensions; the Python extra
 does not install this operating-system executable.
 
-The command uses Azure `DefaultAzureCredential`. Use one of its supported
+Only the publication command uses Azure `DefaultAzureCredential`. Use one of
+its supported
 non-secret credential sources, such as managed identity, workload identity,
 Azure CLI login for an attended operator run, or `AZURE_CLIENT_ID`,
 `AZURE_TENANT_ID`, and `AZURE_CLIENT_SECRET` supplied by the execution
@@ -2067,89 +2092,152 @@ target filesystem or on the required `staging/` and `incoming/` paths when
 ACL-based scoping is available. The Fabric processing identity remains a
 reader and does not need this write role.
 
-Run one non-overlapping date/path partition per job invocation. The job's
-required inputs are the immutable `camera_catalog.csv`, optional
-`video_inventory.csv`, local video root, ADLS filesystem and staging root,
-final `incoming/` root, and a durable local or external checkpoint directory.
-The implementation must never put storage credentials in either CSV,
-generated manifests, command history, or logs.
-
-First validate a partition without authenticating to Azure or writing remote
-objects:
+Run one non-overlapping path partition per preparation invocation. Prepare the
+package without authenticating to Azure or writing remote objects:
 
 ```bash
-uv run people-counter-publish-manifests \
+uv run prepare-manifests \
   --catalog config/camera_catalog.csv \
-  --inventory config/video_inventory.csv \
   --video-root /mnt/source-videos \
   --partition-prefix north-entrance/camera-17/ \
-  --checkpoint state/camera-17.sqlite3 \
-  --rejection-report state/camera-17-rejections.csv \
-  --max-files 1000 \
-  --dry-run
+  --output-dir prepared/camera-17-2026-09 \
+  --max-files 1000
 ```
 
-Fix every reported rejection, then publish the same partition:
+The preparation command writes:
+
+```text
+prepared/camera-17-2026-09/
+  manifest-package.json
+  prepared-manifests/<asset-id>/<asset-version>.json
+  generated-video-inventory.csv
+  rejection-report.csv
+  summary.json
+  preparation.sqlite3
+```
+
+`manifest-package.json` is the authoritative, checksum-indexed package
+inventory and records whether preparation completed without rejections.
+Prepared manifests contain all source-derived and catalog metadata but do not
+contain `video_uri` or `source_etag`, because those values do not exist until
+publication. The preparation output never contains video bytes and does not
+copy or move them.
+
+If `rejection-report.csv` contains `CAPTURE_TIME_MISSING` or
+`CAPTURE_TIME_FILENAME_MISMATCH`, create a small exception inventory and
+repeat preparation with:
+
+```text
+--inventory config/video-inventory-exceptions.csv
+```
+
+Resolve every rejection before publication. Transfer or retain these two
+items together:
+
+1. the unchanged source-video directory tree; and
+2. the prepared output directory.
+
+The storage operator can publish immediately or later. The paths inside the
+package are relative to `--video-root`, so the directory tree may be mounted
+at a different absolute path. The publisher verifies the package index,
+prepared-manifest checksums, path identities, and source-video size/SHA-256.
+It refuses an incomplete, edited, unsupported, or mismatched package before
+publishing its entries.
 
 ```bash
-uv run --extra publisher people-counter-publish-manifests \
-  --catalog config/camera_catalog.csv \
-  --inventory config/video_inventory.csv \
+uv run --extra publisher publish-manifests \
+  --manifest-package-dir prepared/camera-17-2026-09 \
   --video-root /mnt/source-videos \
-  --partition-prefix north-entrance/camera-17/ \
   --storage-account <storage-account> \
   --filesystem <source-filesystem> \
   --staging-prefix staging \
   --incoming-prefix incoming \
-  --checkpoint state/camera-17.sqlite3 \
-  --rejection-report state/camera-17-rejections.csv \
-  --max-files 1000 \
+  --checkpoint state/camera-17-publication.sqlite3 \
+  --rejection-report state/camera-17-publication-rejections.csv \
+  --summary-report state/camera-17-publication-summary.json \
   --chunk-size-mib 8
 ```
 
-`--partition-prefix` is relative to `--video-root`. A global inventory may
-contain rows for other partitions; the command reconciles only rows under the
-selected prefix. Omit `--inventory` only when every matched catalog row uses
-`capture_time_source=filename_utc`.
+Publication supplies all destination details; preparation does not embed a
+storage account or filesystem. After each video is uploaded and atomically
+renamed, publication reads its final ETag, materializes the final
+schema-version-1 manifest, uploads that manifest under `staging/`, and renames
+it into `incoming/` last.
 
-The command prints one JSON summary containing `generator_version`,
+The preparation command prints one JSON summary containing `generator_version`,
 `catalog_sha256`, `inventory_sha256`, `discovered`, `planned`, `published`,
-`already_published`, `rejected`, and `total_video_duration_seconds`. Exit code
-`0` means the partition completed without rejections. Exit code `2` means at
-least one video was rejected; inspect the CSV supplied through
-`--rejection-report` and do not register that partition.
+`already_published`, `rejected`, `total_video_duration_seconds`,
+`rejections_by_reason`, `rejections_by_camera`, and
+`rejections_by_prefix`. The same content is written atomically to
+`--summary-report`.
 
-For each partition, the job must:
+`generated-video-inventory.csv` is produced by preparation, not by the
+operator. It contains one successful row per video with
+the derived capture-time source, camera/location, asset identifiers, byte
+size, SHA-256, dimensions, duration, and prepared-manifest path. It remains
+destination-independent; final ADLS paths are chosen during publication.
+Reruns update rows by relative path and preserve unchanged completed rows.
 
-1. Validate the entire catalog and inventory before writing anything.
+The rejection CSV contains one row per rejected video with
+`reason_code`, `field`, `observed_value`, `explanation`,
+`suggested_action`, `retryable`, camera/path context, and checkpoint state.
+Use the grouped JSON counts to prioritize bulk corrections, then filter the
+CSV by reason code instead of reviewing console logs. For example:
+
+| Reason code | Operator action |
+|---|---|
+| `CAPTURE_TIME_MISSING` | Add a filename rule, repair embedded `creation_time`, or add only the affected files to the exception inventory |
+| `CAPTURE_TIME_FILENAME_MISMATCH` | Correct the catalog regex/format or add exception timestamps |
+| `NO_CAMERA_MATCH` | Add or correct the camera `source_path_prefix` |
+| `VIDEO_DIMENSION_MISMATCH` | Correct catalog dimensions/counting line or add an effective-dated configuration row |
+| `VIDEO_PROBE_FAILED` | Validate, repair, or remux the source video |
+| `PUBLICATION_CONFLICT` | Investigate the existing object and checkpoint; never overwrite `incoming/` |
+
+Exit code `0` means the command completed without rejections. Exit code `2`
+means at least one video was rejected. Do not publish an incomplete package,
+and do not register a publication partition with unresolved failures.
+
+For each partition, preparation must:
+
+1. Validate the entire catalog and any exception inventory before writing
+   anything.
 2. Enumerate supported video files and join every file to exactly one
    effective catalog row.
-3. Parse or look up `captured_at_utc`; reject ambiguous local times and
-   timestamps outside the matched effective interval.
+3. Resolve `captured_at_utc` from an exception inventory, embedded
+   `creation_time`, or the configured filename rule, in that order for
+   `auto`; reject ambiguous or unavailable times and timestamps outside the
+   matched effective interval.
 4. Read each local file as a stream to calculate final byte size and lowercase
    SHA-256. Use `ffprobe` or an equivalently tested parser to read duration and
    frame dimensions, and reject files whose dimensions do not match the
    catalog.
-5. Upload in resumable chunks into
-   `staging/<content-sha256>/<asset-version>/...`, complete the upload, and
-   verify the remote size before publication. The content-hash segment
-   prevents a stale partial upload from another asset version from being
-   resumed. Reuse a verified existing staged upload on an idempotent retry
-   instead of transferring it again.
-6. Atomically rename the video within the same hierarchical-namespace ADLS
+5. Write one destination-independent prepared manifest per accepted video and
+   a checksum-indexed `manifest-package.json` last.
+
+For each prepared package, publication must:
+
+1. Validate `manifest-package.json`, every prepared-manifest checksum, every
+   deterministic identity, and every referenced source path before Azure
+   access.
+2. Upload in resumable chunks into
+   `staging/<asset-id>/<asset-version>/...`, hash the exact local byte stream
+   used by the resumable upload, and verify its size and SHA-256 before
+   publication. Reuse a verified existing staged upload on an idempotent
+   retry instead of transferring it again.
+3. Atomically rename the video within the same hierarchical-namespace ADLS
    filesystem to
-   `incoming/<yyyy>/<mm>/<dd>/<asset-version>/<name>.mp4`, then read the
-   final object's ETag/version.
-7. Serialize manifest version 1 with the final incoming URI, final ETag,
+   `incoming/<yyyy>/<mm>/<dd>/<asset-id>/<asset-version>/<name>.mp4`, then
+   read the final object's ETag/version.
+4. Serialize manifest version 1 with the final incoming URI, final ETag,
    expected size and SHA-256, catalog metadata, and measured duration. Write
    the manifest under `staging/` first.
-8. Atomically rename the manifest into the video's `incoming/` directory
+5. Atomically rename the manifest into the video's `incoming/` directory
    **last**. That rename is the steady-state readiness event.
-9. Write a durable checkpoint containing the normalized input path, manifest
+6. Write a durable checkpoint containing the normalized input path, manifest
    URI, asset ID/version, content SHA-256, state, attempt count, and error.
    Record explicit `DISCOVERED`, `HASHED`, `VIDEO_PUBLISHED`,
    `MANIFEST_PUBLISHED`, and `REJECTED` states.
-10. Emit a partition summary with discovered, published, already published,
+7. Emit a partition summary with discovered, published, already published,
     and rejected counts plus total video duration and a rejection report.
 
 For an archive that was already uploaded directly into `incoming/`, the
@@ -2167,10 +2255,10 @@ backfill registrations converge on the same `work_id`. The dispatcher still
 provides the hard inference-concurrency limit.
 
 The generator must be idempotent. A rerun with identical video bytes, catalog,
-and inventory produces the same `asset_id`, `asset_version`, final URI, and
-manifest content. ADLS rename uses a server-side destination-must-not-exist
-condition, so a concurrent publisher cannot overwrite an `incoming/` object
-between a preflight check and the rename.
+and optional overrides produces the same `asset_id`, `asset_version`, final
+URI, and manifest content. ADLS rename uses a server-side
+destination-must-not-exist condition, so a concurrent publisher cannot
+overwrite an `incoming/` object between a preflight check and the rename.
 
 The SQLite checkpoint stores local size and nanosecond modification time,
 configuration fingerprints, final paths, the published video ETag, and the
@@ -2192,7 +2280,7 @@ partition:
 
 `02_register_backfill` remains separate: it does not inspect local archives,
 upload videos, or repair rejected metadata. It validates the manifests
-published by `people-counter-publish-manifests` and registers their work.
+published by `publish-manifests` and registers their work.
 
 ### 7.3 Backfill registration pipeline
 
@@ -2262,9 +2350,8 @@ outside these notebooks or append directly to `video_work`.
 
 ### 7.4 Backfill execution phases
 
-1. **Catalog and inventory:** approve the camera catalog, reconcile the source
-   video inventory, and partition generation by capture date and storage
-   prefix.
+1. **Catalog and discovery:** approve the camera catalog, let the generator
+   inventory the source tree, and partition generation by path prefix.
 2. **Manifest publication:** run the producer-side generator, resolve its
    rejection report, and reconcile each partition before registration.
 3. **Representative benchmark:** use at least three duration/resolution/motion
@@ -3708,7 +3795,7 @@ does not conflict with replay, audit, or legal-hold requirements.
 
 ### Phase 5: backfill ramp
 
-- Approve and freeze the camera catalog and source video inventory.
+- Approve and freeze the camera catalog and source video roots.
 - Generate manifests with the producer-side job and reconcile every
   generation partition before registration.
 - Execute the 0.1%, 1%, and stepped ramp plan.
