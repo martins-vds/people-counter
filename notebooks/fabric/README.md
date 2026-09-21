@@ -986,29 +986,27 @@ Create `pc-event-intake`:
    - Select `<workspace-name>`.
    - For **Item**, select the `pc-event-intake` Data Pipeline.
    - Do not add another status filter; the selected event type already means
-     the item job failed, became stuck, or was canceled.
+     the item job failed.
    - Save the source connection.
    - Under **Condition**, configure:
 
      | Field | Value |
      |---|---|
-     | **Check** | `On each event when` |
+     | **Check** | `On each event` |
      | **Grouping field** | Leave empty |
-     | **When** | `__type` |
-     | **Condition** | `Is equal to` |
-     | **Value** | Select the failure type shown by the Activator schema; in the current UI this is `Microsoft.Fabric.JobEvents.ItemJobFailed` |
 
      The source is already restricted to `pc-event-intake` and the
-     `ItemJobFailed` event type. Activator exposes the top-level CloudEvent
-     field as `__type`. Do not select `jobType`: that field describes the
-     workload operation, such as a pipeline or notebook run, rather than the
-     event category. If another Fabric runtime displays
-     `Microsoft.Fabric.ItemJobFailed` instead, use the exact `__type` value
-     visible in that event preview. This predicate repeats the event-type
-     check only because the current Activator UI requires a **When** field.
-   - Under **Action**, choose one or both:
-     - **Send email** to the operations distribution list.
-     - **Teams → Channel post** to the operations team/channel.
+     `ItemJobFailed` event type, so do not add a **When** predicate. If the
+     tenant UI lacks plain **On each event** and requires a predicate, inspect
+     a real event preview and select the exact event-type field and value
+     exposed in that tenant. Do not hardcode `__type` or use `jobType`.
+   - Under **Action**, choose a supported destination:
+     - **Send email** to a tested user or mail-enabled distribution address;
+       or
+     - **Teams -> Channel post** to the approved operations team/channel.
+
+     If both channels are required, add and test the second action in
+     Activator rather than assuming one simple action sends to both.
    - Use a subject/headline such as:
 
      ```text
@@ -2770,15 +2768,15 @@ Configure it in Fabric:
 
      | Rule field | Value |
      |---|---|
-     | **Check** | `On each event when` |
+     | **Check** | `On each event` |
      | **Grouping field** | Leave empty |
-     | **When** | `__type` |
-     | **Condition** | `Is equal to` |
-     | **Value** | Select the failure value exposed by the picker, normally `Microsoft.Fabric.JobEvents.ItemJobFailed` |
 
-     The source already contains only ItemJobFailed events; this condition is
-     repeated because the current rule UI requires a **When** field. Do not
-     use `jobType` as the event condition.
+     The source is already restricted to
+     `Microsoft.Fabric.ItemJobFailed`, so do not add a **When** predicate.
+     If the tenant UI does not expose plain **On each event** and requires a
+     predicate, inspect a real event preview and select the exact event-type
+     field and value exposed by that tenant. Do not hardcode `__type`,
+     `jobType`, or a differently namespaced event value.
    - Under **Action**, select **Message to individuals**, **Channel post**, or
      **Email**, then configure the recipient.
    - Set **Headline** to
@@ -4887,26 +4885,192 @@ videos or cameras as unique humans.
 
 ### 8.3 Alerts
 
-Use Fabric job events and Activator for immediate terminal failures. Use
-scheduled/KQL or ledger checks for:
+Use separate alert sources for Fabric execution failures and application
+ledger conditions. Do not treat a failed Fabric job and a failed video work
+item as the same signal.
 
-```text
-queue age > queue SLA
-heartbeat age > lease SLA
-event receipt with no work row
-Fabric job with no attempt correlation
-failure rate > threshold
-dead-letter count > 0
-daily completed hours below burn-down target
-capacity queue/throttling sustained
-reconciliation severity = ERROR
-```
+1. Confirm the two job-level alert types from section 8.1 are running:
+   - `alert_pc_event_intake_duration_20m` is the dashboard-polled elapsed-time
+     alert created in section 8.1 step 7.
+   - `alert_<item-name>_failed` is the immediate
+     `Microsoft.Fabric.ItemJobFailed` Job-event alert created in section 8.1
+     step 8 for each critical pipeline or notebook.
 
-Implement the intake-duration and immediate terminal-failure alerts in
-section 8.1 steps 7 and 8. Add the remaining application-ledger alerts only
-after their Delta/KQL data sources and operator runbooks are validated. Avoid
-creating both a dashboard-polled failure rule and a Job-event failure rule
-for the same item unless duplicate notifications are intentional.
+   Do not create another dashboard-polled `JobStatus == "Failed"` alert for
+   an item that already has an immediate Job-event failure rule. That would
+   send duplicate notifications for the same Fabric failure. For a notebook
+   invoked by a Data Pipeline, also choose whether the pipeline item or the
+   notebook item is the authoritative Job-event alert source. Do not alert on
+   both layers for the same execution path unless different owners
+   intentionally need both notifications.
+2. Before creating ledger alerts, approve and record:
+
+   | Decision | Required value |
+   |---|---|
+   | Queue-age SLA | `<approved-queue-sla-minutes>` |
+   | Heartbeat timeout | `20` minutes, matching `pc-watchdog` |
+   | Operations recipients | Named users, a mail-enabled distribution address, or an approved Teams destination |
+   | Notification channel | One tested channel per simple report alert |
+   | Severity and escalation owner | Approved operations policy |
+   | Evaluation expectation | Confirm alerts evaluate often enough for the SLA |
+
+   Do not invent a queue SLA while configuring the rule. Replace
+   `<approved-queue-sla-minutes>` only after the owner approves it.
+3. Add one alert-specific measure to `pc_operations_model`:
+   1. Open `pc_operations_model` with **Open data model** and switch to
+      **Editing** mode.
+   2. Select `people_counter_video_work` as the home table.
+   3. Create the measure and set its display folder to `Operations KPIs`:
+
+      ```DAX
+      Terminal Failed Work Count =
+      CALCULATE(
+          COUNTROWS(people_counter_video_work),
+          people_counter_video_work[status] = "TERMINAL_FAILED"
+      )
+      ```
+
+      Format it as a whole number.
+   4. Wait for autosave, select **Refresh**, and confirm the model has no
+      orange Direct Lake warnings.
+4. Add alert-source Cards to the **Operations** page of
+   `pc_operations_report`. Use one Card per measure:
+
+   | Measure path | Card title |
+   |---|---|
+   | `people_counter_video_work -> Operations KPIs -> Oldest Queue Age Minutes` | `Oldest queue age (minutes)` |
+   | `people_counter_video_work -> Operations KPIs -> Terminal Failed Work Count` | `Terminal failed work` |
+   | `people_counter_video_work -> Operations KPIs -> Dead Letter Count` | `Dead-lettered work` |
+   | `people_counter_video_work -> Operations KPIs -> Open Reconciliation Errors` | `Open reconciliation errors` |
+
+   For each Card, drag the calculator-icon measure into **Values** or
+   **Data**, turn the visual title on, and use the title above. Keep these
+   Cards unfiltered by Camera, Location, Status, or Date when creating the
+   alerts so they monitor the global operational condition.
+5. Create one Fabric Activator item for application-ledger alerts:
+   1. Open `pc_operations_report` in **Editing** view.
+   2. Select **Set alert** on the report ribbon. If it is not visible, verify:
+      - the tenant setting that allows Power BI users to create Fabric
+        Activator alerts is enabled;
+      - the workspace is on active Fabric capacity;
+      - you have Edit access to the report; and
+      - the report is in Editing view, not Reading view.
+   3. In the **Alerts** pane, select **Select save location**.
+   4. Select workspace `<workspace-name>`.
+   5. Choose **Create a new activator item**, name it:
+
+      ```text
+      pc_ledger_alerts
+      ```
+
+   6. Select **Confirm**. Store application-ledger rules here; do not store
+      them in `pc_job_failure_activator` or
+      `pc_manifest_arrival_activator`.
+6. Create the ledger rules from the report Cards. For each row below:
+   1. Select the corresponding Card.
+   2. Select the visual ellipsis (`...`) -> **Add alert**, or use the bell icon
+      if it appears on the visual.
+   3. In the alert **Condition**, choose **Becomes**.
+   4. Configure the operator and value shown below.
+   5. Under **Send notification**, choose Teams or Email and add the approved
+      recipient or destination supported by the selected channel.
+   6. Select **Apply**.
+
+   | Rule name | Card measure | Condition |
+   |---|---|---|
+   | `alert_pc_queue_age_sla` | `Oldest Queue Age Minutes` | Becomes greater than `<approved-queue-sla-minutes>` |
+   | `alert_pc_terminal_failed_work` | `Terminal Failed Work Count` | Becomes greater than `0` |
+   | `alert_pc_dead_letter` | `Dead Letter Count` | Becomes greater than `0` |
+   | `alert_pc_reconciliation_error` | `Open Reconciliation Errors` | Becomes greater than `0` |
+
+   These `Becomes` rules are global healthy-to-unhealthy **epoch** alerts.
+   They trigger when the measure crosses from a nonbreaching value into a
+   breaching value. If a count remains greater than zero, another affected
+   work item or finding does not produce another notification. The rule can
+   trigger again only after the measure returns to a healthy value and later
+   breaches again. Use a durable row/event source keyed by `work_id`,
+   `attempt_id`, or `finding_id` when per-incident notification is required.
+
+   The alert captures the report filters in effect when the alert is created.
+   Before selecting **Apply**, use **Show applied filters** and confirm there
+   is no Camera, Location, Status, Date, drill-through, or visual-level filter
+   narrowing the monitored value.
+7. Refine and name the rules in Activator:
+   1. At the bottom of the report's **Alerts** pane, open the Activator
+      ellipsis (`...`) and select **Open in Activator**.
+   2. Switch the Activator item to **Edit** mode.
+   3. Select each alert and rename it to the corresponding rule name above
+      when the report UI did not expose a name field.
+   4. Confirm the condition, recipient, and action.
+   5. Add a concise headline that includes environment and condition, for
+      example:
+
+      ```text
+      [Fabric][<environment>] dead-lettered work detected
+      ```
+
+   6. Add notification context describing:
+      - the triggering measure and current value;
+      - the approved threshold;
+      - workspace and report names;
+      - the first runbook action; and
+      - the operator escalation destination.
+   7. Save and start each rule.
+
+   After an alert is upgraded or edited as an advanced rule in Activator, it
+   can no longer be edited from the Power BI report alert UI. Make subsequent
+   changes in Activator.
+8. Use this routing and first-response policy:
+
+   - Job-event failure alerts are immediate execution symptoms routed to the
+     engineering/platform on-call.
+   - Terminal/dead-letter ledger alerts are durable application-state
+     escalations routed to the video-processing operations owner.
+   - One worker exception can therefore produce both a Job-event notification
+     and a later ledger-state notification. This is intentional only when the
+     recipients, severity, and response actions are different. If the same
+     team should receive exactly one notification, choose one authoritative
+     failure source and disable the overlapping rule.
+
+   | Alert | First response |
+   |---|---|
+   | Intake duration | Open Monitoring Hub and Capacity Metrics; determine whether the job is not started or in progress before retrying anything |
+   | Fabric item failed | Open the failed job instance, record `JobInstanceId`, inspect activity/notebook output, and correlate to pipeline/attempt IDs |
+   | Queue age SLA | Check dispatcher schedule, running workers, `not_before_at`, capacity admission, and whether queue growth is continuing |
+   | Terminal failed work | Inspect attempt history and retryability; do not replay until the root cause is corrected |
+   | Dead-lettered work | Open the Operations report, review all attempts, obtain operator approval, then use `pc-replay` with a new `REPLAY_ID` |
+   | Reconciliation error | Inspect `finding_type`, work/attempt IDs, and details; stop publication or replay when committed-output integrity is uncertain |
+
+   Notifications are prompts to investigate, not authorization to rerun or
+   replay automatically.
+9. Test every rule in Development before Production:
+   - Verify Job-event alerts with one controlled failed test item.
+   - Temporarily use a lower queue-age threshold or a controlled queued test
+     item, then restore the approved threshold.
+   - Use a known Development terminal/dead-letter row to validate the two
+     work-state rules.
+   - Use a controlled reconciliation finding to validate the reconciliation
+     rule.
+   - Confirm exactly one notification is sent for each intended transition,
+     its links and context are usable, and the rule can trigger again after
+     the value returns below the threshold and breaches again.
+10. Treat these conditions as covered by existing rules:
+    - `RECEIPT_WITHOUT_WORK` is an `ERROR` finding emitted by
+      `06_reconcile_publication.ipynb`; it is covered by
+      `alert_pc_reconciliation_error`.
+11. Do not configure these alerts yet:
+
+    | Deferred alert | Missing prerequisite |
+    |---|---|
+    | Heartbeat age above the 20-minute watchdog threshold | `pc-watchdog` can move the row out of the active state before a report alert evaluates, and reconciliation can run after recovery; persist a durable timeout/recovery finding or emit an event before changing state |
+    | Fabric job with no attempt correlation | `06_reconcile_publication.ipynb` does not currently ingest Workspace-monitoring job logs or emit this finding |
+    | Attempt failure rate above threshold | An approved threshold and representative baseline are required; the current successful-video dataset is empty |
+    | Daily completed hours below backfill target | The gold operations fact has no workload-origin/backfill-batch key |
+    | Sustained capacity queueing or throttling | A validated Capacity Metrics/KQL signal and approved duration/threshold are required |
+
+    Do not create placeholder rules that cannot evaluate a real source field.
+    Add each deferred alert only after its prerequisite, test procedure, and
+    operator runbook are implemented.
 
 ## 9. Security, privacy, and lifecycle
 
@@ -5112,7 +5276,9 @@ The implementation is ready only when all checks pass:
 - [Monitoring Hub](https://learn.microsoft.com/fabric/admin/monitoring-hub)
 - [Workspace monitoring](https://learn.microsoft.com/fabric/fundamentals/workspace-monitoring-overview)
 - [Item job event logs](https://learn.microsoft.com/fabric/fundamentals/item-job-event-logs)
+- [Set alerts on Fabric workspace item events](https://learn.microsoft.com/fabric/real-time-hub/set-alerts-fabric-workspace-item-events)
 - [Real-Time Dashboards](https://learn.microsoft.com/fabric/real-time-intelligence/dashboard-real-time-create)
+- [Create Power BI alerts and refine them in Fabric Activator](https://learn.microsoft.com/fabric/real-time-intelligence/data-activator/activator-get-data-power-bi)
 - [Lakehouse SQL analytics endpoint](https://learn.microsoft.com/fabric/data-engineering/lakehouse-sql-analytics-endpoint)
 - [Direct Lake overview](https://learn.microsoft.com/fabric/fundamentals/direct-lake-overview)
 - [Fabric semantic models](https://learn.microsoft.com/fabric/data-warehouse/semantic-models)
