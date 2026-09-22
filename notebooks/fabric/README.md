@@ -61,13 +61,13 @@ Run or deploy the notebooks in this order:
 | [`03_claim_work.ipynb`](./03_claim_work.ipynb) | Claims no more than the available worker slots and returns a JSON work batch | Every dispatcher pipeline run |
 | [`04_process_video.ipynb`](./04_process_video.ipynb) | Owns a lease, processes one video sequentially, writes attempt-scoped output, and publishes the committed attempt | Once per claimed work item |
 | [`05_watchdog_recovery.ipynb`](./05_watchdog_recovery.ipynb) | Requeues expired retryable leases and dead-letters exhausted work | Every five minutes |
-| [`06_reconcile_publication.ipynb`](./06_reconcile_publication.ipynb) | Detects ledger/output/job-correlation anomalies and records reconciliation findings | Every 15 minutes and after releases |
+| [`06_reconcile_publication.ipynb`](./06_reconcile_publication.ipynb) | Detects ledger and committed-output anomalies and records reconciliation findings | Every 15 minutes and after releases |
 | [`07_build_gold_aggregates.ipynb`](./07_build_gold_aggregates.ipynb) | Builds minute-flow, hourly-flow, video, and operational facts for Direct Lake reports | Incrementally after committed work |
 | [`08_capacity_benchmark.ipynb`](./08_capacity_benchmark.ipynb) | Measures processing speed and calculates the minimum parallelism for the 30-day target | Before selecting capacity and after model/runtime changes |
 | [`09_maintain_delta.ipynb`](./09_maintain_delta.ipynb) | Removes expired uncommitted output and runs reviewed Delta optimization/vacuum | Daily or weekly according to retention policy |
 | [`10_replay_work.ipynb`](./10_replay_work.ipynb) | Audits and requeues one terminal/dead-lettered work item | Operator-approved incident recovery |
-| [`11_validate_observability.ipynb`](./11_validate_observability.ipynb) | Validates running-job, queue, burn-down, flow, and camera-level reporting data | Before dashboard release and during incident diagnosis |
-| [`12_plan_gold_refresh.ipynb`](./12_plan_gold_refresh.ipynb) | Discovers date partitions changed within a lookback window for gold refresh | At the start of every gold-refresh pipeline run |
+| [`11_validate_observability.ipynb`](./11_validate_observability.ipynb) | Validates application status, queue, attempts, global throughput, flow, and camera-level reporting data | Before dashboard release and during incident diagnosis |
+| [`12_plan_gold_refresh.ipynb`](./12_plan_gold_refresh.ipynb) | Discovers date partitions affected by recent queue, attempt, and commit activity | At the start of every gold-refresh pipeline run |
 | [`13_build_analytics_dimensions.ipynb`](./13_build_analytics_dimensions.ipynb) | Builds physical Date, Time, Camera, Location, Video, and ModelConfig Delta dimensions | After gold fact partitions finish refreshing |
 
 Manifest generation is a producer-side responsibility, not another Fabric
@@ -225,7 +225,7 @@ sequenceDiagram
     REG->>DELTA: MERGE event_receipts by event_key
     REG->>DELTA: INSERT video_work if work_id is new
     alt duplicate event
-        REG-->>PIPE: DUPLICATE_EVENT
+        REG-->>PIPE: Existing receipt status (QUEUED or EXISTING_WORK)
     else existing immutable work
         REG-->>PIPE: EXISTING_WORK
     else new work
@@ -264,9 +264,7 @@ sequenceDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RECEIVED
-    RECEIVED --> QUEUED: manifest valid
-    RECEIVED --> TERMINAL_FAILED: invalid manifest
+    [*] --> QUEUED: valid manifest registered
     QUEUED --> LEASED: dispatcher claim
     RETRY_WAIT --> LEASED: not_before reached
     LEASED --> STAGING: worker verifies ownership
@@ -279,12 +277,27 @@ stateDiagram-v2
     WRITING --> RETRY_WAIT: retryable Delta conflict
     LEASED --> TERMINAL_FAILED: nonretryable failure
     STAGING --> TERMINAL_FAILED: invalid or changed source
-    RUNNING --> TERMINAL_FAILED: attempts exhausted
-    RETRY_WAIT --> DEAD_LETTERED: attempts exhausted
+    RUNNING --> TERMINAL_FAILED: nonretryable failure
+    WRITING --> TERMINAL_FAILED: nonretryable failure
+    LEASED --> DEAD_LETTERED: attempts exhausted
+    STAGING --> DEAD_LETTERED: attempts exhausted
+    RUNNING --> DEAD_LETTERED: attempts exhausted
+    WRITING --> DEAD_LETTERED: attempts exhausted
+    LEASED --> RECOVERING: stale lease or heartbeat
+    STAGING --> RECOVERING: stale lease or heartbeat
+    RUNNING --> RECOVERING: stale lease or heartbeat
+    WRITING --> RECOVERING: stale lease or heartbeat
+    RECOVERING --> RETRY_WAIT: attempts remain
+    RECOVERING --> DEAD_LETTERED: attempts exhausted
     TERMINAL_FAILED --> QUEUED: approved replay
     DEAD_LETTERED --> QUEUED: approved replay
     SUCCEEDED --> [*]
 ```
+
+Invalid manifests do not create a `video_work` row. They create an
+`event_receipts` row with `registration_status=REJECTED`; receipt status and
+work status are separate state machines. `LEASE_LOST` is an attempt status,
+not a durable work status.
 
 Allowed state changes must be conditional on the current state and, after
 claim, `lease_owner_attempt_id`. A worker that loses its lease must stop and
@@ -343,11 +356,12 @@ One mutable current-state row per immutable video version.
 work_id PK, asset_id, asset_version, source_uri, manifest_uri, source_etag,
 expected_size_bytes, expected_sha256, camera_id, location_id,
 captured_at_utc, camera_timezone, duration_seconds, priority,
-status, received_at, queued_at, not_before_at, attempt_count, max_attempts,
+status, received_at, queued_at, queue_entered_at, not_before_at,
+attempt_count, max_attempts,
 lease_owner_attempt_id, lease_acquired_at, lease_expires_at,
 lease_dispatcher_id, last_heartbeat_at, committed_attempt_id, completed_at,
 last_error_category, last_error_type, last_error_message,
-config_json, config_sha256
+last_replay_id, replay_generation, config_json, config_sha256, capture_date
 ```
 
 #### `people_counter_dispatcher_leases`
@@ -372,13 +386,14 @@ One durable row per attempt. Attempts are never reused or deleted by a retry.
 
 ```text
 attempt_id PK, work_id, dispatcher_id, pipeline_run_id, activity_run_id,
-fabric_job_instance_id, sdk_version, bundle_manifest_sha256, config_sha256,
+fabric_job_instance_id, worker_execution_id, sdk_version,
+bundle_manifest_sha256, config_sha256,
 status, claimed_at, staging_started_at,
 inference_started_at, writing_started_at, completed_at, last_heartbeat_at,
 input_sha256, source_size_bytes, source_duration_seconds, source_fps,
 total_source_frames, processed_frames, effective_sample_fps,
 processing_seconds, distinct_people, line_in_count, line_out_count,
-retryable, error_category, error_type, error_message
+retryable, error_category, error_type, error_message, capture_date
 ```
 
 #### `people_counter_replay_requests`
@@ -387,7 +402,7 @@ An append-only audit record for every operator-approved replay:
 
 ```text
 replay_id PK, work_id, requested_by, reason, requested_at,
-previous_status, applied_at, capture_date
+previous_status, replay_generation, applied_at, capture_date
 ```
 
 ### Attempt output tables
@@ -399,7 +414,7 @@ In addition to the SDK telemetry fields it stores:
 
 ```text
 camera_id, location_id, captured_at_utc, person_entry_at_utc,
-person_exit_at_utc, recorded_at
+person_exit_at_utc, recorded_at, capture_date
 ```
 
 `people_counter_line_count_attempts` is keyed by
@@ -408,7 +423,8 @@ person_exit_at_utc, recorded_at
 In addition to the SDK line-count fields it stores:
 
 ```text
-camera_id, location_id, captured_at_utc, observed_at_utc, recorded_at
+camera_id, location_id, captured_at_utc, observed_at_utc, recorded_at,
+capture_date
 ```
 
 To keep the 200,000-hour backfill tractable, the worker persists rows where a
@@ -1411,6 +1427,7 @@ date and alert before it expires:
     | `ATTEMPT_ID` | `String` | Dynamic | `@item().attempt_id` |
     | `PIPELINE_RUN_ID` | `String` | Dynamic | `@pipeline().RunId` |
     | `ACTIVITY_RUN_ID` | `String` | Dynamic | `@concat(pipeline().RunId, '/', item().attempt_id)` |
+    | `WORKER_EXECUTION_ID` | `String` | Dynamic | `@guid()` |
     | `FABRIC_JOB_INSTANCE_ID` | `String` | Literal | Empty; populated later by monitoring reconciliation |
     | `BUNDLE_MANIFEST_SHA256` | `String` | Dynamic | `@pipeline().parameters.BUNDLE_MANIFEST_SHA256` |
     | `SOURCE_STORAGE_ACCOUNT` | `String` | Literal | `<storage-account>` |
@@ -1421,10 +1438,12 @@ date and alert before it expires:
     | `LEASE_MINUTES` | `Int` | Literal | `30` |
     | `HEARTBEAT_SECONDS` | `Int` | Literal | `600` |
 
-    For the five Dynamic rows, select **Value -> Add dynamic content** and
+    For the six Dynamic rows, select **Value -> Add dynamic content** and
     enter the expression exactly as shown without quotes. `ACTIVITY_RUN_ID`
     is a synthetic correlation ID because Fabric does not expose the Data
     Factory activity-run ID or monitoring `JobInstanceId` to the notebook.
+    `WORKER_EXECUTION_ID` is a unique execution fence; every separate worker
+    activity invocation must receive a new GUID.
 
     `BUNDLE_MANIFEST_SHA256` identifies the SDK deployment bundle, not the
     per-video manifest. Set the pipeline parameter once per deployed release
@@ -1903,6 +1922,9 @@ pipeline.
             "attempt_count",
             "max_attempts",
             "queued_at",
+            "queue_entered_at",
+            "last_replay_id",
+            "replay_generation",
             "committed_attempt_id",
         )
     )
@@ -2358,9 +2380,15 @@ outside these notebooks or append directly to `video_work`.
    observed aggregate video seconds divided by batch wall-clock time, not the
    declared worker count or SDK inference-only duration.
    After all benchmark workers finish, run the notebook with
-   `RUN_INFERENCE=false` and `ENFORCE_CAPACITY_GATE=true`; the activity must
-   fail and block promotion when no six-hour batch meets required aggregate
-   throughput.
+   `RUN_INFERENCE=false`, the same approved `BENCHMARK_BATCH_ID`, and
+   `ENFORCE_CAPACITY_GATE=true`. Set `EXPECTED_BATCH_MEMBERS` to the exact
+   number of benchmark activities that were launched for that batch and set
+   `CONCURRENT_WORKERS` to the tested concurrency. The gate filters to that
+   batch, current SDK version, capacity SKU, runtime, configuration, and
+   concurrency; an older faster batch cannot make the current batch pass. A
+   missing, duplicate, or failed member makes the gate fail. The activity must
+   also fail and block promotion when that selected batch has no six-hour
+   result meeting required aggregate throughput.
 4. **Capacity gate:** calculate required parallel workers, Spark cores,
    memory, CU consumption, and 20% retry/variance headroom.
 5. **Pilot 0.1%:** register 200 video-hours and validate counts, output volume,
@@ -2370,7 +2398,11 @@ outside these notebooks or append directly to `video_work`.
 7. **Ramp:** increase admission in 25% steps while monitoring queue age,
    throughput, failures, capacity throttling, and output-file health.
 8. **Daily checkpoint:** compare completed video-hours with the burn-down
-   target and recalculate the forecast completion date.
+   target and recalculate the forecast completion date from a governed
+   backfill batch/workload-origin dataset. Until that key exists in the gold
+   layer, reconcile the approved backfill inventory directly; do not use
+   global `gold_operations_hour` totals when live intake or replay is mixed
+   into the same environment.
 9. **Stop condition:** pause new claims when the projected completion misses
    the deadline, error rate breaches the SLO, or capacity throttling is
    sustained. Do not compensate by silently exceeding proven concurrency.
@@ -2461,8 +2493,38 @@ Configure it in Fabric:
    `ItemName` identifies the specific pipeline/notebook. `ItemKind`
    identifies the artifact type. `JobType` proves how it was executed.
    `JobStatus` contains lifecycle values, and `JobInstanceId` identifies one
-   job across its multiple status-event rows. If `JobType` is not visible in
-   Data preview, use the **Columns** pane or run the KQL query above.
+   job across its multiple status-event rows. Validate the exact values in
+   this workspace before building filters:
+
+   ```kusto
+   ItemJobEventLogs
+   | where isnotempty(JobStatus)
+   | summarize Events = count() by JobStatus
+   | order by JobStatus asc
+   ```
+
+   The validated canonical values used below are:
+
+   | `JobStatus` value | Definition |
+   |---|---|
+   | `NotStarted` | Scheduled or admitted, but execution has not started |
+   | `InProgress` | Execution has started and no terminal event has been recorded |
+   | `Completed` | Execution finished successfully |
+   | `Failed` | Execution finished unsuccessfully |
+   | `Cancelled` | Execution was stopped before normal completion |
+
+   These values are case-sensitive KQL strings. Human-readable visual titles
+   may say “Not-started” or “Running,” but KQL predicates and parameter values
+   must use `NotStarted` and `InProgress`. If the distinct-status query in a
+   target tenant returns a different canonical value, use the value returned
+   by that table rather than copying a display label. If `JobType` is not
+   visible in Data preview, use the **Columns** pane or run the KQL query
+   above.
+
+   `Cancelled` is terminal, so include it in terminal-duration and
+   terminal-trend queries. It is not equivalent to `Failed`, so do not include
+   it in the **Recent failures** table or use it to trigger an
+   `ItemJobFailed` alert.
 
    Keep `pc_workspace_monitoring_queries`; later dashboard and alert queries
    can be developed and validated in the same reusable queryset.
@@ -2542,9 +2604,11 @@ Configure it in Fabric:
      | Variable name | `_jobStatus` |
      | Data type | `string` |
      | Show on pages | `Select all` |
-     | Source | `Fixed values` |
-     | Values | `Not started`, `In progress`, `Completed`, `Failed` |
-     | Display labels | Match each value exactly |
+     | Source | `Query` |
+     | Data source | `workspace_monitoring` |
+     | Query | `ItemJobEventLogs \| where isnotempty(JobStatus) \| distinct JobStatus \| order by JobStatus asc` |
+     | Value column | `JobStatus (string)` |
+     | Label column | `Match value selection` |
      | Add "Select all" value | Enabled |
      | Default value | `Select all` |
 
@@ -2561,10 +2625,20 @@ Configure it in Fabric:
    ```kusto
    let CurrentJobs =
        ItemJobEventLogs
-       | where Timestamp between (_startTime .. _endTime)
        | where isempty(_itemName) or ItemName in (_itemName)
        | where isempty(_jobType) or JobType in (_jobType)
-       | summarize arg_max(Timestamp, *) by JobInstanceId;
+       | summarize
+           FirstSeen = min(Timestamp),
+           arg_max(Timestamp, *)
+           by JobInstanceId
+       | extend StatusTime =
+           iff(
+               JobStatus in ("Completed", "Failed", "Cancelled"),
+               coalesce(JobEndTime, Timestamp),
+               coalesce(JobStartTime, JobScheduleTime, FirstSeen)
+           )
+       | where JobStatus in ("NotStarted", "InProgress")
+           or StatusTime between (_startTime .. _endTime);
    CurrentJobs
    | where isempty(_jobStatus) or JobStatus in (_jobStatus)
    | summarize Jobs = count() by JobStatus
@@ -2575,11 +2649,10 @@ Configure it in Fabric:
 
    ```kusto
    ItemJobEventLogs
-   | where Timestamp between (_startTime .. _endTime)
    | where isempty(_itemName) or ItemName in (_itemName)
    | where isempty(_jobType) or JobType in (_jobType)
    | summarize arg_max(Timestamp, *) by JobInstanceId
-   | where JobStatus == "In progress"
+   | where JobStatus == "InProgress"
    | summarize RunningJobs = count()
    ```
 
@@ -2587,11 +2660,10 @@ Configure it in Fabric:
 
    ```kusto
    ItemJobEventLogs
-   | where Timestamp between (_startTime .. _endTime)
    | where isempty(_itemName) or ItemName in (_itemName)
    | where isempty(_jobType) or JobType in (_jobType)
    | summarize arg_max(Timestamp, *) by JobInstanceId
-   | where JobStatus == "Not started"
+   | where JobStatus == "NotStarted"
    | summarize NotStartedJobs = count()
    ```
 
@@ -2600,12 +2672,14 @@ Configure it in Fabric:
 
    ```kusto
    ItemJobEventLogs
-   | where Timestamp between (_startTime .. _endTime)
    | where isempty(_itemName) or ItemName in (_itemName)
    | where isempty(_jobType) or JobType in (_jobType)
-   | summarize arg_max(Timestamp, *) by JobInstanceId
-   | where JobStatus == "Not started"
-   | extend QueueReferenceTime = coalesce(JobScheduleTime, Timestamp)
+   | summarize
+       FirstSeen = min(Timestamp),
+       arg_max(Timestamp, *)
+       by JobInstanceId
+   | where JobStatus == "NotStarted"
+   | extend QueueReferenceTime = coalesce(JobScheduleTime, FirstSeen)
    | summarize OldestQueueAgeMinutes =
        max(datetime_diff("minute", now(), QueueReferenceTime))
    ```
@@ -2614,11 +2688,12 @@ Configure it in Fabric:
 
    ```kusto
    ItemJobEventLogs
-   | where Timestamp between (_startTime .. _endTime)
    | where isempty(_itemName) or ItemName in (_itemName)
    | where isempty(_jobType) or JobType in (_jobType)
    | summarize arg_max(Timestamp, *) by JobInstanceId
-   | where JobStatus in ("Completed", "Failed")
+   | where JobStatus in ("Completed", "Failed", "Cancelled")
+   | extend TerminalTime = coalesce(JobEndTime, Timestamp)
+   | where TerminalTime between (_startTime .. _endTime)
    | summarize P95DurationMinutes =
        percentile(todouble(DurationMs), 95) / 60000.0
    ```
@@ -2627,13 +2702,14 @@ Configure it in Fabric:
 
    ```kusto
    ItemJobEventLogs
-   | where Timestamp between (_startTime .. _endTime)
    | where isempty(_itemName) or ItemName in (_itemName)
    | where isempty(_jobType) or JobType in (_jobType)
    | summarize arg_max(Timestamp, *) by JobInstanceId
    | where JobStatus == "Failed"
+   | extend TerminalTime = coalesce(JobEndTime, Timestamp)
+   | where TerminalTime between (_startTime .. _endTime)
    | project
-       Timestamp,
+       Timestamp = TerminalTime,
        WorkspaceName,
        ItemKind,
        ItemName,
@@ -2650,14 +2726,30 @@ Configure it in Fabric:
 
    ```kusto
    ItemJobEventLogs
-   | where Timestamp between (_startTime .. _endTime)
    | where isempty(_itemName) or ItemName in (_itemName)
    | where isempty(_jobType) or JobType in (_jobType)
-   | where JobStatus in ("Completed", "Failed")
+   | summarize arg_max(Timestamp, *) by JobInstanceId
+   | where JobStatus in ("Completed", "Failed", "Cancelled")
+   | where isempty(_jobStatus) or JobStatus in (_jobStatus)
+   | extend TerminalTime = coalesce(JobEndTime, Timestamp)
+   | where TerminalTime between (_startTime .. _endTime)
    | summarize Jobs = dcount(JobInstanceId)
-       by Hour = bin(Timestamp, 1h), JobStatus
+       by Hour = bin(TerminalTime, 1h), JobStatus
    | order by Hour asc
    ```
+
+   The three active-state KPIs—**Running jobs**, **Not-started jobs**, and
+   **Oldest not-started age**—are current snapshots over retained monitoring
+   history and intentionally do not apply the dashboard Time range. Applying
+   the range before `arg_max` can hide a still-active job whose last event is
+   older than the selected window. Those KPIs also intentionally ignore the
+   Status parameter because each one hardcodes its named status.
+   **Jobs by status** includes current active jobs plus terminal jobs whose
+   terminal time is inside the selected range and applies the Status
+   parameter. **Terminal job trend** also applies the Status parameter after
+   limiting rows to terminal states. Terminal-duration and failure visuals
+   apply the Time range to `JobEndTime` (falling back to the terminal event
+   timestamp) and intentionally use their named terminal-status set.
 
 6. Arrange and validate the first page:
    - First row: **Running jobs**, **Not-started jobs**, **Oldest not-started
@@ -2685,13 +2777,16 @@ Configure it in Fabric:
      ```kusto
      ItemJobEventLogs
      | where ItemName in ("pc-event-intake", "01_register_event")
-     | summarize arg_max(Timestamp, *) by JobInstanceId
-     | where JobStatus in ("Not started", "In progress")
+     | summarize
+         FirstSeen = min(Timestamp),
+         arg_max(Timestamp, *)
+         by JobInstanceId
+     | where JobStatus in ("NotStarted", "InProgress")
      | extend ReferenceTime =
          iff(
-             JobStatus == "Not started",
-             coalesce(JobScheduleTime, Timestamp),
-             coalesce(JobStartTime, Timestamp)
+             JobStatus == "NotStarted",
+             coalesce(JobScheduleTime, FirstSeen),
+             coalesce(JobStartTime, FirstSeen)
          )
      | extend ElapsedMinutes =
          datetime_diff("minute", now(), ReferenceTime)
@@ -2730,7 +2825,7 @@ Configure it in Fabric:
      The KQL query already filters to `ElapsedMinutes >= 20`; repeating the
      same threshold in the rule is intentional because this rule UI requires
      a **When**, **Condition**, and **Value**. Do not choose `JobStartTime` as
-     the Timestamp because it is null for `Not started` jobs.
+     the Timestamp because it is null for `NotStarted` jobs.
    - Set the polling/evaluation interval to five minutes when the UI exposes
      that option.
    - Under **Action**, choose the email or Teams action and recipient.
@@ -2824,8 +2919,8 @@ Create the Power BI operations report:
 1. Run
    [`11_validate_observability.ipynb`](./11_validate_observability.ipynb)
    with `<lakehouse-name>` attached. Confirm the status, active-work,
-   queue-health, attempt-health, burn-down, and reconciliation results are
-   populated as expected.
+   queue-health, attempt-health, global operation-throughput, and
+   reconciliation results are populated as expected.
 2. Open `<lakehouse-name>` in Lakehouse view and confirm the required
    physical Delta tables appear under **Tables**.
 3. Select **New semantic model** from the Lakehouse.
@@ -2923,7 +3018,7 @@ Create the Power BI operations report:
       `Operations KPIs`.
    3. For `Completed Video Hours`, select
       `people_counter_gold_operations_hour` as the home table and use display
-      folder `Backfill KPIs`.
+      folder `Throughput KPIs`.
    4. Select **Home -> New measure** in the toolbar. Depending on the current
       editor layout, you can instead right-click the intended home table and
       select **New measure**.
@@ -2939,7 +3034,7 @@ Create the Power BI operations report:
    If `Completed Video Hours` was already created under
    `people_counter_video_work`, select the measure and change its **Home
    table** property to `people_counter_gold_operations_hour`, then set its
-   display folder to `Backfill KPIs`; do not create a duplicate measure.
+   display folder to `Throughput KPIs`; do not create a duplicate measure.
 
    Replace table names in DAX only if a deployment uses a different
    `TABLE_PREFIX`:
@@ -2955,7 +3050,7 @@ Create the Power BI operations report:
    CALCULATE(
        COUNTROWS(people_counter_video_work),
        people_counter_video_work[status]
-           IN {"LEASED", "STAGING", "RUNNING", "WRITING", "RECOVERING"}
+           IN {"LEASED", "STAGING", "RUNNING", "WRITING"}
    )
 
    Dead Letter Count =
@@ -2972,20 +3067,20 @@ Create the Power BI operations report:
    )
 
    Oldest Queue Age Minutes =
-   VAR OldestQueuedAt =
+   VAR OldestQueueEntry =
        MINX(
            FILTER(
                people_counter_video_work,
                people_counter_video_work[status]
                    IN {"QUEUED", "RETRY_WAIT"}
            ),
-           people_counter_video_work[queued_at]
+           people_counter_video_work[queue_entered_at]
        )
    RETURN
        IF(
-           ISBLANK(OldestQueuedAt),
+           ISBLANK(OldestQueueEntry),
            BLANK(),
-           DATEDIFF(OldestQueuedAt, UTCNOW(), MINUTE)
+           DATEDIFF(OldestQueueEntry, UTCNOW(), MINUTE)
        )
 
    Completed Video Hours =
@@ -3065,7 +3160,7 @@ Create the Power BI operations report:
         | Visual field well | Field |
         |---|---|
         | **X-axis** | `people_counter_gold_operations_hour[hour_utc]` |
-        | **Y-axis** | `Completed Video Hours` measure |
+        | **Y-axis** | `people_counter_gold_operations_hour -> Throughput KPIs -> Completed Video Hours` measure |
         | **Secondary y-axis** | Leave empty |
         | **Legend** | Leave empty |
         | **Small multiples** | Leave empty |
@@ -3098,6 +3193,7 @@ Create the Power BI operations report:
         attempt_count
         max_attempts
         queued_at
+        queue_entered_at
         completed_at
         last_error_category
         last_error_type
@@ -3188,6 +3284,7 @@ Create the Power BI operations report:
         pipeline_run_id
         activity_run_id
         fabric_job_instance_id
+        worker_execution_id
         sdk_version
         bundle_manifest_sha256
         config_sha256
@@ -3267,154 +3364,45 @@ Create the Power BI operations report:
          drill-through field uses the parent table's `work_id`.
    - Table: unresolved reconciliation findings with severity, finding type,
      work ID, attempt ID, first detection, last detection, and details.
-10. Add and configure the **Backfill** page:
-    1. Return to `pc_operations_model`, select
-       `people_counter_gold_operations_hour` as the home table, and add these
-       measures to the `Backfill KPIs` display folder:
-
-       ```DAX
-       Backfill Target Video Hours =
-       200000.0
-
-       Backfill Completed Video Hours =
-       CALCULATE(
-           [Completed Video Hours],
-           REMOVEFILTERS(people_counter_gold_operations_hour)
-       )
-
-       Remaining Video Hours =
-       MAX(
-           0.0,
-           [Backfill Target Video Hours]
-               - [Backfill Completed Video Hours]
-       )
-
-       Backfill Start UTC =
-       CALCULATE(
-           MIN(people_counter_gold_operations_hour[hour_utc]),
-           REMOVEFILTERS(people_counter_gold_operations_hour)
-       )
-
-       Average Video Hours Per Wall Hour =
-       VAR StartedAt = [Backfill Start UTC]
-       VAR ElapsedHours =
-           IF(
-               ISBLANK(StartedAt),
-               BLANK(),
-               MAX(1, DATEDIFF(StartedAt, UTCNOW(), HOUR))
-           )
-       RETURN
-           DIVIDE([Backfill Completed Video Hours], ElapsedHours)
-
-       Forecast Completion UTC =
-       VAR RatePerHour = [Average Video Hours Per Wall Hour]
-       VAR RemainingHours = [Remaining Video Hours]
-       RETURN
-           IF(
-               RatePerHour > 0,
-               UTCNOW() + DIVIDE(RemainingHours, RatePerHour * 24.0),
-               BLANK()
-           )
-       ```
-
-       Immediately after creating the measures, configure their model formats
-       while still editing `pc_operations_model`:
-
-       1. Select `Backfill Completed Video Hours`, set its format to
-          **Decimal number**, and set decimal places to `1` or `2`.
-       2. Select `Remaining Video Hours`, set its format to
-          **Decimal number**, and use the same number of decimal places.
-       3. Select `Forecast Completion UTC` and set its format to
-          **Date/Time**.
-
-       The current `123` Card visual does not expose display-unit or
-       decimal-place controls under **Callout -> Value**, so the Cards use
-       these model formats. Change `Backfill Target Video Hours` only when the
-       approved target differs from 200,000 hours.
-    2. Return to `pc_operations_report`, select the `+` page button, and
-       rename the page `Backfill`.
-    3. Add three separate `123` Card visuals. Each Card must contain exactly
-       one measure:
-
-       1. Create the **Completed video hours** Card:
-          - Select a blank area of the `Backfill` page canvas.
-          - In **Visualizations -> Build visual**, hover over the visual icons
-            and select the `123` icon whose tooltip is **Card** or
-            **Card (new)**.
-          - Keep the new empty Card selected.
-          - In the **Data** pane, expand
-            `people_counter_gold_operations_hour`, then expand the
-            `Backfill KPIs` display folder.
-          - Drag `Backfill Completed Video Hours` into the Card's
-            **Values** field well. If the current UI labels that well
-            **Data**, use **Data** instead. Drag the measure itself, not
-            `completed_video_seconds` or another table column.
-          - After the measure has been added, select
-            **Visualizations -> Format visual** (paintbrush icon), expand
-            **General -> Title**, turn **Title** on, and enter
-            `Completed video hours` in **Title text**. The title settings may
-            not appear until the Card contains a measure.
-
-       2. Create the **Remaining video hours** Card:
-          - Select a blank canvas area so the first Card is no longer the
-            active visual, then select the `123` **Card** icon again. This
-            creates a second Card instead of adding another value to the
-            first one.
-          - From
-            `people_counter_gold_operations_hour -> Backfill KPIs`, drag
-            `Remaining Video Hours` into **Values** (or **Data**).
-          - Open **Format visual -> General -> Title**, turn **Title** on,
-            and set **Title text** to `Remaining video hours`.
-
-       3. Create the **Forecast completion (UTC)** Card:
-          - Select a blank canvas area and add a third `123` **Card** visual.
-          - From
-            `people_counter_gold_operations_hour -> Backfill KPIs`, drag
-            `Forecast Completion UTC` into **Values** (or **Data**).
-          - Open **Format visual -> General -> Title**, turn **Title** on,
-            and set **Title text** to `Forecast completion (UTC)`.
-          - A blank value is expected until completed video hours exist and
-            `Average Video Hours Per Wall Hour` is greater than zero.
-
-       Arrange the three Cards next to each other on the first row of the
-       page. Do not select all three measures while one Card is active; that
-       would create one multi-value Card rather than three independent KPI
-       Cards. If selecting a measure first creates another visual type, keep
-       that visual selected and select the `123` Card icon to convert it.
-    4. Add the **Hourly completed video hours** Line chart:
+10. Add and configure the **Throughput** page:
+    1. Do not create Backfill target, remaining-hours, rate, or forecast
+       measures in `pc_operations_model`. The current gold operations fact is
+       global and has no workload-origin/backfill-batch key, so those measures
+       cannot separate backfill from live intake or replay.
+    2. If a page named `Backfill` or measures named
+       `Backfill Target Video Hours`, `Backfill Completed Video Hours`,
+       `Remaining Video Hours`, `Backfill Start UTC`,
+       `Average Video Hours Per Wall Hour`, or `Forecast Completion UTC`
+       were created from earlier instructions, delete those measures and
+       rename the page `Throughput`.
+    3. Otherwise, return to `pc_operations_report`, select the `+` page
+       button, and rename the page `Throughput`.
+    4. Add one `123` Card visual:
+       - In the **Data** pane, expand
+         `people_counter_gold_operations_hour`, then expand the
+         `Throughput KPIs` display folder.
+       - Drag the calculator-icon `Completed Video Hours` measure into
+         **Values** or **Data**.
+       - Set the Card title to `Completed video hours`.
+       - Use the measure's decimal format with `1` or `2` decimal places.
+    5. Add the **Hourly completed video hours** Line chart:
 
        | Visual field well | Field |
        |---|---|
        | X-axis | `people_counter_gold_operations_hour[hour_utc]` |
-       | Y-axis | `people_counter_video_work -> Operations KPIs -> Completed Video Hours` measure |
+       | Y-axis | `people_counter_gold_operations_hour -> Throughput KPIs -> Completed Video Hours` measure |
        | Secondary y-axis | Empty |
        | Legend | Empty |
 
-       In the **Data** pane, expand `people_counter_video_work`, expand the
-       `Operations KPIs` display folder, and drag `Completed Video Hours` to
-       the **Y-axis**. Use the original measure defined earlier:
-
-       ```DAX
-       Completed Video Hours =
-       SUM(people_counter_gold_operations_hour[video_hours_completed])
-       ```
-
-       The measure appears under `people_counter_video_work` ->
-       `Operations KPIs` because `people_counter_video_work` is its home table
-       and `Operations KPIs` is its display folder. Its DAX can still read
-       `people_counter_gold_operations_hour`.
-
-       Do **not** use `Backfill Completed Video Hours` on this chart.
-       `Completed Video Hours` respects the `hour_utc` axis filter and
-       therefore shows the video hours completed during each hour.
-       `Backfill Completed Video Hours` removes all filters from
-       `people_counter_gold_operations_hour`, so it is appropriate for the
-       grand-total Card but would repeat the same grand total at every point
-       on the hourly line.
+       Expand `people_counter_gold_operations_hour`, drag `hour_utc` to the
+       **X-axis**, expand `Throughput KPIs`, and drag the calculator-icon
+       `Completed Video Hours` measure to the **Y-axis**. The measure respects
+       the `hour_utc` filter and shows video hours completed during each hour.
 
        Use a continuous X-axis, sort ascending, and add `succeeded`, `failed`,
        and `p95_processing_seconds` as Tooltips.
-    5. Add a second Line chart titled `Hourly work outcomes`:
+    6. Add a second Line chart titled
+       `Hourly initial registrations and attempt outcomes`:
 
        | Visual field well | Field |
        |---|---|
@@ -3424,10 +3412,11 @@ Create the Power BI operations report:
        | Legend | Leave empty; Power BI uses the four value names as series |
 
        Set each numeric field to **Sum**, use a continuous X-axis, and sort
-       ascending.
-    6. Confirm the cards agree with
-       `11_validate_observability.ipynb` and that the hourly charts use the
-       same date range.
+       ascending. The `queued` series counts initial registrations by the
+       immutable `queued_at`; it does not count replay or retry admissions.
+    7. Confirm the Card and hourly charts agree with the global operation
+       throughput from `11_validate_observability.ipynb` for the same
+       lookback range. Do not interpret this page as backfill-only progress.
 11. Add page-appropriate slicers:
     - On the **Operations** page, add one Slicer visual per field:
 
@@ -3442,13 +3431,13 @@ Create the Power BI operations report:
       For each slicer, select a blank canvas area, select the **Slicer**
       visual, drag the source field into its Field well, and set the title.
       Keep these slicers page-scoped initially.
-    - Do not add those `video_work` slicers to the **Backfill** page expecting
+    - Do not add those `video_work` slicers to the **Throughput** page expecting
       them to filter the hourly gold charts.
       `people_counter_gold_operations_hour` is intentionally disconnected
       from `video_work`.
-    - On the **Backfill** page, add one date Slicer using
+    - On the **Throughput** page, add one date Slicer using
       `people_counter_gold_operations_hour[operation_date]`, with style
-      **Between**. It filters the hourly backfill visuals only.
+      **Between**. It filters the hourly global-throughput visuals only.
     - The **Attempt History** page inherits the selected work through
       drill-through; do not add another work-status slicer there.
 12. Apply model-level row-level security before sharing:
@@ -4085,6 +4074,11 @@ Configure the analytical model in Fabric:
       `Completed Video Hours` as a decimal number with `1` or `2` decimal
       places. These rates describe attempt outcomes recorded in the
       operations aggregate; they are not a distinct-video success rate.
+      `Queued Work` counts initial work registrations by immutable
+      `video_work.queued_at`. Replay preserves that timestamp, so this series
+      does not count replay or retry admissions. Current queue-age and
+      dispatcher ordering use `video_work.queue_entered_at`, which is reset
+      when work enters `RETRY_WAIT` or is replayed.
    **Current limitation — no action in this report setup:** Do not select
    **New measure** for Backfill target, remaining-hours, or
    forecast-completion measures. Skip those measures and continue directly
@@ -4146,19 +4140,32 @@ Configure the analytical model in Fabric:
           )
 
       Data Freshness Minutes =
-      MAX(
-          [Flow Data Freshness Minutes],
-          [Operations Data Freshness Minutes]
-      )
+      VAR FlowAge = [Flow Data Freshness Minutes]
+      VAR OperationsAge = [Operations Data Freshness Minutes]
+      RETURN
+          IF(
+              ISBLANK(FlowAge) || ISBLANK(OperationsAge),
+              BLANK(),
+              MAX(FlowAge, OperationsAge)
+          )
+
+      Missing Freshness Sources =
+      IF(ISBLANK([Flow Data Freshness Minutes]), 1, 0)
+          + IF(
+              ISBLANK([Operations Data Freshness Minutes]),
+              1,
+              0
+          )
       ```
 
-      Format all four measures as whole numbers. They intentionally ignore
+      Format all five measures as whole numbers. They intentionally ignore
       page filters. `Data Freshness Minutes` reports the older of the latest
-      flow and operations refreshes. `Latest Video Completion Age Minutes`
-      measures business activity age, not table-refresh age, because
-      `people_counter_gold_video` does not have a `refreshed_at` column. A
-      blank component means that fact has no rows and should be investigated
-      separately rather than interpreted as fresh.
+      flow and operations refreshes only when both sources are present; it is
+      blank when either source is missing. `Missing Freshness Sources`
+      reports how many of those two facts have no refresh row.
+      `Latest Video Completion Age Minutes` measures business activity age,
+      not table-refresh age, because `people_counter_gold_video` does not have
+      a `refreshed_at` column.
    6. Wait for the web model editor to autosave each committed measure, select
       **Refresh**, and confirm no orange Direct Lake warning icons remain.
 
@@ -4533,7 +4540,7 @@ Configure the analytical model in Fabric:
 
          Leave **Legend** empty. Set the X-axis to **Continuous**, sort by
          `hour_utc` ascending, and set the title to
-         `Hourly processing outcomes (UTC)`.
+         `Hourly initial registrations and attempt outcomes (UTC)`.
       5. Add a Date Slicer:
 
          | Source field | Slicer style | Title |
@@ -4572,7 +4579,7 @@ Configure the analytical model in Fabric:
            activity.
    7. Create the **Data quality** page:
       1. Select the `+` page button and rename the new page `Data quality`.
-      2. Add five separate `123` Card visuals. Four measures are under the
+      2. Add six separate `123` Card visuals. Five measures are under the
          Operations fact and one is under the Video fact:
 
          | Measure path | Card title | Format |
@@ -4581,6 +4588,7 @@ Configure the analytical model in Fabric:
          | `people_counter_gold_operations_hour -> Data Quality KPIs -> Flow Data Freshness Minutes` | `Flow data freshness (minutes)` | Whole number |
          | `people_counter_gold_operations_hour -> Data Quality KPIs -> Operations Data Freshness Minutes` | `Operations data freshness (minutes)` | Whole number |
          | `people_counter_gold_operations_hour -> Data Quality KPIs -> Latest Video Completion Age Minutes` | `Latest video completion age (minutes)` | Whole number |
+         | `people_counter_gold_operations_hour -> Data Quality KPIs -> Missing Freshness Sources` | `Missing freshness sources` | Whole number |
          | `people_counter_gold_video -> Video KPIs -> Videos Missing Required Metrics` | `Videos missing required metrics` | Whole number |
 
          Create each Card separately:
@@ -4682,9 +4690,11 @@ Configure the analytical model in Fabric:
          - adding slicers would make only the missing-metrics Card and Table
            respond, which would make the page behavior inconsistent.
       6. Validate the page:
-         - `Data Freshness Minutes` should equal the larger nonblank value of
-           `Flow Data Freshness Minutes` and
+         - When both facts are present, `Data Freshness Minutes` should equal
+           the larger value of `Flow Data Freshness Minutes` and
            `Operations Data Freshness Minutes`.
+         - If either fact is absent, `Data Freshness Minutes` should be blank
+           and `Missing Freshness Sources` should be greater than zero.
          - Freshness and age values should not be negative. A negative value
            indicates clock or timestamp problems.
          - `Videos Missing Required Metrics` should match the number of
@@ -5232,7 +5242,9 @@ The implementation is ready only when all checks pass:
 
 - Every Fabric job correlates to a pipeline run and application attempt.
 - Running count, queue depth, queue age, retries, and dead letters are visible.
-- Failure and stale-heartbeat alerts fire and resolve.
+- Failure alerts fire and resolve. After the watchdog persists a durable
+  timeout/recovery finding or event, the stale-heartbeat alert also fires and
+  resolves.
 - After a workload-origin/backfill-batch key is added to the gold operations
   fact, backfill burn-down forecasts the completion date without including
   live intake or replay work.
