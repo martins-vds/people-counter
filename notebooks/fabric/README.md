@@ -5263,7 +5263,192 @@ The implementation is ready only when all checks pass:
 - Failure rate, p95 duration, queue age, memory, capacity throttling, and Delta
   conflicts remain within approved thresholds.
 
-## 12. Official references
+## 12. Maintenance shutdown and restart
+
+Use this procedure when maintenance requires all people-counter application
+workloads to be stopped. In this section, "nothing is running" means:
+
+- no `pc-*` pipeline or people-counter notebook job is running or queued;
+- no dispatcher can claim new work;
+- the manifest-arrival Activator rule cannot start event intake; and
+- the ADLS Eventstream is stopped.
+
+**Do not pause the Fabric capacity at any point in this procedure.** Keep the
+capacity active, and keep Workspace monitoring enabled. Capacity pause is not
+an application stop control and can prevent orderly draining, recovery, and
+verification. Direct Lake reports, alerts, and Workspace monitoring may
+remain available because they do not admit or process videos.
+
+### 12.1 Before the maintenance window
+
+1. Open a change or maintenance record. Record:
+   - operator and UTC start time;
+   - the maintenance scope;
+   - the enabled/disabled state, cadence, parameters, and end date of every
+     schedule;
+   - the Eventstream and manifest-arrival rule status;
+   - every active or queued job instance ID; and
+   - queue depth, oldest queue age, active leases, retry-wait work, terminal
+     failures, and reconciliation errors.
+2. Confirm that the Fabric capacity is **Active**, not paused. Do not use
+   capacity pause or resume as part of this runbook.
+3. Tell producers to stop publishing. They may upload incomplete work under
+   `staging/`, but they must not move videos or manifests into `incoming/`
+   until operations releases the hold. The final manifest rename is the
+   production event, so freezing it prevents an event gap while the
+   Eventstream is stopped.
+4. Block operator-initiated runs for the window. Do not start
+   `pc-backfill-register`, `pc-replay`, benchmarks, bootstrap, deployment
+   tests, or notebooks directly.
+5. Inventory every deployed dispatcher shard, from `pc-dispatcher-00`
+   through `pc-dispatcher-NN`. Do not assume that stopping only shard `00`
+   stops admission.
+
+### 12.2 Pull the plug
+
+Perform these steps in order:
+
+1. Disable the fixed schedule on **every** `pc-dispatcher-NN` pipeline.
+   Disable the schedules; do not delete them or change
+   `MAX_CONCURRENT_WORKERS` to zero. Verify that each schedule reports
+   disabled and cannot create another run.
+2. In `pc_manifest_arrival_activator`, stop
+   `run_pc_event_intake_on_manifest_renamed`. Verify its status is no longer
+   **Running**. Do not stop or edit unrelated monitoring alert rules.
+3. Disable the schedules for:
+   - `pc-watchdog`;
+   - `pc-reconcile`;
+   - `pc-gold-refresh`; and
+   - `pc-delta-maintenance`.
+
+   Preserve each cadence, offset, parameter default, start date, and reviewed
+   end date for restart. Confirm that no separate scheduled trigger exists
+   for `pc-event-intake`, `pc-backfill-register`, or `pc-replay`.
+4. Stop the ADLS Eventstream that feeds
+   `to_pc_manifest_arrival_activator`. Wait until the item reports
+   **Stopped**. Do not unpublish, delete, or rewire its source, filters, or
+   destinations.
+5. In Monitoring Hub, filter to the workspace and review both pipeline and
+   notebook/Spark jobs. Include:
+   - `pc-event-intake`;
+   - every `pc-dispatcher-NN` and its `ClaimWork` and `ProcessVideo`
+     notebook jobs;
+   - `pc-watchdog`;
+   - `pc-reconcile`;
+   - `pc-gold-refresh`;
+   - `pc-delta-maintenance`;
+   - `pc-backfill-register`;
+   - `pc-replay`; and
+   - any directly started people-counter notebook.
+6. Prefer a graceful drain. Wait for already-started intake, workers,
+   watchdog, reconciliation, gold refresh, and maintenance runs to reach a
+   terminal state. A dispatcher schedule being disabled does not cancel a
+   run that was already queued or in progress.
+7. If the maintenance deadline does not allow a graceful drain, cancel the
+   active or queued pipeline runs in Monitoring Hub, then verify that their
+   child notebook/Spark jobs also reach a terminal state. Record every
+   canceled pipeline run, `work_id`, and `attempt_id`. Do not modify
+   `video_work`, `video_attempts`, lease, heartbeat, or commit-pointer rows
+   manually. Canceled workers are recovered after the normal lease or
+   heartbeat expiry during restart.
+8. Repeat the Monitoring Hub search until there are no queued or running
+   people-counter pipeline, notebook, or Spark jobs. Refresh the view after
+   at least one dispatcher cadence so a previously queued trigger cannot be
+   mistaken for a clean stop.
+9. Complete this stop gate before maintenance begins:
+
+   | Check | Required state |
+   |---|---|
+   | Fabric capacity | **Active**; never paused |
+   | Producer publication into `incoming/` | Held |
+   | All `pc-dispatcher-NN` schedules | Disabled |
+   | Manifest-arrival Activator rule | Stopped |
+   | ADLS Eventstream | Stopped |
+   | Watchdog, reconciliation, gold, and Delta-maintenance schedules | Disabled |
+   | Manual backfill, replay, benchmark, bootstrap, and direct notebook runs | Prohibited |
+   | People-counter jobs in Monitoring Hub | No queued or running jobs |
+
+Do not start maintenance if any stop-gate row is not satisfied. A stopped
+schedule or Activator rule alone is insufficient because work may already be
+queued in Fabric. Do not directly maintain or rewrite control-plane Delta
+tables after a forced cancellation unless the maintenance plan explicitly
+accounts for the recorded live leases and attempts.
+
+### 12.3 Plug back in
+
+Keep the producer hold in place while restoring the system:
+
+1. Confirm maintenance is complete, the Lakehouse and Environment are
+   available, and the Fabric capacity is still **Active**. If the capacity
+   was paused outside this procedure, stop and escalate; do not silently
+   substitute capacity resume for the validation below.
+2. Confirm the Eventstream definition, Activator parameter mappings,
+   pipeline parameters, schedule definitions, notebook default Lakehouse,
+   Environment, and custom Spark pool still match the recorded pre-window
+   configuration.
+3. Start the ADLS Eventstream. Wait for **Running**, then verify that its
+   source and all three serial manifest filters are healthy and that
+   `filter_json_manifests -> to_pc_manifest_arrival_activator` is still the
+   published connection.
+4. Start `run_pc_event_intake_on_manifest_renamed` and verify:
+   - **Monitor -> Event** is the manifest-arrival source, not a workspace job
+     event;
+   - **Condition -> Operation** is `On every value`; and
+   - **Action -> Action** is `Run Pipeline` for `pc-event-intake` with all
+     six dynamic parameter mappings.
+5. Reconcile the outage interval before releasing producers. If any producer
+   violated the hold or an event arrived while the rule or Eventstream was
+   stopped, do not assume that Activator will replay it. Compare manifests
+   published under `incoming/` during the recorded interval with
+   `event_receipts` and `video_work`. Register any missing, valid manifests
+   through the controlled `pc-backfill-register` path; do not rename
+   immutable `incoming/` objects again and do not insert queue rows manually.
+6. If every pre-window worker drained cleanly, run `pc-watchdog` once
+   manually and verify that it reports no unexpected recovery. If any worker
+   was canceled, wait until its normal lease or heartbeat recovery threshold
+   has elapsed, run `pc-watchdog`, and verify that each recorded attempt is
+   fenced and either requeued or dead-lettered according to policy. Never
+   create a second worker for a lease that is still valid.
+7. Run `pc-reconcile` manually. Resolve every new `ERROR` finding before
+   enabling dispatch. Confirm that committed views expose only committed
+   attempts.
+8. Re-enable the `pc-watchdog` five-minute schedule and the
+   `pc-reconcile` 15-minute schedule with their original offset and reviewed
+   end dates.
+9. Re-enable every `pc-dispatcher-NN` schedule with its recorded parameters,
+   offsets, and end date. Verify one complete dispatcher run:
+   - `ClaimWork` succeeds;
+   - the number of active leases does not exceed the approved global limit;
+   - each claimed item starts at most one current `ProcessVideo`; and
+   - a successful worker advances its commit pointer.
+10. Run `pc-gold-refresh` once as a catch-up after committed work is visible,
+    then re-enable its hourly schedule. Verify the affected fact partitions
+    and analytics dimensions before using the reports for post-maintenance
+    validation.
+11. Re-enable `pc-delta-maintenance` with its recorded cadence and
+    `RUN_VACUUM` value. Do not run it concurrently with the initial recovery
+    or catch-up wave; wait for the configured low-admission window.
+12. While the producer hold remains in place, publish one new Development or
+    otherwise approved canary video and manifest using the normal
+    video-first, manifest-last sequence. Trace it through Eventstream,
+    Activator, `pc-event-intake`, the dispatcher, committed views, and gold
+    refresh.
+13. Release the producer hold only after the canary succeeds and queue age,
+    failures, reconciliation findings, Spark admission, and capacity
+    throttling are healthy. Monitor at least one full watchdog,
+    reconciliation, and gold-refresh interval.
+14. Close the maintenance record with UTC completion time, canceled and
+    recovered attempts, missing manifests registered through the controlled
+    path, validation evidence, final queue state, and confirmation that the
+    capacity remained active for the entire procedure.
+
+If restart validation fails, stop all dispatcher schedules again, keep the
+producer hold in place, and investigate. Leave the Eventstream and manifest
+rule running only when intake is healthy and it is safe to durably queue new
+work; otherwise repeat the stop sequence. Do not pause the capacity as a
+fallback.
+
+## 13. Official references
 
 - [Fabric event delivery guarantees](https://learn.microsoft.com/fabric/real-time-hub/fabric-event-delivery-guarantees)
 - [Build event-driven Fabric pipelines](https://learn.microsoft.com/fabric/real-time-hub/tutorial-build-event-driven-data-pipelines)
