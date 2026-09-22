@@ -69,6 +69,11 @@ Run or deploy the notebooks in this order:
 | [`11_validate_observability.ipynb`](./11_validate_observability.ipynb) | Validates application status, queue, attempts, global throughput, flow, and camera-level reporting data | Before dashboard release and during incident diagnosis |
 | [`12_plan_gold_refresh.ipynb`](./12_plan_gold_refresh.ipynb) | Discovers date partitions affected by recent queue, attempt, and commit activity | At the start of every gold-refresh pipeline run |
 | [`13_build_analytics_dimensions.ipynb`](./13_build_analytics_dimensions.ipynb) | Builds physical Date, Time, Camera, Location, Video, and ModelConfig Delta dimensions | After gold fact partitions finish refreshing |
+| [`14_reset_test_data.ipynb`](./14_reset_test_data.ipynb) | Deletes Development/Test rows while preserving Delta schemas, committed views, and the registration-lock seed | Manually, after the section 12.2 stop gate; never in Production |
+
+Notebook `14_reset_test_data` is a destructive test utility, not part of the
+normal deployment sequence. Do not deploy it to a Production workspace or
+call it from a pipeline, schedule, Eventstream trigger, or Activator action.
 
 Manifest generation is a producer-side responsibility, not another Fabric
 inference notebook. For a large historical load, use the
@@ -5299,7 +5304,9 @@ remain available because they do not admit or process videos.
    Eventstream is stopped.
 4. Block operator-initiated runs for the window. Do not start
    `pc-backfill-register`, `pc-replay`, benchmarks, bootstrap, deployment
-   tests, or notebooks directly.
+   tests, or notebooks directly before the stop gate passes. After it passes,
+   the only permitted job is the approved maintenance or test-reset notebook
+   described in the change record.
 5. Inventory every deployed dispatcher shard, from `pc-dispatcher-00`
    through `pc-dispatcher-NN`. Do not assume that stopping only shard `00`
    stops admission.
@@ -5374,7 +5381,92 @@ queued in Fabric. Do not directly maintain or rewrite control-plane Delta
 tables after a forced cancellation unless the maintenance plan explicitly
 accounts for the recorded live leases and attempts.
 
-### 12.3 Plug back in
+### 12.3 Reset Development or Test data
+
+Use this optional procedure only when a clean Development or Test Lakehouse
+is required. It deletes all current people-counter table rows while
+preserving:
+
+- all 20 Delta table definitions, columns, partitions, and table properties;
+- the `telemetry_committed`, `line_counts_committed`, and `runs_committed`
+  views; and
+- the required empty `global` row in `registration_leases`.
+
+**Never run this reset in Production.** The reset is destructive, is not one
+transaction across all tables, and cannot be undone through this runbook.
+Take any required test evidence or export before continuing.
+
+1. Complete the stop gate in section 12.2. The capacity remains **Active**,
+   but no application workload may be queued or running.
+2. Confirm in the Lakehouse explorer and the notebook's pinned default
+   Lakehouse that the target is the intended Development or Test Lakehouse.
+   Do not rely only on a similarly named workspace or notebook.
+3. Import
+   [`14_reset_test_data.ipynb`](./14_reset_test_data.ipynb) into the
+   Development or Test workspace. Do not import or deploy it to Production.
+   Toggle its configuration cell as the parameter cell, then attach and pin
+   the target Lakehouse.
+4. Run the notebook manually with these parameters:
+
+   | Parameter | Required value |
+   |---|---|
+   | `ENVIRONMENT` | `dev` or `test` |
+   | `DATABASE` | Empty for the attached default Lakehouse, or the deployed database identifier |
+   | `TABLE_PREFIX` | `people_counter` unless this environment uses a reviewed alternative |
+   | `CONFIRM_RESET` | `RESET DEV <target>` or `RESET TEST <target>` |
+
+   `<target>` is `TABLE_PREFIX` when `DATABASE` is empty and
+   `DATABASE.TABLE_PREFIX` otherwise. For example, the default Test
+   confirmation is:
+
+   ```text
+   RESET TEST people_counter
+   ```
+
+   Leave the saved `CONFIRM_RESET` default empty. Never schedule the notebook,
+   call it from a pipeline, Eventstream, or Activator, or persist a populated
+   confirmation in source control.
+
+   The notebook validates that all expected tables and views exist before the
+   first delete. If it fails after deletion begins, keep the stop gate in
+   effect, correct the reported problem, and rerun the notebook with the same
+   parameters. The deletes and seed merge are idempotent.
+5. Rerun [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb)
+   against the same Lakehouse. Bootstrap must report 20 verified Delta tables
+   and three committed views. It must not recreate a dropped table during
+   this procedure; a recreated table means the pre-reset inventory or target
+   was wrong and requires investigation.
+6. Verify the reset independently:
+   - every table is empty except `registration_leases`;
+   - `registration_leases` contains exactly one `global` row with an empty
+     owner and expired epoch timestamps;
+   - all three committed views return zero rows;
+   - the SQL analytics endpoint and semantic model still expose the same
+     tables and columns; and
+   - Direct Lake report visuals show no prior test facts after their metadata
+     is refreshed.
+7. The reset removes rows from the current Delta table versions; it does not
+   immediately remove older Delta files or history. Allow the approved
+   retention and `pc-delta-maintenance` policy to remove obsolete files. Do
+   not disable Delta retention safety checks or shorten Production retention
+   to make a test reset appear physical.
+8. The reset does not delete videos or manifests from external ADLS
+   `staging/` or `incoming/`. Delete only explicitly identified test objects
+   in an isolated Development/Test source path under the approved storage
+   retention policy. Never recursively delete a shared container or
+   Production prefix. If source cleanup is not approved, publish the next
+   test with a new `asset_version`.
+9. Record the reset output, deleted-row count, target Lakehouse, operator,
+   UTC time, bootstrap result, and independent verification in the test or
+   change record. Ensure the imported notebook still has an empty saved
+   confirmation value.
+
+After a reset, continue with section 12.4. There are no canceled attempts or
+outage events to recover because the reset intentionally removed their
+ledgers; skip only the recovery-specific portions of steps 5 and 6, not the
+configuration, reconciliation, scheduling, or canary checks.
+
+### 12.4 Plug back in
 
 Keep the producer hold in place while restoring the system:
 
