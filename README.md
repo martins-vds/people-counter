@@ -81,6 +81,24 @@ pipeline to mark the activity as failed.
 
 ### Microsoft Fabric
 
+The Fabric coordination modules and public APIs are available from the package
+root:
+
+```python
+from people_counter import (
+    fabric_control,
+    fabric_events,
+    ControlLockError,
+    ControlWriter,
+    LeaseLostError,
+    WorkerEventClient,
+    process_worker_events,
+)
+```
+
+Importing these names does not require Spark or Delta; those dependencies are
+loaded only when Fabric operations run.
+
 Generate a platform-specific CPU or GPU deployment bundle, upload its wheels
 to a Fabric Environment, and attach that environment to the notebook. A
 Fabric Data Pipeline can then invoke the notebook as an activity.
@@ -154,6 +172,11 @@ idempotent Delta merges, failed-attempt snapshots, and a run-status ledger.
 For event-driven ADLS ingestion, bounded dispatch, lease recovery,
 observability, Direct Lake reporting, and large backfills, use the
 [production Fabric implementation plan](notebooks/fabric/README.md).
+That deployment uses append-only worker commands and an exclusive Lakehouse
+control writer so same-date videos can run in parallel without competing
+control-table mutations. Existing deployments require the coordinated SDK
+and notebook upgrade described in section 4.1 of that plan; replacing only
+the worker notebook is not sufficient.
 For a runnable operator walkthrough from camera catalog creation through
 guarded ADLS publication, use the
 [manifest package operator tutorial](notebooks/manifest_package_operator_tutorial.ipynb).

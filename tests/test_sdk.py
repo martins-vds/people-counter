@@ -1,14 +1,24 @@
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import people_counter
 from people_counter import (
+    ControlLockError,
+    ControlWriter,
+    LeaseLostError,
     PipelineConfig,
     RFDetrBotsortConfig,
     RTDetrOsnetConfig,
     RunResult,
+    WorkerEventClient,
+    fabric_control,
+    fabric_events,
     line_count_records,
+    process_worker_events,
     run,
     telemetry_records,
 )
@@ -16,6 +26,54 @@ from people_counter.models import LineCountRecord, PersonTelemetry
 
 
 class PublicSdkTests(unittest.TestCase):
+    def test_fabric_modules_and_apis_are_public_exports(self):
+        exports = {
+            "fabric_control": fabric_control,
+            "fabric_events": fabric_events,
+            "ControlLockError": ControlLockError,
+            "ControlWriter": ControlWriter,
+            "LeaseLostError": LeaseLostError,
+            "WorkerEventClient": WorkerEventClient,
+            "process_worker_events": process_worker_events,
+        }
+        for name, exported in exports.items():
+            with self.subTest(name=name):
+                self.assertIn(name, people_counter.__all__)
+                self.assertIs(getattr(people_counter, name), exported)
+        self.assertIs(ControlLockError, fabric_control.ControlLockError)
+        self.assertIs(ControlWriter, fabric_control.ControlWriter)
+        self.assertIs(LeaseLostError, fabric_events.LeaseLostError)
+        self.assertIs(WorkerEventClient, fabric_events.WorkerEventClient)
+        self.assertIs(process_worker_events, fabric_events.process_worker_events)
+
+    def test_public_import_does_not_load_optional_fabric_dependencies(self):
+        source = """
+import builtins
+
+original_import = builtins.__import__
+
+def without_fabric_dependencies(name, *args, **kwargs):
+    if name.split(".")[0] in {"delta", "pyspark", "py4j"}:
+        raise AssertionError(f"Optional Fabric dependency imported eagerly: {name}")
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = without_fabric_dependencies
+from people_counter import (
+    fabric_control, fabric_events, ControlLockError, ControlWriter,
+    LeaseLostError, WorkerEventClient, process_worker_events,
+)
+assert ControlWriter is fabric_control.ControlWriter
+assert WorkerEventClient is fabric_events.WorkerEventClient
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", source],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_run_dispatches_rtdetr_config(self):
         config = RTDetrOsnetConfig(
             video=Path("video.mp4"),

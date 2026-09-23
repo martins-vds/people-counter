@@ -109,10 +109,12 @@ flowchart LR
     DP --> N3[03 claim work]
     N3 -->|bounded JSON batch| FE[ForEach, batch count N]
     FE --> N4[04 process video]
-    N4 --> AT[(video_attempts)]
+    N4 --> WE[(worker_events)]
+    WE --> CW[Exclusive control writer]
+    CW --> AT[(video_attempts)]
     N4 --> OT[(telemetry_attempts)]
     N4 --> OL[(line_count_attempts)]
-    N4 -->|atomic commit pointer| W
+    CW -->|atomic commit pointer| W
 
     W --> CV[Committed Delta views]
     OT --> CV
@@ -248,6 +250,8 @@ sequenceDiagram
     participant W as video_work
     participant F as ForEach
     participant V as 04 process video
+    participant E as Worker event inbox
+    participant X as Exclusive control writer
 
     S->>P: Run every minute
     P->>C: dispatcher_id, max_concurrent_workers
@@ -259,9 +263,15 @@ sequenceDiagram
     par each claimed item
         F->>V: work_id, attempt_id, Fabric correlation IDs
         V->>W: Verify lease ownership
-        V->>W: Heartbeat and extend lease
+        V->>E: Append heartbeat command
+        V->>X: Request command processing
+        X->>W: Validate ownership and extend lease
+        X-->>V: Durable accepted receipt
         V->>V: Process frames sequentially
-        V->>W: Publish committed_attempt_id
+        V->>E: Append completion and commit commands
+        V->>X: Request command processing
+        X->>W: Publish committed_attempt_id
+        X-->>V: Durable accepted receipt
     end
 ```
 
@@ -331,6 +341,143 @@ Readers must use the committed views created by
 [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb), never the
 attempt tables directly.
 
+### 4.1 Parallel workers and a single control writer
+
+Different `work_id` and `attempt_id` values do not isolate concurrent Delta
+mutations inside the same `capture_date` partition. In particular, three
+workers updating different attempts can still repeatedly raise
+`ConcurrentAppendException`. More retries, replacing `MERGE` with `UPDATE`,
+or adding the same literal date predicate to every worker does not remove
+that overlap. Fabric documents Serializable isolation and recommends
+[append-only staging followed by a single merge writer](https://learn.microsoft.com/fabric/data-engineering/delta-lake-concurrency-control).
+Deletion vectors alone are not a guarantee of row-level concurrency.
+
+The coordination boundary is now:
+
+```text
+parallel video workers -> append-only worker_events
+                                      |
+                            exclusive control writer
+                                      |
+                  video_work + video_attempts + event receipts
+```
+
+The writer is an exclusive role, not a separate always-running Spark job.
+After appending a command, a worker synchronously requests that role, drains
+a bounded batch of pending commands, and waits for its durable receipt before
+continuing. Dispatcher and watchdog runs also drain pending commands before
+claiming work or deciding that a worker is stale. Inference and result appends
+remain parallel; the worker no longer directly merges or deletes control
+table rows.
+
+[`fabric_control.py`](../../src/people_counter/fabric_control.py) enforces
+one mutation authority across Spark sessions through the pre-seeded
+`people_counter_control_writer` row. Registration, claiming, recovery, replay,
+and reconciliation use the same authority when executing mutations.
+Existing registration and dispatcher leases remain in place: they protect
+multi-step business rules, while the global writer protects Delta's shared
+physical conflict domain. A queued command is not a lease grant or successful
+publication. Workers must receive an accepted result from
+[`fabric_events.py`](../../src/people_counter/fabric_events.py).
+
+The inbox and receipts are separate append-only tables. Stable event IDs,
+per-execution sequences, current-state validation, and replay-safe commands
+prevent duplicate delivery or delayed commands from overwriting a newer
+lease or regressing completed work. Attempt updates modify only the supplied
+fields, never a stale copy of the entire row.
+
+Attempt result tables are append-only during processing. Each output table
+uses `txnAppId=<qualified-table>:<attempt_id>` and `txnVersion=0`. A
+failure-snapshot write therefore cannot duplicate a previously committed
+append for that attempt/table. A new attempt gets a new transaction identity.
+Do not expire Delta transaction identifiers while a corresponding worker or
+failure-snapshot retry could still run.
+
+**Failure is deliberately fail-closed.** The writer permit has no automatic
+expiry. A paused or disconnected Spark driver can still commit after a
+time-based lease expires, and Delta cannot atomically fence that driver
+across several tables. If a mutation fails or its outcome is ambiguous, the
+permit is retained and the owner token is logged. Other callers wait for a
+bounded interval and fail visibly rather than taking over from a potentially
+live writer. This trades automatic availability after an uncertain write
+failure for correct single-writer ownership.
+
+#### Upgrade an existing deployment
+
+Do not deploy only the worker notebook or mix old direct writers with the new
+coordinator.
+
+1. Disable every dispatcher shard, event-intake/backfill trigger, watchdog,
+   replay, reconciliation, and maintenance schedule. Stop external
+   submissions, and wait for or explicitly stop all affected pipeline and
+   Spark notebook runs. A stale heartbeat is not proof that a driver stopped.
+2. Build a fresh SDK deployment bundle, upload its wheels to the Fabric
+   Environment, and publish that Environment. Both new coordinator modules
+   must be available to every updated notebook. Record the new
+   `BUNDLE_MANIFEST_SHA256`.
+3. Update the imported notebooks `00`, `01`, `02`, `03`, `04`, `05`, `06`,
+   `09`, `10`, and the test-only `14` from this directory. Preserve each
+   parameter-cell marker, Environment attachment, default Lakehouse, and
+   activity connection.
+4. Run [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb) with
+   `CONFIRM_WRITERS_STOPPED=true`. The upgrade adds the writer, event, and
+   receipt tables and seeds an unowned writer row; it does not repartition,
+   truncate, or reset existing work. An existing owned writer must be
+   recovered explicitly, not overwritten by bootstrap.
+5. Run the updated watchdog to recover stopped old attempts and pending
+   commands. Use the approved replay workflow for exhausted attempts rather
+   than recycling an old attempt or execution ID.
+6. Re-enable admission and test at least three videos with the **same**
+   capture date concurrently. Keep worker activity retries disabled. Verify
+   accepted command receipts, one owner per attempt, one committed attempt
+   per successful work item, and no duplicated telemetry or line counts.
+7. Test command redelivery, an outdated execution ID, and writer failure
+   before resuming normal schedules. After a writer failure, verify that
+   other writers refuse takeover and that recovery preserves publication
+   and lease fencing.
+
+#### Recover an orphaned writer permit
+
+Never clear a permit based only on its age or a notebook timeout.
+
+1. Pause all writers and admission as above. Inspect
+   `people_counter_control_writer` and record the exact `owner_id`.
+2. Verify in Fabric monitoring that the owning driver and any associated
+   child Spark jobs have stopped and can no longer commit. If that cannot be
+   established, do not clear the permit.
+3. In a controlled maintenance notebook, using the correct database and
+   prefix, inspect the row again and release only the observed owner:
+
+   ```python
+   from delta.tables import DeltaTable
+   from pyspark.sql import functions as F
+
+   lock_table = "people_counter_control_writer"
+   confirmed_stopped_owner = "<exact-owner-id-verified-stopped>"
+   rows = spark.table(lock_table).where(F.col("lock_name") == "global").collect()
+   if len(rows) != 1 or rows[0].owner_id != confirmed_stopped_owner:
+       raise RuntimeError("Writer ownership changed; investigate before recovery")
+   DeltaTable.forName(spark, lock_table).update(
+       condition=(
+           (F.col("lock_name") == "global")
+           & (F.col("owner_id") == confirmed_stopped_owner)
+       ),
+       set={"owner_id": F.lit(None).cast("string"),
+            "acquired_at": F.lit(None).cast("timestamp")},
+   )
+   rows = spark.table(lock_table).where(F.col("lock_name") == "global").collect()
+   if len(rows) != 1 or rows[0].owner_id is not None:
+       raise RuntimeError("Writer permit was not released")
+   ```
+
+4. Run the updated watchdog before resuming admission. It replays pending
+   worker commands before inspecting stale work. Inspect receipts and
+   committed pointers, then run reconciliation.
+
+Schema changes, reset, output deletion, `OPTIMIZE`, and `VACUUM` require an
+exclusive stopped-writer maintenance window. A global metadata permit does
+not stop already-running workers from appending immutable output.
+
 ## 5. Delta data contracts
 
 All timestamps are UTC.
@@ -384,6 +531,37 @@ mutex, post-write cardinality checks, and immutable-field comparisons are
 required to prevent concurrent duplicate `event_key` or `work_id` rows.
 Keep backfill manifest partitions small enough to finish inside the
 registration lease.
+
+#### `people_counter_control_writer`
+
+Exactly one pre-seeded row, `lock_name=global`:
+
+```text
+lock_name, owner_id, acquired_at
+```
+
+`owner_id=NULL` is available. A non-null owner is never automatically expired
+or stolen; follow the recovery procedure in section 4.1.
+
+#### `people_counter_worker_events` and `people_counter_worker_event_receipts`
+
+Durable worker commands:
+
+```text
+event_id, work_id, attempt_id, worker_execution_id, capture_date,
+sequence, event_kind, payload_json, created_at
+```
+
+Durable coordinator receipts:
+
+```text
+event_id, work_id, attempt_id, worker_execution_id, sequence,
+outcome, message, applied_at
+```
+
+Only the coordinator writes receipts. Commands and receipts remain
+append-only; ordinary maintenance does not independently delete either
+side of the replay ledger.
 
 #### `people_counter_video_attempts`
 
@@ -1462,6 +1640,10 @@ date and alert before it expires:
     prevents an activity timeout from running two executions under the same
     lease.
 
+    All workers must use the SDK and notebook versions from the coordinated
+    single-writer upgrade in section 4.1. Increasing activity retries is not
+    a remedy for a held control-writer permit or same-partition contention.
+
 12. Set the initial `ProcessVideo` **Timeout** to:
 
     ```text
@@ -1727,6 +1909,7 @@ The planner discovers recently affected dates.
    | `OPTIMIZE_LOOKBACK_DAYS` | `Int` | `7` |
    | `VACUUM_RETENTION_HOURS` | `Int` | `168` |
    | `RUN_VACUUM` | `Bool` | `false` |
+   | `CONFIRM_WRITERS_STOPPED` | `Bool` | `false`; set `true` only after the exclusive maintenance stop gate |
 
 5. Configure General settings:
 
@@ -1741,7 +1924,10 @@ The planner discovers recently affected dates.
    | Retry conditions | Empty |
 
 6. Keep `RUN_VACUUM=false` until retention is approved.
-7. Save and run manually during a low-admission window. Verify
+7. Disable admission and all affected writer schedules, and confirm all
+   Spark writers have stopped. Resolve active work through watchdog/recovery,
+   then pause recovery again. Set `CONFIRM_WRITERS_STOPPED=true` only for
+   this exclusive maintenance run. Save and run manually. Verify
    `stale_uncommitted_attempts`, `optimize_start`, and `vacuum_ran`.
 
 #### 6.7.5 Enable schedules
@@ -1753,8 +1939,10 @@ Only after all four manual runs succeed:
    the watchdog.
 3. Schedule `pc-gold-refresh` hourly and invoke it after controlled backfill
    batches as a catch-up.
-4. Schedule `pc-delta-maintenance` daily during the backfill and weekly in
-   steady state, during a low-admission window.
+4. Reserve maintenance windows daily during the backfill and weekly in
+   steady state. Do not schedule `MaintainDelta` directly alongside live
+   workers. Its orchestration must first disable admission, drain/stop all
+   writers, and satisfy the exclusive maintenance gate in section 4.1.
 5. Use reviewed far-future end dates because Fabric fixed schedules require
    start and end dates.
 6. If a run regularly overlaps its next schedule, reduce its per-run scope
@@ -5387,10 +5575,11 @@ Use this optional procedure only when a clean Development or Test Lakehouse
 is required. It deletes all current people-counter table rows while
 preserving:
 
-- all 20 Delta table definitions, columns, partitions, and table properties;
+- all Delta table definitions, columns, partitions, and table properties;
 - the `telemetry_committed`, `line_counts_committed`, and `runs_committed`
   views; and
-- the required empty `global` row in `registration_leases`.
+- the required empty `global` rows in `registration_leases` and
+  `control_writer`.
 
 **Never run this reset in Production.** The reset is destructive, is not one
 transaction across all tables, and cannot be undone through this runbook.
@@ -5414,6 +5603,7 @@ Take any required test evidence or export before continuing.
    | `DATABASE` | Empty for the attached default Lakehouse, or the deployed database identifier |
    | `TABLE_PREFIX` | `people_counter` unless this environment uses a reviewed alternative |
    | `CONFIRM_RESET` | `RESET DEV <target>` or `RESET TEST <target>` |
+   | `CONFIRM_WRITERS_STOPPED` | `true`, only after section 12.2 and resolution of active work |
 
    `<target>` is `TABLE_PREFIX` when `DATABASE` is empty and
    `DATABASE.TABLE_PREFIX` otherwise. For example, the default Test
@@ -5430,16 +5620,20 @@ Take any required test evidence or export before continuing.
    The notebook validates that all expected tables and views exist before the
    first delete. If it fails after deletion begins, keep the stop gate in
    effect, correct the reported problem, and rerun the notebook with the same
-   parameters. The deletes and seed merge are idempotent.
+   parameters. If a writer permit was retained, follow section 4.1 first.
+   The deletes and seed merge are idempotent.
 5. Rerun [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb)
-   against the same Lakehouse. Bootstrap must report 20 verified Delta tables
-   and three committed views. It must not recreate a dropped table during
+   against the same Lakehouse with `CONFIRM_WRITERS_STOPPED=true`. Bootstrap
+   must verify every expected Delta table, including the three coordinator
+   tables, and three committed views. It must not recreate a dropped table during
    this procedure; a recreated table means the pre-reset inventory or target
    was wrong and requires investigation.
 6. Verify the reset independently:
-   - every table is empty except `registration_leases`;
+   - every table is empty except `registration_leases` and `control_writer`;
    - `registration_leases` contains exactly one `global` row with an empty
      owner and expired epoch timestamps;
+   - `control_writer` contains exactly one `global` row with null owner and
+     acquisition timestamp;
    - all three committed views return zero rows;
    - the SQL analytics endpoint and semantic model still expose the same
      tables and columns; and
@@ -5517,9 +5711,10 @@ Keep the producer hold in place while restoring the system:
     then re-enable its hourly schedule. Verify the affected fact partitions
     and analytics dimensions before using the reports for post-maintenance
     validation.
-11. Re-enable `pc-delta-maintenance` with its recorded cadence and
-    `RUN_VACUUM` value. Do not run it concurrently with the initial recovery
-    or catch-up wave; wait for the configured low-admission window.
+11. Restore the maintenance-window orchestration and recorded `RUN_VACUUM`
+    policy, not a direct unattended maintenance schedule. Every maintenance
+    run must pass the exclusive stopped-writer gate in section 4.1; a
+    low-admission window with live workers is insufficient.
 12. While the producer hold remains in place, publish one new Development or
     otherwise approved canary video and manifest using the normal
     video-first, manifest-last sequence. Trace it through Eventstream,

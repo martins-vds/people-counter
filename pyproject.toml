@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "people-counter"
-version = "0.1.0"
+version = "0.2.0"
 description = "A permissively licensed CPU/GPU distinct person counter"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -43,6 +43,7 @@ people_counter = ["py.typed"]
 [tool.mutmut]
 source_paths = ["src/people_counter/"]
 pytest_add_cli_args_test_selection = ["tests/"]
+also_copy = ["notebooks/fabric/"]
 
 [project.optional-dependencies]
 cpu = [
