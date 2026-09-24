@@ -2753,22 +2753,43 @@ Each pipeline item represents one notebook invocation:
 ```json
 [
   {
-    "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/benchmarks/short-720p.mp4",
+    "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/short-720p.mp4",
     "sample_name": "short-720p-low-motion",
     "duration_seconds": 600.0
   },
   {
-    "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/benchmarks/common-1080p.mp4",
+    "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/common-1080p.mp4",
     "sample_name": "common-1080p-medium-motion",
     "duration_seconds": 1800.0
   },
   {
-    "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/benchmarks/long-4k.mp4",
+    "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/long-4k.mp4",
     "sample_name": "long-4k-high-motion",
     "duration_seconds": 3600.0
   }
 ]
 ```
+
+Use the OneLake shortcut URI copied from the shortcut's **Properties**, then
+append the exact case-sensitive relative path shown under
+`Files/<shortcut-name>`. Do not infer a folder or filename from another
+sample. Before putting an item in `BENCHMARK_ITEMS`, verify it from the
+attached benchmark notebook session:
+
+```python
+import notebookutils
+
+video_uri = (
+    "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/"
+    "<lakehouse-id>/Files/<shortcut-name>/benchmarks/short-720p.mp4"
+)
+assert notebookutils.fs.exists(video_uri), video_uri
+print(notebookutils.fs.head(video_uri, 1))
+```
+
+This environment uses the shortcut as its supported data path. Do not replace
+it with the original external ADLS URI unless section 6.3's external-access
+validation succeeded for this workspace identity and network configuration.
 
 This three-item array only demonstrates the shape. Repeat the representative
 items in the intended inventory proportions until the ForEach can keep the
@@ -2941,6 +2962,42 @@ flowchart LR
    change `EXPECTED_BATCH_MEMBERS` to make a contaminated batch pass.
 6. Repeat with increasing concurrency and, when applicable, each candidate
    capacity SKU. Use a new batch ID every time.
+
+#### 7.4.6 Troubleshoot benchmark worker failures
+
+**`FileNotFoundException: Operation failed: "Not Found", 404, HEAD`**
+
+The `VIDEO_URI` does not resolve through the attached notebook's OneLake
+identity. The failed URL shows the path Fabric actually tested. Confirm all of
+the following before rerunning:
+
+- the workspace and Lakehouse IDs belong to the attached benchmark Lakehouse;
+- `Files/<shortcut-name>` uses the exact shortcut name shown in Lakehouse
+  Explorer;
+- every directory and filename after the shortcut name exists with the same
+  case; and
+- the notebook activity connection/identity can read the shortcut target.
+
+Run `notebookutils.fs.exists` and `notebookutils.fs.head` as shown in section
+7.4.1 for every distinct URI. Changing only the filename does not work unless
+both files actually exist in that directory.
+
+**`OSError: [Errno 39] Directory not empty:
+'/tmp/people-counter-benchmark-...'`**
+
+Inference completed, but the previous notebook cleanup assumed that staging
+created only the copied video. Fabric or a video dependency can leave
+additional files in the notebook-owned temporary directory. The current
+notebook recursively removes the UUID-scoped
+`/tmp/people-counter-benchmark-<benchmark-id>` directory instead of requiring
+it to be empty.
+
+The old implementation wrote its Delta benchmark row before cleanup failed.
+That row can therefore say `succeeded=true` even though Fabric marked the
+activity failed. Other failed staging activities also write failed rows. Treat
+the entire `BENCHMARK_BATCH_ID` as contaminated: deploy the corrected notebook,
+verify all URIs, and rerun every item under a new batch ID. Do not reuse the
+old batch ID or enable activity retries.
 
 With the notebook defaults:
 
