@@ -195,6 +195,14 @@ def _common_parser() -> argparse.ArgumentParser:
         default=Path("outputs"),
         help="Directory for generated CSV files (default: outputs).",
     )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        help=(
+            "Use models downloaded by scripts/download_models.py from this "
+            "directory and disable network-backed model loading."
+        ),
+    )
     return parser
 
 
@@ -347,6 +355,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "device_variant": args.device,
         "device": device,
         "batch_size": batch_size,
+        "models_dir": args.models_dir,
         "sample_fps": args.sample_fps,
         "detection_threshold": args.detection_threshold,
         "use_fp16": use_fp16,

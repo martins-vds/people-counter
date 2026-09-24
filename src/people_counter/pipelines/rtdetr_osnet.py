@@ -22,6 +22,10 @@ from people_counter.line_counting import (
     create_line_zone,
     record_line_counts,
 )
+from people_counter.model_artifacts import (
+    OSNET_FILENAME as REID_FILENAME,
+    resolve_rtdetr_osnet_artifacts,
+)
 from people_counter.models import (
     Detection,
     Embedding,
@@ -42,7 +46,6 @@ from scipy.optimize import linear_sum_assignment
 from transformers import AutoImageProcessor, RTDetrV2ForObjectDetection
 
 REID_REPO_ID = "LibreYOLO/LibreReID-osnet"
-REID_FILENAME = "osnet_ain_x0_25.pt"
 REID_REVISION = "5c7c20e54ccf80c9889a64020748f148ad5f7634"
 REID_SHA256 = "ce171fe160b3608f5e4c19489774991419be965b1d6f4bdccc4b4cfd2ef95347"
 ACTIVE_MATCH_THRESHOLD = 0.70
@@ -125,14 +128,18 @@ def update_person_telemetry(
     )
 
 
-def load_reid_embedder(device: torch.device):
-    weights_path = Path(
-        hf_hub_download(
-            repo_id=REID_REPO_ID,
-            filename=REID_FILENAME,
-            revision=REID_REVISION,
+def load_reid_embedder(
+    device: torch.device,
+    weights_path: Path | None = None,
+):
+    if weights_path is None:
+        weights_path = Path(
+            hf_hub_download(
+                repo_id=REID_REPO_ID,
+                filename=REID_FILENAME,
+                revision=REID_REVISION,
+            )
         )
-    )
     weights_digest = hashlib.sha256(weights_path.read_bytes()).hexdigest()
     if weights_digest != REID_SHA256:
         raise RuntimeError(
@@ -723,12 +730,25 @@ def load_runtime(config: RTDetrOsnetConfig) -> RTDetrRuntime:
     device = torch.device(config.device)
     if config.device_variant == "gpu":
         torch.backends.cudnn.benchmark = True
-    reid_embedder = load_reid_embedder(device)
-    detector_model_id = DETECTOR_MODELS[config.detector_model]
-    processor = AutoImageProcessor.from_pretrained(detector_model_id)
-    model = RTDetrV2ForObjectDetection.from_pretrained(detector_model_id).to(
-        device
+    if config.models_dir is None:
+        detector_model: str | Path = DETECTOR_MODELS[config.detector_model]
+        reid_embedder = load_reid_embedder(device)
+        load_kwargs: dict[str, bool] = {}
+    else:
+        detector_model, reid_path = resolve_rtdetr_osnet_artifacts(
+            config.models_dir,
+            config.detector_model,
+        )
+        reid_embedder = load_reid_embedder(device, reid_path)
+        load_kwargs = {"local_files_only": True}
+    processor = AutoImageProcessor.from_pretrained(
+        detector_model,
+        **load_kwargs,
     )
+    model = RTDetrV2ForObjectDetection.from_pretrained(
+        detector_model,
+        **load_kwargs,
+    ).to(device)
     return RTDetrRuntime(
         device=device,
         reid_embedder=reid_embedder,

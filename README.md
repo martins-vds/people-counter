@@ -50,6 +50,51 @@ Use `RFDetrBotsortConfig` with the same `run` function to select the
 RF-DETR/BoT-SORT pipeline. Each config and its mutable `RunResult` are
 single-use. Create a new config for every invocation.
 
+### Offline model loading
+
+Download the model artifacts on a connected machine. The command downloads
+both RT-DETR backbones, OSNet, and RF-DETR Large by default:
+
+```bash
+uv run python scripts/download_models.py \
+  --output-dir /data/people-counter-models
+```
+
+Copy that directory to the offline machine without changing its internal
+layout. Set `models_dir` on either SDK configuration to require local model
+loading:
+
+```python
+config = RTDetrOsnetConfig(
+    video=Path("/data/entrance-camera.mp4"),
+    device_variant="cpu",
+    device="cpu",
+    batch_size=1,
+    models_dir=Path("/data/people-counter-models"),
+)
+result = run(config)
+```
+
+For RT-DETR/OSNet, the SDK passes the selected local model directory to
+Transformers with `local_files_only=True` and reads OSNet directly from the
+downloaded file. For RF-DETR/BoT-SORT, it passes the downloaded checkpoint as
+`pretrain_weights`. Supervision and the configured BoT-SORT tracker do not
+require separate model files. Missing artifacts raise `FileNotFoundError`
+instead of falling back to a network download.
+
+The CLI uses the same contract:
+
+```bash
+uv run --extra cpu people-counter rtdetr-osnet \
+  samples/three_people_walking.mp4 \
+  --device cpu \
+  --models-dir /data/people-counter-models
+```
+
+Omit `models_dir` or `--models-dir` to retain the existing online/cache-backed
+loading behavior. Package dependencies must still be installed on the offline
+machine, such as from an SDK deployment bundle.
+
 `telemetry_records(result)` and `line_count_records(result)` return typed
 lists of built-in dictionaries. They intentionally do not depend on pandas or
 Spark:

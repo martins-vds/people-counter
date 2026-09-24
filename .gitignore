@@ -14,3 +14,4 @@ outputs/
 # Mutation tests
 mutants/
 manifest-package/
+offline-models/

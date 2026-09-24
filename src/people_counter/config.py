@@ -49,11 +49,13 @@ class CommonPipelineConfig:
 @dataclass(frozen=True)
 class RTDetrOsnetConfig(CommonPipelineConfig):
     detector_model: Literal["r18", "r50"] = "r18"
+    models_dir: Path | None = None
 
 
 @dataclass(frozen=True)
 class RFDetrBotsortConfig(CommonPipelineConfig):
     camera_motion_compensation: bool | None = None
+    models_dir: Path | None = None
 
 
 def sampling_config(

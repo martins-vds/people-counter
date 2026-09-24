@@ -9,6 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from huggingface_hub import hf_hub_download, snapshot_download
+from people_counter.model_artifacts import (
+    OSNET_FILENAME,
+    OSNET_MODEL_DIR,
+    RFDETR_FILENAME,
+    RFDETR_PIPELINE_DIR,
+    RTDETR_MODEL_DIRS,
+    RTDETR_PIPELINE_DIR,
+)
 
 
 @dataclass(frozen=True)
@@ -21,25 +29,24 @@ class HuggingFaceModel:
 
 RTDETR_MODELS = (
     HuggingFaceModel(
-        name="rtdetr_v2_r18vd",
+        name=RTDETR_MODEL_DIRS["r18"],
         repo_id="PekingU/rtdetr_v2_r18vd",
         revision="5650961749fa93567c0d46fc7f43ea4f9e914107",
         files=("config.json", "model.safetensors", "preprocessor_config.json"),
     ),
     HuggingFaceModel(
-        name="rtdetr_v2_r50vd",
+        name=RTDETR_MODEL_DIRS["r50"],
         repo_id="PekingU/rtdetr_v2_r50vd",
         revision="282494075698cab9faa1096ae26856890030c817",
         files=("config.json", "model.safetensors", "preprocessor_config.json"),
     ),
 )
 OSNET_MODEL = HuggingFaceModel(
-    name="libre_reid_osnet",
+    name=OSNET_MODEL_DIR,
     repo_id="LibreYOLO/LibreReID-osnet",
     revision="5c7c20e54ccf80c9889a64020748f148ad5f7634",
-    files=("osnet_ain_x0_25.pt",),
+    files=(OSNET_FILENAME,),
 )
-RFDETR_FILENAME = "rf-detr-large-2026.pth"
 RFDETR_URL = (
     "https://storage.googleapis.com/rfdetr/rf-detr-large-2026.pth"
 )
@@ -61,7 +68,7 @@ def download_rtdetr_osnet_models(
     *,
     force: bool = False,
 ) -> list[Path]:
-    pipeline_dir = output_dir / "rtdetr_osnet"
+    pipeline_dir = output_dir / RTDETR_PIPELINE_DIR
     downloaded = []
     for model in RTDETR_MODELS:
         destination = pipeline_dir / model.name
@@ -93,7 +100,7 @@ def download_rfdetr_botsort_model(
     *,
     force: bool = False,
 ) -> Path:
-    destination = output_dir / "rfdetr_botsort" / RFDETR_FILENAME
+    destination = output_dir / RFDETR_PIPELINE_DIR / RFDETR_FILENAME
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     if destination.exists() and not force:

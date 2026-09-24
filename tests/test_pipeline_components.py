@@ -14,6 +14,15 @@ from people_counter.config import (
     SamplingConfig,
 )
 from people_counter.models import RunResult
+from people_counter.model_artifacts import (
+    OSNET_FILENAME,
+    OSNET_MODEL_DIR,
+    RFDETR_FILENAME,
+    RFDETR_PIPELINE_DIR,
+    RTDETR_MODEL_DIRS,
+    RTDETR_PIPELINE_DIR,
+    RTDETR_REQUIRED_FILES,
+)
 from people_counter.pipelines import rfdetr_botsort, rtdetr_osnet
 from people_counter.video import FrameReadState, VideoMetadata
 from tests.helpers import FakeCapture
@@ -121,6 +130,36 @@ class RuntimeLoadingTests(unittest.TestCase):
             ):
                 rtdetr_osnet.load_reid_embedder(torch.device("cpu"))
 
+    def test_rtdetr_load_reid_embedder_uses_local_weights_without_hub(self):
+        weights = b"offline weights"
+        with tempfile.TemporaryDirectory() as directory:
+            weights_path = Path(directory, "weights.pt")
+            weights_path.write_bytes(weights)
+            embedder = object()
+            with (
+                patch.object(
+                    rtdetr_osnet,
+                    "REID_SHA256",
+                    hashlib.sha256(weights).hexdigest(),
+                ),
+                patch.object(
+                    rtdetr_osnet,
+                    "hf_hub_download",
+                ) as download,
+                patch.object(
+                    rtdetr_osnet,
+                    "OSNetEmbedder",
+                    return_value=embedder,
+                ),
+            ):
+                result = rtdetr_osnet.load_reid_embedder(
+                    torch.device("cpu"),
+                    weights_path,
+                )
+
+        self.assertIs(result, embedder)
+        download.assert_not_called()
+
     def test_rtdetr_resolves_exactly_one_person_class(self):
         self.assertEqual(
             rtdetr_osnet.resolve_person_class_id(
@@ -187,6 +226,69 @@ class RuntimeLoadingTests(unittest.TestCase):
         load_model.assert_called_once_with(expected_model)
         model.to.assert_called_once_with(torch.device("cuda:0"))
 
+    def test_rtdetr_load_runtime_uses_offline_artifacts_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            models_dir = Path(directory)
+            detector_dir = (
+                models_dir
+                / RTDETR_PIPELINE_DIR
+                / RTDETR_MODEL_DIRS["r50"]
+            )
+            detector_dir.mkdir(parents=True)
+            for filename in RTDETR_REQUIRED_FILES:
+                (detector_dir / filename).touch()
+            reid_path = (
+                models_dir
+                / RTDETR_PIPELINE_DIR
+                / OSNET_MODEL_DIR
+                / OSNET_FILENAME
+            )
+            reid_path.parent.mkdir()
+            reid_path.touch()
+            config = RTDetrOsnetConfig(
+                video=Path("video.mp4"),
+                device_variant="cpu",
+                device="cpu",
+                batch_size=1,
+                detector_model="r50",
+                models_dir=models_dir,
+            )
+            processor = object()
+            embedder = object()
+            model = MagicMock()
+            model.to.return_value = model
+            model.config.id2label = {1: "person"}
+
+            with (
+                patch.object(
+                    rtdetr_osnet,
+                    "load_reid_embedder",
+                    return_value=embedder,
+                ) as load_embedder,
+                patch.object(
+                    rtdetr_osnet.AutoImageProcessor,
+                    "from_pretrained",
+                    return_value=processor,
+                ) as load_processor,
+                patch.object(
+                    rtdetr_osnet.RTDetrV2ForObjectDetection,
+                    "from_pretrained",
+                    return_value=model,
+                ) as load_model,
+            ):
+                runtime = rtdetr_osnet.load_runtime(config)
+
+        self.assertIs(runtime.reid_embedder, embedder)
+        load_embedder.assert_called_once_with(torch.device("cpu"), reid_path)
+        load_processor.assert_called_once_with(
+            detector_dir,
+            local_files_only=True,
+        )
+        load_model.assert_called_once_with(
+            detector_dir,
+            local_files_only=True,
+        )
+
     def test_botsort_load_runtime_configures_inference(self):
         model = MagicMock()
         with patch.object(
@@ -232,6 +334,38 @@ class RuntimeLoadingTests(unittest.TestCase):
         self.assertEqual(
             model.inference.call_args.kwargs["dtype"],
             torch.float32,
+        )
+
+    def test_botsort_load_runtime_uses_offline_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            models_dir = Path(directory)
+            checkpoint = (
+                models_dir
+                / RFDETR_PIPELINE_DIR
+                / RFDETR_FILENAME
+            )
+            checkpoint.parent.mkdir()
+            checkpoint.touch()
+            model = MagicMock()
+            with patch.object(
+                rfdetr_botsort,
+                "RFDETRLarge",
+                return_value=model,
+            ) as model_type:
+                runtime = rfdetr_botsort.load_runtime(
+                    RFDetrBotsortConfig(
+                        video=Path("video.mp4"),
+                        device_variant="cpu",
+                        device="cpu",
+                        batch_size=1,
+                        models_dir=models_dir,
+                    )
+                )
+
+        self.assertIs(runtime.model, model)
+        model_type.assert_called_once_with(
+            device="cpu",
+            pretrain_weights=str(checkpoint),
         )
 
 

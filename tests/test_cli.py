@@ -217,6 +217,7 @@ class CliTests(unittest.TestCase):
                 "no_fp16",
                 "line",
                 "output_dir",
+                "models_dir",
             },
         )
         self.assertEqual(common_actions["video"].type, video_file_path)
@@ -281,6 +282,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             common_actions["output_dir"].help,
             "Directory for generated CSV files (default: outputs).",
+        )
+        self.assertIs(common_actions["models_dir"].type, Path)
+        self.assertIsNone(common_actions["models_dir"].default)
+        self.assertEqual(
+            common_actions["models_dir"].help,
+            (
+                "Use models downloaded by scripts/download_models.py from "
+                "this directory and disable network-backed model loading."
+            ),
         )
 
         rtdetr_actions = {
@@ -353,6 +363,10 @@ class CliTests(unittest.TestCase):
             "Disable FP16 detector inference in GPU mode.",
             "Directed counting line in source-video pixels.",
             "Directory for generated CSV files (default: outputs).",
+            (
+                "Use models downloaded by scripts/download_models.py from "
+                "this directory and disable network-backed model loading."
+            ),
             "RT-DETRv2 backbone (default: r18).",
         ):
             self.assertIn(expected, rtdetr_help)
@@ -456,6 +470,7 @@ class CliTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             output_dir = Path(directory, "nested", "outputs")
+            models_dir = Path(directory, "offline-models")
             exit_code = main(
                 [
                     "rtdetr-osnet",
@@ -476,6 +491,8 @@ class CliTests(unittest.TestCase):
                     "4",
                     "--output-dir",
                     str(output_dir),
+                    "--models-dir",
+                    str(models_dir),
                     "--detector-model",
                     "r50",
                 ]
@@ -493,6 +510,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(config.use_fp16)
         self.assertEqual(config.line, (1, 2, 3, 4))
         self.assertEqual(config.detector_model, "r50")
+        self.assertEqual(config.models_dir, models_dir)
         self.assertEqual(len(line_files), 1)
         self.assertIn("Running CPU variant on: cpu", output.getvalue())
         self.assertIn("Loading detector: RT-DETRv2 (R50)", output.getvalue())

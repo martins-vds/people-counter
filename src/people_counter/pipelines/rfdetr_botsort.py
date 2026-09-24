@@ -22,6 +22,7 @@ from people_counter.line_counting import (
     record_line_counts,
 )
 from people_counter.models import PersonTelemetry, RunResult
+from people_counter.model_artifacts import resolve_rfdetr_checkpoint
 from people_counter.video import (
     FrameBatch,
     FrameReadState,
@@ -53,7 +54,12 @@ class RFDetrRunState:
 
 def load_runtime(config: RFDetrBotsortConfig) -> RFDetrRuntime:
     device = torch.device(config.device)
-    model = RFDETRLarge(device=str(device))
+    model_kwargs: dict[str, Any] = {"device": str(device)}
+    if config.models_dir is not None:
+        model_kwargs["pretrain_weights"] = str(
+            resolve_rfdetr_checkpoint(config.models_dir)
+        )
+    model = RFDETRLarge(**model_kwargs)
     model.inference(
         compile=False,
         batch_size=config.batch_size,
