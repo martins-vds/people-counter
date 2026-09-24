@@ -2719,47 +2719,325 @@ Event intake uses `event_key` as the lock owner; backfill uses the pipeline
 run ID supplied through `REGISTRATION_ID`. Do not run both registration paths
 outside these notebooks or append directly to `video_work`.
 
-### 7.4 Backfill execution phases
+### 7.4 Capacity benchmark pipeline
 
-1. **Catalog and discovery:** approve the camera catalog, let the generator
-   inventory the source tree, and partition generation by path prefix.
-2. **Manifest publication:** run the producer-side generator, resolve its
-   rejection report, and reconcile each partition before registration.
-3. **Representative benchmark:** use at least three duration/resolution/motion
-   buckets in [`08_capacity_benchmark.ipynb`](./08_capacity_benchmark.ipynb).
-   Give every sustained concurrent run one `BENCHMARK_BATCH_ID`; the gate uses
-   observed aggregate video seconds divided by batch wall-clock time, not the
-   declared worker count or SDK inference-only duration.
-   After all benchmark workers finish, run the notebook with
-   `RUN_INFERENCE=false`, the same approved `BENCHMARK_BATCH_ID`, and
-   `ENFORCE_CAPACITY_GATE=true`. Set `EXPECTED_BATCH_MEMBERS` to the exact
-   number of benchmark activities that were launched for that batch and set
-   `CONCURRENT_WORKERS` to the tested concurrency. The gate filters to that
-   batch, current SDK version, capacity SKU, runtime, configuration, and
-   concurrency; an older faster batch cannot make the current batch pass. A
-   missing, duplicate, or failed member makes the gate fail. The activity must
-   also fail and block promotion when that selected batch has no six-hour
-   result meeting required aggregate throughput.
-4. **Capacity gate:** calculate required parallel workers, Spark cores,
-   memory, CU consumption, and 20% retry/variance headroom.
-5. **Pilot 0.1%:** register 200 video-hours and validate counts, output volume,
-   queue behavior, and cost.
-6. **Pilot 1%:** register 2,000 video-hours, sustain target concurrency for at
-   least six hours, and verify no memory or Delta contention trend.
-7. **Ramp:** increase admission in 25% steps while monitoring queue age,
-   throughput, failures, capacity throttling, and output-file health.
+The capacity benchmark is a deployment gate with its own pipeline, not an
+interactive notebook test. Create one reusable pipeline that runs a bounded
+set of benchmark workers and then evaluates exactly those results. The
+parameter worksheet embedded in
+[`08_capacity_benchmark.ipynb`](./08_capacity_benchmark.ipynb) explains every
+notebook parameter; this section explains how to orchestrate those parameters
+in Fabric.
+
+#### 7.4.1 Prepare the notebook and sample list
+
+1. Run [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb) so
+   `people_counter_processing_benchmarks` exists.
+2. Import [`08_capacity_benchmark.ipynb`](./08_capacity_benchmark.ipynb) as
+   the `08_capacity_benchmark` Fabric notebook item.
+3. Open its configuration cell, select **... -> Toggle parameter cell**, and
+   confirm that Fabric displays the parameter-cell indicator.
+4. Select the same published Environment and pinned runtime intended for the
+   backfill workers. Attach and pin `people_counter_<environment>` as the
+   default Lakehouse.
+5. Select at least three combined duration/resolution/motion buckets:
+   a short or low-motion case, the common case, and a long or high-motion
+   case. Include any codec or camera family that is materially more expensive.
+   Weight repeated executions approximately like the approved inventory.
+6. Record each sample's exact source duration in seconds. This becomes
+   `duration_seconds`; it is source-video duration, not sampled duration,
+   notebook runtime, or SDK `processing_seconds`.
+
+Each pipeline item represents one notebook invocation:
+
+```json
+[
+  {
+    "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/benchmarks/short-720p.mp4",
+    "sample_name": "short-720p-low-motion",
+    "duration_seconds": 600.0
+  },
+  {
+    "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/benchmarks/common-1080p.mp4",
+    "sample_name": "common-1080p-medium-motion",
+    "duration_seconds": 1800.0
+  },
+  {
+    "video_uri": "abfss://<source-filesystem>@<storage-account>.dfs.core.windows.net/benchmarks/long-4k.mp4",
+    "sample_name": "long-4k-high-motion",
+    "duration_seconds": 3600.0
+  }
+]
+```
+
+This three-item array only demonstrates the shape. Repeat the representative
+items in the intended inventory proportions until the ForEach can keep the
+selected concurrency busy for more than six hours. After a short calibration
+run, estimate the minimum member count as:
+
+```text
+ceil(6 * 3600 * CONCURRENT_WORKERS /
+     average end-to-end seconds per benchmark activity)
+```
+
+Add margin for unequal clip runtimes and Spark startup. Reusing the same sample
+URI is allowed; each invocation writes a distinct `benchmark_id`.
+
+#### 7.4.2 Create the pipeline and parameters
+
+1. In the target Fabric workspace, select **New item -> Data pipeline**.
+2. Name the pipeline `pc-capacity-benchmark`.
+3. Select the pipeline canvas background, open **Parameters**, and add:
+
+   | Pipeline parameter | Type | Initial/default value |
+   |---|---|---|
+   | `BENCHMARK_BATCH_ID` | `String` | Empty; provide a unique value for every run |
+   | `CAPACITY_SKU` | `String` | Actual assigned SKU, for example `F64` |
+   | `RUNTIME_VERSION` | `String` | Exact pinned Fabric runtime label |
+   | `CONCURRENT_WORKERS` | `Int` | `4` for the first run |
+   | `BENCHMARK_ITEMS` | `Array` | The representative item array |
+   | `PIPELINE` | `String` | `rtdetr-osnet` |
+   | `BATCH_SIZE` | `Int` | `1` |
+   | `SAMPLE_FPS` | `Float` | `3.0` |
+   | `DETECTION_THRESHOLD` | `Float` | `0.6` |
+   | `DETECTOR_MODEL` | `String` | `r18` |
+   | `CAMERA_MOTION_COMPENSATION` | `String` | Empty; parsed as null |
+
+   The values above match the documented initial production configuration.
+   If another configuration will process the backfill, change these pipeline
+   parameters before benchmarking. `BENCHMARK_BATCH_ID` should identify the
+   environment, SKU, concurrency, date, and run, for example
+   `prod-f64-c04-20260924-r01`.
+
+#### 7.4.3 Add the benchmark worker ForEach
+
+1. Add a top-level **ForEach** activity to the pipeline canvas and name it
+   `ForEachBenchmarkItems`.
+2. In **Settings -> Items**, choose **Add dynamic content** and enter:
+
+   ```text
+   @pipeline().parameters.BENCHMARK_ITEMS
+   ```
+
+3. Turn **Sequential** off and set **Batch count** to the literal integer
+   matching `CONCURRENT_WORKERS`; initially both are `4`.
+
+   Fabric's Batch count controls actual ForEach parallelism. The notebook's
+   `CONCURRENT_WORKERS` value is recorded metadata and does not create
+   concurrency. Before each run, manually keep these values equal:
+
+   ```text
+   ForEach Batch count                  = 4
+   CONCURRENT_WORKERS pipeline parameter = 4
+   ```
+
+   Do not set a Batch count above `50`. To test a different concurrency,
+   change the literal Batch count, save the pipeline, and supply the matching
+   `CONCURRENT_WORKERS` run parameter.
+4. Open `ForEachBenchmarkItems`, add a **Notebook** child activity, and name it
+   `RunBenchmarkWorker`.
+5. In the Notebook activity **Settings**, select the validated connection and
+   the `08_capacity_benchmark` notebook. If Base parameters do not appear,
+   reselect/refresh the notebook and confirm its parameter-cell setting.
+6. Configure the worker Base parameters:
+
+   | Notebook base parameter | Type | Value |
+   |---|---|---|
+   | `RUN_INFERENCE` | `Bool` | `true` |
+   | `ENFORCE_CAPACITY_GATE` | `Bool` | `false` |
+   | `BENCHMARK_BATCH_ID` | `String` | `@pipeline().parameters.BENCHMARK_BATCH_ID` |
+   | `VIDEO_URI` | `String` | `@item().video_uri` |
+   | `SAMPLE_NAME` | `String` | `@item().sample_name` |
+   | `EXPECTED_VIDEO_DURATION_SECONDS` | `Float` | `@item().duration_seconds` |
+   | `CAPACITY_SKU` | `String` | `@pipeline().parameters.CAPACITY_SKU` |
+   | `RUNTIME_VERSION` | `String` | `@pipeline().parameters.RUNTIME_VERSION` |
+   | `CONCURRENT_WORKERS` | `Int` | `@pipeline().parameters.CONCURRENT_WORKERS` |
+   | `EXPECTED_BATCH_MEMBERS` | `Int` | `0` |
+   | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
+   | `TABLE_PREFIX` | `String` | `people_counter` |
+   | `PIPELINE` | `String` | `@pipeline().parameters.PIPELINE` |
+   | `DEVICE_VARIANT` | `String` | `cpu` |
+   | `DEVICE` | `String` | `cpu` |
+   | `BATCH_SIZE` | `Int` | `@pipeline().parameters.BATCH_SIZE` |
+   | `SAMPLE_FPS` | `Float` | `@pipeline().parameters.SAMPLE_FPS` |
+   | `DETECTION_THRESHOLD` | `Float` | `@pipeline().parameters.DETECTION_THRESHOLD` |
+   | `USE_FP16` | `Bool` | `false` |
+   | `LINE` | Auto-populated type | Leave the notebook default `[]` when line counting is not required |
+   | `DETECTOR_MODEL` | `String` | `@pipeline().parameters.DETECTOR_MODEL` |
+   | `CAMERA_MOTION_COMPENSATION` | `String` | `@pipeline().parameters.CAMERA_MOTION_COMPENSATION` |
+   | `TARGET_VIDEO_HOURS` | `Float` | `200000.0` |
+   | `DEADLINE_DAYS` | `Float` | `30.0` |
+   | `UTILIZATION` | `Float` | `0.80` |
+   | `HEADROOM_FACTOR` | `Float` | `1.20` |
+
+   For each expression, select **Value -> Add dynamic content** and enter the
+   expression without quotes. Keep the declared Type shown in the table.
+   Leave `LINE` at its auto-populated empty-list default unless the production
+   benchmark explicitly includes line counting.
+7. In `RunBenchmarkWorker` **General**, leave retries disabled. A retry writes
+   another benchmark row and invalidates the expected member count. Set a
+   timeout longer than the slowest single video plus Spark startup and source
+   staging; this is an activity timeout, not the duration of the whole
+   six-hour ForEach run.
+
+#### 7.4.4 Add the gate activity
+
+1. Return to the top-level pipeline canvas. Add a second **Notebook** activity
+   outside the ForEach and name it `EvaluateCapacityGate`.
+2. Connect `ForEachBenchmarkItems` to `EvaluateCapacityGate` with the
+   **On completion** dependency, not only **On success**. The gate must run
+   after a failed worker group so it can report failed or missing members.
+3. Select the same connection and `08_capacity_benchmark` notebook.
+4. Start with the same Base parameter mappings as `RunBenchmarkWorker`, then
+   replace these values:
+
+   | Notebook base parameter | Type | Gate value |
+   |---|---|---|
+   | `RUN_INFERENCE` | `Bool` | `false` |
+   | `ENFORCE_CAPACITY_GATE` | `Bool` | `true` |
+   | `VIDEO_URI` | `String` | Empty |
+   | `SAMPLE_NAME` | `String` | Empty |
+   | `EXPECTED_VIDEO_DURATION_SECONDS` | `Float` | `0.0` |
+   | `EXPECTED_BATCH_MEMBERS` | `Int` | `@length(pipeline().parameters.BENCHMARK_ITEMS)` |
+
+   `BENCHMARK_BATCH_ID`, `CAPACITY_SKU`, `RUNTIME_VERSION`,
+   `CONCURRENT_WORKERS`, model parameters, target, utilization, and headroom
+   must be identical to the worker mappings. The gate uses those values to
+   select one exact configuration; a mismatch produces no matching result.
+5. Leave gate retries disabled and use a 30-minute timeout. Do not put the gate
+   inside `ForEachBenchmarkItems`.
+6. Select **Save**, then **Validate**. Resolve every validation error before
+   running the pipeline.
+
+The final pipeline shape is:
+
+```mermaid
+flowchart LR
+    P[Pipeline parameters] --> FE[ForEachBenchmarkItems<br/>parallel, batch count N]
+    FE -->|each item| BW[RunBenchmarkWorker<br/>RUN_INFERENCE=true]
+    FE -->|On completion| G[EvaluateCapacityGate<br/>RUN_INFERENCE=false]
+    G --> R{Pass or fail pipeline}
+```
+
+#### 7.4.5 Run and approve a capacity
+
+1. Set the ForEach Batch count to the concurrency under test and save.
+2. Select **Run** and provide a unique `BENCHMARK_BATCH_ID`, the actual
+   `CAPACITY_SKU`, exact `RUNTIME_VERSION`, matching `CONCURRENT_WORKERS`, and
+   the full `BENCHMARK_ITEMS` array. Verify that the array's length is the
+   intended total activity count, not the concurrency.
+3. In Monitoring Hub, confirm `RunBenchmarkWorker` maintains the requested
+   concurrency for at least six hours. Spark admission, throttling, source
+   staging, and idle gaps are part of observed end-to-end performance and must
+   not be removed from the result.
+4. Confirm `EvaluateCapacityGate` runs after the ForEach completes. It must
+   fail unless the selected batch has:
+   - exactly `length(BENCHMARK_ITEMS)` rows;
+   - zero failed rows;
+   - at least six hours between its earliest start and latest completion; and
+   - observed aggregate throughput at or above the requirement.
+5. If any worker was retried, duplicated, omitted, or run with a mismatched
+   parameter, correct the pipeline and rerun under a new batch ID. Do not
+   change `EXPECTED_BATCH_MEMBERS` to make a contaminated batch pass.
+6. Repeat with increasing concurrency and, when applicable, each candidate
+   capacity SKU. Use a new batch ID every time.
+
+With the notebook defaults:
+
+```text
+nominal required speed = TARGET_VIDEO_HOURS / (DEADLINE_DAYS * 24)
+                       = 200,000 / 720
+                       = 277.78x real time
+
+gated aggregate speed  = nominal required speed
+                          * HEADROOM_FACTOR / UTILIZATION
+                       = 277.78 * 1.20 / 0.80
+                       = 416.67x real time
+
+planned workers        = ceil(gated aggregate speed /
+                               p10 single-activity speed)
+```
+
+`1x` means one source-video second completed per wall-clock second.
+`HEADROOM_FACTOR=1.20` supplies the 20% retry/data-variance allowance;
+`UTILIZATION=0.80` separately reserves time for admission delays, maintenance,
+and other unproductive intervals. Do not add another 20% to the result.
+
+Complete this worksheet for each candidate SKU:
+
+| Check | How to obtain it | Approval rule |
+|---|---|---|
+| Aggregate throughput | `best_six_hour_aggregate_speed_x` from the gate output | At least `required_aggregate_speed_x` |
+| Worker count | `required_workers_with_headroom` and tested `CONCURRENT_WORKERS` | Approve only a concurrency that was actually tested and passed |
+| Spark cores | Cores allocated per benchmark activity from Spark job details, multiplied by tested concurrency | Must fit the pool and SKU without relying on queued jobs |
+| Memory | Peak executor and driver memory from Spark/Fabric monitoring, multiplied by tested concurrency | Must fit with operating margin and show no rising six-hour trend |
+| CU consumption | CU seconds for the benchmark window from the Fabric Capacity Metrics app; divide by elapsed seconds for average CU and inspect peaks/throttling | Must fit the SKU, protected workloads, and approved cost budget |
+| Operational limits | Spark admission delay, node count, throttling, source I/O, and Delta contention from the same window | No sustained throttling, 24-hour queue dependency, or unproven scale assumption |
+
+The notebook does not infer cores, memory, or CU from the SKU label.
+`CAPACITY_SKU` and `RUNTIME_VERSION` are operator-supplied grouping keys, and
+`peak_memory_mb` is not currently populated. Capture resource values from
+Fabric job details, Spark monitoring, and the Capacity Metrics app for the
+exact benchmark interval. If throughput passes but a resource or cost check
+fails, reduce other load, select another capacity, or rerun at a different
+concurrency; do not approve the backfill.
+
+### 7.5 Backfill execution phases
+
+1. **Catalog and discovery:** approve the camera catalog, inventory the source
+   tree, and record video count, bytes, duration, resolution, frame rate,
+   codec, and capture-date coverage. Quarantine unreadable or contract-invalid
+   assets rather than letting them enter the benchmark or queue. Partition the
+   inventory by stable path prefixes so that each partition can be generated,
+   registered, retried, and reconciled independently.
+2. **Manifest publication:** run the producer-side generator for one inventory
+   partition at a time. Resolve every rejection, publish by the documented
+   temporary-name/atomic-move protocol, and reconcile inventory assets,
+   generated manifests, and published manifests before registration. Preserve
+   the reconciled inventory totals as the denominator for pilot percentages
+   and final completion.
+3. **Representative benchmark:** create and run the section 7.4 benchmark
+   pipeline over the approved representative sample mix. Test increasing
+   concurrency levels under the same runtime, model configuration, source
+   path, and candidate SKU intended for production. Keep only complete,
+   uncontaminated six-hour batches.
+4. **Capacity gate:** approve only a section 7.4 batch whose gate activity
+   succeeds and whose measured cores, memory, CU, throttling, protected
+   workload impact, and cost fit the selected capacity. Record the approved
+   batch ID, configuration hash, SDK/runtime, SKU, concurrency, and evidence
+   before any backfill registration.
+5. **Pilot 0.1%:** register 200 reconciled video-hours through
+   `pc-backfill-register`. Validate registered/completed counts against the
+   pilot inventory, inspect output volume and small-file growth, verify queue
+   and retry behavior, and compare measured CU/cost with the benchmark
+   forecast. Resolve every unexplained discrepancy before continuing.
+6. **Pilot 1%:** register 2,000 reconciled video-hours. Sustain only the
+   capacity-gated concurrency for at least six hours and verify throughput,
+   memory, admission delay, error rate, source I/O, and Delta contention do
+   not trend adversely. Recalculate the finish forecast from observed pilot
+   throughput and stop if it misses the deadline.
+7. **Ramp:** increase admitted inventory in 25% steps while keeping worker
+   concurrency at or below the proven value. Hold each step long enough to
+   observe queue age, throughput, failures, capacity throttling, CU burn, and
+   output-file health. A larger queue is not permission to exceed the tested
+   concurrency.
 8. **Daily checkpoint:** compare completed video-hours with the burn-down
    target and recalculate the forecast completion date from a governed
-   backfill batch/workload-origin dataset. Until that key exists in the gold
-   layer, reconcile the approved backfill inventory directly; do not use
-   global `gold_operations_hour` totals when live intake or replay is mixed
-   into the same environment.
-9. **Stop condition:** pause new claims when the projected completion misses
-   the deadline, error rate breaches the SLO, or capacity throttling is
-   sustained. Do not compensate by silently exceeding proven concurrency.
-10. **Completion:** reconcile the source inventory, published manifests,
-    registered work, committed work, and dead-letter queue before declaring
-    the backfill complete.
+   backfill batch/workload-origin dataset. Reconcile queued, leased, running,
+   retryable, dead-lettered, and committed work to the approved inventory.
+   Until a backfill-origin key exists in the gold layer, reconcile that
+   inventory directly; do not use global `gold_operations_hour` totals when
+   live intake or replay is mixed into the same environment.
+9. **Stop condition:** pause new claims when the forecast misses the deadline,
+   the error rate breaches the SLO, capacity throttling is sustained, resource
+   use exceeds the approved envelope, or reconciliation drifts. Preserve
+   leases and evidence, diagnose the cause, and resume only after a controlled
+   validation. Do not compensate by silently exceeding proven concurrency.
+10. **Completion:** require zero unexplained differences among source
+    inventory, published manifests, registered work, terminal work, committed
+    output, and the dead-letter queue. Record the final video-hours, elapsed
+    time, SDK/runtime/configuration, capacity, cost, exceptions, and
+    reconciliation evidence before declaring the backfill complete.
 
 The backfill pipeline and event intake create the same `work_id` and rows, so
 a backfill item and a later duplicate storage event converge.
@@ -5901,6 +6179,7 @@ fallback.
 - [Azure Blob/ADLS event schemas](https://learn.microsoft.com/azure/event-grid/event-schema-blob-storage)
 - [Activator actions for Fabric items](https://learn.microsoft.com/fabric/real-time-intelligence/data-activator/activator-trigger-fabric-items)
 - [Fabric pipeline runs and triggers](https://learn.microsoft.com/fabric/data-factory/pipeline-runs)
+- [Fabric pipeline parameters](https://learn.microsoft.com/fabric/data-factory/parameters)
 - [Fabric pipeline expression language](https://learn.microsoft.com/fabric/data-factory/expression-language)
 - [Activity retries](https://learn.microsoft.com/fabric/data-factory/activity-retries)
 - [Notebook activity](https://learn.microsoft.com/fabric/data-factory/notebook-activity)
