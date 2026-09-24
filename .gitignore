@@ -13,5 +13,10 @@ outputs/
 
 # Mutation tests
 mutants/
+
+# Manifest and offline models
 manifest-package/
 offline-models/
+
+# Temporary Python exports of Fabric notebooks
+/.nbsrc_*.py
