@@ -1765,6 +1765,12 @@ Complete these shared prerequisites first:
 Do not manually calculate `FLOW_DATE`, `CAPTURE_DATE`, or `OPERATION_DATE`.
 The planner discovers recently affected dates.
 
+The completed pipeline must also refresh both Power BI semantic models after
+the gold facts and dimensions finish. Writing Delta tables and refreshing
+report visuals are not substitutes for refreshing a Direct Lake semantic
+model. A semantic-model refresh performs **framing**: it advances the
+Delta-table versions that subsequent report queries read.
+
 1. Create a Data Pipeline named `pc-gold-refresh`.
 2. Create these pipeline parameters:
 
@@ -1886,6 +1892,9 @@ The planner discovers recently affected dates.
 20. Save and run manually with `LOOKBACK_HOURS=48` and
     `FULL_REBUILD_DIMENSIONS=true`. The dimension notebook also performs a
     full video-dimension build automatically when its target table is empty.
+    For a first-time deployment, this initial run populates the tables before
+    the semantic models exist. Complete the semantic-model refresh steps
+    below before enabling the hourly schedule.
 21. Verify `PlanGoldRefresh` output contains `partition_count` and `items`.
     Verify the corresponding `people_counter_gold_*` fact partitions and all
     six `people_counter_gold_dim_*` tables.
@@ -1893,6 +1902,150 @@ The planner discovers recently affected dates.
     `LOOKBACK_HOURS` enough to rebuild every historical gold fact partition,
     run with `FULL_REBUILD_DIMENSIONS=true`, and then restore
     `LOOKBACK_HOURS` to `48` and `FULL_REBUILD_DIMENSIONS` to `false`.
+23. Confirm that `pc_operations_model` and `pc_analytics_model` exist in
+    `<workspace-name>` and use the intended environment's Lakehouse. If this
+    is the first deployment, create them using
+    [the operations model instructions](#create-the-separate-power-bi-operations-report)
+    and [the analytical model instructions](#82-analytical-report), then
+    return here. Select the **semantic models**, not the similarly named
+    reports, in the following activities.
+24. Outside the ForEach, add two **Semantic model refresh** activities from
+    the pipeline **Activities** bar:
+
+    | Activity name | Target semantic model |
+    |---|---|
+    | `RefreshAnalyticsModel` | `pc_analytics_model` |
+    | `RefreshOperationsModel` | `pc_operations_model` |
+
+    Connect **On success** dependencies in this order:
+
+    ```text
+    PlanGoldRefresh
+      -> ForEachGoldPartition
+      -> BuildAnalyticsDimensions
+      -> RefreshAnalyticsModel
+      -> RefreshOperationsModel
+    ```
+
+    Do not place either refresh inside `ForEachGoldPartition` or connect it
+    before `BuildAnalyticsDimensions` succeeds. Do not use **On completion**
+    dependencies to refresh after failed data preparation.
+25. Create or reuse a **Power BI Semantic Model** cloud connection with
+    **Workspace identity** authentication. Use the existing identity for the
+    workspace containing `pc-gold-refresh`; do not create another identity
+    or a client secret. The identity must already be authorized to refresh
+    the target semantic models. This is a separate connection from the ADLS
+    service-principal connection used by the processing notebooks.
+
+    If a suitable connection already exists, skip its creation and select it
+    in both refresh activities as described below. Otherwise, use the current
+    **Manage Connections and Gateways** screens:
+
+    1. In the Fabric header, select the **Settings** gear, then
+       **Manage connections and gateways** under **Resources and extensions**.
+       If the compact header first opens a menu, select **Settings** there.
+       Do not use the pipeline ribbon's **Settings** button.
+    2. On the **Connections** tab, select **New**.
+    3. In the **New connection** panel, select **Cloud**, not **On-premises**
+       or either virtual-network option.
+    4. Complete these fields:
+
+       | Field | Value |
+       |---|---|
+       | **Connection name** | `pc_powerbi_workspace_identity_<environment>` |
+       | **Connection type** | `Power BI Semantic Model` |
+       | **Authentication method** | `Workspace identity` |
+       | **Privacy level** | `Organizational` |
+
+       Search for `Power BI` in **Connection type**, then explicitly select
+       **Power BI Semantic Model**. Do not select
+       **Power BI dataflows (Legacy)**. The current connector name is not
+       simply `Power BI`.
+    5. With **Workspace identity** selected, the panel does not ask for a
+       tenant ID, client ID, client secret, or interactive OAuth sign-in.
+       It also does not ask for the target workspace or semantic model;
+       those are selected later in the activity.
+       - Leave **Allow Code-First Artifacts like Notebooks to access this
+         connection (Preview)** unchecked. These refresh activities are not
+         notebooks and do not require that consent.
+       - Leave **Allow this connection to be utilized with either on-premises
+         data gateways or VNet data gateways** unchecked.
+    6. Select **Create** and confirm the connection appears on the
+       **Connections** tab with type **Power BI Semantic Model**.
+       Workspace-identity connections do not support the connection-list
+       status check. A message saying that checking status is unsupported
+       is not a failed refresh; validate through the pipeline run below.
+    7. Return to `pc-gold-refresh`. For each refresh activity, open
+       **Settings**, select **Refresh** beside **Connection**, and select
+       `pc_powerbi_workspace_identity_<environment>` or the existing
+       equivalent connection. Do not leave this required field at
+       **Select...**.
+    8. Select `<workspace-name>` under **Workspace**, then select the
+       activity's matching model from the table above under **Semantic
+       model**. The current UI uses **Semantic model**, not the older
+       **Dataset** label. Reuse the same connection for both activities in
+       this workspace.
+
+    Creating this connection does not itself grant the workspace identity
+    permissions on the models or replace the models' own OneLake
+    connections. The pipeline's invoking user or service principal also
+    needs an Admin, Member, or Contributor role in the pipeline workspace
+    to use workspace-identity authentication. Check that separately for
+    manual and scheduled execution.
+26. Configure both activities to refresh the entire semantic model:
+    - Leave **Table(s)** and partition selections unset. Do not use
+      **Refresh** beside **Table(s)** or **Select partitions** for this
+      whole-model refresh; the connection-list refresh in step 25 is a
+      different control.
+    - Under **Advanced**, keep **Wait on completion** turned **On** so the
+      pipeline waits for the refresh result rather than only submitting it.
+    - Use **Transactional** commit mode, not **Partial Batch**. This applies
+      to each model refresh; it does not make the two models or the upstream
+      Delta writes one transaction.
+    - The activity's default full refresh frames these Direct Lake tables;
+      it does not rerun the aggregation notebooks or import a complete copy
+      of the Delta data.
+
+    See Microsoft's
+    [Semantic model refresh activity instructions](https://learn.microsoft.com/fabric/data-factory/semantic-model-refresh-activity)
+    for the connection and Advanced controls.
+27. Configure both refresh activities' **General** settings:
+
+    | Setting | Value |
+    |---|---|
+    | Timeout | `0.00:30:00` |
+    | Enable retries | Yes |
+    | Retry | `2` |
+    | Interval type | Increasing Delay |
+    | Initial interval | `60` seconds |
+    | Max interval | `300` seconds |
+    | Retry conditions | Empty |
+
+    Leave failures visible in the pipeline output. Do not add a success
+    fallback that hides an exhausted refresh failure.
+28. Save and run the complete pipeline manually. Verify that
+    `BuildAnalyticsDimensions`, `RefreshAnalyticsModel`, and
+    `RefreshOperationsModel` all succeed. In each semantic model's
+    **Settings -> Refresh -> View Refresh History**, confirm a successful
+    refresh corresponding to this pipeline run. A completed notebook run
+    alone does not prove that either semantic model has advanced.
+29. Reopen or refresh the visuals in `pc_analytics_report` and
+    `pc_operations_report` without manually refreshing either semantic model.
+    Verify a known newly processed video's results and the updated completed
+    video-hours against
+    [`11_validate_observability.ipynb`](./11_validate_observability.ipynb).
+    Check the analytics report's flow and operations freshness measures
+    against the gold facts' `refreshed_at` values. An already-open report page
+    still needs its visuals requeried; a model refresh does not itself redraw
+    the page.
+
+The model setting **Keep your Direct Lake data up to date** can perform
+automatic framing, but it is not a replacement for these explicit pipeline
+steps. Power BI can suspend automatic updates after a non-recoverable refresh
+error; a subsequent successful on-demand refresh resumes them. If reports
+remain stale, inspect the two refresh activities and each model's refresh
+history rather than only rerunning the gold notebooks. See
+[Direct Lake automatic updates](https://learn.microsoft.com/fabric/fundamentals/direct-lake-how-it-works#automatic-updates).
 
 #### 6.7.4 Create `pc-delta-maintenance`
 
@@ -1938,7 +2091,12 @@ Only after all four manual runs succeed:
 2. Schedule `pc-reconcile` every 15 minutes, offset at least two minutes from
    the watchdog.
 3. Schedule `pc-gold-refresh` hourly and invoke it after controlled backfill
-   batches as a catch-up.
+   batches as a catch-up. Enable this schedule only after the complete
+   pipeline, including both semantic-model refresh activities from section
+   6.7.3, passes manual validation. This cadence covers gold reporting data;
+   if queue/status reporting requires lower latency, configure a separate,
+   approved refresh cadence for `pc_operations_model` rather than assuming
+   the hourly gold pipeline provides near-real-time ledger visibility.
 4. Reserve maintenance windows daily during the backfill and weekly in
    steady state. Do not schedule `MaintainDelta` directly alongside live
    workers. Its orchestration must first disable admission, drain/stop all
