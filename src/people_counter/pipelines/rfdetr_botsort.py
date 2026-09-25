@@ -21,7 +21,11 @@ from people_counter.line_counting import (
     create_line_zone,
     record_line_counts,
 )
-from people_counter.models import PersonTelemetry, RunResult
+from people_counter.models import (
+    PersonTelemetry,
+    RunResult,
+    UNUSED_RESULT_ERROR,
+)
 from people_counter.model_artifacts import resolve_rfdetr_checkpoint
 from people_counter.video import (
     FrameBatch,
@@ -246,10 +250,12 @@ def finalize_run(
         result.line_out_count = line_zone.out_count
 
 
-def run(config: RFDetrBotsortConfig) -> RunResult:
-    """Run RF-DETR/BoT-SORT and mutate the result owned by ``config``."""
+def run_with_runtime(
+    config: RFDetrBotsortConfig,
+    runtime: RFDetrRuntime,
+) -> RunResult:
+    """Process one RF-DETR/BoT-SORT video with an already-loaded runtime."""
     config.result.ensure_unused()
-    runtime = load_runtime(config)
     capture = cv2.VideoCapture(str(config.video))
     if not capture.isOpened():
         raise RuntimeError(f"Could not open input video: {config.video}")
@@ -281,3 +287,11 @@ def run(config: RFDetrBotsortConfig) -> RunResult:
             line_zone,
         )
     return config.result
+
+
+def run(config: RFDetrBotsortConfig) -> RunResult:
+    """Load one RF-DETR/BoT-SORT runtime and process the configured video."""
+    if config.result.started or config.result.initialized:
+        raise RuntimeError(UNUSED_RESULT_ERROR)
+    runtime = load_runtime(config)
+    return run_with_runtime(config=config, runtime=runtime)

@@ -75,6 +75,33 @@ Notebook `14_reset_test_data` is a destructive test utility, not part of the
 normal deployment sequence. Do not deploy it to a Production workspace or
 call it from a pipeline, schedule, Eventstream trigger, or Activator action.
 
+Notebook
+[`15_executor_partition_inference.ipynb`](./15_executor_partition_inference.ipynb)
+is an opt-in CPU executor-partition prototype for benchmarking a
+`mapPartitions` architecture. It deliberately does not replace
+[`04_process_video.ipynb`](./04_process_video.ipynb) or its lease, attempt,
+heartbeat, and commit contract. Use it only with prepared Delta input and
+controlled prototype output tables until a production migration plan preserves
+the existing control-plane semantics.
+
+Before running the prototype:
+
+- prepare one input row per whole video with a worker-local
+  `local_video_path` and a non-empty `models_dir` containing the pinned offline
+  artifacts;
+- set `EXECUTOR_CORES` to the executor profile's vCore count and
+  `ACTIVE_TASKS_PER_EXECUTOR` to the intended simultaneous tasks per executor;
+- set `TARGET_PARTITIONS` high enough to occupy the intended executor tasks;
+- provide a batch-specific `OUTPUT_TXN_APP_ID` and a non-negative,
+  monotonically managed `OUTPUT_TXN_VERSION`; the defaults intentionally fail
+  closed;
+- use only `device_variant="cpu"` and `device="cpu"`.
+
+The driver calculates the Spark task CPU request, while each executor Python
+worker applies the matching OpenMP, MKL, PyTorch, and OpenCV limits before
+loading a model runtime. A reused Python worker accepts the same limits but
+fails rather than silently changing an already initialized native runtime.
+
 Manifest generation is a producer-side responsibility, not another Fabric
 inference notebook. For a large historical load, use the
 `prepare-manifests` command described in section 7.2 to turn a

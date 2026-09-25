@@ -10,6 +10,9 @@ BBox = tuple[int, int, int, int]
 Centroid = tuple[int, int]
 Embedding = NDArray[np.floating]
 LineCoordinates = tuple[int, int, int, int]
+UNUSED_RESULT_ERROR = (
+    "RunResult already populated; create a new config for each run"
+)
 
 
 @dataclass(frozen=True)
@@ -83,7 +86,5 @@ class RunResult:
 
     def ensure_unused(self) -> None:
         if self.started or self.initialized:
-            raise RuntimeError(
-                "RunResult already populated; create a new config for each run"
-            )
+            raise RuntimeError(UNUSED_RESULT_ERROR)
         self.started = True

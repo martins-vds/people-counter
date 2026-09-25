@@ -4,9 +4,12 @@ from people_counter import fabric_control, fabric_events
 from people_counter.api import (
     LineCountRecordDict,
     PipelineConfig,
+    PipelineRuntime,
     TelemetryRecord,
     line_count_records,
+    load_runtime,
     run,
+    run_with_runtime,
     telemetry_records,
 )
 from people_counter.config import RFDetrBotsortConfig, RTDetrOsnetConfig
@@ -24,6 +27,7 @@ __all__ = [
     "LeaseLostError",
     "LineCountRecordDict",
     "PipelineConfig",
+    "PipelineRuntime",
     "RFDetrBotsortConfig",
     "RTDetrOsnetConfig",
     "RunResult",
@@ -32,7 +36,9 @@ __all__ = [
     "fabric_control",
     "fabric_events",
     "line_count_records",
+    "load_runtime",
     "process_worker_events",
     "run",
+    "run_with_runtime",
     "telemetry_records",
 ]

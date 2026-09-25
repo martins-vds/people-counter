@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, call
 
 NOTEBOOKS = Path(__file__).resolve().parents[1] / "notebooks" / "fabric"
 WORKER = NOTEBOOKS / "04_process_video.ipynb"
+EXECUTOR_PROTOTYPE = NOTEBOOKS / "15_executor_partition_inference.ipynb"
 
 
 def cell_source(path, cell_id):
@@ -102,6 +103,25 @@ class FabricNotebookTests(unittest.TestCase):
                 if cell["cell_type"] == "code":
                     with self.subTest(notebook=path.name, cell=cell["id"]):
                         compile("".join(cell["source"]), f"{path}:{cell['id']}", "exec")
+
+    def test_executor_partition_prototype_configures_executor_cpu_limits(self):
+        parameters = cell_source(EXECUTOR_PROTOTYPE, "parameters")
+        spark_config = cell_source(EXECUTOR_PROTOTYPE, "spark-config")
+        partition = cell_source(EXECUTOR_PROTOTYPE, "map-partitions")
+
+        self.assertIn('OUTPUT_TXN_APP_ID = "UNSET"', parameters)
+        self.assertIn("OUTPUT_TXN_VERSION = -1", parameters)
+        self.assertIn(
+            "calculate_thread_budget(EXECUTOR_CORES, ACTIVE_TASKS_PER_EXECUTOR)",
+            spark_config,
+        )
+        self.assertNotIn("configure_cpu_runtime(", spark_config)
+        self.assertIn(
+            "configure_cpu_runtime(EXECUTOR_CORES, ACTIVE_TASKS_PER_EXECUTOR)",
+            partition,
+        )
+        self.assertIn("models_dir is required for offline executor inference", partition)
+        self.assertIn("supports only CPU inference", partition)
 
     def test_worker_has_no_direct_delta_mutations(self):
         source = code_source(WORKER)

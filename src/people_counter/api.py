@@ -1,6 +1,8 @@
 """Stable public API for embedding people-counter in Python applications."""
 
-from typing import TypeAlias, TypedDict
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, TypeAlias, TypedDict
 
 from people_counter.config import (
     RFDetrBotsortConfig,
@@ -9,8 +11,12 @@ from people_counter.config import (
 from people_counter.models import RunResult
 from people_counter.video import format_video_timestamp
 
+if TYPE_CHECKING:
+    from people_counter.pipelines.rfdetr_botsort import RFDetrRuntime
+    from people_counter.pipelines.rtdetr_osnet import RTDetrRuntime
 
 PipelineConfig: TypeAlias = RTDetrOsnetConfig | RFDetrBotsortConfig
+PipelineRuntime: TypeAlias = "RTDetrRuntime | RFDetrRuntime"
 
 
 class TelemetryRecord(TypedDict):
@@ -48,6 +54,51 @@ def run(config: PipelineConfig) -> RunResult:
         from people_counter.pipelines.rfdetr_botsort import run as run_pipeline
 
         return run_pipeline(config)
+    raise TypeError(
+        "config must be RTDetrOsnetConfig or RFDetrBotsortConfig; "
+        f"got {type(config).__name__}"
+    )
+
+
+def load_runtime(config: PipelineConfig) -> PipelineRuntime:
+    """Load a reusable runtime selected by the concrete configuration type."""
+    if isinstance(config, RTDetrOsnetConfig):
+        from people_counter.pipelines.rtdetr_osnet import load_runtime
+
+        return load_runtime(config)
+    if isinstance(config, RFDetrBotsortConfig):
+        from people_counter.pipelines.rfdetr_botsort import load_runtime
+
+        return load_runtime(config)
+    raise TypeError(
+        "config must be RTDetrOsnetConfig or RFDetrBotsortConfig; "
+        f"got {type(config).__name__}"
+    )
+
+
+def run_with_runtime(
+    config: PipelineConfig,
+    runtime: PipelineRuntime,
+) -> RunResult:
+    """Run one video with a compatible already-loaded runtime."""
+    if isinstance(config, RTDetrOsnetConfig):
+        from people_counter.pipelines.rtdetr_osnet import (
+            RTDetrRuntime,
+            run_with_runtime,
+        )
+
+        if not isinstance(runtime, RTDetrRuntime):
+            raise TypeError("RTDetrOsnetConfig requires an RTDetrRuntime")
+        return run_with_runtime(config, runtime)
+    if isinstance(config, RFDetrBotsortConfig):
+        from people_counter.pipelines.rfdetr_botsort import (
+            RFDetrRuntime,
+            run_with_runtime,
+        )
+
+        if not isinstance(runtime, RFDetrRuntime):
+            raise TypeError("RFDetrBotsortConfig requires an RFDetrRuntime")
+        return run_with_runtime(config, runtime)
     raise TypeError(
         "config must be RTDetrOsnetConfig or RFDetrBotsortConfig; "
         f"got {type(config).__name__}"

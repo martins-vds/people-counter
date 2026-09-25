@@ -33,6 +33,7 @@ from people_counter.models import (
     PersonTelemetry,
     RunResult,
     TrackProfile,
+    UNUSED_RESULT_ERROR,
 )
 from people_counter.video import (
     FrameBatch,
@@ -924,10 +925,12 @@ def finalize_run(
         result.line_out_count = line_zone.out_count
 
 
-def run(config: RTDetrOsnetConfig) -> RunResult:
-    """Run RT-DETR/OSNet and mutate the result owned by ``config``."""
+def run_with_runtime(
+    config: RTDetrOsnetConfig,
+    runtime: RTDetrRuntime,
+) -> RunResult:
+    """Process one RT-DETR/OSNet video with an already-loaded runtime."""
     config.result.ensure_unused()
-    runtime = load_runtime(config)
     tracking = RTDetrTrackingState(telemetry=config.result.telemetry)
     capture = cv2.VideoCapture(str(config.video))
     if not capture.isOpened():
@@ -965,3 +968,11 @@ def run(config: RTDetrOsnetConfig) -> RunResult:
             line_zone,
         )
     return config.result
+
+
+def run(config: RTDetrOsnetConfig) -> RunResult:
+    """Load one RT-DETR/OSNet runtime and process the configured video."""
+    if config.result.started or config.result.initialized:
+        raise RuntimeError(UNUSED_RESULT_ERROR)
+    runtime = load_runtime(config)
+    return run_with_runtime(config=config, runtime=runtime)

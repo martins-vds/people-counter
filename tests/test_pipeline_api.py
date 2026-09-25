@@ -5,12 +5,22 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
+from people_counter.api import (
+    load_runtime,
+    run_with_runtime,
+)
 from people_counter.config import RFDetrBotsortConfig, RTDetrOsnetConfig
 from people_counter.models import RunResult
 from people_counter.pipelines.rfdetr_botsort import RFDetrRuntime
 from people_counter.pipelines.rfdetr_botsort import run as run_botsort
+from people_counter.pipelines.rfdetr_botsort import (
+    run_with_runtime as run_botsort_with_runtime,
+)
 from people_counter.pipelines.rtdetr_osnet import RTDetrRuntime
 from people_counter.pipelines.rtdetr_osnet import run as run_rtdetr
+from people_counter.pipelines.rtdetr_osnet import (
+    run_with_runtime as run_rtdetr_with_runtime,
+)
 from people_counter.video import read_video_metadata
 from tests.helpers import FakeCapture, RecordingEmbedder
 
@@ -102,8 +112,19 @@ class PipelineApiTests(unittest.TestCase):
             result=RunResult(initialized=True),
         )
 
-        with self.assertRaisesRegex(RuntimeError, "already populated"):
+        with (
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.load_runtime",
+            ) as load_models,
+            self.assertRaises(RuntimeError) as raised,
+        ):
             run_rtdetr(config)
+
+        load_models.assert_not_called()
+        self.assertEqual(
+            str(raised.exception),
+            "RunResult already populated; create a new config for each run",
+        )
 
     def test_botsort_rejects_reused_result_before_loading_models(self):
         config = RFDetrBotsortConfig(
@@ -114,8 +135,186 @@ class PipelineApiTests(unittest.TestCase):
             result=RunResult(initialized=True),
         )
 
-        with self.assertRaisesRegex(RuntimeError, "already populated"):
+        with (
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.load_runtime",
+            ) as load_models,
+            self.assertRaises(RuntimeError) as raised,
+        ):
             run_botsort(config)
+
+        load_models.assert_not_called()
+        self.assertEqual(
+            str(raised.exception),
+            "RunResult already populated; create a new config for each run",
+        )
+
+    def test_public_runtime_api_loads_and_reuses_typed_runtime(self):
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        runtime = RTDetrRuntime(
+            device=torch.device("cpu"),
+            reid_embedder=MagicMock(),
+            processor=MagicMock(),
+            model=MagicMock(),
+            person_class_id=0,
+        )
+        result = RunResult(initialized=True)
+
+        with (
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.load_runtime",
+                return_value=runtime,
+            ) as load_pipeline_runtime,
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.run_with_runtime",
+                return_value=result,
+            ) as run_pipeline,
+        ):
+            loaded = load_runtime(config)
+            actual = run_with_runtime(config, loaded)
+
+        self.assertIs(loaded, runtime)
+        self.assertIs(actual, result)
+        load_pipeline_runtime.assert_called_once_with(config)
+        run_pipeline.assert_called_once_with(config, runtime)
+
+    def test_public_runtime_api_rejects_pipeline_mismatch(self):
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        runtime = RFDetrRuntime(model=MagicMock())
+
+        with self.assertRaises(TypeError) as raised:
+            run_with_runtime(config, runtime)
+        self.assertEqual(
+            str(raised.exception),
+            "RTDetrOsnetConfig requires an RTDetrRuntime",
+        )
+
+    def test_public_runtime_api_dispatches_rfdetr_runtime(self):
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        runtime = RFDetrRuntime(model=MagicMock())
+        result = RunResult(initialized=True)
+
+        with (
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.load_runtime",
+                return_value=runtime,
+            ) as load_pipeline_runtime,
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.run_with_runtime",
+                return_value=result,
+            ) as run_pipeline,
+        ):
+            loaded = load_runtime(config)
+            actual = run_with_runtime(config, loaded)
+
+        self.assertIs(loaded, runtime)
+        self.assertIs(actual, result)
+        load_pipeline_runtime.assert_called_once_with(config)
+        run_pipeline.assert_called_once_with(config, runtime)
+
+    def test_public_runtime_api_rejects_rfdetr_runtime_mismatch(self):
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        runtime = RTDetrRuntime(
+            device=torch.device("cpu"),
+            reid_embedder=MagicMock(),
+            processor=MagicMock(),
+            model=MagicMock(),
+            person_class_id=0,
+        )
+
+        with self.assertRaises(TypeError) as raised:
+            run_with_runtime(config, runtime)
+        self.assertEqual(
+            str(raised.exception),
+            "RFDetrBotsortConfig requires an RFDetrRuntime",
+        )
+
+    def test_public_runtime_api_rejects_unknown_config(self):
+        config = MagicMock()
+
+        with self.assertRaises(TypeError) as load_error:
+            load_runtime(config)
+        with self.assertRaises(TypeError) as run_error:
+            run_with_runtime(config, MagicMock())
+
+        expected = (
+            "config must be RTDetrOsnetConfig or RFDetrBotsortConfig; "
+            "got MagicMock"
+        )
+        self.assertEqual(str(load_error.exception), expected)
+        self.assertEqual(str(run_error.exception), expected)
+
+    def test_rtdetr_run_loads_and_passes_runtime(self):
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        runtime = MagicMock(spec=RTDetrRuntime)
+        result = RunResult(initialized=True)
+
+        with (
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.load_runtime",
+                return_value=runtime,
+            ) as load_models,
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.run_with_runtime",
+                return_value=result,
+            ) as run_loaded,
+        ):
+            actual = run_rtdetr(config)
+
+        self.assertIs(actual, result)
+        load_models.assert_called_once_with(config)
+        run_loaded.assert_called_once_with(config=config, runtime=runtime)
+
+    def test_botsort_run_loads_and_passes_runtime(self):
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        runtime = MagicMock(spec=RFDetrRuntime)
+        result = RunResult(initialized=True)
+
+        with (
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.load_runtime",
+                return_value=runtime,
+            ) as load_models,
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.run_with_runtime",
+                return_value=result,
+            ) as run_loaded,
+        ):
+            actual = run_botsort(config)
+
+        self.assertIs(actual, result)
+        load_models.assert_called_once_with(config)
+        run_loaded.assert_called_once_with(config=config, runtime=runtime)
 
     def test_rtdetr_run_processes_mocked_video_and_reports_progress(self):
         frames = [
@@ -147,10 +346,6 @@ class PipelineApiTests(unittest.TestCase):
 
         with (
             patch(
-                "people_counter.pipelines.rtdetr_osnet.load_runtime",
-                return_value=runtime,
-            ) as load_runtime,
-            patch(
                 "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
                 return_value=capture,
             ) as open_capture,
@@ -166,9 +361,8 @@ class PipelineApiTests(unittest.TestCase):
                 "people_counter.pipelines.rtdetr_osnet.record_line_counts",
             ),
         ):
-            result = run_rtdetr(config)
+            result = run_rtdetr_with_runtime(config, runtime)
 
-        load_runtime.assert_called_once_with(config)
         open_capture.assert_called_once_with("video.mp4")
         read_metadata.assert_called_once_with(capture, Path("video.mp4"))
         self.assertIs(result, config.result)
@@ -209,18 +403,13 @@ class PipelineApiTests(unittest.TestCase):
 
         with (
             patch(
-                "people_counter.pipelines.rtdetr_osnet.load_runtime",
-                return_value=runtime,
-            ) as load_runtime,
-            patch(
                 "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
                 return_value=capture,
             ) as open_capture,
             self.assertRaisesRegex(RuntimeError, "detector failed"),
         ):
-            run_rtdetr(config)
+            run_rtdetr_with_runtime(config, runtime)
 
-        load_runtime.assert_called_once_with(config)
         open_capture.assert_called_once_with("video.mp4")
         self.assertTrue(capture.released)
         self.assertTrue(config.result.initialized)
@@ -248,12 +437,9 @@ class PipelineApiTests(unittest.TestCase):
                 result.processed_frames
             ),
         )
+        runtime = RFDetrRuntime(model=FakeRFDetrModel())
 
         with (
-            patch(
-                "people_counter.pipelines.rfdetr_botsort.load_runtime",
-                return_value=RFDetrRuntime(model=FakeRFDetrModel()),
-            ) as load_runtime,
             patch(
                 "people_counter.pipelines.rfdetr_botsort.BoTSORTTracker",
                 return_value=FakeBoTSORTTracker(),
@@ -278,9 +464,8 @@ class PipelineApiTests(unittest.TestCase):
                 return_value=object(),
             ),
         ):
-            result = run_botsort(config)
+            result = run_botsort_with_runtime(config, runtime)
 
-        load_runtime.assert_called_once_with(config)
         open_capture.assert_called_once_with("video.mp4")
         read_metadata.assert_called_once_with(capture, Path("video.mp4"))
         self.assertIs(result, config.result)
