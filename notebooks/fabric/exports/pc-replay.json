@@ -50,7 +50,10 @@
                             "type": "string"
                         },
                         "MAX_ATTEMPTS": {
-                            "value": "4",
+                            "value": {
+                                "value": "@pipeline().parameters.MAX_ATTEMPTS",
+                                "type": "Expression"
+                            },
                             "type": "int"
                         },
                         "DATABASE": {
@@ -79,7 +82,8 @@
                 "type": "string"
             },
             "MAX_ATTEMPTS": {
-                "type": "string"
+                "type": "int",
+                "defaultValue": 4
             }
         },
         "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
