@@ -1,0 +1,238 @@
+{
+    "name": "pc-gold-refresh",
+    "objectId": "dd4fc19b-7276-4402-9d30-76676f36555b",
+    "properties": {
+        "activities": [
+            {
+                "name": "PlanGoldRefresh",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                    "notebookId": "14de776a-5ba3-4b21-831f-804e07cb8738",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "LOOKBACK_HOURS": {
+                            "value": {
+                                "value": "@pipeline().parameters.LOOKBACK_HOURS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "ForEachGoldPartition",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "PlanGoldRefresh",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "typeProperties": {
+                    "items": {
+                        "value": "@json(activity('PlanGoldRefresh').output.result.exitValue).items",
+                        "type": "Expression"
+                    },
+                    "batchCount": 4,
+                    "activities": [
+                        {
+                            "name": "BuildGoldAggregates",
+                            "type": "TridentNotebook",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.02:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 60,
+                                "secureOutput": false,
+                                "secureInput": false,
+                                "exponentialRetry": true,
+                                "maxRetryIntervalInSeconds": 600
+                            },
+                            "typeProperties": {
+                                "notebookId": "173c7fb8-19be-4300-8f43-4d680076c0cf",
+                                "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                                "parameters": {
+                                    "FLOW_DATE": {
+                                        "value": {
+                                            "value": "@item().partition_date",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "CAPTURE_DATE": {
+                                        "value": {
+                                            "value": "@item().partition_date",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "OPERATION_DATE": {
+                                        "value": {
+                                            "value": "@item().partition_date",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "DATABASE": {
+                                        "value": "",
+                                        "type": "string"
+                                    },
+                                    "TABLE_PREFIX": {
+                                        "value": "people_counter",
+                                        "type": "string"
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "BuildAnalyticsDimensions",
+                "type": "TridentNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "ForEachGoldPartition",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.01:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                    "notebookId": "1ca2d058-8551-4a48-9240-ab8b416e45b5",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "LOOKBACK_HOURS": {
+                            "value": {
+                                "value": "@pipeline().parameters.LOOKBACK_HOURS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "FULL_REBUILD": {
+                            "value": {
+                                "value": "@pipeline().parameters.FULL_REBUILD_DIMENSIONS",
+                                "type": "Expression"
+                            },
+                            "type": "bool"
+                        },
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "RefreshOperationsModel",
+                "type": "PBISemanticModelRefresh",
+                "dependsOn": [
+                    {
+                        "activity": "BuildAnalyticsDimensions",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                    "method": "POST",
+                    "operationType": "SemanticModelRefresh",
+                    "groupId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "datasetId": "b108e56f-8559-4f84-8ae1-70ba58075353",
+                    "waitOnCompletion": true,
+                    "commitMode": "Transactional"
+                },
+                "externalReferences": {
+                    "connection": "8fe1df1e-acf7-4ea3-b00b-2fd0d2fc8d29"
+                }
+            },
+            {
+                "name": "RefreshAnalyticsModel",
+                "type": "PBISemanticModelRefresh",
+                "dependsOn": [
+                    {
+                        "activity": "BuildAnalyticsDimensions",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                    "method": "POST",
+                    "operationType": "SemanticModelRefresh",
+                    "groupId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "datasetId": "5dbaf3d1-9f86-4bcd-a590-f32c7fbea08c",
+                    "waitOnCompletion": true,
+                    "commitMode": "Transactional"
+                },
+                "externalReferences": {
+                    "connection": "8fe1df1e-acf7-4ea3-b00b-2fd0d2fc8d29"
+                }
+            }
+        ],
+        "parameters": {
+            "LOOKBACK_HOURS": {
+                "type": "int",
+                "defaultValue": 48
+            },
+            "FULL_REBUILD_DIMENSIONS": {
+                "type": "bool",
+                "defaultValue": false
+            }
+        },
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-24T16:23:09Z"
+    }
+}
