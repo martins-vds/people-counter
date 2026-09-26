@@ -12,6 +12,10 @@ This is not a recommendation to make every change at once. Implement the phases
 in order, measure after each phase, and stop pursuing an optimization when it
 does not improve aggregate throughput or when it violates correctness.
 
+For the 2026-09-26 implementation and deployment review, current Spark setting
+recommendations, and an agent-ready completion checklist, see the
+[Fabric performance assessment](./fabric-performance-assessment-2026-09-26.md).
+
 ## Baseline and diagnosis
 
 The observed run used:
