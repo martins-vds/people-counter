@@ -3162,6 +3162,573 @@ exact benchmark interval. If throughput passes but a resource or cost check
 fails, reduce other load, select another capacity, or rerun at a different
 concurrency; do not approve the backfill.
 
+#### 7.4.7 Create the benchmark comparison semantic model and report
+
+Create a separate semantic model and report for comparing benchmark runs.
+Do not add this table to `pc_operations_model` or `pc_analytics_model`:
+benchmark rows have a different grain, retention purpose, and filtering
+behavior from the operational ledger and curated analytical facts.
+
+Use these artifacts:
+
+| Artifact | Purpose |
+|---|---|
+| `pc_benchmark_model` | Direct Lake model over the durable benchmark fact |
+| `pc_benchmark_report` | Run comparison, throughput, capacity-planning, and stage-timing visuals |
+
+The report is a comparison and diagnostic surface. The
+`EvaluateCapacityGate` notebook activity remains the authoritative approval
+gate because `people_counter_processing_benchmarks` does not persist
+`EXPECTED_BATCH_MEMBERS` or the gate's final pass/fail result.
+
+##### Create the benchmark semantic model
+
+1. Run at least two benchmark batches with different
+   `BENCHMARK_BATCH_ID` values. A short calibration batch is sufficient to
+   validate the report, but only an uncontaminated run sustained for at least
+   six hours is eligible for capacity approval.
+2. Open `<lakehouse-name>` in Lakehouse view and confirm this physical Delta
+   table appears under **Tables**:
+
+   ```text
+   people_counter_processing_benchmarks
+   ```
+
+3. Select **New semantic model** from the Lakehouse.
+4. Name it:
+
+   ```text
+   pc_benchmark_model
+   ```
+
+5. Choose **Direct Lake on OneLake**, select only
+   `people_counter_processing_benchmarks`, and create the model.
+
+   Do not choose **Direct Lake on SQL**. The model uses the physical Delta
+   table directly and does not require SQL views or SQL-endpoint security.
+   The SQL analytics endpoint can lag a recent Delta append while Direct Lake
+   already sees the new files.
+6. If the model opens in **Viewing** mode, switch to **Editing** mode. No
+   relationships are required because this model contains one fact table.
+7. Create every measure below with
+   `people_counter_processing_benchmarks` as its home table:
+
+   1. Select the table in Model explorer.
+   2. Select **Home -> New measure**, or right-click the table and select
+      **New measure**.
+   3. Replace the placeholder expression with one complete DAX definition.
+   4. Commit the measure with the formula-bar check mark or Enter.
+   5. Set the measure's **Display folder** and format as specified.
+   6. Wait for autosave before creating the next measure. Do not paste
+      multiple measure definitions into one formula-bar entry.
+
+8. Create the run-count and success measures in the `Run Comparison` display
+   folder:
+
+   ```DAX
+   Benchmark Runs =
+   DISTINCTCOUNT(
+       people_counter_processing_benchmarks[benchmark_batch_id]
+   )
+
+   Benchmark Samples =
+   COUNTROWS(people_counter_processing_benchmarks)
+
+   Successful Samples =
+   COALESCE(
+       CALCULATE(
+           COUNTROWS(people_counter_processing_benchmarks),
+           people_counter_processing_benchmarks[succeeded] = TRUE()
+       ),
+       0
+   )
+
+   Failed Samples =
+   COALESCE(
+       CALCULATE(
+           COUNTROWS(people_counter_processing_benchmarks),
+           people_counter_processing_benchmarks[succeeded] = FALSE()
+       ),
+       0
+   )
+
+   Invalid Interop Samples =
+   COALESCE(
+       CALCULATE(
+           COUNTROWS(people_counter_processing_benchmarks),
+           people_counter_processing_benchmarks[interop_threads_configured]
+               <> TRUE()
+       ),
+       0
+   )
+
+   Success Rate =
+   DIVIDE([Successful Samples], [Benchmark Samples])
+
+   Total Video Hours =
+   DIVIDE(
+       CALCULATE(
+           SUM(
+               people_counter_processing_benchmarks[video_duration_seconds]
+           ),
+           people_counter_processing_benchmarks[succeeded] = TRUE()
+       ),
+       3600.0
+   )
+   ```
+
+   Format `Benchmark Runs`, `Benchmark Samples`, `Successful Samples`,
+   `Failed Samples`, and `Invalid Interop Samples` as whole numbers. Format
+   `Success Rate` as Percentage with one decimal place and
+   `Total Video Hours` as a decimal number with two decimal places.
+
+9. Create the throughput measures in the `Throughput` display folder:
+
+   ```DAX
+   Average Speed x =
+   CALCULATE(
+       AVERAGE(
+           people_counter_processing_benchmarks[speed_x_realtime]
+       ),
+       people_counter_processing_benchmarks[succeeded] = TRUE()
+   )
+
+   Median Speed x =
+   PERCENTILEX.INC(
+       FILTER(
+           people_counter_processing_benchmarks,
+           people_counter_processing_benchmarks[succeeded] = TRUE()
+       ),
+       people_counter_processing_benchmarks[speed_x_realtime],
+       0.50
+   )
+
+   Conservative Speed x =
+   VAR SuccessfulRows =
+       FILTER(
+           people_counter_processing_benchmarks,
+           people_counter_processing_benchmarks[succeeded] = TRUE()
+       )
+   VAR PercentileRank =
+       MAX(
+           1,
+           ROUNDUP(COUNTROWS(SuccessfulRows) * 0.10, 0)
+       )
+   RETURN
+       MAXX(
+           TOPN(
+               PercentileRank,
+               SuccessfulRows,
+               people_counter_processing_benchmarks[speed_x_realtime],
+               ASC
+           ),
+           people_counter_processing_benchmarks[speed_x_realtime]
+       )
+
+   Batch Started UTC =
+   CALCULATE(
+       MIN(
+           people_counter_processing_benchmarks[benchmark_started_at]
+       ),
+       people_counter_processing_benchmarks[succeeded] = TRUE()
+   )
+
+   Batch Completed UTC =
+   CALCULATE(
+       MAX(people_counter_processing_benchmarks[completed_at]),
+       people_counter_processing_benchmarks[succeeded] = TRUE()
+   )
+
+   Sustained Wall Hours =
+   DIVIDE(
+       DATEDIFF(
+           [Batch Started UTC],
+           [Batch Completed UTC],
+           SECOND
+       ),
+       3600.0
+   )
+
+   Observed Aggregate Speed x =
+   VAR WallSeconds =
+       DATEDIFF(
+           [Batch Started UTC],
+           [Batch Completed UTC],
+           SECOND
+       )
+   VAR VideoSeconds =
+       CALCULATE(
+           SUM(
+               people_counter_processing_benchmarks[video_duration_seconds]
+           ),
+           people_counter_processing_benchmarks[succeeded] = TRUE()
+       )
+   RETURN
+       DIVIDE(VideoSeconds, WallSeconds)
+   ```
+
+   `Conservative Speed x` intentionally selects the discrete p10 order
+   statistic rather than using DAX's interpolated percentile. This matches
+   the Spark `percentile_approx(speed_x_realtime, 0.10)` result used by
+   [`08_capacity_benchmark.ipynb`](./08_capacity_benchmark.ipynb), including
+   small batches.
+
+   Format the three single-activity speed measures and
+   `Observed Aggregate Speed x` with the custom format `0.000x`. Format
+   `Batch Started UTC` and `Batch Completed UTC` as a date/time, and
+   `Sustained Wall Hours` as a decimal number with two decimal places.
+
+10. Create the capacity-planning measures in the `Capacity Planning` display
+    folder:
+
+    ```DAX
+    Required Aggregate Speed x =
+    DIVIDE(
+        200000.0 * 1.20,
+        30.0 * 24.0 * 0.80
+    )
+
+    Aggregate Target Attainment =
+    DIVIDE(
+        [Observed Aggregate Speed x],
+        [Required Aggregate Speed x]
+    )
+
+    Estimated Workers with Headroom =
+    VAR ConservativeSpeed = [Conservative Speed x]
+    RETURN
+        IF(
+            ConservativeSpeed > 0,
+            ROUNDUP(
+                DIVIDE(
+                    [Required Aggregate Speed x],
+                    ConservativeSpeed
+                ),
+                0
+            ),
+            BLANK()
+        )
+
+    Six Hour Evidence =
+    IF([Sustained Wall Hours] >= 6.0, 1, 0)
+
+    Comparison Readiness =
+    SWITCH(
+        TRUE(),
+        [Benchmark Samples] = 0, "NO DATA",
+        HASONEVALUE(
+            people_counter_processing_benchmarks[benchmark_batch_id]
+        ) = FALSE(), "SELECT ONE RUN",
+        [Failed Samples] > 0, "HAS FAILURES",
+        [Invalid Interop Samples] > 0, "INVALID INTEROP",
+        [Sustained Wall Hours] < 6.0, "UNDER 6 HOURS",
+        [Observed Aggregate Speed x]
+            < [Required Aggregate Speed x], "BELOW TARGET",
+        "THROUGHPUT READY"
+    )
+    ```
+
+    `Required Aggregate Speed x` uses the documented defaults:
+    `TARGET_VIDEO_HOURS=200000`, `HEADROOM_FACTOR=1.20`,
+    `DEADLINE_DAYS=30`, and `UTILIZATION=0.80`. If a benchmark uses different
+    values, update this measure to the exact gate parameters before comparing
+    its capacity estimate. Do not compare runs with different target
+    assumptions under one unchanged constant.
+
+    Format `Required Aggregate Speed x` as `0.000x`,
+    `Aggregate Target Attainment` as Percentage with one decimal place, and
+    `Estimated Workers with Headroom` and `Six Hour Evidence` as whole
+    numbers. `Comparison Readiness` is text.
+
+    `THROUGHPUT READY` is not the same as
+    `capacity_gate_passed=true`. It checks the persisted throughput, duration,
+    failure, and interop evidence for one selected batch, but cannot verify
+    that `observed_batch_members` equals the pipeline's
+    `EXPECTED_BATCH_MEMBERS`. Use the gate activity output for final approval.
+
+11. Create the timing measures in the `Stage Timing` display folder:
+
+    ```DAX
+    Average End-to-End Seconds =
+    CALCULATE(
+        AVERAGE(
+            people_counter_processing_benchmarks[end_to_end_seconds]
+        ),
+        people_counter_processing_benchmarks[succeeded] = TRUE()
+    )
+
+    P95 End-to-End Seconds =
+    VAR SuccessfulRows =
+        FILTER(
+            people_counter_processing_benchmarks,
+            people_counter_processing_benchmarks[succeeded] = TRUE()
+        )
+    VAR PercentileRank =
+        MAX(
+            1,
+            ROUNDUP(COUNTROWS(SuccessfulRows) * 0.95, 0)
+        )
+    RETURN
+        MAXX(
+            TOPN(
+                PercentileRank,
+                SuccessfulRows,
+                people_counter_processing_benchmarks[end_to_end_seconds],
+                ASC
+            ),
+            people_counter_processing_benchmarks[end_to_end_seconds]
+        )
+
+    Average Source Stage Seconds =
+    CALCULATE(
+        AVERAGE(
+            people_counter_processing_benchmarks[source_stage_seconds]
+        ),
+        people_counter_processing_benchmarks[succeeded] = TRUE()
+    )
+
+    Average Runtime Load Seconds =
+    CALCULATE(
+        AVERAGE(
+            people_counter_processing_benchmarks[runtime_load_seconds]
+        ),
+        people_counter_processing_benchmarks[succeeded] = TRUE()
+    )
+
+    Average Video Processing Seconds =
+    CALCULATE(
+        AVERAGE(
+            people_counter_processing_benchmarks[video_processing_seconds]
+        ),
+        people_counter_processing_benchmarks[succeeded] = TRUE()
+    )
+
+    Average Persist Seconds =
+    CALCULATE(
+        AVERAGE(
+            people_counter_processing_benchmarks[result_persist_seconds]
+        ),
+        people_counter_processing_benchmarks[succeeded] = TRUE()
+    )
+
+    Average Overhead Seconds =
+    CALCULATE(
+        AVERAGE(
+            people_counter_processing_benchmarks[overhead_seconds]
+        ),
+        people_counter_processing_benchmarks[succeeded] = TRUE()
+    )
+
+    Total Sampled Frames =
+    CALCULATE(
+        SUM(people_counter_processing_benchmarks[sampled_frames]),
+        people_counter_processing_benchmarks[succeeded] = TRUE()
+    )
+    ```
+
+    Format the duration measures as decimal numbers with two decimal places
+    and `Total Sampled Frames` as a whole number. `Average Persist Seconds`
+    remains blank with the current notebook because append duration is logged
+    after the shared Delta row is written; do not replace the blank with
+    `0`.
+
+12. Select **Refresh** in the semantic model and wait for Direct Lake framing
+    to complete. Confirm the table, measures, and display folders are visible
+    and that no orange Direct Lake warning icons remain.
+
+##### Create the benchmark report
+
+1. From `pc_benchmark_model`, select **New report** and name it:
+
+   ```text
+   pc_benchmark_report
+   ```
+
+2. Rename the first page **Run Comparison**.
+3. Add separate Slicer visuals across the top of the page:
+
+   | Source field | Slicer style | Title |
+   |---|---|---|
+   | `benchmark_batch_id` | Dropdown | `Benchmark run` |
+   | `capacity_sku` | Dropdown | `Capacity SKU` |
+   | `runtime_version` | Dropdown | `Runtime` |
+   | `config_sha256` | Dropdown | `Configuration` |
+   | `sample_name` | Dropdown | `Sample` |
+
+   Use the columns from `people_counter_processing_benchmarks`. Leave all
+   values selected initially. Selecting one benchmark run is required for a
+   meaningful `Comparison Readiness` value.
+4. Add six separate `123` Card visuals. Use one calculator-icon measure per
+   Card:
+
+   | Measure | Card title |
+   |---|---|
+   | `Benchmark Runs` | `Runs` |
+   | `Benchmark Samples` | `Samples` |
+   | `Success Rate` | `Success rate` |
+   | `Average Speed x` | `Average speed` |
+   | `Estimated Workers with Headroom` | `Estimated workers` |
+   | `Comparison Readiness` | `Readiness` |
+
+   Select a blank area before creating each Card so Power BI does not add
+   several measures to one visual.
+5. Add a **Clustered bar chart** titled
+   `Average and conservative speed by run`:
+
+   | Visual field well | Field |
+   |---|---|
+   | Y-axis | `benchmark_batch_id` |
+   | X-axis | `Average Speed x`; `Conservative Speed x` |
+   | Legend | Empty; measure names become the series |
+
+6. Add a second **Clustered bar chart** titled
+   `Observed aggregate speed versus target`:
+
+   | Visual field well | Field |
+   |---|---|
+   | Y-axis | `benchmark_batch_id` |
+   | X-axis | `Observed Aggregate Speed x`; `Required Aggregate Speed x` |
+   | Legend | Empty; measure names become the series |
+
+   The required series is intentionally much larger than a short calibration
+   run. Do not hide or rescale that gap to make an unqualified run appear
+   close to passing.
+7. Add a Table visual titled `Run comparison details`. Add these columns
+   first and set numeric identifier/configuration columns to
+   **Don't summarize**:
+
+   ```text
+   benchmark_batch_id
+   capacity_sku
+   runtime_version
+   sdk_version
+   config_sha256
+   concurrent_workers
+   ```
+
+   Then add these measures:
+
+   ```text
+   Benchmark Samples
+   Failed Samples
+   Success Rate
+   Conservative Speed x
+   Observed Aggregate Speed x
+   Sustained Wall Hours
+   Estimated Workers with Headroom
+   Comparison Readiness
+   ```
+
+   Sort by `benchmark_batch_id` or by a separately added
+   `Batch Completed UTC` measure. Keep `config_sha256` visible: two runs are
+   directly comparable only when the capacity, runtime, SDK, configuration,
+   and model inputs are intentionally equivalent.
+8. Add a second page and name it **Stage Timing & Samples**.
+9. Add Dropdown Slicers for:
+
+   ```text
+   benchmark_batch_id
+   capacity_sku
+   runtime_version
+   sample_name
+   ```
+
+   Title them `Benchmark run`, `Capacity SKU`, `Runtime`, and `Sample`.
+10. Add a **Clustered bar chart** titled
+    `Average stage timing by run`:
+
+    | Visual field well | Field |
+    |---|---|
+    | Y-axis | `benchmark_batch_id` |
+    | X-axis | `Average Source Stage Seconds`; `Average Runtime Load Seconds`; `Average Video Processing Seconds`; `Average End-to-End Seconds` |
+    | Legend | Empty; measure names become the series |
+
+    These measures are not additive components of one stacked duration.
+    `Average End-to-End Seconds` is the complete elapsed time, while the
+    other measures are selected stages. Use a clustered chart, not a stacked
+    chart.
+11. Add another **Clustered bar chart** titled
+    `End-to-end latency by sample`:
+
+    | Visual field well | Field |
+    |---|---|
+    | Y-axis | `sample_name` |
+    | X-axis | `Average End-to-End Seconds`; `P95 End-to-End Seconds` |
+    | Legend | Empty; measure names become the series |
+
+12. Add a Table visual titled `Benchmark sample details`. Add these physical
+    columns:
+
+    ```text
+    benchmark_batch_id
+    benchmark_id
+    sample_name
+    benchmark_started_at
+    completed_at
+    capacity_sku
+    runtime_version
+    sdk_version
+    concurrent_workers
+    driver_cores
+    threads_per_worker
+    spark_application_id
+    succeeded
+    error_message
+    ```
+
+    Add these measures after the physical columns:
+
+    ```text
+    Average Speed x
+    Average End-to-End Seconds
+    Average Source Stage Seconds
+    Average Runtime Load Seconds
+    Average Video Processing Seconds
+    ```
+
+    Set integer metadata columns to **Don't summarize** and sort by
+    `completed_at` descending. Keep failed rows in this table so a comparison
+    does not silently exclude contaminated batches.
+13. Save the report.
+
+##### Validate and operate the benchmark report
+
+1. Open **Run Comparison** with all slicers cleared. Confirm that every
+   distinct `benchmark_batch_id` appears in both charts and the details
+   table.
+2. Select one run. Confirm the Cards, both charts, and details table reduce to
+   that batch and that `Benchmark Samples` equals the number of persisted
+   rows for the batch.
+3. Compare these report values with the same gate activity's structured
+   output:
+
+   | Report measure | Gate output |
+   |---|---|
+   | `Conservative Speed x` | `conservative_speed_x` |
+   | `Estimated Workers with Headroom` | `required_workers_with_headroom` |
+   | `Observed Aggregate Speed x` | Aggregate speed calculated before the six-hour qualification |
+   | `Failed Samples` | `failed_benchmarks` |
+   | `Invalid Interop Samples` | `invalid_interop_benchmarks` |
+   | `Sustained Wall Hours` | Successful-row batch span divided by 3,600 |
+
+   The notebook reports `best_six_hour_aggregate_speed_x=0` for an
+   under-six-hour batch. The report still shows its observed aggregate speed
+   for diagnostic comparison and separately labels the run
+   `UNDER 6 HOURS`.
+4. Confirm **Stage Timing & Samples** responds to each slicer and retains
+   failed sample rows with their `error_message`.
+5. After a new benchmark batch, refresh `pc_benchmark_model` if the report
+   does not show the new ID immediately. A stale SQL analytics endpoint count
+   does not prove the Direct Lake table is empty; refresh Direct Lake framing
+   and check the report again.
+6. Use `Comparison Readiness` to diagnose a selected run, not to approve it.
+   Approve capacity only from an `EvaluateCapacityGate` output with:
+   - `capacity_gate_passed=true`;
+   - `observed_batch_members=expected_batch_members`;
+   - at least six hours of sustained evidence;
+   - zero failed and invalid-interop benchmarks; and
+   - the matching resource, throttling, and cost evidence from section 7.4.5.
+
 ### 7.5 Backfill execution phases
 
 1. **Catalog and discovery:** approve the camera catalog, inventory the source
