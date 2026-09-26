@@ -1,0 +1,113 @@
+{
+    "name": "pc-backfill-register",
+    "objectId": "09d2e5d0-c90a-4a22-885b-b29688983d70",
+    "properties": {
+        "activities": [
+            {
+                "name": "Register Backfill",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.01:00:00",
+                    "retry": 3,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 900
+                },
+                "typeProperties": {
+                    "notebookId": "471ebf5c-348f-429a-bf9f-2cb2868badc4",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "MANIFEST_GLOB": {
+                            "value": {
+                                "value": "@pipeline().parameters.MANIFEST_GLOB",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "REGISTRATION_ID": {
+                            "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "SOURCE_STORAGE_ACCOUNT": {
+                            "value": "peoplecountingfootage",
+                            "type": "string"
+                        },
+                        "SOURCE_CONTAINER": {
+                            "value": "videos",
+                            "type": "string"
+                        },
+                        "SOURCE_SHORTCUT_NAME": {
+                            "value": "videos",
+                            "type": "string"
+                        },
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        },
+                        "MAX_ATTEMPTS": {
+                            "value": "4",
+                            "type": "int"
+                        },
+                        "PRIORITY": {
+                            "value": "10",
+                            "type": "int"
+                        },
+                        "PIPELINE": {
+                            "value": "rtdetr-osnet",
+                            "type": "string"
+                        },
+                        "DEVICE_VARIANT": {
+                            "value": "cpu",
+                            "type": "string"
+                        },
+                        "DEVICE": {
+                            "value": "cpu",
+                            "type": "string"
+                        },
+                        "BATCH_SIZE": {
+                            "value": "1",
+                            "type": "int"
+                        },
+                        "SAMPLE_FPS": {
+                            "value": "3.0",
+                            "type": "float"
+                        },
+                        "DETECTION_THRESHOLD": {
+                            "value": "0.6",
+                            "type": "float"
+                        },
+                        "USE_FP16": {
+                            "value": false,
+                            "type": "bool"
+                        },
+                        "DETECTOR_MODEL": {
+                            "value": "r18",
+                            "type": "string"
+                        },
+                        "CAMERA_MOTION_COMPENSATION": {
+                            "value": "",
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "MANIFEST_GLOB": {
+                "type": "string"
+            }
+        },
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-23T15:39:53Z"
+    }
+}
