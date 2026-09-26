@@ -1,0 +1,88 @@
+{
+    "name": "pc-replay",
+    "objectId": "f6153ed1-ef84-4270-98ae-c17398dadb61",
+    "properties": {
+        "activities": [
+            {
+                "name": "ReplayWork",
+                "description": "",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                    "notebookId": "b5263605-c454-4196-82ce-490873319be4",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "REPLAY_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.REPLAY_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "WORK_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.WORK_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "REQUESTED_BY": {
+                            "value": {
+                                "value": "@pipeline().parameters.REQUESTED_BY",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "REASON": {
+                            "value": {
+                                "value": "@pipeline().parameters.REASON",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "MAX_ATTEMPTS": {
+                            "value": "4",
+                            "type": "int"
+                        },
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "REPLAY_ID": {
+                "type": "string"
+            },
+            "WORK_ID": {
+                "type": "string"
+            },
+            "REQUESTED_BY": {
+                "type": "string"
+            },
+            "REASON": {
+                "type": "string"
+            },
+            "MAX_ATTEMPTS": {
+                "type": "string"
+            }
+        },
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-19T16:29:03Z"
+    }
+}
