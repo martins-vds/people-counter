@@ -171,10 +171,6 @@
                                         "value": false,
                                         "type": "bool"
                                     },
-                                    "LINE": {
-                                        "value": [],
-                                        "type": "array"
-                                    },
                                     "DETECTOR_MODEL": {
                                         "value": {
                                             "value": "@pipeline().parameters.DETECTOR_MODEL",
@@ -368,10 +364,6 @@
                         "USE_FP16": {
                             "value": false,
                             "type": "bool"
-                        },
-                        "LINE": {
-                            "value": [],
-                            "type": "array"
                         },
                         "DETECTOR_MODEL": {
                             "value": {

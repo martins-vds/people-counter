@@ -2956,7 +2956,7 @@ URI is allowed; each invocation writes a distinct `benchmark_id`.
    | `SAMPLE_FPS` | `Float` | `@pipeline().parameters.SAMPLE_FPS` |
    | `DETECTION_THRESHOLD` | `Float` | `@pipeline().parameters.DETECTION_THRESHOLD` |
    | `USE_FP16` | `Bool` | `false` |
-   | `LINE` | Auto-populated type | Leave the notebook default `[]` when line counting is not required |
+   | `LINE` | Omit | Do not pass this base parameter when line counting is not required; the notebook keeps its `[]` default |
    | `DETECTOR_MODEL` | `String` | `@pipeline().parameters.DETECTOR_MODEL` |
    | `CAMERA_MOTION_COMPENSATION` | `String` | `@pipeline().parameters.CAMERA_MOTION_COMPENSATION` |
    | `TARGET_VIDEO_HOURS` | `Float` | `200000.0` |
@@ -2966,8 +2966,13 @@ URI is allowed; each invocation writes a distinct `benchmark_id`.
 
    For each expression, select **Value -> Add dynamic content** and enter the
    expression without quotes. Keep the declared Type shown in the table.
-   Leave `LINE` at its auto-populated empty-list default unless the production
-   benchmark explicitly includes line counting.
+   Omit `LINE` from both Notebook activities when line counting is disabled.
+   If Fabric auto-populates a `LINE` base-parameter row, remove it rather than
+   passing an empty array: the Notebook service can reject an explicit empty
+   array with `Unable to convert LINE to array` before the notebook starts.
+   The notebook then retains its `LINE = []` default. If the production
+   benchmark explicitly includes line counting, pass a non-empty four-integer
+   coordinate array and validate it with a short run first.
 
    For production-equivalent runtime-reuse measurements, group up to
    `MAX_ITEMS_PER_WORKER` sample objects into a JSON array and pass its string
