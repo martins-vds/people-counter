@@ -1,0 +1,163 @@
+{
+    "name": "pc-event-intake",
+    "objectId": "5548a877-38e0-4933-bf2d-0285250637d2",
+    "properties": {
+        "activities": [
+            {
+                "name": "01_register_event",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 3,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 900
+                },
+                "typeProperties": {
+                    "notebookId": "2282928b-0163-4b66-a1f8-4078ee329ba3",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "EVENT_SOURCE": {
+                            "value": {
+                                "value": "@pipeline().parameters.EVENT_SOURCE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EVENT_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.EVENT_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EVENT_TYPE": {
+                            "value": {
+                                "value": "@pipeline().parameters.EVENT_TYPE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EVENT_TIME": {
+                            "value": {
+                                "value": "@pipeline().parameters.EVENT_TIME",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "SUBJECT": {
+                            "value": {
+                                "value": "@pipeline().parameters.SUBJECT",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "MANIFEST_URI": {
+                            "value": {
+                                "value": "@pipeline().parameters.MANIFEST_URI",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "PIPELINE_RUN_ID": {
+                            "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        },
+                        "MAX_ATTEMPTS": {
+                            "value": "4",
+                            "type": "int"
+                        },
+                        "PRIORITY": {
+                            "value": "100",
+                            "type": "int"
+                        },
+                        "PIPELINE": {
+                            "value": "rtdetr-osnet",
+                            "type": "string"
+                        },
+                        "DEVICE_VARIANT": {
+                            "value": "cpu",
+                            "type": "string"
+                        },
+                        "DEVICE": {
+                            "value": "cpu",
+                            "type": "string"
+                        },
+                        "BATCH_SIZE": {
+                            "value": "1",
+                            "type": "int"
+                        },
+                        "SAMPLE_FPS": {
+                            "value": "3.0",
+                            "type": "float"
+                        },
+                        "DETECTION_THRESHOLD": {
+                            "value": "0.6",
+                            "type": "float"
+                        },
+                        "USE_FP16": {
+                            "value": false,
+                            "type": "bool"
+                        },
+                        "DETECTOR_MODEL": {
+                            "value": "r18",
+                            "type": "string"
+                        },
+                        "CAMERA_MOTION_COMPENSATION": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "SOURCE_STORAGE_ACCOUNT": {
+                            "value": "peoplecountingfootage",
+                            "type": "string"
+                        },
+                        "SOURCE_CONTAINER": {
+                            "value": "videos",
+                            "type": "string"
+                        },
+                        "SOURCE_SHORTCUT_ABFS_ROOT": {
+                            "value": "abfss://c31ee864-230d-4005-8fd5-7c7130ebf774@onelake.dfs.fabric.microsoft.com/883cff91-eaa8-40be-870f-6e9716303cb2/Files/videos",
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "EVENT_SOURCE": {
+                "type": "string"
+            },
+            "EVENT_ID": {
+                "type": "string"
+            },
+            "EVENT_TYPE": {
+                "type": "string"
+            },
+            "EVENT_TIME": {
+                "type": "string"
+            },
+            "SUBJECT": {
+                "type": "string"
+            },
+            "MANIFEST_URI": {
+                "type": "string"
+            }
+        },
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-19T04:22:04Z"
+    }
+}
