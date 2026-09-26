@@ -397,6 +397,60 @@
                         }
                     }
                 }
+            },
+            {
+                "name": "RefreshBenchmarkModel",
+                "type": "PBISemanticModelRefresh",
+                "dependsOn": [
+                  {
+                    "activity": "EvaluateCapacityGate",
+                    "dependencyConditions": [
+                      "Completed"
+                    ]
+                  }
+                ],
+                "policy": {
+                  "timeout": "0.00:30:00",
+                  "retry": 2,
+                  "retryIntervalInSeconds": 60,
+                  "secureOutput": false,
+                  "secureInput": false,
+                  "exponentialRetry": true,
+                  "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                  "method": "POST",
+                  "operationType": "SemanticModelRefresh",
+                  "groupId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                  "datasetId": "1bcc8dd2-66f1-4cde-8225-d07ba944da09",
+                  "waitOnCompletion": true,
+                  "commitMode": "Transactional"
+                },
+                "externalReferences": {
+                  "connection": "8fe1df1e-acf7-4ea3-b00b-2fd0d2fc8d29"
+                }
+            },
+            {
+                "name": "PropagateCapacityGateFailure",
+                "type": "Fail",
+                "dependsOn": [
+                    {
+                        "activity": "EvaluateCapacityGate",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    },
+                    {
+                        "activity": "RefreshBenchmarkModel",
+                        "dependencyConditions": [
+                            "Completed"
+                        ]
+                    }
+                ],
+                "typeProperties": {
+                    "message": "EvaluateCapacityGate failed; benchmark diagnostics were refreshed. Inspect the gate notebook output.",
+                    "errorCode": "CapacityGateFailed"
+                }
             }
         ],
         "parameters": {

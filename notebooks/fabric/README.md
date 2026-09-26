@@ -2007,12 +2007,14 @@ Delta-table versions that subsequent report queries read.
        | **Connection name** | `pc_powerbi_workspace_identity_<environment>` |
        | **Connection type** | `Power BI Semantic Model` |
        | **Authentication method** | `Workspace identity` |
-       | **Privacy level** | `Organizational` |
+       | **Privacy level** | `Organizational`, when the field is shown |
 
        Search for `Power BI` in **Connection type**, then explicitly select
        **Power BI Semantic Model**. Do not select
        **Power BI dataflows (Legacy)**. The current connector name is not
-       simply `Power BI`.
+       simply `Power BI`. Some current tenants omit **Privacy level** for this
+       connector; if the field is absent, continue without setting it rather
+       than selecting a different connector.
     5. With **Workspace identity** selected, the panel does not ask for a
        tenant ID, client ID, client secret, or interactive OAuth sign-in.
        It also does not ask for the target workspace or semantic model;
@@ -3042,8 +3044,18 @@ flowchart LR
     P[Pipeline parameters] --> FE[ForEachBenchmarkItems<br/>parallel, batch count N]
     FE -->|each item| BW[RunBenchmarkWorker<br/>RUN_INFERENCE=true]
     FE -->|On completion| G[EvaluateCapacityGate<br/>RUN_INFERENCE=false]
-    G --> R{Pass or fail pipeline}
+    G -->|On completion| SM[RefreshBenchmarkModel<br/>Direct Lake framing]
+    G -->|On failure| PF[PropagateCapacityGateFailure<br/>Fail]
+    SM -->|On completion| PF
 ```
+
+Create `RefreshBenchmarkModel` and `PropagateCapacityGateFailure` after
+`pc_benchmark_model` exists by following section 7.4.7. The refresh uses
+**On completion** intentionally so failed and under-six-hour benchmark
+evidence becomes visible in the comparison report. The conditional Fail
+activity then restores the gate's failure as the overall pipeline result;
+without it, Fabric treats a successful downstream refresh as the terminal
+outcome and can mark the pipeline completed even though the gate failed.
 
 #### 7.4.5 Run and approve a capacity
 
@@ -3065,10 +3077,15 @@ flowchart LR
    - zero rows with missing or false `interop_threads_configured`;
    - at least six hours between its earliest start and latest completion; and
    - observed aggregate throughput at or above the requirement.
-5. If any worker was retried, duplicated, omitted, or run with a mismatched
+5. Confirm `RefreshBenchmarkModel` runs after `EvaluateCapacityGate`
+   completes, including when the gate fails. If the gate failed, confirm
+   `PropagateCapacityGateFailure` runs after the refresh and the overall
+   pipeline status is **Failed**. A passing gate skips that Fail activity and
+   leaves the successful refresh as the terminal result.
+6. If any worker was retried, duplicated, omitted, or run with a mismatched
    parameter, correct the pipeline and rerun under a new batch ID. Do not
    change `EXPECTED_BATCH_MEMBERS` to make a contaminated batch pass.
-6. Repeat with increasing concurrency and, when applicable, each candidate
+7. Repeat with increasing concurrency and, when applicable, each candidate
    capacity SKU. Use a new batch ID every time.
 
 Each benchmark row records `source_stage_seconds`, `runtime_load_seconds`,
@@ -3536,6 +3553,142 @@ gate because `people_counter_processing_benchmarks` does not persist
     to complete. Confirm the table, measures, and display folders are visible
     and that no orange Direct Lake warning icons remain.
 
+##### Add the semantic-model refresh activity
+
+After `pc_benchmark_model` exists, add its refresh to
+`pc-capacity-benchmark`. This performs Direct Lake framing after every
+benchmark attempt so `pc_benchmark_report` can compare successful, failed,
+and under-duration runs without a manual semantic-model refresh.
+
+1. Open `pc-capacity-benchmark` in **Editing** mode and return to the
+   top-level pipeline canvas. Do not open the activities inside
+   `ForEachBenchmarkItems`.
+2. In the pipeline **Activities** bar, find and add the
+   **Semantic model refresh** activity. Depending on the current editor
+   width, it can appear directly on the bar or under the bar's overflow menu.
+   The activity is named **Semantic model refresh** in the current UI; do not
+   use a Notebook, Web, Copy data, or Dataflow refresh activity.
+3. Select the new activity and set its name to:
+
+   ```text
+   RefreshBenchmarkModel
+   ```
+
+4. Connect `EvaluateCapacityGate` to `RefreshBenchmarkModel` with an
+   **On completion** dependency:
+   - Select `EvaluateCapacityGate`.
+   - Drag its **On completion** connector to `RefreshBenchmarkModel`.
+   - Select the dependency line or the refresh activity and confirm the
+     dependency condition is **Completed**, not **Succeeded**.
+
+   Use **On completion** because the gate deliberately fails short,
+   incomplete, invalid-interop, and below-target runs. Their persisted rows
+   still need to be framed so the report can diagnose them.
+5. Add a **Fail** activity to the top-level canvas and name it:
+
+   ```text
+   PropagateCapacityGateFailure
+   ```
+
+6. Give `PropagateCapacityGateFailure` both of these dependencies:
+   - Connect `EvaluateCapacityGate` to it with **On failure**. Confirm this
+     dependency condition is **Failed**.
+   - Connect `RefreshBenchmarkModel` to it with **On completion**. Confirm
+     this dependency condition is **Completed**.
+
+   Multiple incoming dependencies are combined with AND semantics. The Fail
+   activity therefore runs only after the refresh finishes and only when the
+   original gate failed. Configure its **Settings**:
+
+   | Field | Value |
+   |---|---|
+   | **Fail message** | `EvaluateCapacityGate failed; benchmark diagnostics were refreshed. Inspect the gate notebook output.` |
+   | **Error code** | `CapacityGateFailed` |
+
+   This activity is required. Fabric evaluates the terminal dependency path,
+   so `EvaluateCapacityGate -> On completion -> RefreshBenchmarkModel` alone
+   can produce an overall **Completed** pipeline after a failed gate if the
+   refresh succeeds. The conditional Fail activity re-propagates the gate
+   result without preventing the diagnostic refresh.
+7. Open `RefreshBenchmarkModel` **Settings**.
+8. Under **Connection**, select **Refresh** to reload the available
+   connections, then choose the existing Power BI Semantic Model connection:
+
+   ```text
+   pc_powerbi_workspace_identity_<environment>
+   ```
+
+   For the development workspace this is
+   `pc_powerbi_workspace_identity_dev`. The connection type is
+   **Power BI Semantic Model** and its authentication method is
+   **Workspace identity**. This is not the ADLS service-principal connection
+   used by the benchmark notebook.
+
+   If the connection does not exist, create it by following section 6.7.3,
+   step 25. In the current connection UI, **Privacy level** might not be
+   displayed for this connector. If it is displayed, choose
+   **Organizational**; if the field is absent, do not block creation or choose
+   a different connector.
+9. In the same Settings pane, select:
+
+   | Field | Value |
+   |---|---|
+   | **Workspace** | `<workspace-name>` |
+   | **Semantic model** | `pc_benchmark_model` |
+
+   The current UI labels the second field **Semantic model**, not
+   **Dataset**. Select the semantic model, not `pc_benchmark_report`.
+10. Refresh the **Table(s)** list only if needed to confirm the connection,
+   then leave all table and partition selections unset. An empty selection
+   requests the whole semantic model; selecting only the benchmark table is
+   unnecessary for this one-table model.
+11. Expand **Advanced** and configure:
+
+   | Setting | Value |
+   |---|---|
+   | **Wait on completion** | On |
+   | **Commit mode** | `Transactional` |
+
+   The UI does not expose a separate refresh-type control for this activity.
+   With no table or partition selected, it submits the model's default full
+   refresh, which advances the Direct Lake framing metadata.
+12. Open the activity's **General** settings and configure:
+
+    | Setting | Value |
+    |---|---|
+    | Timeout | `0.00:30:00` |
+    | Enable retries | Yes |
+    | Retry | `2` |
+    | Interval type | Increasing Delay |
+    | Initial interval | `60` seconds |
+    | Max interval | `300` seconds |
+    | Retry conditions | Empty |
+
+    Leave `Secure input` and `Secure output` off. Do not add a fallback that
+    hides an exhausted refresh failure.
+13. Select **Save**, then **Validate**. Resolve every validation error,
+    especially a missing Connection, Workspace, or Semantic model selection.
+14. Run a short benchmark with a new batch ID. In Monitoring Hub, confirm the
+    order is:
+
+    ```text
+    ForEachBenchmarkItems
+      -> EvaluateCapacityGate
+      -> RefreshBenchmarkModel
+      -> PropagateCapacityGateFailure (only when the gate failed)
+    ```
+
+    `RefreshBenchmarkModel` must run after both a passing gate and an expected
+    gate failure. When the gate fails, confirm `RefreshBenchmarkModel`
+    succeeds first, `PropagateCapacityGateFailure` fails afterward, and the
+    overall pipeline status is **Failed**. When the gate passes, confirm
+    `PropagateCapacityGateFailure` is skipped and the overall pipeline status
+    is **Completed**. Then open
+    `pc_benchmark_model` **Settings -> Refresh -> View refresh history** and
+    verify a corresponding successful refresh. Finally, reopen or refresh the
+    report visuals and confirm the new batch ID appears without manually
+    refreshing the semantic model.
+
 ##### Create the benchmark report
 
 1. From `pc_benchmark_model`, select **New report** and name it:
@@ -3717,10 +3870,12 @@ gate because `people_counter_processing_benchmarks` does not persist
    `UNDER 6 HOURS`.
 4. Confirm **Stage Timing & Samples** responds to each slicer and retains
    failed sample rows with their `error_message`.
-5. After a new benchmark batch, refresh `pc_benchmark_model` if the report
-   does not show the new ID immediately. A stale SQL analytics endpoint count
-   does not prove the Direct Lake table is empty; refresh Direct Lake framing
-   and check the report again.
+5. After a new benchmark batch, confirm the pipeline's
+   `RefreshBenchmarkModel` activity succeeded. If the report does not show
+   the new ID, inspect that activity and the model refresh history before
+   using a manual semantic-model refresh as recovery. A stale SQL analytics
+   endpoint count does not prove the Direct Lake table is empty; verify
+   Direct Lake framing and check the report again.
 6. Use `Comparison Readiness` to diagnose a selected run, not to approve it.
    Approve capacity only from an `EvaluateCapacityGate` output with:
    - `capacity_gate_passed=true`;
