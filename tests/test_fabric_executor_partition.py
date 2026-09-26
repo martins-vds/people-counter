@@ -1,5 +1,4 @@
 import json
-import os
 import sys
 import types
 import unittest
@@ -11,8 +10,6 @@ from people_counter.fabric_executor_partition import (
     ExecutorRuntimeCache,
     SdkRuntimeProcessor,
     _runtime_cache_key,
-    calculate_thread_budget,
-    configure_cpu_runtime,
     executor_partition_schema,
     process_video_partition,
 )
@@ -20,139 +17,6 @@ from people_counter.models import LineCountRecord, PersonTelemetry, RunResult
 
 
 class FabricExecutorPartitionTests(unittest.TestCase):
-    def test_thread_budget_rejects_invalid_values(self):
-        for kwargs, message in (
-            (
-                {"driver_cores": 0, "active_workers": 1},
-                "driver_cores must be a positive integer",
-            ),
-            (
-                {"driver_cores": 4, "active_workers": 0},
-                "active_workers must be a positive integer",
-            ),
-            (
-                {"driver_cores": 4.0, "active_workers": 1},
-                "driver_cores must be a positive integer",
-            ),
-        ):
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(ValueError) as raised:
-                    calculate_thread_budget(**kwargs)
-                self.assertEqual(str(raised.exception), message)
-
-    def test_thread_budget_preserves_inputs_and_warns_only_for_oversubscription(self):
-        with self.assertNoLogs(
-            "people_counter.fabric_executor_partition",
-            level="WARNING",
-        ):
-            balanced = calculate_thread_budget(4, 4)
-        self.assertEqual(balanced.driver_cores, 4)
-        self.assertEqual(balanced.active_workers, 4)
-        self.assertEqual(balanced.threads_per_worker, 1)
-
-        with self.assertLogs(
-            "people_counter.fabric_executor_partition",
-            level="WARNING",
-        ) as logs:
-            oversubscribed = calculate_thread_budget(2, 3)
-        self.assertEqual(oversubscribed.driver_cores, 2)
-        self.assertEqual(oversubscribed.active_workers, 3)
-        self.assertEqual(oversubscribed.threads_per_worker, 1)
-        self.assertEqual(
-            logs.output,
-            [
-                "WARNING:people_counter.fabric_executor_partition:"
-                "active_workers=3 exceeds driver_cores=2; assigning one "
-                "thread per worker"
-            ],
-        )
-
-    def test_configure_cpu_runtime_sets_environment_budget(self):
-        environ = {}
-
-        with self.assertLogs(
-            "people_counter.fabric_executor_partition",
-            level="INFO",
-        ) as logs:
-            budget = configure_cpu_runtime(
-                4,
-                3,
-                environment=environ,
-                apply_native_limits=False,
-            )
-
-        self.assertEqual(budget.driver_cores, 4)
-        self.assertEqual(budget.active_workers, 3)
-        self.assertEqual(budget.threads_per_worker, 1)
-        self.assertEqual(environ["OMP_NUM_THREADS"], "1")
-        self.assertEqual(environ["MKL_NUM_THREADS"], "1")
-        self.assertEqual(
-            logs.output,
-            [
-                "INFO:people_counter.fabric_executor_partition:"
-                "Configured CPU executor worker: driver_cores=4 "
-                "active_workers=3 threads_per_worker=1"
-            ],
-        )
-
-    def test_configure_cpu_runtime_can_update_process_environment(self):
-        with patch.dict(os.environ, {}, clear=True):
-            budget = configure_cpu_runtime(
-                1,
-                1,
-                apply_native_limits=False,
-            )
-
-            self.assertEqual(budget.threads_per_worker, 1)
-            self.assertEqual(os.environ["OMP_NUM_THREADS"], "1")
-
-    def test_configure_cpu_runtime_rejects_contradictory_existing_environment(self):
-        with self.assertRaises(ValueError) as raised:
-            configure_cpu_runtime(
-                4,
-                2,
-                environment={"OMP_NUM_THREADS": "4"},
-                apply_native_limits=False,
-            )
-        self.assertEqual(
-            str(raised.exception),
-            "OMP_NUM_THREADS is already set to 4; expected 2. "
-            "Configure CPU thread limits before native runtime import.",
-        )
-
-    def test_configure_cpu_runtime_applies_native_limits_once_per_process(self):
-        environ = {}
-        cv2 = MagicMock()
-        torch = MagicMock()
-
-        with (
-            patch(
-                "people_counter.fabric_executor_partition._NATIVE_THREAD_BUDGET",
-                None,
-            ),
-            patch.dict(sys.modules, {"cv2": cv2, "torch": torch}),
-        ):
-            first = configure_cpu_runtime(4, 2, environment=environ)
-            second = configure_cpu_runtime(4, 2, environment=environ)
-            with self.assertRaisesRegex(
-                ValueError,
-                "Native CPU runtime is already configured",
-            ) as raised:
-                configure_cpu_runtime(6, 3, environment=environ)
-
-        self.assertEqual(first, second)
-        self.assertEqual(
-            str(raised.exception),
-            "Native CPU runtime is already configured with "
-            "ThreadBudget(driver_cores=4, active_workers=2, "
-            "threads_per_worker=2); requested "
-            "ThreadBudget(driver_cores=6, active_workers=3, "
-            "threads_per_worker=2)",
-        )
-        torch.set_num_threads.assert_called_once_with(2)
-        torch.set_num_interop_threads.assert_called_once_with(1)
-        cv2.setNumThreads.assert_called_once_with(1)
-
     def test_executor_partition_schema_is_explicit(self):
         fake_types = types.SimpleNamespace()
 

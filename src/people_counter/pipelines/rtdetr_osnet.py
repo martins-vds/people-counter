@@ -35,6 +35,7 @@ from people_counter.models import (
     TrackProfile,
     UNUSED_RESULT_ERROR,
 )
+from people_counter.runtime import RuntimeCompatibilityError
 from people_counter.video import (
     FrameBatch,
     FrameReadState,
@@ -90,12 +91,35 @@ class AssociationState:
 
 
 @dataclass(frozen=True)
+class RTDetrRuntimeSpec:
+    device_variant: str
+    device: str
+    detector_model: str
+    models_dir: str | None
+
+
+@dataclass(frozen=True)
 class RTDetrRuntime:
+    spec: RTDetrRuntimeSpec
     device: torch.device
     reid_embedder: Any
     processor: Any
     model: Any
     person_class_id: int
+
+
+def runtime_spec(config: RTDetrOsnetConfig) -> RTDetrRuntimeSpec:
+    """Describe only values consumed while constructing the reusable runtime."""
+    return RTDetrRuntimeSpec(
+        device_variant=config.device_variant,
+        device=config.device,
+        detector_model=config.detector_model,
+        models_dir=(
+            str(config.models_dir.expanduser().resolve())
+            if config.models_dir is not None
+            else None
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -751,6 +775,7 @@ def load_runtime(config: RTDetrOsnetConfig) -> RTDetrRuntime:
         **load_kwargs,
     ).to(device)
     return RTDetrRuntime(
+        spec=runtime_spec(config),
         device=device,
         reid_embedder=reid_embedder,
         processor=processor,
@@ -930,6 +955,12 @@ def run_with_runtime(
     runtime: RTDetrRuntime,
 ) -> RunResult:
     """Process one RT-DETR/OSNet video with an already-loaded runtime."""
+    expected_spec = runtime_spec(config)
+    if runtime.spec != expected_spec:
+        raise RuntimeCompatibilityError(
+            "RT-DETR runtime is incompatible with config: "
+            f"expected {expected_spec!r}, got {runtime.spec!r}"
+        )
     config.result.ensure_unused()
     tracking = RTDetrTrackingState(telemetry=config.result.telemetry)
     capture = cv2.VideoCapture(str(config.video))

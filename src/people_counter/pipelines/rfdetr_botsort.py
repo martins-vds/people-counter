@@ -26,6 +26,7 @@ from people_counter.models import (
     RunResult,
     UNUSED_RESULT_ERROR,
 )
+from people_counter.runtime import RuntimeCompatibilityError
 from people_counter.model_artifacts import resolve_rfdetr_checkpoint
 from people_counter.video import (
     FrameBatch,
@@ -40,8 +41,33 @@ from trackers import BoTSORTTracker
 
 
 @dataclass(frozen=True)
+class RFDetrRuntimeSpec:
+    device_variant: str
+    device: str
+    batch_size: int
+    use_fp16: bool
+    models_dir: str | None
+
+
+@dataclass(frozen=True)
 class RFDetrRuntime:
+    spec: RFDetrRuntimeSpec
     model: RFDETRLarge
+
+
+def runtime_spec(config: RFDetrBotsortConfig) -> RFDetrRuntimeSpec:
+    """Describe load-time values, including RF-DETR inference optimization."""
+    return RFDetrRuntimeSpec(
+        device_variant=config.device_variant,
+        device=config.device,
+        batch_size=config.batch_size,
+        use_fp16=config.use_fp16,
+        models_dir=(
+            str(config.models_dir.expanduser().resolve())
+            if config.models_dir is not None
+            else None
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -70,7 +96,7 @@ def load_runtime(config: RFDetrBotsortConfig) -> RFDetrRuntime:
         dtype=torch.float16 if config.use_fp16 else torch.float32,
         inplace=True,
     )
-    return RFDetrRuntime(model=model)
+    return RFDetrRuntime(spec=runtime_spec(config), model=model)
 
 
 def _notify_progress(config: RFDetrBotsortConfig) -> None:
@@ -255,6 +281,12 @@ def run_with_runtime(
     runtime: RFDetrRuntime,
 ) -> RunResult:
     """Process one RF-DETR/BoT-SORT video with an already-loaded runtime."""
+    expected_spec = runtime_spec(config)
+    if runtime.spec != expected_spec:
+        raise RuntimeCompatibilityError(
+            "RF-DETR runtime is incompatible with config: "
+            f"expected {expected_spec!r}, got {runtime.spec!r}"
+        )
     config.result.ensure_unused()
     capture = cv2.VideoCapture(str(config.video))
     if not capture.isOpened():

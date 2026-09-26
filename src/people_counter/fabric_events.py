@@ -27,7 +27,14 @@ class _Rejected(Exception):
 
 
 _ACTIVE = ("LEASED", "STAGING", "RUNNING", "WRITING")
-_KINDS = {"claim_execution", "heartbeat", "attempt_update", "commit", "failure"}
+_KINDS = {
+    "claim_execution",
+    "heartbeat",
+    "attempt_update",
+    "commit",
+    "failure",
+    "release",
+}
 _RECEIPT_TIMEOUT_SECONDS = 600
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _TEXT_FIELDS = {
@@ -195,6 +202,7 @@ def _validate_payload(kind: str, payload: Any) -> None:
     expected = {
         "claim_execution": set(), "commit": set(), "attempt_update": {"updates"},
         "heartbeat": {"status", "updates"}, "failure": _FAILURE_FIELDS,
+        "release": {"reason"},
     }[kind]
     if payload.keys() != expected:
         raise ValueError(f"Unexpected payload fields for {kind}")
@@ -220,6 +228,8 @@ def _validate_payload(kind: str, payload: Any) -> None:
             if type(payload[name]) is not bool:
                 raise ValueError(f"{name} must be boolean")
         _validate_updates({key: payload[key] for key in ("processed_frames", "processing_seconds")})
+    if kind == "release":
+        _text(payload["reason"], "reason")
 
 
 @dataclass(frozen=True)
@@ -412,6 +422,52 @@ def _failure(command: _Command, work: dict[str, Any], attempt: dict[str, Any], n
     return _Plan(work=work_updates, attempt=updates)
 
 
+def _release(command: _Command, work: dict[str, Any], attempt: dict[str, Any], now: datetime) -> _Plan:
+    reason = command.payload["reason"]
+    attempt_updates = {
+        "status": "RELEASED",
+        "completed_at": command.created_at,
+        "retryable": True,
+        "error_category": "WORKER_BUDGET",
+        "error_type": "WorkerLifetimeReached",
+        "error_message": reason,
+    }
+    work_updates = {
+        **_LEASE_CLEAR,
+        "status": "RETRY_WAIT",
+        "attempt_count": max(0, work["attempt_count"] - 1),
+        "not_before_at": command.created_at,
+        "last_error_category": None,
+        "last_error_type": None,
+        "last_error_message": None,
+    }
+    attempt_applied = _matches(attempt, attempt_updates)
+    if attempt_applied and (
+        work["status"] == "RETRY_WAIT"
+        and work["lease_owner_attempt_id"] is None
+        and work["lease_dispatcher_id"] is None
+        and work["lease_acquired_at"] is None
+        and work["lease_expires_at"] is None
+        and work["not_before_at"] is not None
+        and _timestamp(work["not_before_at"]) == command.created_at
+    ):
+        return _Plan(message="Release already applied")
+    _owner(command, work, attempt)
+    if not attempt_applied:
+        _live(command, work, now)
+    else:
+        _require(command.created_at <= now, "Event timestamp is in the future")
+        acquired = work["lease_acquired_at"]
+        _require(acquired is not None and command.created_at >= _timestamp(acquired), "Event predates this lease")
+    _require(work["status"] == "LEASED", "Release requires LEASED work")
+    _require(
+        attempt["status"] == "LEASED" or attempt_applied,
+        "Release requires a LEASED or already released attempt",
+    )
+    _require(attempt["inference_started_at"] is None, "Started attempts cannot be released")
+    return _Plan(work=work_updates, attempt=attempt_updates)
+
+
 def _plan(command: _Command, work: dict[str, Any], attempt: dict[str, Any], now: datetime) -> _Plan:
     _identity(command, work, attempt)
     if command.kind == "claim_execution":
@@ -425,6 +481,8 @@ def _plan(command: _Command, work: dict[str, Any], attempt: dict[str, Any], now:
         return _commit(command, work, attempt, now)
     if command.kind == "failure":
         return _failure(command, work, attempt, now)
+    if command.kind == "release":
+        return _release(command, work, attempt, now)
     _owner(command, work, attempt)
     if command.kind == "heartbeat":
         return _heartbeat(command, work, attempt, now)

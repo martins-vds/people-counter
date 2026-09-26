@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,18 +12,35 @@ from people_counter.api import (
 )
 from people_counter.config import RFDetrBotsortConfig, RTDetrOsnetConfig
 from people_counter.models import RunResult
-from people_counter.pipelines.rfdetr_botsort import RFDetrRuntime
+from people_counter.pipelines.rfdetr_botsort import (
+    RFDetrRuntime,
+    RFDetrRuntimeSpec,
+    runtime_spec as rfdetr_runtime_spec,
+)
 from people_counter.pipelines.rfdetr_botsort import run as run_botsort
 from people_counter.pipelines.rfdetr_botsort import (
     run_with_runtime as run_botsort_with_runtime,
 )
-from people_counter.pipelines.rtdetr_osnet import RTDetrRuntime
+from people_counter.pipelines.rtdetr_osnet import (
+    RTDetrRuntime,
+    RTDetrRuntimeSpec,
+    runtime_spec as rtdetr_runtime_spec,
+)
+from people_counter.runtime import RuntimeCompatibilityError
 from people_counter.pipelines.rtdetr_osnet import run as run_rtdetr
 from people_counter.pipelines.rtdetr_osnet import (
     run_with_runtime as run_rtdetr_with_runtime,
 )
 from people_counter.video import read_video_metadata
 from tests.helpers import FakeCapture, RecordingEmbedder
+
+
+def rtdetr_spec() -> RTDetrRuntimeSpec:
+    return RTDetrRuntimeSpec("cpu", "cpu", "r18", None)
+
+
+def rfdetr_spec(batch_size: int = 1) -> RFDetrRuntimeSpec:
+    return RFDetrRuntimeSpec("cpu", "cpu", batch_size, False, None)
 
 
 class FakeInputs(dict):
@@ -157,6 +175,7 @@ class PipelineApiTests(unittest.TestCase):
             batch_size=1,
         )
         runtime = RTDetrRuntime(
+            spec=rtdetr_spec(),
             device=torch.device("cpu"),
             reid_embedder=MagicMock(),
             processor=MagicMock(),
@@ -190,7 +209,7 @@ class PipelineApiTests(unittest.TestCase):
             device="cpu",
             batch_size=1,
         )
-        runtime = RFDetrRuntime(model=MagicMock())
+        runtime = RFDetrRuntime(spec=rfdetr_spec(), model=MagicMock())
 
         with self.assertRaises(TypeError) as raised:
             run_with_runtime(config, runtime)
@@ -206,7 +225,7 @@ class PipelineApiTests(unittest.TestCase):
             device="cpu",
             batch_size=1,
         )
-        runtime = RFDetrRuntime(model=MagicMock())
+        runtime = RFDetrRuntime(spec=rfdetr_spec(), model=MagicMock())
         result = RunResult(initialized=True)
 
         with (
@@ -235,6 +254,7 @@ class PipelineApiTests(unittest.TestCase):
             batch_size=1,
         )
         runtime = RTDetrRuntime(
+            spec=rtdetr_spec(),
             device=torch.device("cpu"),
             reid_embedder=MagicMock(),
             processor=MagicMock(),
@@ -263,6 +283,218 @@ class PipelineApiTests(unittest.TestCase):
         )
         self.assertEqual(str(load_error.exception), expected)
         self.assertEqual(str(run_error.exception), expected)
+
+    def test_rtdetr_runtime_rejects_incompatible_detector_before_video_open(self):
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+            detector_model="r18",
+        )
+        runtime = RTDetrRuntime(
+            spec=RTDetrRuntimeSpec("cpu", "cpu", "r50", None),
+            device=torch.device("cpu"),
+            reid_embedder=MagicMock(),
+            processor=MagicMock(),
+            model=MagicMock(),
+            person_class_id=0,
+        )
+
+        with patch(
+            "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
+        ) as open_video:
+            with self.assertRaises(RuntimeCompatibilityError) as raised:
+                run_rtdetr_with_runtime(config, runtime)
+
+        open_video.assert_not_called()
+        self.assertEqual(
+            str(raised.exception),
+            "RT-DETR runtime is incompatible with config: "
+            f"expected {rtdetr_runtime_spec(config)!r}, got {runtime.spec!r}",
+        )
+
+    def test_rtdetr_runtime_spec_captures_all_compatibility_fields(self):
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+            detector_model="r50",
+            models_dir=Path("models"),
+        )
+
+        self.assertEqual(
+            rtdetr_runtime_spec(config),
+            RTDetrRuntimeSpec(
+                device_variant="cpu",
+                device="cpu",
+                detector_model="r50",
+                models_dir=str(Path("models").resolve()),
+            ),
+        )
+
+    def test_rtdetr_runtime_rejects_every_incompatible_spec_field(self):
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+            detector_model="r18",
+            models_dir=Path("models"),
+        )
+        expected = rtdetr_runtime_spec(config)
+        mismatches = (
+            replace(expected, device_variant="gpu"),
+            replace(expected, device="cuda"),
+            replace(expected, detector_model="r50"),
+            replace(expected, models_dir=str(Path("other-models").resolve())),
+        )
+
+        for mismatch in mismatches:
+            with self.subTest(spec=mismatch):
+                runtime = RTDetrRuntime(
+                    spec=mismatch,
+                    device=torch.device("cpu"),
+                    reid_embedder=MagicMock(),
+                    processor=MagicMock(),
+                    model=MagicMock(),
+                    person_class_id=0,
+                )
+                with (
+                    patch(
+                        "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
+                    ) as open_video,
+                    self.assertRaisesRegex(RuntimeCompatibilityError, "incompatible with config"),
+                ):
+                    run_rtdetr_with_runtime(config, runtime)
+                open_video.assert_not_called()
+
+    def test_rtdetr_runtime_accepts_compatible_spec_before_video_validation(self):
+        config = RTDetrOsnetConfig(
+            video=Path("missing.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        runtime = RTDetrRuntime(
+            spec=rtdetr_runtime_spec(config),
+            device=torch.device("cpu"),
+            reid_embedder=MagicMock(),
+            processor=MagicMock(),
+            model=MagicMock(),
+            person_class_id=0,
+        )
+        capture = FakeCapture([np.zeros((1, 1, 3), dtype=np.uint8)])
+        capture.isOpened = lambda: False
+
+        with (
+            patch(
+                "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
+                return_value=capture,
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            run_rtdetr_with_runtime(config, runtime)
+
+    def test_rfdetr_runtime_rejects_incompatible_batch_before_video_open(self):
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=2,
+        )
+        runtime = RFDetrRuntime(
+            spec=RFDetrRuntimeSpec("cpu", "cpu", 1, False, None),
+            model=MagicMock(),
+        )
+
+        with patch(
+            "people_counter.pipelines.rfdetr_botsort.cv2.VideoCapture",
+        ) as open_video:
+            with self.assertRaises(RuntimeCompatibilityError) as raised:
+                run_botsort_with_runtime(config, runtime)
+
+        open_video.assert_not_called()
+        self.assertEqual(
+            str(raised.exception),
+            "RF-DETR runtime is incompatible with config: "
+            f"expected {rfdetr_runtime_spec(config)!r}, got {runtime.spec!r}",
+        )
+
+    def test_rfdetr_runtime_spec_captures_all_compatibility_fields(self):
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="gpu",
+            device="cuda",
+            batch_size=4,
+            use_fp16=True,
+            models_dir=Path("models"),
+        )
+
+        self.assertEqual(
+            rfdetr_runtime_spec(config),
+            RFDetrRuntimeSpec(
+                device_variant="gpu",
+                device="cuda",
+                batch_size=4,
+                use_fp16=True,
+                models_dir=str(Path("models").resolve()),
+            ),
+        )
+
+    def test_rfdetr_runtime_rejects_every_incompatible_spec_field(self):
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=2,
+            use_fp16=False,
+            models_dir=Path("models"),
+        )
+        expected = rfdetr_runtime_spec(config)
+        mismatches = (
+            replace(expected, device_variant="gpu"),
+            replace(expected, device="cuda"),
+            replace(expected, batch_size=1),
+            replace(expected, use_fp16=True),
+            replace(expected, models_dir=str(Path("other-models").resolve())),
+        )
+
+        for mismatch in mismatches:
+            with self.subTest(spec=mismatch):
+                runtime = RFDetrRuntime(spec=mismatch, model=MagicMock())
+                with (
+                    patch(
+                        "people_counter.pipelines.rfdetr_botsort.cv2.VideoCapture",
+                    ) as open_video,
+                    self.assertRaisesRegex(RuntimeCompatibilityError, "incompatible with config"),
+                ):
+                    run_botsort_with_runtime(config, runtime)
+                open_video.assert_not_called()
+
+    def test_rfdetr_runtime_accepts_compatible_spec_before_video_validation(self):
+        config = RFDetrBotsortConfig(
+            video=Path("missing.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+        )
+        runtime = RFDetrRuntime(
+            spec=rfdetr_runtime_spec(config),
+            model=MagicMock(),
+        )
+        capture = FakeCapture([np.zeros((1, 1, 3), dtype=np.uint8)])
+        capture.isOpened = lambda: False
+
+        with (
+            patch(
+                "people_counter.pipelines.rfdetr_botsort.cv2.VideoCapture",
+                return_value=capture,
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            run_botsort_with_runtime(config, runtime)
 
     def test_rtdetr_run_loads_and_passes_runtime(self):
         config = RTDetrOsnetConfig(
@@ -326,6 +558,7 @@ class PipelineApiTests(unittest.TestCase):
         progress = []
         line_zone = MagicMock(in_count=4, out_count=3)
         runtime = RTDetrRuntime(
+            spec=rtdetr_spec(),
             device=torch.device("cpu"),
             reid_embedder=RecordingEmbedder(),
             processor=FakeProcessor(),
@@ -384,6 +617,7 @@ class PipelineApiTests(unittest.TestCase):
         capture = FakeCapture(frames)
         progress = []
         runtime = RTDetrRuntime(
+            spec=rtdetr_spec(),
             device=torch.device("cpu"),
             reid_embedder=RecordingEmbedder(),
             processor=FakeProcessor(),
@@ -437,7 +671,10 @@ class PipelineApiTests(unittest.TestCase):
                 result.processed_frames
             ),
         )
-        runtime = RFDetrRuntime(model=FakeRFDetrModel())
+        runtime = RFDetrRuntime(
+            spec=rfdetr_spec(batch_size=2),
+            model=FakeRFDetrModel(),
+        )
 
         with (
             patch(
@@ -493,7 +730,14 @@ class PipelineApiTests(unittest.TestCase):
         with (
             patch(
                 "people_counter.pipelines.rtdetr_osnet.load_runtime",
-                return_value=MagicMock(spec=RTDetrRuntime),
+                return_value=RTDetrRuntime(
+                    spec=rtdetr_spec(),
+                    device=torch.device("cpu"),
+                    reid_embedder=MagicMock(),
+                    processor=MagicMock(),
+                    model=MagicMock(),
+                    person_class_id=0,
+                ),
             ),
             patch(
                 "people_counter.pipelines.rtdetr_osnet.cv2.VideoCapture",
@@ -519,7 +763,10 @@ class PipelineApiTests(unittest.TestCase):
         with (
             patch(
                 "people_counter.pipelines.rfdetr_botsort.load_runtime",
-                return_value=MagicMock(spec=RFDetrRuntime),
+                return_value=RFDetrRuntime(
+                    spec=rfdetr_spec(),
+                    model=MagicMock(),
+                ),
             ),
             patch(
                 "people_counter.pipelines.rfdetr_botsort.cv2.VideoCapture",
@@ -552,7 +799,10 @@ class PipelineApiTests(unittest.TestCase):
         with (
             patch(
                 "people_counter.pipelines.rfdetr_botsort.load_runtime",
-                return_value=RFDetrRuntime(model=FakeRFDetrModel()),
+                return_value=RFDetrRuntime(
+                    spec=rfdetr_spec(),
+                    model=FakeRFDetrModel(),
+                ),
             ),
             patch(
                 "people_counter.pipelines.rfdetr_botsort.BoTSORTTracker",

@@ -396,6 +396,7 @@ class RunStateTests(unittest.TestCase):
             ),
         )
         runtime = MagicMock(spec=rtdetr_osnet.RTDetrRuntime)
+        runtime.spec = rtdetr_osnet.runtime_spec(config)
         tracking = rtdetr_osnet.RTDetrTrackingState()
         metadata = VideoMetadata(
             fps=30.0,
@@ -608,6 +609,7 @@ class RunExecutionTests(unittest.TestCase):
             ),
         )
         runtime = MagicMock(spec=rtdetr_osnet.RTDetrRuntime)
+        runtime.spec = rtdetr_osnet.runtime_spec(config)
         metadata = VideoMetadata(
             fps=30.0,
             width=120,
@@ -699,6 +701,7 @@ class FrameProcessingTests(unittest.TestCase):
             use_fp16=False,
         )
         runtime = rtdetr_osnet.RTDetrRuntime(
+            spec=rtdetr_osnet.runtime_spec(config),
             device=torch.device("cpu"),
             reid_embedder=object(),
             processor=processor,
@@ -815,6 +818,7 @@ class FrameProcessingTests(unittest.TestCase):
             line=(1, 2, 3, 4),
         )
         runtime = rtdetr_osnet.RTDetrRuntime(
+            spec=rtdetr_osnet.runtime_spec(config),
             device=torch.device("cpu"),
             reid_embedder=object(),
             processor=object(),
@@ -1182,7 +1186,10 @@ class FrameProcessingTests(unittest.TestCase):
         )
         state = rfdetr_botsort.RFDetrRunState(
             config=config,
-            runtime=rfdetr_botsort.RFDetrRuntime(model=model),
+            runtime=rfdetr_botsort.RFDetrRuntime(
+                spec=rfdetr_botsort.runtime_spec(config),
+                model=model,
+            ),
             metadata=VideoMetadata(30.0, 120, 80, 61),
             sampling=SamplingConfig(10, 3.0, 7),
             tracker=MagicMock(),
@@ -1234,14 +1241,18 @@ class FrameProcessingTests(unittest.TestCase):
     def test_botsort_process_batch_rejects_non_list_results(self):
         model = MagicMock()
         model.predict.return_value = object()
-        state = rfdetr_botsort.RFDetrRunState(
-            config=RFDetrBotsortConfig(
+        config = RFDetrBotsortConfig(
                 video=Path("video.mp4"),
                 device_variant="cpu",
                 device="cpu",
                 batch_size=1,
+            )
+        state = rfdetr_botsort.RFDetrRunState(
+            config=config,
+            runtime=rfdetr_botsort.RFDetrRuntime(
+                spec=rfdetr_botsort.runtime_spec(config),
+                model=model,
             ),
-            runtime=rfdetr_botsort.RFDetrRuntime(model=model),
             metadata=VideoMetadata(30.0, 120, 80, 61),
             sampling=SamplingConfig(1, 30.0, 61),
             tracker=MagicMock(),

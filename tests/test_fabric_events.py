@@ -477,6 +477,195 @@ class EventBusinessTests(unittest.TestCase):
         self.assertIsNone(result.work["lease_expires_at"])
         self.assertIsNone(result.work["lease_owner_attempt_id"])
 
+    def test_release_returns_unstarted_work_without_consuming_attempt(self):
+        work, attempt = state()
+
+        result = plan(
+            event("release", {"reason": "Worker lifetime budget exhausted"}),
+            work,
+            attempt,
+        )
+
+        self.assertEqual(
+            result.work,
+            {
+                "lease_owner_attempt_id": None,
+                "lease_dispatcher_id": None,
+                "lease_acquired_at": None,
+                "lease_expires_at": None,
+                "status": "RETRY_WAIT",
+                "attempt_count": 0,
+                "not_before_at": NOW,
+                "last_error_category": None,
+                "last_error_type": None,
+                "last_error_message": None,
+            },
+        )
+        self.assertEqual(result.attempt["status"], "RELEASED")
+        self.assertEqual(result.attempt["completed_at"], NOW)
+        self.assertTrue(result.attempt["retryable"])
+        self.assertEqual(result.attempt["error_category"], "WORKER_BUDGET")
+        self.assertEqual(result.attempt["error_type"], "WorkerLifetimeReached")
+        self.assertEqual(
+            result.attempt["error_message"],
+            "Worker lifetime budget exhausted",
+        )
+
+        work, attempt = state()
+        work["attempt_count"] = 3
+        result = plan(
+            event("release", {"reason": "Worker lifetime budget exhausted"}),
+            work,
+            attempt,
+        )
+        self.assertEqual(result.work["attempt_count"], 2)
+        self.assertNotIn("queue_entered_at", result.work)
+
+        work.update(result.work)
+        attempt.update(result.attempt)
+        replay = plan(
+            event("release", {"reason": "Worker lifetime budget exhausted"}),
+            work,
+            attempt,
+        )
+        self.assertEqual(replay.message, "Release already applied")
+        self.assertEqual(replay.work, {})
+        self.assertEqual(replay.attempt, {})
+
+    def test_release_rejects_started_or_nonleased_attempt(self):
+        work, attempt = state("RUNNING")
+        attempt["inference_started_at"] = NOW - timedelta(minutes=1)
+        with self.assertRaisesRegex(
+            events._Rejected,
+            "^Release requires LEASED work$",
+        ):
+            plan(
+                event("release", {"reason": "Worker lifetime budget exhausted"}),
+                work,
+                attempt,
+            )
+
+        work, attempt = state()
+        attempt["status"] = "RUNNING"
+        with self.assertRaisesRegex(
+            events._Rejected,
+            "^Release requires a LEASED or already released attempt$",
+        ):
+            plan(
+                event("release", {"reason": "Worker lifetime budget exhausted"}),
+                work,
+                attempt,
+            )
+
+    def test_release_requires_a_live_lease_before_attempt_update(self):
+        work, attempt = state()
+        work["lease_expires_at"] = NOW - timedelta(seconds=1)
+
+        with self.assertRaisesRegex(events._Rejected, "^Work lease has expired$"):
+            plan(
+                event("release", {"reason": "Worker lifetime budget exhausted"}),
+                work,
+                attempt,
+            )
+
+    def test_release_partial_replay_allows_expiry_but_preserves_event_ordering(self):
+        row = event("release", {"reason": "Worker lifetime budget exhausted"})
+        work, attempt = state()
+        initial = plan(row, work, attempt)
+        attempt.update(initial.attempt)
+        work["lease_expires_at"] = NOW - timedelta(seconds=1)
+
+        replay = plan(row, work, attempt)
+        self.assertEqual(replay.work["status"], "RETRY_WAIT")
+
+        future_row = event(
+            "release",
+            {"reason": "Worker lifetime budget exhausted"},
+        )
+        future_row["created_at"] = NOW + timedelta(seconds=1)
+        future_work, future_attempt = state()
+        future_attempt.update(
+            plan(
+                future_row,
+                future_work,
+                future_attempt,
+                NOW + timedelta(seconds=2),
+            ).attempt
+        )
+        with self.assertRaisesRegex(
+            events._Rejected,
+            "^Event timestamp is in the future$",
+        ):
+            plan(future_row, future_work, future_attempt, NOW)
+
+        for created_at, acquired_at, now, message in (
+            (
+                NOW,
+                NOW + timedelta(seconds=1),
+                NOW + timedelta(seconds=2),
+                "Event predates this lease",
+            ),
+        ):
+            with self.subTest(message=message):
+                ordered_row = event(
+                    "release",
+                    {"reason": "Worker lifetime budget exhausted"},
+                )
+                ordered_row["created_at"] = created_at
+                ordered_work, ordered_attempt = state()
+                ordered_attempt.update(initial.attempt)
+                ordered_work["lease_acquired_at"] = acquired_at
+                with self.assertRaisesRegex(events._Rejected, f"^{message}$"):
+                    plan(ordered_row, ordered_work, ordered_attempt, now)
+
+        boundary_work, boundary_attempt = state()
+        boundary_attempt.update(initial.attempt)
+        boundary_work["lease_acquired_at"] = NOW
+        self.assertEqual(
+            plan(row, boundary_work, boundary_attempt).work["status"],
+            "RETRY_WAIT",
+        )
+
+    def test_release_replay_requires_every_lease_field_to_be_cleared(self):
+        row = event("release", {"reason": "Worker lifetime budget exhausted"})
+        work, attempt = state()
+        result = plan(row, work, attempt)
+        work.update(result.work)
+        attempt.update(result.attempt)
+        stale_values = {
+            "lease_owner_attempt_id": "attempt",
+            "lease_dispatcher_id": "dispatcher",
+            "lease_acquired_at": NOW - timedelta(minutes=1),
+            "lease_expires_at": NOW + timedelta(minutes=1),
+        }
+
+        for field, value in stale_values.items():
+            with self.subTest(field=field):
+                inconsistent = dict(work)
+                inconsistent[field] = value
+                with self.assertRaises(events._Rejected):
+                    plan(row, inconsistent, attempt)
+
+        work, attempt = state()
+        attempt["inference_started_at"] = NOW - timedelta(minutes=1)
+        with self.assertRaisesRegex(
+            events._Rejected,
+            "^Started attempts cannot be released$",
+        ):
+            plan(
+                event("release", {"reason": "Worker lifetime budget exhausted"}),
+                work,
+                attempt,
+            )
+
+    def test_release_requires_exact_nonempty_reason_payload(self):
+        with self.assertRaisesRegex(ValueError, "^reason must be a non-empty string$"):
+            events._Command.from_row(event("release", {"reason": ""}))
+
+        for payload in ({}, {"reason": "later", "extra": True}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                events._Command.from_row(event("release", payload))
+
     def test_partial_failure_replays_after_expiry_without_changing_timestamp(self):
         work, attempt = state("RUNNING")
         row = event("failure", failure())
@@ -599,6 +788,37 @@ class EventDrainTests(unittest.TestCase):
         self.assertEqual(self.drain(store)["applied"], 1)
         self.assertEqual(store.work["status"], "RETRY_WAIT")
         self.assertEqual(store.attempt["completed_at"], NOW)
+
+    def test_partial_release_recovery_finishes_work_then_receipt(self):
+        work, attempt = state()
+        store = MemoryStore(
+            Writer(),
+            [event("release", {"reason": "Worker lifetime budget exhausted"})],
+            work,
+            attempt,
+        )
+        store.fail_after = "video_attempts"
+
+        with self.assertRaisesRegex(OSError, "Ambiguous"):
+            self.drain(store)
+
+        self.assertEqual(store.work["status"], "LEASED")
+        self.assertEqual(store.attempt["status"], "RELEASED")
+        original_queue_entered_at = store.work["queue_entered_at"]
+
+        store.writer.retained = False
+        self.assertEqual(self.drain(store)["applied"], 1)
+        self.assertEqual(store.work["status"], "RETRY_WAIT")
+        self.assertEqual(store.work["attempt_count"], 0)
+        self.assertEqual(store.work["queue_entered_at"], original_queue_entered_at)
+        self.assertEqual(store.attempt["status"], "RELEASED")
+
+        store.receipts.clear()
+        store.events = [
+            event("release", {"reason": "Worker lifetime budget exhausted"})
+        ]
+        self.assertEqual(self.drain(store)["applied"], 1)
+        self.assertEqual(store.work["attempt_count"], 0)
 
     def test_ambiguous_work_commit_replays_without_regression(self):
         work, attempt = state("WRITING")

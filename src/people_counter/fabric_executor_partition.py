@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import json
-import logging
-import os
-from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypedDict
@@ -20,22 +17,16 @@ from people_counter.api import (
     telemetry_records,
 )
 from people_counter.config import RFDetrBotsortConfig, RTDetrOsnetConfig
+from people_counter.cpu_runtime import (
+    ThreadBudget,
+    calculate_thread_budget,
+    configure_cpu_runtime,
+)
 from people_counter.models import RunResult
 
 
 RecordType = Literal["video_result", "telemetry", "line_count", "error"]
 RecordStatus = Literal["SUCCEEDED", "FAILED"]
-
-
-_LOG = logging.getLogger(__name__)
-_THREAD_ENVIRONMENT_VARIABLES = (
-    "OMP_NUM_THREADS",
-    "MKL_NUM_THREADS",
-    "OPENBLAS_NUM_THREADS",
-    "NUMEXPR_NUM_THREADS",
-    "VECLIB_MAXIMUM_THREADS",
-)
-_NATIVE_THREAD_BUDGET: ThreadBudget | None = None
 
 
 class ExecutorPartitionRecord(TypedDict):
@@ -60,81 +51,6 @@ class RuntimeProcessor(Protocol):
 
 ErrorClassifier = Callable[[Exception], tuple[bool, str]]
 ConfigBuilder = Callable[[Mapping[str, Any]], PipelineConfig]
-
-
-@dataclass(frozen=True)
-class ThreadBudget:
-    driver_cores: int
-    active_workers: int
-    threads_per_worker: int
-
-
-def calculate_thread_budget(driver_cores: int, active_workers: int) -> ThreadBudget:
-    """Calculate a CPU thread budget, flooring oversubscribed workers at one."""
-    if type(driver_cores) is not int or driver_cores < 1:
-        raise ValueError("driver_cores must be a positive integer")
-    if type(active_workers) is not int or active_workers < 1:
-        raise ValueError("active_workers must be a positive integer")
-    if active_workers > driver_cores:
-        _LOG.warning(
-            "active_workers=%s exceeds driver_cores=%s; assigning one thread per worker",
-            active_workers,
-            driver_cores,
-        )
-    return ThreadBudget(
-        driver_cores=driver_cores,
-        active_workers=active_workers,
-        threads_per_worker=max(1, driver_cores // active_workers),
-    )
-
-
-def configure_cpu_runtime(
-    driver_cores: int,
-    active_workers: int,
-    *,
-    environment: MutableMapping[str, str] | None = None,
-    apply_native_limits: bool = True,
-) -> ThreadBudget:
-    """Apply process-local CPU thread limits for a Fabric worker process.
-
-    Environment variables are set before importing native libraries when this
-    function is called early in a notebook or executor task.
-    """
-    budget = calculate_thread_budget(driver_cores, active_workers)
-    environ = os.environ if environment is None else environment
-    threads = str(budget.threads_per_worker)
-    for name in _THREAD_ENVIRONMENT_VARIABLES:
-        existing = environ.get(name)
-        if existing not in (None, threads):
-            raise ValueError(
-                f"{name} is already set to {existing}; expected {threads}. "
-                "Configure CPU thread limits before native runtime import."
-            )
-        environ[name] = threads
-
-    global _NATIVE_THREAD_BUDGET
-    if apply_native_limits and _NATIVE_THREAD_BUDGET is None:
-        import cv2
-        import torch
-
-        torch.set_num_threads(budget.threads_per_worker)
-        torch.set_num_interop_threads(1)
-        cv2.setNumThreads(1)
-        _NATIVE_THREAD_BUDGET = budget
-    elif apply_native_limits and _NATIVE_THREAD_BUDGET != budget:
-        raise ValueError(
-            "Native CPU runtime is already configured with "
-            f"{_NATIVE_THREAD_BUDGET}; requested {budget}"
-        )
-
-    _LOG.info(
-        "Configured CPU executor worker: driver_cores=%s active_workers=%s "
-        "threads_per_worker=%s",
-        budget.driver_cores,
-        budget.active_workers,
-        budget.threads_per_worker,
-    )
-    return budget
 
 
 class ExecutorRuntimeCache:
