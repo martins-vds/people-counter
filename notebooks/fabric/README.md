@@ -58,8 +58,8 @@ Run or deploy the notebooks in this order:
 | [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb) | Creates control, attempt, output, benchmark, and gold tables plus committed-output views | Once per environment and after compatible schema releases |
 | [`01_register_event.ipynb`](./01_register_event.ipynb) | Validates an ADLS manifest event and registers a deduplicated `QUEUED` work item | Once for every matching storage event |
 | [`02_register_backfill.ipynb`](./02_register_backfill.ipynb) | Bulk-registers historical manifests without bypassing the normal queue | Once per backfill partition |
-| [`03_claim_work.ipynb`](./03_claim_work.ipynb) | Claims no more than the available worker slots and returns a JSON work batch | Every dispatcher pipeline run |
-| [`04_process_video.ipynb`](./04_process_video.ipynb) | Owns a lease, processes one video sequentially, writes attempt-scoped output, and publishes the committed attempt | Once per claimed work item |
+| [`03_claim_work.ipynb`](./03_claim_work.ipynb) | Claims one runtime-compatible, bounded item batch when a worker slot is available | Every dispatcher pipeline run |
+| [`04_process_video.ipynb`](./04_process_video.ipynb) | Loads one offline runtime, processes a bounded video batch sequentially, and independently commits each attempt | Once per claimed worker batch |
 | [`05_watchdog_recovery.ipynb`](./05_watchdog_recovery.ipynb) | Requeues expired retryable leases and dead-letters exhausted work | Every five minutes |
 | [`06_reconcile_publication.ipynb`](./06_reconcile_publication.ipynb) | Detects ledger and committed-output anomalies and records reconciliation findings | Every 15 minutes and after releases |
 | [`07_build_gold_aggregates.ipynb`](./07_build_gold_aggregates.ipynb) | Builds minute-flow, hourly-flow, video, and operational facts for Direct Lake reports | Incrementally after committed work |
@@ -134,8 +134,7 @@ flowchart LR
 
     SCH[1-minute dispatcher schedule] --> DP[Dispatcher pipeline]
     DP --> N3[03 claim work]
-    N3 -->|bounded JSON batch| FE[ForEach, batch count N]
-    FE --> N4[04 process video]
+    N3 -->|runtime-compatible bounded JSON batch| N4[04 process video]
     N4 --> WE[(worker_events)]
     WE --> CW[Exclusive control writer]
     CW --> AT[(video_attempts)]
@@ -275,25 +274,24 @@ sequenceDiagram
     participant P as Dispatcher pipeline
     participant C as 03 claim work
     participant W as video_work
-    participant F as ForEach
     participant V as 04 process video
     participant E as Worker event inbox
     participant X as Exclusive control writer
 
     S->>P: Run every minute
     P->>C: dispatcher_id, max_concurrent_workers
-    C->>W: Count unexpired active leases
-    C->>W: Claim min(queue, max-active)
-    C->>W: Set LEASED, attempt_id, lease expiry
+    C->>W: Count distinct active dispatcher/worker IDs
+    C->>W: Claim one bounded, runtime-compatible batch
+    C->>W: Set LEASED, attempt IDs, lease expiry
     C-->>P: JSON [{work_id, attempt_id}, ...]
-    P->>F: Iterate with bounded batch count
-    par each claimed item
-        F->>V: work_id, attempt_id, Fabric correlation IDs
+    P->>V: complete item array and Fabric correlation IDs
+    loop each claimed item, sequentially
         V->>W: Verify lease ownership
         V->>E: Append heartbeat command
         V->>X: Request command processing
         X->>W: Validate ownership and extend lease
         X-->>V: Durable accepted receipt
+        V->>E: Renew pending items as LEASED
         V->>V: Process frames sequentially
         V->>E: Append completion and commit commands
         V->>X: Request command processing
@@ -314,6 +312,7 @@ stateDiagram-v2
     RUNNING --> WRITING: inference complete
     WRITING --> SUCCEEDED: commit pointer published
     LEASED --> RETRY_WAIT: retryable startup failure
+    LEASED --> RETRY_WAIT: worker lifetime deferral
     STAGING --> RETRY_WAIT: retryable storage failure
     RUNNING --> RETRY_WAIT: retryable inference failure
     WRITING --> RETRY_WAIT: retryable Delta conflict
@@ -540,8 +539,16 @@ attempt_count, max_attempts,
 lease_owner_attempt_id, lease_acquired_at, lease_expires_at,
 lease_dispatcher_id, last_heartbeat_at, committed_attempt_id, completed_at,
 last_error_category, last_error_type, last_error_message,
-last_replay_id, replay_generation, config_json, config_sha256, capture_date
+last_replay_id, replay_generation, config_json, config_sha256,
+runtime_sha256, capture_date
 ```
+
+`config_sha256` fences the complete per-video configuration.
+`runtime_sha256` contains only model-load compatibility fields and allows one
+worker runtime to serve videos whose counting lines or run-time thresholds
+differ. Legacy rows with a null `runtime_sha256` fall back to
+`config_sha256`; a matching event or backfill registration safely fills the
+runtime hash.
 
 #### `people_counter_dispatcher_leases`
 
@@ -663,6 +670,11 @@ people_counter_gold_dim_video
 people_counter_gold_dim_model_config
 ```
 
+`people_counter_gold_operations_hour` reports `started`, `succeeded`,
+`failed`, and `deferred` attempts separately. `deferred` counts `RELEASED`
+attempts returned before inference because a worker reached its lifetime
+budget; these are not failures and do not consume retry budget.
+
 Partition large attempt/output tables by a derived capture date, not by
 high-cardinality `work_id`.
 
@@ -689,6 +701,15 @@ to every notebook.
 6. Pin the Environment and notebook to the tested Fabric runtime. Do not
    silently upgrade during the backfill.
 7. Record the SDK version and bundle manifest SHA-256 in every attempt.
+
+The worker must be the first code in its Python process to configure PyTorch
+threading. If structured worker output reports
+`interop_threads_configured=false`, stop that Spark application and remove any
+Environment startup library or earlier notebook activity that imports and
+initializes PyTorch first. When a shared Spark application needs an explicit
+bootstrap, call `configure_cpu_runtime(driver_cores, active_workers)` in its
+first Python activity before importing model libraries. Do not approve a
+capacity result whose benchmark rows report a false inter-op status.
 
 Fabric-native compute is a hard constraint. Do not start the backfill until
 [`08_capacity_benchmark.ipynb`](./08_capacity_benchmark.ipynb) proves that an
@@ -1575,71 +1596,31 @@ date and alert before it expires:
    ClaimWork -> Output** and verify this property path. If the current tenant
    uses a different path, update the next two expressions before enabling the
    schedule.
-6. Do not add an **If Condition**. Fabric does not support nesting a
-   `ForEach` inside an `If Condition`. A top-level `ForEach` given an empty
-   array performs zero iterations and completes successfully, so the extra
-   condition is unnecessary.
-7. Add a top-level **ForEach** activity directly on the pipeline canvas:
-   - Name it `ForEachClaimedWork`.
-   - Connect the green **On success** output of `ClaimWork` directly to
-     `ForEachClaimedWork`.
-   - In **Settings -> Items**, choose **Add dynamic content** and enter:
-
-     ```text
-     @json(activity('ClaimWork').output.result.exitValue).items
-     ```
-
-   Each iteration's `@item()` is one object containing `work_id` and
-   `attempt_id`. If `items` is empty, `ForEachClaimedWork` runs zero child
-   activities and the dispatcher succeeds as a no-op.
-8. In `ForEachClaimedWork` **Settings**:
-   - Turn **Sequential** off.
-   - Set **Batch count** to the literal integer `4`.
-
-   Yes: the sensible initial Batch count is the same numeric value as the
-   `CLAIM_LIMIT` pipeline parameter. Fabric's Batch count field is a maximum
-   concurrency setting, not the `CLAIM_LIMIT` expression itself, so enter
-   `4`, not `@pipeline().parameters.CLAIM_LIMIT`.
-
-   Keep these values aligned:
-
-   ```text
-   CLAIM_LIMIT pipeline default = 4
-   ForEach Batch count          = 4
-   MAX_CONCURRENT_WORKERS       = 4
-   ```
-
-   `CLAIM_LIMIT` controls how many new leases one dispatcher can create.
-   Batch count controls how many claimed items that pipeline run can process
-   concurrently. `MAX_CONCURRENT_WORKERS` limits active leases across
-   dispatcher runs. If Batch count is lower than `CLAIM_LIMIT`, some claimed
-   items wait inside the ForEach while their leases are already aging.
-
-   After benchmarking, change `CLAIM_LIMIT` and Batch count together, keep
-   both at or below `50`, and set `MAX_CONCURRENT_WORKERS` to the approved
-   aggregate concurrency. With dispatcher shards, each shard keeps
-   `CLAIM_LIMIT = Batch count <= 50`, while all shards share the global
-   `MAX_CONCURRENT_WORKERS`.
-9. Open `ForEachClaimedWork` and add a Notebook activity. Name the child
-   activity `ProcessVideo` and target the imported `04_process_video` Fabric
+6. Add a Notebook activity directly after `ClaimWork`. Name it
+   `ProcessVideo` and target the imported `04_process_video` Fabric
    notebook item, sourced from
    [`04_process_video.ipynb`](./04_process_video.ipynb).
+   Connect the green **On success** output of `ClaimWork` to `ProcessVideo`.
    - Confirm its configuration cell is toggled as the parameter cell.
    - Confirm `<lakehouse-name>` is attached and pinned as its default
      Lakehouse.
    - Select the environment's validated Notebook activity connection.
-10. In `ProcessVideo` **Settings -> Base parameters**, configure every
+7. In `ProcessVideo` **Settings -> Base parameters**, configure every
     parameter:
 
     | Notebook base parameter | Type | Value source | Value |
     |---|---|---|---|
-    | `WORK_ID` | `String` | Dynamic | `@item().work_id` |
-    | `ATTEMPT_ID` | `String` | Dynamic | `@item().attempt_id` |
+    | `WORK_ITEMS_JSON` | `String` | Dynamic | `@string(json(activity('ClaimWork').output.result.exitValue).items)` |
+    | `WORK_ID` | `String` | Literal | Empty; legacy single-item fallback only |
+    | `ATTEMPT_ID` | `String` | Literal | Empty; legacy single-item fallback only |
+    | `MAX_ITEMS_PER_WORKER` | `Int` | Dynamic | `@pipeline().parameters.CLAIM_LIMIT` |
+    | `MAX_WORKER_LIFETIME_SECONDS` | `Int` | Literal | `19800` |
     | `PIPELINE_RUN_ID` | `String` | Dynamic | `@pipeline().RunId` |
-    | `ACTIVITY_RUN_ID` | `String` | Dynamic | `@concat(pipeline().RunId, '/', item().attempt_id)` |
+    | `ACTIVITY_RUN_ID` | `String` | Dynamic | `@concat(pipeline().RunId, '/worker')` |
     | `WORKER_EXECUTION_ID` | `String` | Dynamic | `@guid()` |
     | `FABRIC_JOB_INSTANCE_ID` | `String` | Literal | Empty; populated later by monitoring reconciliation |
     | `BUNDLE_MANIFEST_SHA256` | `String` | Dynamic | `@pipeline().parameters.BUNDLE_MANIFEST_SHA256` |
+    | `MODELS_DIR` | `String` | Literal | `/lakehouse/default/Files/models/<release>` |
     | `SOURCE_STORAGE_ACCOUNT` | `String` | Literal | `<storage-account>` |
     | `SOURCE_CONTAINER` | `String` | Literal | `<source-filesystem>` |
     | `SOURCE_SHORTCUT_LOCAL_ROOT` | `String` | Literal | `/lakehouse/default/Files/<shortcut-name>` |
@@ -1647,13 +1628,20 @@ date and alert before it expires:
     | `TABLE_PREFIX` | `String` | Literal | `people_counter` |
     | `LEASE_MINUTES` | `Int` | Literal | `30` |
     | `HEARTBEAT_SECONDS` | `Int` | Literal | `600` |
+    | `DRIVER_CORES` | `Int` | Literal | Actual driver vCores, initially `4` |
+    | `ACTIVE_WORKERS` | `Int` | Dynamic | `@pipeline().parameters.MAX_CONCURRENT_WORKERS` |
 
-    For the six Dynamic rows, select **Value -> Add dynamic content** and
-    enter the expression exactly as shown without quotes. `ACTIVITY_RUN_ID`
-    is a synthetic correlation ID because Fabric does not expose the Data
-    Factory activity-run ID or monitoring `JobInstanceId` to the notebook.
-    `WORKER_EXECUTION_ID` is a unique execution fence; every separate worker
-    activity invocation must receive a new GUID.
+    For each Dynamic row, select **Value -> Add dynamic content** and enter
+    the expression exactly as shown without quotes. `WORK_ITEMS_JSON` passes
+    the entire claim result to one notebook invocation. The worker rejects
+    duplicate items, batches larger than `MAX_ITEMS_PER_WORKER`, and batches
+    containing incompatible model runtimes. It stages `MODELS_DIR`
+    once, loads one runtime, and processes each video sequentially.
+
+    An empty `items` array is a normal idle-dispatch result. `ProcessVideo`
+    returns `NO_WORK` without configuring native CPU libraries, staging
+    artifacts, or loading a runtime, so the one-minute dispatcher schedule
+    remains successful when the queue is empty.
 
     `BUNDLE_MANIFEST_SHA256` identifies the SDK deployment bundle, not the
     per-video manifest. Set the pipeline parameter once per deployed release
@@ -1661,7 +1649,42 @@ date and alert before it expires:
     hash remains `expected_sha256` inside each input manifest. Do not
     hard-code a placeholder string in `ProcessVideo`.
 
-11. In `ProcessVideo` **General**, leave **Enable retries** unchecked. Do not
+    `MODELS_DIR` must contain the complete pinned offline artifact tree for
+    the selected model configuration. Missing artifacts fail explicitly;
+    workers do not download models from the network. Set `DRIVER_CORES` to
+    the notebook driver profile. Fabric notebook activities can attach to one
+    Spark application and share its driver, so the safe default passes the
+    maximum concurrently scheduled workers. The notebook derives an OpenMP,
+    MKL, OpenBLAS, PyTorch, and OpenCV thread budget from those values. After
+    a controlled run, compare `spark_application_id` in every worker result.
+    Reduce `ACTIVE_WORKERS` only when the observed application IDs prove that
+    fewer workers share each driver; record that evidence with the approved
+    capacity configuration.
+
+    Before processing the first video, the worker fences every claimed
+    attempt with its execution ID. Progress heartbeats for the current video
+    also renew not-yet-started items as `LEASED`, preventing watchdog recovery
+    while they wait. If the lifetime limit is reached, unstarted items are
+    released to `RETRY_WAIT` without consuming their attempt budget.
+
+    Worker outcomes use these statuses:
+
+    | Scope | Status | Meaning |
+    |---|---|---|
+    | Batch | `NO_WORK` | The claim array was empty; no native runtime or model was loaded |
+    | Batch | `SUCCEEDED` | Every claimed item succeeded, was already committed, or was deferred |
+    | Batch | `COMPLETED_WITH_FAILURES` | At least one item failed; the same structured outcome is printed and included in the activity exception |
+    | Item | `SUCCEEDED` | Output and committed-attempt pointer were published |
+    | Item | `SUCCEEDED_AFTER_AMBIGUOUS_COMMIT` | A retry confirmed that the commit had succeeded |
+    | Item | `ALREADY_SUCCEEDED` | Preflight found the attempt already committed |
+    | Item | `DEFERRED` | Unstarted work was returned immediately without consuming retry budget |
+    | Item | `PREFLIGHT_FAILED` or `FAILED` | The item failed before or during processing |
+
+    Successful and no-work runs return the structured JSON as the notebook
+    exit value. A batch with failures intentionally fails the activity; read
+    the same JSON from its exception or driver output.
+
+8. In `ProcessVideo` **General**, leave **Enable retries** unchecked. Do not
     enable Fabric activity retries for the worker. A failed attempt records
     `RETRY_WAIT`; a later dispatcher claim creates a fresh attempt ID. This
     prevents an activity timeout from running two executions under the same
@@ -1671,7 +1694,7 @@ date and alert before it expires:
     single-writer upgrade in section 4.1. Increasing activity retries is not
     a remedy for a held control-writer permit or same-partition contention.
 
-12. Set the initial `ProcessVideo` **Timeout** to:
+9. Set the initial `ProcessVideo` **Timeout** to:
 
     ```text
     0.06:00:00
@@ -1685,19 +1708,20 @@ date and alert before it expires:
     max(1 hour, measured p99 end-to-end runtime × 1.25)
     ```
 
-    End-to-end runtime includes Spark admission, shortcut-to-local staging,
-    model loading, inference, Delta writes, and cleanup. If any approved
-    bucket needs more than six hours, create a separate worker
-    activity/pipeline for that bucket rather than silently increasing every
-    video's timeout. Fabric activity timeout must remain within the platform
-    maximum.
+    End-to-end runtime includes Spark admission, offline model staging,
+    source staging, inference, Delta writes, and cleanup. Keep
+    `MAX_WORKER_LIFETIME_SECONDS` below this activity timeout so the worker
+    stops starting new videos while it can still record their item-scoped
+    failures. Already committed items remain committed if a later item
+    fails.
 
-13. Fabric does not document a fixed-schedule no-overlap switch. The
+10. Fabric does not document a fixed-schedule no-overlap switch. The
     dispatcher notebook therefore takes a short global Delta mutex before
     counting active leases and claiming work.
 
-Fabric `ForEach` parallelism is capped at 50. If the benchmark requires more
-than 50 concurrent notebook activities, clone the dispatcher pipeline into
+Each dispatcher run starts at most one bounded worker. If the benchmark
+requires more concurrent notebook activities than one schedule can sustain,
+clone the dispatcher pipeline into
 `pc-dispatcher-00` through `pc-dispatcher-NN` and offset their schedules.
 Do not add a `DISPATCHER_ID` pipeline parameter to any clone. In every
 clone's `ClaimWork` Notebook activity, keep this base-parameter mapping:
@@ -1707,9 +1731,10 @@ DISPATCHER_ID = @pipeline().RunId
 ```
 
 Fabric supplies a different run ID for every execution of every clone, so
-each dispatcher run is already unique. Each shard still uses
-`CLAIM_LIMIT <= 50`; the global mutex and `MAX_CONCURRENT_WORKERS` enforce
-the aggregate limit. The capacity gate must prove that Fabric can admit the
+each dispatcher run is already unique. `CLAIM_LIMIT` controls videos per
+worker, while the global mutex and `MAX_CONCURRENT_WORKERS` enforce the
+aggregate count of distinct active dispatcher/worker IDs. The capacity gate
+must prove that Fabric can admit the
 resulting Spark jobs—creating more pipeline activities does not create more
 capacity.
 
@@ -2844,6 +2869,10 @@ URI is allowed; each invocation writes a distinct `benchmark_id`.
    | `RUNTIME_VERSION` | `String` | Exact pinned Fabric runtime label |
    | `CONCURRENT_WORKERS` | `Int` | `4` for the first run |
    | `BENCHMARK_ITEMS` | `Array` | The representative item array |
+   | `MODELS_DIR` | `String` | `/lakehouse/default/Files/models/<release>` |
+   | `DRIVER_CORES` | `Int` | Actual notebook driver vCores, initially `4` |
+   | `ACTIVE_WORKERS_PER_DRIVER` | `Int` | `4`, matching the initial concurrent worker count |
+   | `EXPECTED_BATCH_MEMBERS` | `Int` | `0`; set to the total video count for grouped runs |
    | `PIPELINE` | `String` | `rtdetr-osnet` |
    | `BATCH_SIZE` | `Int` | `1` |
    | `SAMPLE_FPS` | `Float` | `3.0` |
@@ -2856,6 +2885,12 @@ URI is allowed; each invocation writes a distinct `benchmark_id`.
    parameters before benchmarking. `BENCHMARK_BATCH_ID` should identify the
    environment, SKU, concurrency, date, and run, for example
    `prod-f64-c04-20260924-r01`.
+
+   `RUNTIME_VERSION` must be the exact non-empty pinned runtime label.
+   `UNSET`, `none`, `null`, blank, and null values are rejected before a
+   worker runs or a gate query is evaluated. `MODELS_DIR` must contain the
+   complete pinned offline model tree; benchmark workers never use an online
+   model fallback.
 
 #### 7.4.3 Add the benchmark worker ForEach
 
@@ -2882,6 +2917,11 @@ URI is allowed; each invocation writes a distinct `benchmark_id`.
    Do not set a Batch count above `50`. To test a different concurrency,
    change the literal Batch count, save the pipeline, and supply the matching
    `CONCURRENT_WORKERS` run parameter.
+
+   Use `ACTIVE_WORKERS_PER_DRIVER=CONCURRENT_WORKERS` unless a controlled run
+   proves that concurrent activities have distinct `spark_application_id`
+   values. This conservative default prevents all workers attached to one
+   four-core application from independently claiming all four cores.
 4. Open `ForEachBenchmarkItems`, add a **Notebook** child activity, and name it
    `RunBenchmarkWorker`.
 5. In the Notebook activity **Settings**, select the validated connection and
@@ -2897,9 +2937,15 @@ URI is allowed; each invocation writes a distinct `benchmark_id`.
    | `VIDEO_URI` | `String` | `@item().video_uri` |
    | `SAMPLE_NAME` | `String` | `@item().sample_name` |
    | `EXPECTED_VIDEO_DURATION_SECONDS` | `Float` | `@item().duration_seconds` |
+   | `BENCHMARK_ITEMS_JSON` | `String` | Empty for one-item activities |
+   | `MAX_ITEMS_PER_WORKER` | `Int` | `4` |
+   | `MAX_WORKER_LIFETIME_SECONDS` | `Int` | `19800` |
+   | `MODELS_DIR` | `String` | `@pipeline().parameters.MODELS_DIR` |
    | `CAPACITY_SKU` | `String` | `@pipeline().parameters.CAPACITY_SKU` |
    | `RUNTIME_VERSION` | `String` | `@pipeline().parameters.RUNTIME_VERSION` |
    | `CONCURRENT_WORKERS` | `Int` | `@pipeline().parameters.CONCURRENT_WORKERS` |
+   | `DRIVER_CORES` | `Int` | `@pipeline().parameters.DRIVER_CORES` |
+   | `ACTIVE_WORKERS_PER_DRIVER` | `Int` | `@pipeline().parameters.ACTIVE_WORKERS_PER_DRIVER` |
    | `EXPECTED_BATCH_MEMBERS` | `Int` | `0` |
    | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
    | `TABLE_PREFIX` | `String` | `people_counter` |
@@ -2922,6 +2968,30 @@ URI is allowed; each invocation writes a distinct `benchmark_id`.
    expression without quotes. Keep the declared Type shown in the table.
    Leave `LINE` at its auto-populated empty-list default unless the production
    benchmark explicitly includes line counting.
+
+   For production-equivalent runtime-reuse measurements, group up to
+   `MAX_ITEMS_PER_WORKER` sample objects into a JSON array and pass its string
+   representation through `BENCHMARK_ITEMS_JSON`; leave the three legacy
+   single-item parameters empty in that activity. One notebook invocation
+   stages the offline model tree and loads one runtime, then processes the
+   array sequentially. Every video still writes one independent benchmark
+   row, and `EXPECTED_BATCH_MEMBERS` remains the total number of videos, not
+   the number of notebook activities.
+
+   Grouped mode uses an array of arrays for `BENCHMARK_ITEMS`. In that mode
+   replace the three single-video mappings with:
+
+   | Notebook base parameter | Grouped value |
+   |---|---|
+   | `VIDEO_URI` | Empty |
+   | `SAMPLE_NAME` | Empty |
+   | `EXPECTED_VIDEO_DURATION_SECONDS` | `0.0` |
+   | `BENCHMARK_ITEMS_JSON` | `@string(item())` |
+
+   Set pipeline parameter `EXPECTED_BATCH_MEMBERS` to the sum of the lengths
+   of those inner arrays before the run. Fabric pipeline expressions do not
+   provide a reliable reduction over nested arrays, so this total is an
+   explicit reviewed input rather than the number of ForEach activities.
 7. In `RunBenchmarkWorker` **General**, leave retries disabled. A retry writes
    another benchmark row and invalidates the expected member count. Set a
    timeout longer than the slowest single video plus Spark startup and source
@@ -2952,6 +3022,9 @@ URI is allowed; each invocation writes a distinct `benchmark_id`.
    `CONCURRENT_WORKERS`, model parameters, target, utilization, and headroom
    must be identical to the worker mappings. The gate uses those values to
    select one exact configuration; a mismatch produces no matching result.
+   The expression above is only for flat one-video activities. For grouped
+   mode map `EXPECTED_BATCH_MEMBERS` to
+   `@pipeline().parameters.EXPECTED_BATCH_MEMBERS`.
 5. Leave gate retries disabled and use a 30-minute timeout. Do not put the gate
    inside `ForEachBenchmarkItems`.
 6. Select **Save**, then **Validate**. Resolve every validation error before
@@ -2973,15 +3046,18 @@ flowchart LR
 2. Select **Run** and provide a unique `BENCHMARK_BATCH_ID`, the actual
    `CAPACITY_SKU`, exact `RUNTIME_VERSION`, matching `CONCURRENT_WORKERS`, and
    the full `BENCHMARK_ITEMS` array. Verify that the array's length is the
-   intended total activity count, not the concurrency.
+   intended total video count, not the concurrency. For the documented flat
+   item array this equals the activity count; grouped multi-video workers must
+   use the sum of videos across all activity arrays.
 3. In Monitoring Hub, confirm `RunBenchmarkWorker` maintains the requested
    concurrency for at least six hours. Spark admission, throttling, source
    staging, and idle gaps are part of observed end-to-end performance and must
    not be removed from the result.
 4. Confirm `EvaluateCapacityGate` runs after the ForEach completes. It must
    fail unless the selected batch has:
-   - exactly `length(BENCHMARK_ITEMS)` rows;
+   - exactly the configured `EXPECTED_BATCH_MEMBERS` rows;
    - zero failed rows;
+   - zero rows with missing or false `interop_threads_configured`;
    - at least six hours between its earliest start and latest completion; and
    - observed aggregate throughput at or above the requirement.
 5. If any worker was retried, duplicated, omitted, or run with a mismatched
@@ -2989,6 +3065,21 @@ flowchart LR
    change `EXPECTED_BATCH_MEMBERS` to make a contaminated batch pass.
 6. Repeat with increasing concurrency and, when applicable, each candidate
    capacity SKU. Use a new batch ID every time.
+
+Each benchmark row records `source_stage_seconds`, `runtime_load_seconds`,
+`video_processing_seconds`, `sampled_frames`, `artifact_mode`, `driver_cores`,
+`active_workers_per_driver`, and `threads_per_worker`.
+`video_processing_seconds` is the wall time around SDK processing, while
+`processing_seconds` is the SDK-reported value. The first row in a multi-video
+worker carries the runtime-load cost; later rows carry zero because they reuse
+that runtime. `spark_application_id` identifies workers sharing one Spark
+application, and `interop_threads_configured` must be true for an approved
+CPU capacity run. `result_persist_seconds` remains null in the shared Delta row:
+the measured append duration is emitted in the worker's structured JSON log
+instead of performing a conflicting post-append Delta update. Use the row and
+log fields together to distinguish source I/O, model initialization,
+inference, Delta persistence, and unexplained overhead before changing
+capacity.
 
 #### 7.4.6 Troubleshoot benchmark worker failures
 

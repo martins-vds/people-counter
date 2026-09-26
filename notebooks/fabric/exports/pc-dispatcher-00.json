@@ -1,0 +1,209 @@
+{
+    "name": "pc-dispatcher-00",
+    "objectId": "12e33015-5c82-4ea0-a54e-fe145694ad02",
+    "properties": {
+        "activities": [
+            {
+                "name": "ClaimWork",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 3,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                    "notebookId": "3cde34ec-2a2e-4726-9f2f-2d35c2f25b00",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "DISPATCHER_ID": {
+                            "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "MAX_CONCURRENT_WORKERS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MAX_CONCURRENT_WORKERS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "CLAIM_LIMIT": {
+                            "value": {
+                                "value": "@pipeline().parameters.CLAIM_LIMIT",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "LEASE_MINUTES": {
+                            "value": {
+                                "value": "@pipeline().parameters.LEASE_MINUTES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "ProcessVideo",
+                "type": "TridentNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "ClaimWork",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.06:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "737b6e2f-e899-4305-95ae-8a7c850d16a0",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "WORK_ITEMS_JSON": {
+                            "value": {
+                                "value": "@string(json(activity('ClaimWork').output.result.exitValue).items)",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "WORK_ID": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "ATTEMPT_ID": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "MAX_ITEMS_PER_WORKER": {
+                            "value": {
+                                "value": "@pipeline().parameters.CLAIM_LIMIT",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MAX_WORKER_LIFETIME_SECONDS": {
+                            "value": "19800",
+                            "type": "int"
+                        },
+                        "PIPELINE_RUN_ID": {
+                            "value": {
+                                "value": "@pipeline().RunId",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "ACTIVITY_RUN_ID": {
+                            "value": {
+                                "value": "@concat(pipeline().RunId, '/worker')",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "WORKER_EXECUTION_ID": {
+                            "value": {
+                                "value": "@guid()",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "FABRIC_JOB_INSTANCE_ID": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "BUNDLE_MANIFEST_SHA256": {
+                            "value": {
+                                "value": "@pipeline().parameters.BUNDLE_MANIFEST_SHA256",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "MODELS_DIR": {
+                            "value": "/lakehouse/default/Files/models/<release>",
+                            "type": "string"
+                        },
+                        "SOURCE_STORAGE_ACCOUNT": {
+                            "value": "peoplecountingfootage",
+                            "type": "string"
+                        },
+                        "SOURCE_CONTAINER": {
+                            "value": "videos",
+                            "type": "string"
+                        },
+                        "SOURCE_SHORTCUT_LOCAL_ROOT": {
+                            "value": "/lakehouse/default/Files/videos",
+                            "type": "string"
+                        },
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        },
+                        "LEASE_MINUTES": {
+                            "value": "30",
+                            "type": "int"
+                        },
+                        "HEARTBEAT_SECONDS": {
+                            "value": "600",
+                            "type": "int"
+                        },
+                        "DRIVER_CORES": {
+                            "value": "4",
+                            "type": "int"
+                        },
+                        "ACTIVE_WORKERS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MAX_CONCURRENT_WORKERS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "MAX_CONCURRENT_WORKERS": {
+                "type": "int",
+                "defaultValue": 4
+            },
+            "CLAIM_LIMIT": {
+                "type": "int",
+                "defaultValue": 4
+            },
+            "LEASE_MINUTES": {
+                "type": "int",
+                "defaultValue": 30
+            },
+            "BUNDLE_MANIFEST_SHA256": {
+                "type": "string"
+            }
+        },
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-23T21:46:22Z"
+    }
+}

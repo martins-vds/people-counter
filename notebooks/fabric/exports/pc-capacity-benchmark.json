@@ -1,0 +1,488 @@
+{
+    "name": "pc-capacity-benchmark",
+    "objectId": "5618506e-aed9-43cd-8943-d92322ef4d4a",
+    "properties": {
+        "activities": [
+            {
+                "name": "ForEachBenchmarkItems",
+                "type": "ForEach",
+                "dependsOn": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@pipeline().parameters.BENCHMARK_ITEMS",
+                        "type": "Expression"
+                    },
+                    "batchCount": 4,
+                    "activities": [
+                        {
+                            "name": "RunBenchmarkWorker",
+                            "type": "TridentNotebook",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "typeProperties": {
+                                "notebookId": "d150c81a-7503-4a5c-95e4-0e50dc9c713f",
+                                "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                                "parameters": {
+                                    "RUN_INFERENCE": {
+                                        "value": true,
+                                        "type": "bool"
+                                    },
+                                    "ENFORCE_CAPACITY_GATE": {
+                                        "value": false,
+                                        "type": "bool"
+                                    },
+                                    "BENCHMARK_BATCH_ID": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.BENCHMARK_BATCH_ID",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "VIDEO_URI": {
+                                        "value": {
+                                            "value": "@item().video_uri",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "SAMPLE_NAME": {
+                                        "value": {
+                                            "value": "@item().sample_name",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "EXPECTED_VIDEO_DURATION_SECONDS": {
+                                        "value": {
+                                            "value": "@item().duration_seconds",
+                                            "type": "Expression"
+                                        },
+                                        "type": "float"
+                                    },
+                                    "BENCHMARK_ITEMS_JSON": {
+                                        "value": "",
+                                        "type": "string"
+                                    },
+                                    "MAX_ITEMS_PER_WORKER": {
+                                        "value": "4",
+                                        "type": "int"
+                                    },
+                                    "MAX_WORKER_LIFETIME_SECONDS": {
+                                        "value": "19800",
+                                        "type": "int"
+                                    },
+                                    "MODELS_DIR": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.MODELS_DIR",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "CAPACITY_SKU": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CAPACITY_SKU",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "RUNTIME_VERSION": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.RUNTIME_VERSION",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "CONCURRENT_WORKERS": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CONCURRENT_WORKERS",
+                                            "type": "Expression"
+                                        },
+                                        "type": "int"
+                                    },
+                                    "DRIVER_CORES": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.DRIVER_CORES",
+                                            "type": "Expression"
+                                        },
+                                        "type": "int"
+                                    },
+                                    "ACTIVE_WORKERS_PER_DRIVER": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.ACTIVE_WORKERS_PER_DRIVER",
+                                            "type": "Expression"
+                                        },
+                                        "type": "int"
+                                    },
+                                    "EXPECTED_BATCH_MEMBERS": {
+                                        "value": "0",
+                                        "type": "int"
+                                    },
+                                    "DATABASE": {
+                                        "value": "",
+                                        "type": "string"
+                                    },
+                                    "TABLE_PREFIX": {
+                                        "value": "people_counter",
+                                        "type": "string"
+                                    },
+                                    "PIPELINE": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.PIPELINE",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "DEVICE_VARIANT": {
+                                        "value": "cpu",
+                                        "type": "string"
+                                    },
+                                    "DEVICE": {
+                                        "value": "cpu",
+                                        "type": "string"
+                                    },
+                                    "BATCH_SIZE": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.BATCH_SIZE",
+                                            "type": "Expression"
+                                        },
+                                        "type": "int"
+                                    },
+                                    "SAMPLE_FPS": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.SAMPLE_FPS",
+                                            "type": "Expression"
+                                        },
+                                        "type": "float"
+                                    },
+                                    "DETECTION_THRESHOLD": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.DETECTION_THRESHOLD",
+                                            "type": "Expression"
+                                        },
+                                        "type": "float"
+                                    },
+                                    "USE_FP16": {
+                                        "value": false,
+                                        "type": "bool"
+                                    },
+                                    "LINE": {
+                                        "value": [],
+                                        "type": "array"
+                                    },
+                                    "DETECTOR_MODEL": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.DETECTOR_MODEL",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "CAMERA_MOTION_COMPENSATION": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CAMERA_MOTION_COMPENSATION",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
+                                    "TARGET_VIDEO_HOURS": {
+                                        "value": "200000",
+                                        "type": "float"
+                                    },
+                                    "DEADLINE_DAYS": {
+                                        "value": "30",
+                                        "type": "float"
+                                    },
+                                    "UTILIZATION": {
+                                        "value": "0.8",
+                                        "type": "float"
+                                    },
+                                    "HEADROOM_FACTOR": {
+                                        "value": "1.2",
+                                        "type": "float"
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "EvaluateCapacityGate",
+                "type": "TridentNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "ForEachBenchmarkItems",
+                        "dependencyConditions": [
+                            "Completed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "d150c81a-7503-4a5c-95e4-0e50dc9c713f",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "RUN_INFERENCE": {
+                            "value": false,
+                            "type": "bool"
+                        },
+                        "ENFORCE_CAPACITY_GATE": {
+                            "value": true,
+                            "type": "bool"
+                        },
+                        "BENCHMARK_BATCH_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.BENCHMARK_BATCH_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "VIDEO_URI": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "SAMPLE_NAME": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "EXPECTED_VIDEO_DURATION_SECONDS": {
+                            "value": "0",
+                            "type": "float"
+                        },
+                        "BENCHMARK_ITEMS_JSON": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "MAX_ITEMS_PER_WORKER": {
+                            "value": "4",
+                            "type": "int"
+                        },
+                        "MAX_WORKER_LIFETIME_SECONDS": {
+                            "value": "19800",
+                            "type": "int"
+                        },
+                        "MODELS_DIR": {
+                            "value": {
+                                "value": "@pipeline().parameters.MODELS_DIR",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CAPACITY_SKU": {
+                            "value": {
+                                "value": "@pipeline().parameters.CAPACITY_SKU",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "RUNTIME_VERSION": {
+                            "value": {
+                                "value": "@pipeline().parameters.RUNTIME_VERSION",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CONCURRENT_WORKERS": {
+                            "value": {
+                                "value": "@pipeline().parameters.CONCURRENT_WORKERS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DRIVER_CORES": {
+                            "value": {
+                                "value": "@pipeline().parameters.DRIVER_CORES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "ACTIVE_WORKERS_PER_DRIVER": {
+                            "value": {
+                                "value": "@pipeline().parameters.ACTIVE_WORKERS_PER_DRIVER",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "EXPECTED_BATCH_MEMBERS": {
+                            "value": {
+                                "value": "@length(pipeline().parameters.BENCHMARK_ITEMS)",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        },
+                        "PIPELINE": {
+                            "value": {
+                                "value": "@pipeline().parameters.PIPELINE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "DEVICE_VARIANT": {
+                            "value": "cpu",
+                            "type": "string"
+                        },
+                        "DEVICE": {
+                            "value": "cpu",
+                            "type": "string"
+                        },
+                        "BATCH_SIZE": {
+                            "value": {
+                                "value": "@pipeline().parameters.BATCH_SIZE",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "SAMPLE_FPS": {
+                            "value": {
+                                "value": "@pipeline().parameters.SAMPLE_FPS",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "DETECTION_THRESHOLD": {
+                            "value": {
+                                "value": "@pipeline().parameters.DETECTION_THRESHOLD",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "USE_FP16": {
+                            "value": false,
+                            "type": "bool"
+                        },
+                        "LINE": {
+                            "value": [],
+                            "type": "array"
+                        },
+                        "DETECTOR_MODEL": {
+                            "value": {
+                                "value": "@pipeline().parameters.DETECTOR_MODEL",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CAMERA_MOTION_COMPENSATION": {
+                            "value": {
+                                "value": "@pipeline().parameters.CAMERA_MOTION_COMPENSATION",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "TARGET_VIDEO_HOURS": {
+                            "value": "200000",
+                            "type": "float"
+                        },
+                        "DEADLINE_DAYS": {
+                            "value": "30",
+                            "type": "float"
+                        },
+                        "UTILIZATION": {
+                            "value": "0.8",
+                            "type": "float"
+                        },
+                        "HEADROOM_FACTOR": {
+                            "value": "1.2",
+                            "type": "float"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "BENCHMARK_BATCH_ID": {
+                "type": "string"
+            },
+            "CAPACITY_SKU": {
+                "type": "string",
+                "defaultValue": "F64"
+            },
+            "RUNTIME_VERSION": {
+                "type": "string"
+            },
+            "CONCURRENT_WORKERS": {
+                "type": "int",
+                "defaultValue": 4
+            },
+            "BENCHMARK_ITEMS": {
+                "type": "array",
+                "defaultValue": [
+                    {
+                        "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/short-720p.mp4",
+                        "sample_name": "short-720p-low-motion",
+                        "duration_seconds": 600
+                    },
+                    {
+                        "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/common-1080p.mp4",
+                        "sample_name": "common-1080p-medium-motion",
+                        "duration_seconds": 1800
+                    },
+                    {
+                        "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/long-4k.mp4",
+                        "sample_name": "long-4k-high-motion",
+                        "duration_seconds": 3600
+                    }
+                ]
+            },
+            "MODELS_DIR": {
+                "type": "string",
+                "defaultValue": "/lakehouse/default/Files/models/<release>"
+            },
+            "DRIVER_CORES": {
+                "type": "int",
+                "defaultValue": 4
+            },
+            "ACTIVE_WORKERS_PER_DRIVER": {
+                "type": "int",
+                "defaultValue": 4
+            },
+            "EXPECTED_BATCH_MEMBERS": {
+                "type": "int",
+                "defaultValue": 0
+            },
+            "PIPELINE": {
+                "type": "string",
+                "defaultValue": "rtdetr-osnet"
+            },
+            "BATCH_SIZE": {
+                "type": "int",
+                "defaultValue": 1
+            },
+            "SAMPLE_FPS": {
+                "type": "float",
+                "defaultValue": 3
+            },
+            "DETECTION_THRESHOLD": {
+                "type": "float",
+                "defaultValue": 0.6
+            },
+            "DETECTOR_MODEL": {
+                "type": "string",
+                "defaultValue": "r18"
+            },
+            "CAMERA_MOTION_COMPENSATION": {
+                "type": "string"
+            }
+        },
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-24T19:33:12Z"
+    }
+}
