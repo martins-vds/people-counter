@@ -162,7 +162,7 @@
                 "type": "PBISemanticModelRefresh",
                 "dependsOn": [
                     {
-                        "activity": "BuildAnalyticsDimensions",
+                        "activity": "RefreshAnalyticsModel",
                         "dependencyConditions": [
                             "Succeeded"
                         ]
