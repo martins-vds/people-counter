@@ -1,0 +1,52 @@
+{
+    "name": "pc-delta-maintenance",
+    "objectId": "a26b27a5-99db-4c95-9b2f-c048949a8246",
+    "properties": {
+        "activities": [
+            {
+                "name": "MaintainDelta",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "556afe69-2e87-4fd5-82aa-eac605b530aa",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        },
+                        "UNCOMMITTED_RETENTION_DAYS": {
+                            "value": "30",
+                            "type": "int"
+                        },
+                        "OPTIMIZE_LOOKBACK_DAYS": {
+                            "value": "7",
+                            "type": "int"
+                        },
+                        "VACUUM_RETENTION_HOURS": {
+                            "value": "168",
+                            "type": "int"
+                        },
+                        "RUN_VACUUM": {
+                            "value": false,
+                            "type": "bool"
+                        }
+                    }
+                }
+            }
+        ],
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-22T22:30:58Z"
+    }
+}
