@@ -1,0 +1,38 @@
+{
+    "name": "pc-reconcile",
+    "objectId": "61d98ddf-0a4d-45b7-a21b-fa577f3f909e",
+    "properties": {
+        "activities": [
+            {
+                "name": "ReconcilePublication",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                    "notebookId": "d2761a0b-398c-418f-bbbd-5a30ca57d4ef",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        ],
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-22T21:59:21Z"
+    }
+}
