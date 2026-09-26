@@ -1,0 +1,50 @@
+{
+    "name": "pc-watchdog",
+    "objectId": "2e415a3e-336a-42bf-9e3e-ee7c10c1722f",
+    "properties": {
+        "activities": [
+            {
+                "name": "WatchdogRecovery",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.00:10:00",
+                    "retry": 1,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 120
+                },
+                "typeProperties": {
+                    "notebookId": "1ab47cdb-7775-4f0d-872c-f730291d789a",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "DATABASE": {
+                            "value": "",
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": "people_counter",
+                            "type": "string"
+                        },
+                        "EXPIRY_GRACE_MINUTES": {
+                            "value": "5",
+                            "type": "int"
+                        },
+                        "HEARTBEAT_TIMEOUT_MINUTES": {
+                            "value": "20",
+                            "type": "int"
+                        },
+                        "MAX_RECOVERIES_PER_RUN": {
+                            "value": "1000",
+                            "type": "int"
+                        }
+                    }
+                }
+            }
+        ],
+        "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
+        "lastPublishTime": "2026-09-22T21:59:09Z"
+    }
+}
