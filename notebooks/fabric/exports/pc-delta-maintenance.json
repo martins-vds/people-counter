@@ -8,11 +8,13 @@
                 "type": "TridentNotebook",
                 "dependsOn": [],
                 "policy": {
-                    "timeout": "0.12:00:00",
-                    "retry": 0,
-                    "retryIntervalInSeconds": 30,
+                    "timeout": "0.06:00:00",
+                    "retry": 1,
+                    "retryIntervalInSeconds": 300,
                     "secureOutput": false,
-                    "secureInput": false
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 900
                 },
                 "typeProperties": {
                     "notebookId": "556afe69-2e87-4fd5-82aa-eac605b530aa",
@@ -25,6 +27,10 @@
                         "TABLE_PREFIX": {
                             "value": "people_counter",
                             "type": "string"
+                        },
+                        "CONFIRM_WRITERS_STOPPED": {
+                            "value": false,
+                            "type": "bool"
                         },
                         "UNCOMMITTED_RETENTION_DAYS": {
                             "value": "30",
