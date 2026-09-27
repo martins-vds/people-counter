@@ -140,8 +140,8 @@ For four 8-core executors:
 |---:|---:|---:|
 | 1 | 32 | 32 |
 | 2 | 16 | 32 |
-| 4 | 8 | 32 |
 | 3 | 8 | 24 |
+| 4 | 8 | 32 |
 
 These ceilings are capacity ceilings, not guaranteed occupancy. Reject zero-slot
 plans. Warn about fragments such as the unused 2 cores per 8-core executor when
@@ -229,7 +229,7 @@ def partition_records(rows):
         raise RuntimeError("Partition inference requires a Spark task context")
 
     task_cpus = context.cpus()
-    if type(task_cpus) is not int or task_cpus < 1:
+    if not isinstance(task_cpus, int) or task_cpus < 1:
         raise RuntimeError(f"Invalid Spark task CPU allocation: {task_cpus}")
 
     configure_cpu_runtime(driver_cores=task_cpus, active_workers=1)
