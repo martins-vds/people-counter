@@ -136,12 +136,12 @@ fragmented CPUs across executor boundaries.
 
 For four 8-core executors:
 
-| `CPUS_PER_TASK` (`T`) | Slots per executor, `floor(8 / T)` | Application slots | Cores allocated when slots are full |
-|---:|---:|---:|---:|
-| 1 | 8 | 32 | 32 |
-| 2 | 4 | 16 | 32 |
-| 3 | 2 | 8 | 24 |
-| 4 | 2 | 8 | 32 |
+| `CPUS_PER_TASK` (`T`) | Slots per executor, `floor(8 / T)` | Unused cores per executor | Application slots | Cores allocated when slots are full |
+|---:|---:|---:|---:|---:|
+| 1 | 8 | 0 | 32 | 32 |
+| 2 | 4 | 0 | 16 | 32 |
+| 3 | 2 | 2 | 8 | 24 |
+| 4 | 2 | 0 | 8 | 32 |
 
 These ceilings are capacity ceilings, not guaranteed occupancy. Reject zero-slot
 plans. Warn about fragments such as the unused 2 cores per 8-core executor when
