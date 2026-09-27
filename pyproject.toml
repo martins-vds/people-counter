@@ -68,6 +68,11 @@ experiments = [
     "matplotlib>=3.8.0",
     "pandas>=2.2.0",
 ]
+export = [
+    "libreyolo==1.5.0",
+    "openvino>=2025.0,<2027",
+    "rfdetr[onnx]==1.10.1",
+]
 publisher = [
     "azure-identity>=1.17.0,<2",
     "azure-storage-file-datalake>=12.16.0,<13",

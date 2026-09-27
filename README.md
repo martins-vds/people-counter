@@ -60,6 +60,22 @@ uv run python scripts/download_models.py \
   --output-dir /data/people-counter-models
 ```
 
+To also export every selected detector and re-identification model to ONNX
+or OpenVINO, install the CPU and export extras and pass `--convert`:
+
+```bash
+uv run --extra cpu --extra export python scripts/download_models.py \
+  --output-dir /data/people-counter-models \
+  --convert onnx
+```
+
+Use `--convert openvino` to produce OpenVINO `.xml` and `.bin` files. The
+ONNX files are retained as the intermediate representation. Conversion
+artifacts are written beside their original weights, and existing complete
+artifacts are reused unless `--force` is supplied. The SDK currently loads
+the original PyTorch artifacts; the converted files are intended for custom
+ONNX Runtime or OpenVINO deployments.
+
 Copy that directory to the offline machine without changing its internal
 layout. Set `models_dir` on either SDK configuration to require local model
 loading:
