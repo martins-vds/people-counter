@@ -97,11 +97,12 @@ Before running the prototype:
   already has an active Spark session, select **Stop session**, then rerun from
   the `%%configure` cell so the requested resources and Spark properties take
   effect;
-- use the section 7.4.8 benchmark pipeline to stage each distinct source,
-  probe `duration_seconds`, `source_width`, and `source_height`, verify
-  executor-visible video/model paths, and create one input row per submitted
-  whole video. Direct notebook runs still require those prepared rows and a
-  non-empty executor-visible `models_dir`;
+- use the section 7.4.8 benchmark pipeline to resolve each distinct source to
+  its attached-Lakehouse File API path, probe `duration_seconds`,
+  `source_width`, and `source_height` without copying, verify executor-visible
+  video/model paths, and create one input row per submitted whole video.
+  Direct notebook runs still require those prepared rows and a non-empty
+  executor-visible `models_dir`;
 - keep the `CPUS_PER_TASK` value in the parameter cell equal to the
   `spark.task.cpus` value requested by `%%configure`. The notebook fails with
   restart instructions when the requested and effective values differ and never
@@ -141,6 +142,54 @@ that a Fabric pipeline Notebook activity can override:
 | `CPUS_PER_TASK` | `conf.spark.task.cpus` | `1` | Scheduler CPUs reserved for each inference task. Pass the same integer to the notebook parameter cell. |
 | `MIN_EXECUTORS` | `conf.spark.dynamicAllocation.minExecutors` | `1` | Dynamic-allocation lower bound. |
 | `MAX_EXECUTORS` | `conf.spark.dynamicAllocation.maxExecutors` | `4` | Dynamic-allocation upper bound; it is not proof that this many executors were granted. |
+
+#### Capacity-SKU executor reference
+
+Fabric publishes capacity limits as Spark vCores rather than executor counts.
+For this notebook's default `DRIVER_CORES=4` and `EXECUTOR_CORES=4`, use:
+
+```text
+executor ceiling = floor((Spark vCore limit - DRIVER_CORES) / EXECUTOR_CORES)
+```
+
+The following reference is derived from the Microsoft Learn
+[Spark capacity SKU limits](https://learn.microsoft.com/en-us/fabric/data-engineering/spark-job-concurrency-and-queueing#spark-capacity-sku-limits).
+The no-burst column is the largest executor count whose configured driver plus
+executors fits the SKU's base Spark-vCore allocation. The burst column is an
+absolute capacity ceiling when job-level bursting is enabled and the workspace
+pool is configured to scale that far.
+
+| Capacity SKU | Base Spark vCores | Burst Spark vCores | `MIN_EXECUTORS` starting reference | `MAX_EXECUTORS` no-burst ceiling | `MAX_EXECUTORS` burst ceiling |
+|---|---:|---:|---:|---:|---:|
+| F2 | 4 | 20 | `1`* | `0` | `4` |
+| F4 | 8 | 24 | `1` | `1` | `5` |
+| F8 | 16 | 48 | `1` | `3` | `11` |
+| F16 | 32 | 96 | `1` | `7` | `23` |
+| F32 | 64 | 192 | `1` | `15` | `47` |
+| F64 | 128 | 384 | `1` | `31` | `95` |
+| F128 | 256 | 768 | `1` | `63` | `191` |
+
+\* With this 4-core driver and 4-core executor shape, F2 cannot admit one
+executor from its four base Spark vCores; `MIN_EXECUTORS=1` requires burst
+capacity to be available.
+
+Treat these values as planning ceilings, not guaranteed allocations.
+`MAX_EXECUTORS` must be no greater than the workspace pool maximum and should
+normally be lower when the capacity is shared. `MIN_EXECUTORS` controls the
+job's admission footprint, so keep it at `1` for characterization unless a
+dedicated capacity has been sized for a larger fixed minimum. For the shared
+F8 characterization used by this project, start with `MIN_EXECUTORS=1` and
+`MAX_EXECUTORS=2`; the F8 no-burst ceiling of `3` assumes the application can
+consume the remaining base Spark vCores after its driver. The checked-in F64
+pipeline default of `MIN_EXECUTORS=2` and `MAX_EXECUTORS=8` is deliberately
+below F64's ceiling.
+
+If `DRIVER_CORES` or `EXECUTOR_CORES` changes, do not reuse the table's executor
+counts; recalculate both ceilings with the formula. Actual scale-up can be
+lower because other Spark jobs, pool node limits, memory/node shape, disabled
+job-level bursting, or capacity throttling consume or restrict the same
+resources. Notebook 15 still uses observed executor allocation, not
+`MAX_EXECUTORS`, to calculate inference slots.
 
 The cell also sets `spark.speculation=false`, which is required for explicit
 `PARALLEL_TASKS` benchmark caps, and enables dynamic allocation. Edit the
@@ -3978,7 +4027,7 @@ the system under test.
 
 | Artifact | Responsibility |
 |---|---|
-| `16_executor_partition_benchmark_control.ipynb` | Runs in `PREPARE` or `EVALUATE` mode. Preparation stages and probes benchmark media and writes run-scoped input rows. Evaluation reads notebook-15 records, plans, resource snapshots, and run metrics and enforces the gate. |
+| `16_executor_partition_benchmark_control.ipynb` | Runs in `PREPARE` or `EVALUATE` mode. Preparation resolves attached-Lakehouse File API paths, probes benchmark media without copying, and writes run-scoped input rows. Evaluation reads notebook-15 records, plans, resource snapshots, and run metrics and enforces the gate. |
 | `15_executor_partition_inference.ipynb` | Runs exactly once per benchmark configuration and processes all prepared rows through one Spark application. |
 | `pc-executor-partition-benchmark` | Child Data pipeline implementing prepare, inference, evaluation, refresh, and failure propagation. |
 | `pc-executor-partition-benchmark-suite` | Optional parent pipeline that invokes the child sequentially for a reviewed parameter matrix. It must never overlap matrix members on the same capacity. |
@@ -4008,9 +4057,11 @@ write a second gate notebook manually.
    for all three Notebook activities, and verify the semantic-model connection
    on `RefreshBenchmarkModel`.
 5. Set a new `BENCHMARK_BATCH_ID`, the exact `RUNTIME_VERSION` and
-   `CAPACITY_SKU`, an executor-visible `MODELS_DIR`, and a non-empty
-   `BENCHMARK_ITEMS` array. Do not reuse a batch ID after failure or
-   cancellation.
+   `CAPACITY_SKU`, the exact `ATTACHED_LAKEHOUSE_ID`, an executor-visible
+   `MODELS_DIR`, and a non-empty `BENCHMARK_ITEMS` array. Keep
+   `LAKEHOUSE_FILE_API_ROOT=/lakehouse/default` unless the notebook uses a
+   different attached-Lakehouse mount. Do not reuse a batch ID after failure
+   or cancellation.
 6. Set `CPUS_PER_TASK` once on the pipeline. The export passes that value both
    to notebook 15's first `%%configure` cell and to its Python parameter cell.
    Review the driver/executor memory, core, and dynamic-allocation bounds before
@@ -4060,25 +4111,34 @@ Optional reviewed metadata can avoid or verify probing:
 `PREPARE` mode must:
 
 1. validate a non-empty, bounded array and stable `sample_name` values;
-2. verify each distinct `video_uri` through the attached Lakehouse identity;
-3. copy each distinct source once into a run-scoped directory under
-   `/lakehouse/default/Files/executor-partition-benchmarks/<batch-id>/inputs`;
-4. probe the staged media once for duration, frame count, width, height, FPS,
-   and codec, using supplied positive metadata only as a reviewed value to
-   verify or replace probe output;
-5. fail on unreadable media or material supplied/probed metadata disagreement;
-6. expand repeated benchmark items after probing so repeated samples do not
-   repeat staging or metadata work;
-7. create deterministic `work_id` values from the batch ID, item ordinal, and
-   source identity;
-8. write complete pipeline/model settings and the shared executor-visible
-   video/model paths to `people_counter_executor_partition_input`; and
-9. run a model-free Spark preflight that verifies every active executor can
-   read at least one staged video and the configured `MODELS_DIR`.
+2. require each distinct `video_uri` to be an `abfss://` OneLake `Files` URI
+   whose Lakehouse ID exactly matches `ATTACHED_LAKEHOUSE_ID`;
+3. map only that URI's decoded `Files/...` suffix to
+   `<LAKEHOUSE_FILE_API_ROOT>/Files/...`, retaining the original URI as source
+   identity and rejecting traversal, query, and fragment components;
+4. open and probe the mounted File API path directly with OpenCV, without
+   copying the video to a batch staging area;
+5. collect duration, frame count, width, height, FPS, and codec once per
+   distinct source, using supplied positive metadata only as a reviewed value
+   to verify or replace probe output;
+6. fail on unreadable media or material supplied/probed metadata disagreement;
+7. expand repeated benchmark items after probing so repeated samples do not
+   repeat path resolution or metadata work;
+8. create deterministic `work_id` values from the batch ID, item ordinal, and
+   canonical `video_uri`;
+9. write complete pipeline/model settings and the shared executor-visible
+   File API video/model paths to `people_counter_executor_partition_input`;
+   and
+10. run a model-free Spark preflight that verifies every active executor can
+    read each direct File API video path and the configured `MODELS_DIR`.
 
 Preparation is outside measured inference time. Its duration is persisted
-separately so staging regressions remain visible without being confused with
-notebook-15 throughput.
+separately so source-access regressions remain visible without being confused
+with notebook-15 throughput. During execution, the notebook prints structured
+`EXECUTOR_BENCHMARK_PREPARE_PROGRESS` records for `VALIDATE`, `SOURCE_PROBE`,
+`EXECUTOR_PREFLIGHT`, `INPUT_WRITE`, and `EVENT_WRITE`. If PREPARE stalls, use
+the last `STARTED` record without a matching `SUCCEEDED` record to identify the
+blocking operation.
 
 `duration_seconds` is required for an approvable throughput result, but the
 operator no longer has to enter it: a successful trusted probe supplies it.
@@ -4127,14 +4187,15 @@ without turning the overall pipeline green.
 | `PIPELINE`, `BATCH_SIZE`, `SAMPLE_FPS`, `DETECTION_THRESHOLD`, `DETECTOR_MODEL`, `CAMERA_MOTION_COMPENSATION` | matching types | Exact inference configuration shared with the baseline. |
 | `LINE` | `Array` | Empty for no counting line, or four integer coordinates. It participates in the configuration hash. |
 | `CPUS_PER_TASK` | `Int` | Passed both to notebook 15's `%%configure` parameter and its Python parameter cell. |
-| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. |
+| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. Select executor bounds from the capacity-SKU reference above, then lower them for shared-capacity headroom and workspace-pool limits. |
 | `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
 | `PARTITION_WAVES` | `Int` | Number of planned partition waves. |
 | `RUNTIME_AFFINITY_MAX_IMBALANCE` | `Float` | Maximum projected-load penalty accepted to retain a model-runtime affinity bucket. |
 | `PEAK_WORKER_MEMORY_GIB`, `USABLE_EXECUTOR_MEMORY_GIB`, `EXECUTOR_MEMORY_HEADROOM_FRACTION` | `Float` | Reviewed memory-safety inputs. |
 | `OUTPUT_TXN_VERSION` | `Int` | Stable non-negative version for this unique batch; normally `0`. |
 | `INPUT_TXN_VERSION` | `Int` | Idempotent Delta transaction version for preparation; normally `0`. |
-| `STAGING_ROOT` | `String` | Lakehouse Files root for batch-scoped staged media. |
+| `ATTACHED_LAKEHOUSE_ID` | `String` | Exact item ID of the notebook's attached default Lakehouse. Every benchmark `video_uri` must reference this ID. |
+| `LAKEHOUSE_FILE_API_ROOT` | `String` | Absolute mounted File API root for the attached Lakehouse; normally `/lakehouse/default`. |
 
 Notebook 15 implements `INPUT_BATCH_ID` and rejects partially supplied
 benchmark identity. Before counting or planning, it filters

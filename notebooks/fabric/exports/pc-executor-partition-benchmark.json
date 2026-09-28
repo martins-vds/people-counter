@@ -50,9 +50,16 @@
                             },
                             "type": "string"
                         },
-                        "STAGING_ROOT": {
+                        "ATTACHED_LAKEHOUSE_ID": {
                             "value": {
-                                "value": "@pipeline().parameters.STAGING_ROOT",
+                                "value": "@pipeline().parameters.ATTACHED_LAKEHOUSE_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "LAKEHOUSE_FILE_API_ROOT": {
+                            "value": {
+                                "value": "@pipeline().parameters.LAKEHOUSE_FILE_API_ROOT",
                                 "type": "Expression"
                             },
                             "type": "string"
@@ -709,9 +716,13 @@
                 "type": "string",
                 "defaultValue": "/lakehouse/default/Files/models/<release>"
             },
-            "STAGING_ROOT": {
+            "ATTACHED_LAKEHOUSE_ID": {
                 "type": "string",
-                "defaultValue": "/lakehouse/default/Files/executor-partition-benchmarks"
+                "defaultValue": "883cff91-eaa8-40be-870f-6e9716303cb2"
+            },
+            "LAKEHOUSE_FILE_API_ROOT": {
+                "type": "string",
+                "defaultValue": "/lakehouse/default"
             },
             "BASELINE_BENCHMARK_BATCH_ID": {
                 "type": "string",

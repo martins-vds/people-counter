@@ -221,6 +221,16 @@ if line_counts:
     )
 ```
 
+To verify the direct OneLake File API prerequisite used by the Fabric executor
+benchmark, paste
+[`scripts/verify_onelake_opencv.py`](scripts/verify_onelake_opencv.py) into a
+Fabric scratchpad notebook, replace `ONELAKE_VIDEO_PATH` with a mounted
+`/lakehouse/default/Files/...` video path, and run the cell. The probe passes
+that path directly to OpenCV and succeeds only if it can decode the first
+frame; it does not copy or stage the file. The benchmark retains the canonical
+`abfss://` URI as source identity but resolves its `Files/...` suffix to this
+mounted path for OpenCV and executor access.
+
 For retry-safe pipelines, add a stable run identifier and use Delta merge
 semantics instead of unconditional append. If an `abfss://` URI cannot be
 opened by OpenCV, stage the video in notebook-local storage before invoking

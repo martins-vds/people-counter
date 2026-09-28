@@ -362,9 +362,9 @@ applications and would not exercise executor-partition scheduling.
 - a run-scoped prepared-input contract in
   `people_counter_executor_partition_input`.
 
-The control notebook is separate from notebook 15 so source validation,
-copying, and metadata probing are not included in measured inference
-throughput, while their own timing remains available for diagnosis.
+The control notebook is separate from notebook 15 so source validation, direct
+File API probing, and executor-access checks are not included in measured
+inference throughput, while their own timing remains available for diagnosis.
 
 ### 14.2 Prepare, run, evaluate
 
@@ -388,16 +388,20 @@ notebook-04 benchmark:
 }
 ```
 
-Duration and resolution are optional reviewed fields. Preparation verifies each
-distinct source, copies it once to a batch-scoped path in the attached
-Lakehouse, probes duration, frame count, width, height, FPS, and codec, and
-writes one complete row per submitted item. Supplied and probed metadata must
-agree within reviewed tolerances. Unreadable or incomplete media fails
-preparation; an approval run must not use planning fallbacks.
+Duration and resolution are optional reviewed fields. Preparation verifies that
+each distinct source URI references the exact attached Lakehouse, maps its
+decoded `Files/...` suffix to `/lakehouse/default/Files/...`, probes that
+mounted path directly without copying, and writes one complete row per
+submitted item. Supplied and probed metadata must agree within reviewed
+tolerances. Unreadable or incomplete media fails preparation; an approval run
+must not use planning fallbacks.
 
-Before inference, a model-free Spark action verifies executor access to staged
-videos and `MODELS_DIR`. This is an accessibility check, not resource
-discovery and not part of measured inference wall time.
+Before inference, a model-free Spark action verifies executor access to direct
+File API video paths and `MODELS_DIR`. This is an accessibility check, not
+resource discovery and not part of measured inference wall time. PREPARE emits
+structured start/success progress records around validation, source probing,
+executor preflight, input writes, and the final event write so a stalled
+activity identifies its blocking stage.
 
 Notebook 15 then runs in one Notebook activity. The activity passes both
 session configuration parameters for its first `%%configure` cell and normal

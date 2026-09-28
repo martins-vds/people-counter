@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call
+from urllib.parse import unquote, urlsplit
 
 from people_counter.runtime import RuntimeCompatibilityError
 
@@ -400,6 +401,64 @@ class FabricNotebookTests(unittest.TestCase):
             deterministic_work_id("batch", 1, "video.mp4"),
         )
 
+    def test_executor_benchmark_resolves_attached_lakehouse_file_api_paths(self):
+        resolver = cell_functions(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-helpers",
+            "onelake_file_api_path",
+            unquote=unquote,
+            urlsplit=urlsplit,
+        )["onelake_file_api_path"]
+        lakehouse_id = "883cff91-eaa8-40be-870f-6e9716303cb2"
+        uri = (
+            "abfss://workspace@onelake.dfs.fabric.microsoft.com/"
+            f"{lakehouse_id}/Files/videos/sample%20clip.mp4"
+        )
+
+        self.assertEqual(
+            resolver(uri, lakehouse_id, "/lakehouse/default/"),
+            "/lakehouse/default/Files/videos/sample clip.mp4",
+        )
+        for invalid_uri in (
+            uri.replace(lakehouse_id, "different-lakehouse"),
+            uri.replace("sample%20clip.mp4", "%2E%2E/clip.mp4"),
+            f"{uri}?version=1",
+            "https://onelake.dfs.fabric.microsoft.com/video.mp4",
+        ):
+            with self.subTest(invalid_uri=invalid_uri):
+                with self.assertRaises(ValueError):
+                    resolver(invalid_uri, lakehouse_id, "/lakehouse/default")
+
+    def test_executor_benchmark_prepares_direct_paths_with_stage_progress(self):
+        parameters = cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-parameters",
+        )
+        prepare = cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "prepare-benchmark",
+        )
+
+        self.assertIn('ATTACHED_LAKEHOUSE_ID = ""', parameters)
+        self.assertIn(
+            'LAKEHOUSE_FILE_API_ROOT = "/lakehouse/default"',
+            parameters,
+        )
+        self.assertNotIn("STAGING_ROOT", parameters)
+        self.assertNotIn("notebookutils.fs.cp", prepare)
+        self.assertIn("onelake_file_api_path(", prepare)
+        self.assertIn("Path(local_video_path).is_file()", prepare)
+        self.assertIn('"source_access_mode": "DIRECT_FILE_API"', prepare)
+        self.assertIn('"EXECUTOR_BENCHMARK_PREPARE_PROGRESS"', prepare)
+        for stage in (
+            "VALIDATE",
+            "SOURCE_PROBE",
+            "EXECUTOR_PREFLIGHT",
+            "INPUT_WRITE",
+            "EVENT_WRITE",
+        ):
+            self.assertIn(f'"{stage}"', prepare)
+
     def test_executor_benchmark_bootstrap_and_pipeline_contract(self):
         bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
         bootstrap_evolution = cell_source(
@@ -453,6 +512,21 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertEqual(
             activities["PrepareExecutorBenchmark"]["typeProperties"]["notebookId"],
             "efd68f39-e6f6-42fb-9797-9e7ced47a8a0",
+        )
+        prepare_parameters = activities["PrepareExecutorBenchmark"][
+            "typeProperties"
+        ]["parameters"]
+        self.assertIn("ATTACHED_LAKEHOUSE_ID", prepare_parameters)
+        self.assertIn("LAKEHOUSE_FILE_API_ROOT", prepare_parameters)
+        self.assertNotIn("STAGING_ROOT", prepare_parameters)
+        pipeline_parameters = pipeline["properties"]["parameters"]
+        self.assertEqual(
+            pipeline_parameters["ATTACHED_LAKEHOUSE_ID"]["defaultValue"],
+            "883cff91-eaa8-40be-870f-6e9716303cb2",
+        )
+        self.assertEqual(
+            pipeline_parameters["LAKEHOUSE_FILE_API_ROOT"]["defaultValue"],
+            "/lakehouse/default",
         )
 
     def test_benchmark_rejects_placeholder_runtime_labels(self):
