@@ -1,0 +1,822 @@
+{
+    "name": "pc-executor-partition-benchmark",
+    "objectId": "9169409b-82dc-4a3e-afad-611220b9930a",
+    "properties": {
+        "activities": [
+            {
+                "name": "PrepareExecutorBenchmark",
+                "type": "TridentNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.02:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "efd68f39-e6f6-42fb-9797-9e7ced47a8a0",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "MODE": {
+                            "value": "PREPARE",
+                            "type": "string"
+                        },
+                        "BENCHMARK_BATCH_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.BENCHMARK_BATCH_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "BENCHMARK_ITEMS_JSON": {
+                            "value": {
+                                "value": "@string(pipeline().parameters.BENCHMARK_ITEMS)",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EXPECTED_ITEM_COUNT": {
+                            "value": {
+                                "value": "@length(pipeline().parameters.BENCHMARK_ITEMS)",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MODELS_DIR": {
+                            "value": {
+                                "value": "@pipeline().parameters.MODELS_DIR",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "STAGING_ROOT": {
+                            "value": {
+                                "value": "@pipeline().parameters.STAGING_ROOT",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CAPACITY_SKU": {
+                            "value": {
+                                "value": "@pipeline().parameters.CAPACITY_SKU",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "RUNTIME_VERSION": {
+                            "value": {
+                                "value": "@pipeline().parameters.RUNTIME_VERSION",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "PIPELINE": {
+                            "value": {
+                                "value": "@pipeline().parameters.PIPELINE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "BATCH_SIZE": {
+                            "value": {
+                                "value": "@pipeline().parameters.BATCH_SIZE",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "SAMPLE_FPS": {
+                            "value": {
+                                "value": "@pipeline().parameters.SAMPLE_FPS",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "DETECTION_THRESHOLD": {
+                            "value": {
+                                "value": "@pipeline().parameters.DETECTION_THRESHOLD",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "LINE": {
+                            "value": {
+                                "value": "@string(pipeline().parameters.LINE)",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "DETECTOR_MODEL": {
+                            "value": {
+                                "value": "@pipeline().parameters.DETECTOR_MODEL",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CAMERA_MOTION_COMPENSATION": {
+                            "value": {
+                                "value": "@pipeline().parameters.CAMERA_MOTION_COMPENSATION",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CPUS_PER_TASK": {
+                            "value": {
+                                "value": "@pipeline().parameters.CPUS_PER_TASK",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DRIVER_MEMORY": {
+                            "value": {
+                                "value": "@pipeline().parameters.DRIVER_MEMORY",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "DRIVER_CORES": {
+                            "value": {
+                                "value": "@pipeline().parameters.DRIVER_CORES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "EXECUTOR_MEMORY": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EXECUTOR_CORES": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_CORES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MIN_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MIN_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MAX_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MAX_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "PARALLEL_TASKS": {
+                            "value": {
+                                "value": "@pipeline().parameters.PARALLEL_TASKS",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "PARTITION_WAVES": {
+                            "value": {
+                                "value": "@pipeline().parameters.PARTITION_WAVES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "RUNTIME_AFFINITY_MAX_IMBALANCE": {
+                            "value": {
+                                "value": "@pipeline().parameters.RUNTIME_AFFINITY_MAX_IMBALANCE",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "PEAK_WORKER_MEMORY_GIB": {
+                            "value": {
+                                "value": "@pipeline().parameters.PEAK_WORKER_MEMORY_GIB",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "USABLE_EXECUTOR_MEMORY_GIB": {
+                            "value": {
+                                "value": "@pipeline().parameters.USABLE_EXECUTOR_MEMORY_GIB",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "EXECUTOR_MEMORY_HEADROOM_FRACTION": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY_HEADROOM_FRACTION",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "INPUT_TXN_VERSION": {
+                            "value": {
+                                "value": "@pipeline().parameters.INPUT_TXN_VERSION",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "RunExecutorPartitionInference",
+                "type": "TridentNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "PrepareExecutorBenchmark",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "c3c0fc72-3bd2-4d3a-a485-ccf4326d42e0",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "INPUT_BATCH_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.BENCHMARK_BATCH_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CAPACITY_SKU": {
+                            "value": {
+                                "value": "@pipeline().parameters.CAPACITY_SKU",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "RUNTIME_VERSION": {
+                            "value": {
+                                "value": "@pipeline().parameters.RUNTIME_VERSION",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CONFIG_SHA256": {
+                            "value": {
+                                "value": "@json(activity('PrepareExecutorBenchmark').output.result.exitValue).config_sha256",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "OUTPUT_TXN_APP_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.BENCHMARK_BATCH_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "OUTPUT_TXN_VERSION": {
+                            "value": {
+                                "value": "@pipeline().parameters.OUTPUT_TXN_VERSION",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "CPUS_PER_TASK": {
+                            "value": {
+                                "value": "@pipeline().parameters.CPUS_PER_TASK",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "PARALLEL_TASKS": {
+                            "value": {
+                                "value": "@pipeline().parameters.PARALLEL_TASKS",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "PARTITION_WAVES": {
+                            "value": {
+                                "value": "@pipeline().parameters.PARTITION_WAVES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "RUNTIME_AFFINITY_MAX_IMBALANCE": {
+                            "value": {
+                                "value": "@pipeline().parameters.RUNTIME_AFFINITY_MAX_IMBALANCE",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "PEAK_WORKER_MEMORY_GIB": {
+                            "value": {
+                                "value": "@pipeline().parameters.PEAK_WORKER_MEMORY_GIB",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "USABLE_EXECUTOR_MEMORY_GIB": {
+                            "value": {
+                                "value": "@pipeline().parameters.USABLE_EXECUTOR_MEMORY_GIB",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "EXECUTOR_MEMORY_HEADROOM_FRACTION": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY_HEADROOM_FRACTION",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "DRIVER_MEMORY": {
+                            "value": {
+                                "value": "@pipeline().parameters.DRIVER_MEMORY",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "DRIVER_CORES": {
+                            "value": {
+                                "value": "@pipeline().parameters.DRIVER_CORES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "EXECUTOR_MEMORY": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EXECUTOR_CORES": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_CORES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MIN_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MIN_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MAX_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MAX_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "EvaluateExecutorBenchmark",
+                "type": "TridentNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "RunExecutorPartitionInference",
+                        "dependencyConditions": [
+                            "Completed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.01:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "typeProperties": {
+                    "notebookId": "efd68f39-e6f6-42fb-9797-9e7ced47a8a0",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "parameters": {
+                        "MODE": {
+                            "value": "EVALUATE",
+                            "type": "string"
+                        },
+                        "BENCHMARK_BATCH_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.BENCHMARK_BATCH_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EXPECTED_ITEM_COUNT": {
+                            "value": {
+                                "value": "@length(pipeline().parameters.BENCHMARK_ITEMS)",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "RUN_ID": {
+                            "value": {
+                                "value": "@concat(pipeline().parameters.BENCHMARK_BATCH_ID, ':', string(pipeline().parameters.OUTPUT_TXN_VERSION))",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "MODELS_DIR": {
+                            "value": {
+                                "value": "@pipeline().parameters.MODELS_DIR",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CAPACITY_SKU": {
+                            "value": {
+                                "value": "@pipeline().parameters.CAPACITY_SKU",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "RUNTIME_VERSION": {
+                            "value": {
+                                "value": "@pipeline().parameters.RUNTIME_VERSION",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "BASELINE_BENCHMARK_BATCH_ID": {
+                            "value": {
+                                "value": "@pipeline().parameters.BASELINE_BENCHMARK_BATCH_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "BASELINE_CONFIG_SHA256": {
+                            "value": {
+                                "value": "@pipeline().parameters.BASELINE_CONFIG_SHA256",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "MIN_WALL_SECONDS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MIN_WALL_SECONDS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MIN_THROUGHPUT_IMPROVEMENT_PERCENT": {
+                            "value": {
+                                "value": "@pipeline().parameters.MIN_THROUGHPUT_IMPROVEMENT_PERCENT",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "ENFORCE_GATE": {
+                            "value": true,
+                            "type": "bool"
+                        },
+                        "PIPELINE": {
+                            "value": {
+                                "value": "@pipeline().parameters.PIPELINE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "BATCH_SIZE": {
+                            "value": {
+                                "value": "@pipeline().parameters.BATCH_SIZE",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "SAMPLE_FPS": {
+                            "value": {
+                                "value": "@pipeline().parameters.SAMPLE_FPS",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "DETECTION_THRESHOLD": {
+                            "value": {
+                                "value": "@pipeline().parameters.DETECTION_THRESHOLD",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "LINE": {
+                            "value": {
+                                "value": "@string(pipeline().parameters.LINE)",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "DETECTOR_MODEL": {
+                            "value": {
+                                "value": "@pipeline().parameters.DETECTOR_MODEL",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CAMERA_MOTION_COMPENSATION": {
+                            "value": {
+                                "value": "@pipeline().parameters.CAMERA_MOTION_COMPENSATION",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "CPUS_PER_TASK": {
+                            "value": {
+                                "value": "@pipeline().parameters.CPUS_PER_TASK",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DRIVER_MEMORY": {
+                            "value": {
+                                "value": "@pipeline().parameters.DRIVER_MEMORY",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "DRIVER_CORES": {
+                            "value": {
+                                "value": "@pipeline().parameters.DRIVER_CORES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "EXECUTOR_MEMORY": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EXECUTOR_CORES": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_CORES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MIN_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MIN_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "MAX_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.MAX_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "PARALLEL_TASKS": {
+                            "value": {
+                                "value": "@pipeline().parameters.PARALLEL_TASKS",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "PARTITION_WAVES": {
+                            "value": {
+                                "value": "@pipeline().parameters.PARTITION_WAVES",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "RUNTIME_AFFINITY_MAX_IMBALANCE": {
+                            "value": {
+                                "value": "@pipeline().parameters.RUNTIME_AFFINITY_MAX_IMBALANCE",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "PEAK_WORKER_MEMORY_GIB": {
+                            "value": {
+                                "value": "@pipeline().parameters.PEAK_WORKER_MEMORY_GIB",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "USABLE_EXECUTOR_MEMORY_GIB": {
+                            "value": {
+                                "value": "@pipeline().parameters.USABLE_EXECUTOR_MEMORY_GIB",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        },
+                        "EXECUTOR_MEMORY_HEADROOM_FRACTION": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY_HEADROOM_FRACTION",
+                                "type": "Expression"
+                            },
+                            "type": "float"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "RefreshBenchmarkModel",
+                "type": "PBISemanticModelRefresh",
+                "dependsOn": [
+                    {
+                        "activity": "EvaluateExecutorBenchmark",
+                        "dependencyConditions": [
+                            "Completed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.00:30:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 300
+                },
+                "typeProperties": {
+                    "method": "POST",
+                    "operationType": "SemanticModelRefresh",
+                    "groupId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "datasetId": "1bcc8dd2-66f1-4cde-8225-d07ba944da09",
+                    "waitOnCompletion": true,
+                    "commitMode": "Transactional"
+                },
+                "externalReferences": {
+                    "connection": "8fe1df1e-acf7-4ea3-b00b-2fd0d2fc8d29"
+                }
+            },
+            {
+                "name": "PropagateExecutorBenchmarkFailure",
+                "type": "Fail",
+                "dependsOn": [
+                    {
+                        "activity": "EvaluateExecutorBenchmark",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    },
+                    {
+                        "activity": "RefreshBenchmarkModel",
+                        "dependencyConditions": [
+                            "Completed"
+                        ]
+                    }
+                ],
+                "typeProperties": {
+                    "message": "EvaluateExecutorBenchmark failed; benchmark diagnostics were refreshed. Inspect the gate notebook output.",
+                    "errorCode": "ExecutorBenchmarkGateFailed"
+                }
+            }
+        ],
+        "parameters": {
+            "BENCHMARK_BATCH_ID": {
+                "type": "string"
+            },
+            "BENCHMARK_ITEMS": {
+                "type": "array",
+                "defaultValue": [
+                    {
+                        "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/short-720p.mp4",
+                        "sample_name": "short-720p-low-motion"
+                    },
+                    {
+                        "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/common-1080p.mp4",
+                        "sample_name": "common-1080p-medium-motion"
+                    },
+                    {
+                        "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/long-4k.mp4",
+                        "sample_name": "long-4k-high-motion"
+                    }
+                ]
+            },
+            "CAPACITY_SKU": {
+                "type": "string",
+                "defaultValue": "F64"
+            },
+            "RUNTIME_VERSION": {
+                "type": "string"
+            },
+            "MODELS_DIR": {
+                "type": "string",
+                "defaultValue": "/lakehouse/default/Files/models/<release>"
+            },
+            "STAGING_ROOT": {
+                "type": "string",
+                "defaultValue": "/lakehouse/default/Files/executor-partition-benchmarks"
+            },
+            "BASELINE_BENCHMARK_BATCH_ID": {
+                "type": "string",
+                "defaultValue": ""
+            },
+            "BASELINE_CONFIG_SHA256": {
+                "type": "string",
+                "defaultValue": ""
+            },
+            "MIN_WALL_SECONDS": {
+                "type": "int",
+                "defaultValue": 0
+            },
+            "MIN_THROUGHPUT_IMPROVEMENT_PERCENT": {
+                "type": "float",
+                "defaultValue": 0.0
+            },
+            "PIPELINE": {
+                "type": "string",
+                "defaultValue": "rtdetr-osnet"
+            },
+            "BATCH_SIZE": {
+                "type": "int",
+                "defaultValue": 1
+            },
+            "SAMPLE_FPS": {
+                "type": "float",
+                "defaultValue": 3.0
+            },
+            "DETECTION_THRESHOLD": {
+                "type": "float",
+                "defaultValue": 0.6
+            },
+            "LINE": {
+                "type": "array",
+                "defaultValue": []
+            },
+            "DETECTOR_MODEL": {
+                "type": "string",
+                "defaultValue": "r18"
+            },
+            "CAMERA_MOTION_COMPENSATION": {
+                "type": "string",
+                "defaultValue": ""
+            },
+            "CPUS_PER_TASK": {
+                "type": "int",
+                "defaultValue": 1
+            },
+            "PARALLEL_TASKS": {
+                "type": "string",
+                "defaultValue": "auto"
+            },
+            "PARTITION_WAVES": {
+                "type": "int",
+                "defaultValue": 3
+            },
+            "RUNTIME_AFFINITY_MAX_IMBALANCE": {
+                "type": "float",
+                "defaultValue": 0.1
+            },
+            "PEAK_WORKER_MEMORY_GIB": {
+                "type": "float",
+                "defaultValue": 0.0
+            },
+            "USABLE_EXECUTOR_MEMORY_GIB": {
+                "type": "float",
+                "defaultValue": 0.0
+            },
+            "EXECUTOR_MEMORY_HEADROOM_FRACTION": {
+                "type": "float",
+                "defaultValue": 0.25
+            },
+            "DRIVER_MEMORY": {
+                "type": "string",
+                "defaultValue": "28g"
+            },
+            "DRIVER_CORES": {
+                "type": "int",
+                "defaultValue": 4
+            },
+            "EXECUTOR_MEMORY": {
+                "type": "string",
+                "defaultValue": "28g"
+            },
+            "EXECUTOR_CORES": {
+                "type": "int",
+                "defaultValue": 4
+            },
+            "MIN_EXECUTORS": {
+                "type": "int",
+                "defaultValue": 2
+            },
+            "MAX_EXECUTORS": {
+                "type": "int",
+                "defaultValue": 8
+            },
+            "INPUT_TXN_VERSION": {
+                "type": "int",
+                "defaultValue": 0
+            },
+            "OUTPUT_TXN_VERSION": {
+                "type": "int",
+                "defaultValue": 0
+            }
+        }
+    }
+}

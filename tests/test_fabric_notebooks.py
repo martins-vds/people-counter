@@ -1,5 +1,8 @@
 import ast
+import hashlib
 import json
+import math
+import re
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -14,6 +17,10 @@ WORKER = NOTEBOOKS / "04_process_video.ipynb"
 BOOTSTRAP = NOTEBOOKS / "00_bootstrap_lakehouse.ipynb"
 BENCHMARK = NOTEBOOKS / "08_capacity_benchmark.ipynb"
 EXECUTOR_PROTOTYPE = NOTEBOOKS / "15_executor_partition_inference.ipynb"
+EXECUTOR_BENCHMARK_CONTROL = NOTEBOOKS / "16_executor_partition_benchmark_control.ipynb"
+EXECUTOR_BENCHMARK_PIPELINE = (
+    NOTEBOOKS / "exports" / "pc-executor-partition-benchmark.json"
+)
 
 
 def cell_source(path, cell_id):
@@ -143,27 +150,310 @@ class FabricNotebookTests(unittest.TestCase):
             notebook = json.loads(path.read_text(encoding="utf-8"))
             for cell in notebook["cells"]:
                 if cell["cell_type"] == "code":
+                    source = "".join(cell["source"])
+                    if source.lstrip().startswith("%%configure"):
+                        continue
                     with self.subTest(notebook=path.name, cell=cell["id"]):
-                        compile("".join(cell["source"]), f"{path}:{cell['id']}", "exec")
+                        compile(source, f"{path}:{cell['id']}", "exec")
 
-    def test_executor_partition_prototype_configures_executor_cpu_limits(self):
+    def test_executor_partition_configures_spark_before_parameter_cell(self):
+        notebook = json.loads(EXECUTOR_PROTOTYPE.read_text(encoding="utf-8"))
+        code_cells = [
+            cell for cell in notebook["cells"] if cell["cell_type"] == "code"
+        ]
+
+        self.assertEqual(code_cells[0]["id"], "spark-session-config")
+        self.assertEqual(code_cells[1]["id"], "parameters")
+        self.assertIn("parameters", code_cells[1]["metadata"]["tags"])
+
+        magic, payload = "".join(code_cells[0]["source"]).split("\n", 1)
+        self.assertEqual(magic, "%%configure")
+        configuration = json.loads(payload)
+        self.assertEqual(
+            configuration["conf"]["spark.task.cpus"],
+            {
+                "parameterName": "CPUS_PER_TASK",
+                "defaultValue": "1",
+            },
+        )
+        self.assertEqual(configuration["conf"]["spark.speculation"], "false")
+        self.assertEqual(configuration["executorCores"]["defaultValue"], 4)
+        self.assertEqual(configuration["executorMemory"]["defaultValue"], "28g")
+
+    def test_executor_partition_prototype_is_capacity_aware(self):
         parameters = cell_source(EXECUTOR_PROTOTYPE, "parameters")
         spark_config = cell_source(EXECUTOR_PROTOTYPE, "spark-config")
+        planning = cell_source(EXECUTOR_PROTOTYPE, "prepared-delta-input")
         partition = cell_source(EXECUTOR_PROTOTYPE, "map-partitions")
 
         self.assertIn('OUTPUT_TXN_APP_ID = "UNSET"', parameters)
         self.assertIn("OUTPUT_TXN_VERSION = -1", parameters)
-        self.assertIn(
-            "calculate_thread_budget(EXECUTOR_CORES, ACTIVE_TASKS_PER_EXECUTOR)",
-            spark_config,
-        )
+        self.assertIn("CPUS_PER_TASK = 1", parameters)
+        self.assertIn('PARALLEL_TASKS = "auto"', parameters)
+        self.assertIn("PARTITION_WAVES = 3", parameters)
+        self.assertNotIn("\nEXECUTOR_CORES =", parameters)
+        self.assertNotIn("\nACTIVE_TASKS_PER_EXECUTOR =", parameters)
+        self.assertNotIn("\nTARGET_PARTITIONS =", parameters)
+        self.assertNotIn('conf.set("spark.task.cpus"', spark_config)
         self.assertNotIn("configure_cpu_runtime(", spark_config)
         self.assertIn(
-            "configure_cpu_runtime(EXECUTOR_CORES, ACTIVE_TASKS_PER_EXECUTOR)",
+            "spark-monitoring-rest-v1",
+            spark_config,
+        )
+        self.assertIn(
+            "sum(item[\"slots\"] for item in slot_details)",
+            spark_config,
+        )
+        self.assertIn("choose_bucket(", planning)
+        self.assertIn("toLocalIterator()", planning)
+        self.assertIn(".partitionBy(", partition)
+        self.assertIn("task_cpus = context.cpus()", partition)
+        self.assertIn(
+            "configure_cpu_runtime(driver_cores=task_cpus, active_workers=1)",
             partition,
         )
         self.assertIn("models_dir is required for offline executor inference", partition)
         self.assertIn("supports only CPU inference", partition)
+
+    def test_executor_partition_slot_details_preserve_executor_boundaries(self):
+        executor_slot_details = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "executor_slot_details",
+        )["executor_slot_details"]
+        executors = [
+            MagicMock(executor_id="executor-a", total_cores=8),
+            MagicMock(executor_id="executor-b", total_cores=5),
+        ]
+
+        details = executor_slot_details(executors, 3)
+
+        self.assertEqual([item["slots"] for item in details], [2, 1])
+        self.assertEqual([item["fragment_cores"] for item in details], [2, 2])
+        self.assertEqual(sum(item["slots"] for item in details), 3)
+
+    def test_executor_partition_memory_parser_uses_binary_units(self):
+        parse_spark_memory_bytes = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "parse_spark_memory_bytes",
+            re=re,
+        )["parse_spark_memory_bytes"]
+
+        self.assertEqual(parse_spark_memory_bytes("1.5g"), int(1.5 * 1024**3))
+        self.assertEqual(parse_spark_memory_bytes("512 MiB"), 512 * 1024**2)
+        with self.assertRaisesRegex(ValueError, "Unsupported Spark memory value"):
+            parse_spark_memory_bytes("unbounded")
+
+    def test_executor_partition_bucket_choice_is_balanced_and_stable(self):
+        choose_bucket = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "prepared-delta-input",
+            "choose_bucket",
+        )["choose_bucket"]
+
+        self.assertEqual(choose_bucket(4.0, "new", [2.0, 2.0], {}, 0.1), 0)
+        self.assertEqual(
+            choose_bucket(1.0, "shared", [2.0, 2.1], {"shared": 1}, 0.1),
+            1,
+        )
+        self.assertEqual(
+            choose_bucket(4.0, "shared", [1.0, 8.0], {"shared": 1}, 0.1),
+            0,
+        )
+
+    def test_executor_partition_scopes_and_persists_benchmark_identity(self):
+        parameters = cell_source(EXECUTOR_PROTOTYPE, "parameters")
+        spark_config = cell_source(EXECUTOR_PROTOTYPE, "spark-config")
+        planning = cell_source(EXECUTOR_PROTOTYPE, "prepared-delta-input")
+        execution = cell_source(EXECUTOR_PROTOTYPE, "map-partitions")
+        persistence = cell_source(
+            EXECUTOR_PROTOTYPE,
+            "controlled-delta-persistence",
+        )
+
+        for name in (
+            "INPUT_BATCH_ID",
+            "CAPACITY_SKU",
+            "RUNTIME_VERSION",
+            "CONFIG_SHA256",
+        ):
+            self.assertIn(f'{name} = ""', parameters)
+        self.assertIn(
+            "if any(provided_identity) and not all(provided_identity)",
+            spark_config,
+        )
+        self.assertIn('F.col("benchmark_batch_id") == benchmark_batch_id', planning)
+        self.assertIn('F.col("capacity_sku") == capacity_sku', planning)
+        self.assertIn('F.col("runtime_version") == runtime_version', planning)
+        self.assertIn('F.col("config_sha256") == config_sha256', planning)
+        for source in (planning, execution, persistence):
+            for field in (
+                "benchmark_batch_id",
+                "capacity_sku",
+                "runtime_version",
+                "config_sha256",
+            ):
+                self.assertIn(f'"{field}"', source)
+
+    def test_executor_benchmark_control_has_parameterized_modes(self):
+        notebook = json.loads(
+            EXECUTOR_BENCHMARK_CONTROL.read_text(encoding="utf-8")
+        )
+        code_cells = {
+            cell["id"]: cell
+            for cell in notebook["cells"]
+            if cell["cell_type"] == "code"
+        }
+
+        self.assertIn("parameters", code_cells["control-parameters"]["metadata"]["tags"])
+        self.assertIn('MODE = "PREPARE"', cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-parameters",
+        ))
+        self.assertIn("def prepare_benchmark():", cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "prepare-benchmark",
+        ))
+        self.assertIn("def evaluate_benchmark():", cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "evaluate-benchmark",
+        ))
+
+    def test_executor_benchmark_parses_items_and_rejects_metadata_drift(self):
+        namespace = cell_functions(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-helpers",
+            "positive_finite",
+            "optional_positive_finite",
+            "optional_nonnegative_int",
+            "parse_benchmark_items",
+            "relative_difference",
+            "resolve_media_metadata",
+            json=json,
+            math=math,
+        )
+        items = namespace["parse_benchmark_items"](
+            json.dumps(
+                [
+                    {
+                        "video_uri": "abfss://container/video.mp4",
+                        "sample_name": "sample-a",
+                    }
+                ]
+            ),
+            2,
+        )
+
+        self.assertEqual(items[0]["ordinal"], 0)
+        self.assertIsNone(items[0]["duration_seconds"])
+        metadata = namespace["resolve_media_metadata"](
+            items[0],
+            {
+                "duration_seconds": 60.0,
+                "source_width": 1920,
+                "source_height": 1080,
+                "source_fps": 30.0,
+                "source_frame_count": 1800,
+                "codec": "avc1",
+            },
+            0.02,
+        )
+        self.assertEqual(metadata["duration_seconds"], 60.0)
+        supplied = dict(items[0], duration_seconds=55.0)
+        with self.assertRaisesRegex(ValueError, "duration_seconds mismatch"):
+            namespace["resolve_media_metadata"](
+                supplied,
+                {
+                    "duration_seconds": 60.0,
+                    "source_width": 1920,
+                    "source_height": 1080,
+                    "source_fps": 30.0,
+                    "source_frame_count": 1800,
+                    "codec": "avc1",
+                },
+                0.02,
+            )
+
+    def test_executor_benchmark_hashes_and_work_ids_are_stable(self):
+        namespace = cell_functions(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-helpers",
+            "stable_hash",
+            "deterministic_work_id",
+            hashlib=hashlib,
+            json=json,
+        )
+        stable_hash = namespace["stable_hash"]
+        deterministic_work_id = namespace["deterministic_work_id"]
+
+        self.assertEqual(
+            stable_hash({"b": 2, "a": 1}),
+            stable_hash({"a": 1, "b": 2}),
+        )
+        self.assertEqual(
+            deterministic_work_id("batch", 0, "video.mp4"),
+            deterministic_work_id("batch", 0, "video.mp4"),
+        )
+        self.assertNotEqual(
+            deterministic_work_id("batch", 0, "video.mp4"),
+            deterministic_work_id("batch", 1, "video.mp4"),
+        )
+
+    def test_executor_benchmark_bootstrap_and_pipeline_contract(self):
+        bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
+        bootstrap_evolution = cell_source(
+            BOOTSTRAP,
+            "bootstrap-schema-evolution",
+        )
+        for suffix in (
+            "executor_partition_input",
+            "executor_partition_records",
+            "executor_resource_snapshots",
+            "executor_partition_plans",
+            "executor_inference_runs",
+            "executor_benchmark_events",
+        ):
+            self.assertIn(f'"{suffix}":', bootstrap_create)
+        for suffix in (
+            "executor_partition_records",
+            "executor_resource_snapshots",
+            "executor_partition_plans",
+            "executor_inference_runs",
+        ):
+            self.assertIn(f'"{suffix}":', bootstrap_evolution)
+
+        pipeline = json.loads(
+            EXECUTOR_BENCHMARK_PIPELINE.read_text(encoding="utf-8")
+        )
+        activities = {
+            activity["name"]: activity
+            for activity in pipeline["properties"]["activities"]
+        }
+        self.assertNotIn("ForEach", {item["type"] for item in activities.values()})
+        self.assertEqual(
+            activities["RunExecutorPartitionInference"]["dependsOn"][0],
+            {
+                "activity": "PrepareExecutorBenchmark",
+                "dependencyConditions": ["Succeeded"],
+            },
+        )
+        self.assertEqual(
+            activities["EvaluateExecutorBenchmark"]["dependsOn"][0],
+            {
+                "activity": "RunExecutorPartitionInference",
+                "dependencyConditions": ["Completed"],
+            },
+        )
+        run_parameters = activities["RunExecutorPartitionInference"][
+            "typeProperties"
+        ]["parameters"]
+        self.assertIn("CPUS_PER_TASK", run_parameters)
+        self.assertIn("CONFIG_SHA256", run_parameters)
+        self.assertEqual(
+            activities["PrepareExecutorBenchmark"]["typeProperties"]["notebookId"],
+            "efd68f39-e6f6-42fb-9797-9e7ced47a8a0",
+        )
 
     def test_benchmark_rejects_placeholder_runtime_labels(self):
         required_runtime_label = cell_functions(

@@ -341,3 +341,133 @@ Accept the design only when:
 
 The end principle is to maximize useful source-video throughput, not CPU
 percentage alone.
+
+## 14. Automated benchmark pipeline
+
+Notebook 15 is tested through a dedicated Fabric Data pipeline rather
+than by manually creating prepared Delta rows. The pipeline is a sibling of the
+existing notebook-04 capacity benchmark, but its concurrency shape is
+different: notebook 15 must run once with the complete benchmark set in one
+Spark application. A per-video Fabric `ForEach` would measure multiple
+applications and would not exercise executor-partition scheduling.
+
+### 14.1 Implemented artifacts
+
+- [`16_executor_partition_benchmark_control.ipynb`](../notebooks/fabric/16_executor_partition_benchmark_control.ipynb),
+  with `PREPARE` and `EVALUATE` modes;
+- [`pc-executor-partition-benchmark`](../notebooks/fabric/exports/pc-executor-partition-benchmark.json),
+  a child pipeline export for one configuration;
+- optional `pc-executor-partition-benchmark-suite`, a sequential parameter
+  matrix wrapper; and
+- a run-scoped prepared-input contract in
+  `people_counter_executor_partition_input`.
+
+The control notebook is separate from notebook 15 so source validation,
+copying, and metadata probing are not included in measured inference
+throughput, while their own timing remains available for diagnosis.
+
+### 14.2 Prepare, run, evaluate
+
+The child pipeline is:
+
+```text
+PrepareExecutorBenchmark
+    -> RunExecutorPartitionInference
+    -> EvaluateExecutorBenchmark
+    -> RefreshBenchmarkModel
+    -> conditional Fail propagation
+```
+
+Preparation accepts the same simple item shape operators already use for the
+notebook-04 benchmark:
+
+```json
+{
+  "video_uri": "abfss://.../Files/.../common-1080p.mp4",
+  "sample_name": "common-1080p-medium-motion"
+}
+```
+
+Duration and resolution are optional reviewed fields. Preparation verifies each
+distinct source, copies it once to a batch-scoped path in the attached
+Lakehouse, probes duration, frame count, width, height, FPS, and codec, and
+writes one complete row per submitted item. Supplied and probed metadata must
+agree within reviewed tolerances. Unreadable or incomplete media fails
+preparation; an approval run must not use planning fallbacks.
+
+Before inference, a model-free Spark action verifies executor access to staged
+videos and `MODELS_DIR`. This is an accessibility check, not resource
+discovery and not part of measured inference wall time.
+
+Notebook 15 then runs in one Notebook activity. The activity passes both
+session configuration parameters for its first `%%configure` cell and normal
+notebook parameters. `CPUS_PER_TASK` must be the same pipeline parameter for
+both surfaces. Retries remain disabled.
+
+The evaluator runs with an **On completion** dependency so failed inference
+still produces diagnostics. It reads the exact batch and configuration identity
+from notebook-15 input, plan, record, resource, and run-metric tables. A report
+refresh may run after evaluation, but a conditional Fail activity must restore
+the gate failure as the pipeline result.
+
+### 14.3 Notebook-15 integration
+
+Notebook 15 implements:
+
+1. an `INPUT_BATCH_ID` parameter;
+2. mandatory filtering by that batch ID before input counting and planning in
+   pipeline mode;
+3. persisted `benchmark_batch_id`, `capacity_sku`, `runtime_version`, and
+   deterministic inference-configuration hash on every evidence surface;
+4. exact identity propagation to pre/post resource snapshots; and
+5. explicit rejection of blank, duplicate, or cross-configuration evidence.
+
+The batch identity must not be inferred from timestamps. A failed or cancelled
+activity gets a new batch ID on rerun even when Delta transaction identities
+would suppress duplicate visible writes.
+
+### 14.4 Gate and baseline comparison
+
+Approval requires:
+
+- prepared count equal to submitted item count;
+- exactly one successful terminal video result per prepared `work_id`;
+- no failures, missing results, duplicates, resumed batches, or assumed
+  durations;
+- complete observed resource snapshots without assumed executors;
+- matching requested and effective task CPU allocations;
+- passed memory and native-thread safety checks;
+- observed concurrency no greater than planned concurrency;
+- a reviewed minimum sustained wall time;
+- successful source-video throughput above the configured requirement; and
+- optional expected line counts matching for samples that provide them.
+
+An optional `BASELINE_BENCHMARK_BATCH_ID` selects a notebook-04 benchmark. The
+evaluator must first prove that both runs use the same video multiset, pipeline
+settings, model identity, runtime, and capacity label. Comparison uses
+end-to-end aggregate speed:
+
+```text
+speed_x = successful_source_video_seconds / aggregate_wall_seconds
+improvement_percent = 100 * (notebook_15_speed_x / notebook_04_speed_x - 1)
+```
+
+Do not compare notebook 15 with a single worker's SDK processing time.
+
+### 14.5 Matrix execution
+
+The optional suite pipeline runs child pipelines sequentially for:
+
+- `CPUS_PER_TASK` values 1, 2, and 4;
+- `PARTITION_WAVES` values 1, 2, 3, and 4;
+- auto concurrency and reviewed explicit caps;
+- representative short, common, long, and skewed mixes; and
+- repeated runs under fixed capacity and runtime settings.
+
+Matrix members must not overlap on the same Fabric capacity. Concurrent matrix
+runs would contaminate resource discovery, throttling, and throughput
+comparisons.
+
+Detailed operator parameters, activity dependencies, item examples, and gate
+rules are documented in section 7.4.8 of
+`notebooks/fabric/README.md`.

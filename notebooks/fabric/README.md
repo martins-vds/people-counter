@@ -70,6 +70,8 @@ Run or deploy the notebooks in this order:
 | [`12_plan_gold_refresh.ipynb`](./12_plan_gold_refresh.ipynb) | Discovers date partitions affected by recent queue, attempt, and commit activity | At the start of every gold-refresh pipeline run |
 | [`13_build_analytics_dimensions.ipynb`](./13_build_analytics_dimensions.ipynb) | Builds physical Date, Time, Camera, Location, Video, and ModelConfig Delta dimensions | After gold fact partitions finish refreshing |
 | [`14_reset_test_data.ipynb`](./14_reset_test_data.ipynb) | Deletes Development/Test rows while preserving Delta schemas, committed views, and the registration-lock seed | Manually, after the section 12.2 stop gate; never in Production |
+| [`15_executor_partition_inference.ipynb`](./15_executor_partition_inference.ipynb) | Runs experimental capacity-aware whole-video inference in one Spark application | Once per executor benchmark configuration |
+| [`16_executor_partition_benchmark_control.ipynb`](./16_executor_partition_benchmark_control.ipynb) | Prepares benchmark input and evaluates notebook-15 evidence | Before and after each notebook-15 pipeline activity |
 
 Notebook `14_reset_test_data` is a destructive test utility, not part of the
 normal deployment sequence. Do not deploy it to a Production workspace or
@@ -82,25 +84,97 @@ is an opt-in CPU executor-partition prototype for benchmarking a
 [`04_process_video.ipynb`](./04_process_video.ipynb) or its lease, attempt,
 heartbeat, and commit contract. Use it only with prepared Delta input and
 controlled prototype output tables until a production migration plan preserves
-the existing control-plane semantics.
+the existing control-plane semantics. For routine benchmark execution, use the
+section 7.4.8 pipeline and let
+[`16_executor_partition_benchmark_control.ipynb`](./16_executor_partition_benchmark_control.ipynb)
+prepare and validate the input instead of writing Delta rows manually.
 
 Before running the prototype:
 
-- prepare one input row per whole video with a worker-local
-  `local_video_path` and a non-empty `models_dir` containing the pinned offline
-  artifacts;
-- set `EXECUTOR_CORES` to the executor profile's vCore count and
-  `ACTIVE_TASKS_PER_EXECUTOR` to the intended simultaneous tasks per executor;
-- set `TARGET_PARTITIONS` high enough to occupy the intended executor tasks;
+- run the notebook's `%%configure` cell first. Fabric requires
+  [`%%configure`](https://learn.microsoft.com/en-us/fabric/data-engineering/author-execute-notebook#spark-session-configuration-magic-command)
+  to be the first code cell for pipeline notebook activities. If this notebook
+  already has an active Spark session, select **Stop session**, then rerun from
+  the `%%configure` cell so the requested resources and Spark properties take
+  effect;
+- use the section 7.4.8 benchmark pipeline to stage each distinct source,
+  probe `duration_seconds`, `source_width`, and `source_height`, verify
+  executor-visible video/model paths, and create one input row per submitted
+  whole video. Direct notebook runs still require those prepared rows and a
+  non-empty executor-visible `models_dir`;
+- keep the `CPUS_PER_TASK` value in the parameter cell equal to the
+  `spark.task.cpus` value requested by `%%configure`. The notebook fails with
+  restart instructions when the requested and effective values differ and never
+  changes scheduler allocation after startup;
+- measure peak worker memory for the exact pipeline and settings, then set
+  `PEAK_WORKER_MEMORY_GIB`; separately set
+  `USABLE_EXECUTOR_MEMORY_GIB` to the measured or approved per-executor
+  Python/native budget remaining after JVM, storage, off-heap, and system
+  reserves. The notebook additionally reserves
+  `EXECUTOR_MEMORY_HEADROOM_FRACTION` and rejects a CPU slot plan that is not
+  memory-safe. Do not use `spark.executor.memory` (JVM heap) as the Python
+  worker budget;
+- use `PARALLEL_TASKS="auto"` for maximum useful throughput, or a positive
+  integer for sequential application-local batches; capped runs also require
+  `spark.speculation=false` in startup configuration and are not cluster-wide
+  admission control;
+- leave `ALLOW_ASSUMED_RESOURCES=False` for normal runs. If the Spark monitoring
+  REST endpoint is unavailable and an operator explicitly enables assumed
+  resources, the notebook labels and persists the fallback rather than treating
+  it as observed allocation;
 - provide a batch-specific `OUTPUT_TXN_APP_ID` and a non-negative,
   monotonically managed `OUTPUT_TXN_VERSION`; the defaults intentionally fail
   closed;
 - use only `device_variant="cpu"` and `device="cpu"`.
 
-The driver calculates the Spark task CPU request, while each executor Python
-worker applies the matching OpenMP, MKL, PyTorch, and OpenCV limits before
-loading a model runtime. A reused Python worker accepts the same limits but
-fails rather than silently changing an already initialized native runtime.
+### Executor prototype `%%configure` settings
+
+The first code cell supplies interactive defaults and declares parameter names
+that a Fabric pipeline Notebook activity can override:
+
+| Pipeline activity parameter | `%%configure` field | Interactive default | Purpose |
+|---|---|---:|---|
+| `DRIVER_MEMORY` | `driverMemory` | `28g` | Driver memory requested for the session. |
+| `DRIVER_CORES` | `driverCores` | `4` | Driver vCores requested for the session. |
+| `EXECUTOR_MEMORY` | `executorMemory` | `28g` | Memory requested for each executor. |
+| `EXECUTOR_CORES` | `executorCores` | `4` | vCores requested for each executor. |
+| `CPUS_PER_TASK` | `conf.spark.task.cpus` | `1` | Scheduler CPUs reserved for each inference task. Pass the same integer to the notebook parameter cell. |
+| `MIN_EXECUTORS` | `conf.spark.dynamicAllocation.minExecutors` | `1` | Dynamic-allocation lower bound. |
+| `MAX_EXECUTORS` | `conf.spark.dynamicAllocation.maxExecutors` | `4` | Dynamic-allocation upper bound; it is not proof that this many executors were granted. |
+
+The cell also sets `spark.speculation=false`, which is required for explicit
+`PARALLEL_TASKS` benchmark caps, and enables dynamic allocation. Edit the
+interactive `defaultValue` entries before running directly, or pass matching
+Notebook activity parameters from a pipeline. Fabric scheduled notebook runs do
+not support parameterized session configuration, so scheduled runs use the
+cell's defaults.
+
+Keep `driverMemory`, `driverCores`, `executorMemory`, and `executorCores` as
+top-level `%%configure` fields. Fabric documents that these special Spark
+properties do not take effect when placed inside `conf`; standard properties
+such as `spark.task.cpus`, speculation, and dynamic-allocation bounds belong
+inside `conf`. The defaults are initial benchmark values, not production sizing
+recommendations. The notebook still discovers the executors actually allocated
+to the application and rejects a requested/effective task-CPU mismatch.
+
+Fabric also allows `%%configure` to select an `environment`, a
+`defaultLakehouse`, `sessionTimeoutInSeconds`, `useStarterPool` or
+`useWorkspacePool`, plus session `jars` and `mountPoints`. Those fields are
+intentionally absent from this notebook because their IDs, names, paths, and
+pool choice are deployment-specific. Add them only when the notebook must
+override its attached Environment, pinned Lakehouse, or workspace pool; keep
+credentials and secrets out of the cell.
+
+The notebook derives application slots from each observed executor separately,
+uses deterministic largest-cost-first bucket planning with bounded driver
+buffers, and persists both the plan and its one-to-one physical-partition
+mapping. Each executor task reads `TaskContext.cpus()` and applies matching
+OpenMP, MKL, PyTorch, and OpenCV limits before loading a model runtime. A reused
+Python worker accepts the same limits but fails rather than silently changing an
+already initialized native runtime. Pre/post resource snapshots, batch timing,
+observed concurrency, balance inputs, errors, and source-video throughput are
+persisted to prototype telemetry tables. Missing duration metadata is explicitly
+labeled and prevents the notebook from claiming complete throughput.
 
 Manifest generation is a producer-side responsibility, not another Fabric
 inference notebook. For a large historical load, use the
@@ -3883,6 +3957,251 @@ and under-duration runs without a manual semantic-model refresh.
    - at least six hours of sustained evidence;
    - zero failed and invalid-interop benchmarks; and
    - the matching resource, throttling, and cost evidence from section 7.4.5.
+
+#### 7.4.8 Executor-partition benchmark pipeline
+
+This subsection documents the implemented automated benchmark for
+[`15_executor_partition_inference.ipynb`](./15_executor_partition_inference.ipynb).
+It is not the production `04_process_video` path and must not publish production
+results. Import
+[`exports/pc-executor-partition-benchmark.json`](./exports/pc-executor-partition-benchmark.json)
+as the `pc-executor-partition-benchmark` Data pipeline.
+
+Do not put notebook 15 inside the per-video `ForEachBenchmarkItems` used by the
+notebook-04 benchmark. That would start multiple Spark applications and measure
+pipeline activity concurrency again. Notebook 15 must receive the complete
+benchmark set in one Spark application so its executor allocation,
+cost-aware partitions, model reuse, queue waves, and task CPU allocations are
+the system under test.
+
+##### Implemented artifacts
+
+| Artifact | Responsibility |
+|---|---|
+| `16_executor_partition_benchmark_control.ipynb` | Runs in `PREPARE` or `EVALUATE` mode. Preparation stages and probes benchmark media and writes run-scoped input rows. Evaluation reads notebook-15 records, plans, resource snapshots, and run metrics and enforces the gate. |
+| `15_executor_partition_inference.ipynb` | Runs exactly once per benchmark configuration and processes all prepared rows through one Spark application. |
+| `pc-executor-partition-benchmark` | Child Data pipeline implementing prepare, inference, evaluation, refresh, and failure propagation. |
+| `pc-executor-partition-benchmark-suite` | Optional parent pipeline that invokes the child sequentially for a reviewed parameter matrix. It must never overlap matrix members on the same capacity. |
+| `people_counter_executor_partition_input` | Shared Delta input table keyed by `benchmark_batch_id`; one row per submitted whole video. |
+| Existing notebook-15 output tables | Persist the explicit plan, records, resource snapshots, and run metrics used by the evaluator. |
+
+The control notebook deliberately owns preparation and evaluation in two modes
+so operators do not have to create Delta rows, calculate video dimensions, or
+write a second gate notebook manually.
+
+##### Deploy and run
+
+1. Publish
+   [`15_executor_partition_inference.ipynb`](./15_executor_partition_inference.ipynb)
+   and
+   [`16_executor_partition_benchmark_control.ipynb`](./16_executor_partition_benchmark_control.ipynb)
+   to the workspace IDs referenced by the pipeline export. If new items are
+   created instead, replace both `notebookId` values in the imported pipeline.
+2. Attach the same default Lakehouse and pinned Fabric Environment to both
+   notebooks. The environment must contain the project package, OpenCV, and
+   the pinned offline model dependencies.
+3. Stop writers and run
+   [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb) in its
+   documented maintenance window. It creates the six executor benchmark Delta
+   tables and adds the four identity columns to compatible prototype tables.
+4. Import the pipeline export, select the environment's Lakehouse connection
+   for all three Notebook activities, and verify the semantic-model connection
+   on `RefreshBenchmarkModel`.
+5. Set a new `BENCHMARK_BATCH_ID`, the exact `RUNTIME_VERSION` and
+   `CAPACITY_SKU`, an executor-visible `MODELS_DIR`, and a non-empty
+   `BENCHMARK_ITEMS` array. Do not reuse a batch ID after failure or
+   cancellation.
+6. Set `CPUS_PER_TASK` once on the pipeline. The export passes that value both
+   to notebook 15's first `%%configure` cell and to its Python parameter cell.
+   Review the driver/executor memory, core, and dynamic-allocation bounds before
+   every capacity test.
+7. For characterization, use `MIN_WALL_SECONDS=0`, no baseline ID, and
+   `MIN_THROUGHPUT_IMPROVEMENT_PERCENT=0`. For approval, use the reviewed
+   sustained duration (normally `21600`) and, when comparing with notebook 04,
+   set both `BASELINE_BENCHMARK_BATCH_ID` and its exact
+   `BASELINE_CONFIG_SHA256`.
+8. Run the pipeline once. Confirm `EvaluateExecutorBenchmark` succeeds and use
+   its notebook exit value as the gate result. A failed inference still runs
+   evaluation, refreshes diagnostics, and ends in
+   `PropagateExecutorBenchmarkFailure`.
+
+The checked-in export is bound to workspace
+`c31ee864-230d-4005-8fd5-7c7130ebf774`, notebook 15 item
+`c3c0fc72-3bd2-4d3a-a485-ccf4326d42e0`, notebook 16 item
+`efd68f39-e6f6-42fb-9797-9e7ced47a8a0`, and semantic model
+`1bcc8dd2-66f1-4cde-8225-d07ba944da09`. Replace those IDs for another
+workspace.
+
+##### Benchmark item contract
+
+The pipeline accepts one `BENCHMARK_ITEMS` Array parameter. The minimum item is:
+
+```json
+{
+  "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/common-1080p.mp4",
+  "sample_name": "common-1080p-medium-motion"
+}
+```
+
+Optional reviewed metadata can avoid or verify probing:
+
+```json
+{
+  "video_uri": "abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/benchmarks/common-1080p.mp4",
+  "sample_name": "common-1080p-medium-motion",
+  "duration_seconds": 1800.0,
+  "source_width": 1920,
+  "source_height": 1080,
+  "expected_line_in_count": 120,
+  "expected_line_out_count": 117
+}
+```
+
+`PREPARE` mode must:
+
+1. validate a non-empty, bounded array and stable `sample_name` values;
+2. verify each distinct `video_uri` through the attached Lakehouse identity;
+3. copy each distinct source once into a run-scoped directory under
+   `/lakehouse/default/Files/executor-partition-benchmarks/<batch-id>/inputs`;
+4. probe the staged media once for duration, frame count, width, height, FPS,
+   and codec, using supplied positive metadata only as a reviewed value to
+   verify or replace probe output;
+5. fail on unreadable media or material supplied/probed metadata disagreement;
+6. expand repeated benchmark items after probing so repeated samples do not
+   repeat staging or metadata work;
+7. create deterministic `work_id` values from the batch ID, item ordinal, and
+   source identity;
+8. write complete pipeline/model settings and the shared executor-visible
+   video/model paths to `people_counter_executor_partition_input`; and
+9. run a model-free Spark preflight that verifies every active executor can
+   read at least one staged video and the configured `MODELS_DIR`.
+
+Preparation is outside measured inference time. Its duration is persisted
+separately so staging regressions remain visible without being confused with
+notebook-15 throughput.
+
+`duration_seconds` is required for an approvable throughput result, but the
+operator no longer has to enter it: a successful trusted probe supplies it.
+`source_width` and `source_height` improve estimated partition cost. If the
+probe cannot establish all three values, preparation fails rather than allowing
+the inference gate to approve fallback metadata.
+
+##### Child pipeline shape
+
+```mermaid
+flowchart LR
+    P[Pipeline parameters] --> PREP[PrepareExecutorBenchmark<br/>control notebook: PREPARE]
+    PREP -->|On success| RUN[RunExecutorPartitionInference<br/>notebook 15: one Spark application]
+    RUN -->|On completion| EVAL[EvaluateExecutorBenchmark<br/>control notebook: EVALUATE]
+    EVAL -->|On completion| REFRESH[RefreshBenchmarkModel]
+    EVAL -->|On failure| FAIL[PropagateExecutorBenchmarkFailure]
+    REFRESH -->|On completion after failed gate| FAIL
+```
+
+`RunExecutorPartitionInference` is a single Notebook activity, not a ForEach.
+Its timeout must cover Spark startup plus the longest planned sustained run;
+activity retries remain disabled. A retry can recompute videos and invalidates
+clean attempt timing even though Delta transactions prevent duplicate visible
+records.
+
+Connect `RunExecutorPartitionInference` to `EvaluateExecutorBenchmark` with
+**On completion**. The evaluator must run when inference fails so it can report
+missing terminal records, incomplete metrics, resource mismatches, and the
+failed Fabric activity. Use the same refresh-plus-conditional-Fail pattern as
+the notebook-04 benchmark so failed evidence reaches the comparison report
+without turning the overall pipeline green.
+
+##### Pipeline parameters
+
+| Parameter | Type | Purpose |
+|---|---|---|
+| `BENCHMARK_BATCH_ID` | `String` | Unique identity for one configuration and attempt. Never reuse it after a failed or cancelled inference activity. |
+| `BENCHMARK_ITEMS` | `Array` | Representative videos; preparation derives the Delta input rows. |
+| `CAPACITY_SKU` | `String` | Reviewed capacity label used for comparison, not resource discovery. |
+| `RUNTIME_VERSION` | `String` | Exact pinned Fabric runtime label. |
+| `BASELINE_BENCHMARK_BATCH_ID` | `String` | Optional notebook-04 benchmark batch over the same sample mix and inference settings. |
+| `BASELINE_CONFIG_SHA256` | `String` | Exact configuration hash from the selected notebook-04 batch; required when a baseline batch ID is set. |
+| `MIN_WALL_SECONDS` | `Int` | Minimum sustained inference wall time; use `21600` for an approval run. |
+| `MIN_THROUGHPUT_IMPROVEMENT_PERCENT` | `Float` | Required improvement over the compatible notebook-04 baseline; use `0` while characterizing. |
+| `MODELS_DIR` | `String` | Executor-visible pinned model tree. |
+| `PIPELINE`, `BATCH_SIZE`, `SAMPLE_FPS`, `DETECTION_THRESHOLD`, `DETECTOR_MODEL`, `CAMERA_MOTION_COMPENSATION` | matching types | Exact inference configuration shared with the baseline. |
+| `LINE` | `Array` | Empty for no counting line, or four integer coordinates. It participates in the configuration hash. |
+| `CPUS_PER_TASK` | `Int` | Passed both to notebook 15's `%%configure` parameter and its Python parameter cell. |
+| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. |
+| `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
+| `PARTITION_WAVES` | `Int` | Number of planned partition waves. |
+| `RUNTIME_AFFINITY_MAX_IMBALANCE` | `Float` | Maximum projected-load penalty accepted to retain a model-runtime affinity bucket. |
+| `PEAK_WORKER_MEMORY_GIB`, `USABLE_EXECUTOR_MEMORY_GIB`, `EXECUTOR_MEMORY_HEADROOM_FRACTION` | `Float` | Reviewed memory-safety inputs. |
+| `OUTPUT_TXN_VERSION` | `Int` | Stable non-negative version for this unique batch; normally `0`. |
+| `INPUT_TXN_VERSION` | `Int` | Idempotent Delta transaction version for preparation; normally `0`. |
+| `STAGING_ROOT` | `String` | Lakehouse Files root for batch-scoped staged media. |
+
+Notebook 15 implements `INPUT_BATCH_ID` and rejects partially supplied
+benchmark identity. Before counting or planning, it filters
+`people_counter_executor_partition_input` by the exact batch ID, capacity,
+runtime, and configuration hash. It persists those same identity fields with
+every plan, resource snapshot, output record, and run metric, so evaluation
+never joins evidence by timestamps or table-wide state.
+
+##### Evaluation gate
+
+`EVALUATE` mode approves only when all of the following are true:
+
+- the prepared row count equals `length(BENCHMARK_ITEMS)`;
+- notebook 15 emitted exactly one successful terminal video result for every
+  prepared `work_id`, with no failed, missing, or duplicate terminal result;
+- every output, plan, resource snapshot, and run metric has the exact requested
+  batch ID and configuration hash;
+- requested and effective `spark.task.cpus` match;
+- pre/post resource snapshots are complete, use the supported monitoring
+  backend, and contain no assumed executors;
+- the memory-safety calculation passed and no executor/task reported a
+  conflicting native-thread budget;
+- `metrics_complete=true`, `assumed_duration_count=0`, and no batch was resumed;
+- observed concurrency does not exceed planned concurrency;
+- the run lasted at least `MIN_WALL_SECONDS`;
+- successful source-video minutes divided by end-to-end notebook wall time
+  meets the configured throughput requirement;
+- optional expected line counts match for every item that supplied them; and
+- when `BASELINE_BENCHMARK_BATCH_ID` is set, the notebook-04 batch is complete,
+  successful, uses the same video multiset and configuration, and notebook 15
+  meets `MIN_THROUGHPUT_IMPROVEMENT_PERCENT`.
+
+The baseline comparison uses:
+
+```text
+executor_partition_speed_x =
+    successful_source_video_seconds / notebook_15_end_to_end_seconds
+
+notebook_04_speed_x =
+    baseline_successful_source_video_seconds / baseline_batch_wall_seconds
+
+improvement_percent =
+    100 * (executor_partition_speed_x / notebook_04_speed_x - 1)
+```
+
+Do not compare notebook 15 with one notebook-04 worker's SDK
+`processing_seconds`; compare end-to-end aggregate batch throughput over the
+same video multiset. Keep initialization/warm timing, inference timing, and
+persistence timing as diagnostic fields, not alternative gate denominators.
+
+##### Optional sequential matrix pipeline
+
+`pc-executor-partition-benchmark-suite` can hold the approved matrix:
+
+- `CPUS_PER_TASK`: `1`, `2`, `4`;
+- `PARTITION_WAVES`: `1`, `2`, `3`, `4`;
+- `PARALLEL_TASKS`: `auto` plus reviewed lower caps; and
+- repeated runs for short, common, long, and skewed sample mixes.
+
+Use a **sequential** ForEach of child-pipeline activities. Generate a unique
+`BENCHMARK_BATCH_ID` per matrix member and wait for the child pipeline to
+finish. Parallel matrix members would compete for the same capacity and make
+resource discovery, throttling, and throughput evidence incomparable.
+
+This design removes manual Delta-row preparation while preserving the central
+acceptance rule: choose settings from measured successful source-video
+throughput for the Spark resources actually granted to notebook 15.
 
 ### 7.5 Backfill execution phases
 
