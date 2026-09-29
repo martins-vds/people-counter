@@ -115,12 +115,13 @@ Before running the prototype:
   new batch ID and the suggested positive value. Leave
   `USABLE_EXECUTOR_MEMORY_GIB=0` to have the
   notebook discover a conservative per-executor Python/native budget from
-  executor cgroup limits and the effective Spark memory configuration, or
-  supply a positive reviewed override. The notebook additionally reserves
+  the effective Spark memory configuration, tightened by executor cgroup
+  limits when Fabric exposes finite limits, or supply a positive reviewed
+  override. The notebook additionally reserves
   `EXECUTOR_MEMORY_HEADROOM_FRACTION` and rejects a CPU slot plan that is not
-  memory-safe. It fails rather than guessing from host RAM when executor cgroup
-  limits are unavailable. Do not use `spark.executor.memory` (JVM heap) as the
-  Python worker budget;
+  memory-safe. It never substitutes host RAM or Spark storage-memory telemetry
+  when executor cgroup limits are unavailable. Do not use
+  `spark.executor.memory` (JVM heap) as the Python worker budget;
 - use `PARALLEL_TASKS="auto"` for maximum useful throughput, or a positive
   integer for sequential application-local batches; capped runs also require
   `spark.speculation=false` in startup configuration and are not cluster-wide
@@ -228,11 +229,11 @@ credentials and secrets out of the cell.
 
 `USABLE_EXECUTOR_MEMORY_GIB=0` enables fail-closed runtime discovery. Notebook
 15 starts lightweight probe tasks across the currently approved Spark slots.
-It retries coverage up to three times. Each executor probe reads its finite
-cgroup memory limit, working set, and reclaimable file cache, records the Python
-worker RSS and visible physical memory, and identifies the executor or host
-that supplied the sample. The driver requires coverage for every runnable
-executor and uses the smallest resulting budget.
+It retries coverage up to three times. Each executor probe attempts to read a
+finite cgroup memory limit, working set, and reclaimable file cache; it always
+records the Python worker RSS, visible physical memory, checked cgroup paths,
+and the executor or host that supplied the sample. The driver requires coverage
+for every runnable executor and uses the smallest resulting budget.
 
 The configured worker envelope is selected in this order:
 
@@ -249,8 +250,8 @@ Unitless values for Spark executor heap, overhead, minimum overhead, and
 PySpark memory are interpreted as MiB, matching Spark. Unitless
 `spark.memory.offHeap.size` remains bytes.
 
-For every observed executor the notebook caps that envelope by both current
-cgroup working-set free space and:
+When an executor exposes a finite cgroup limit, the notebook additionally caps
+that envelope by both current cgroup working-set free space and:
 
 ```text
 cgroup limit - JVM heap - configured Spark off-heap reservation
@@ -267,12 +268,19 @@ This deliberately leaves part of `memoryOverhead` for JVM native memory,
 Netty/direct buffers, thread stacks, and allocator arenas rather than assigning
 the whole container-overhead allocation to Python workers.
 
+If Fabric exposes only an unbounded parent cgroup such as
+`system.slice/yarn-nm.service`, the notebook retains the conservative Spark
+configuration envelope for that executor and labels its budget source
+`spark-config-envelope`. This is not a node-RAM estimate: the budget still comes
+from `spark.executor.pyspark.memory`, explicit `spark.executor.memoryOverhead`,
+or Spark's derived memory-overhead allocation after the native reserve.
+
 The successful run persists `usable_executor_memory_source` and the complete
-calculation inputs in `memory_budget_details_json`. Auto mode fails if the
-cgroup limit is unlimited or unreadable, probe coverage is incomplete, or the
-remaining budget is not positive. It does not substitute node RAM or the Spark
-REST API's `maxMemory`, which is storage-memory telemetry rather than a Python
-worker limit.
+calculation inputs in `memory_budget_details_json`, including cgroup
+unavailability diagnostics. Auto mode fails if probe coverage is incomplete or
+the configured/observed remaining budget is not positive. It does not
+substitute node RAM or the Spark REST API's `maxMemory`, which is
+storage-memory telemetry rather than a Python worker limit.
 
 Automatic mode also requires observed executor identities. If an operator
 enables `ALLOW_ASSUMED_RESOURCES`, they must either restore monitoring-based

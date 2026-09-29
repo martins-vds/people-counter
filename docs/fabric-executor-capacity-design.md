@@ -208,29 +208,34 @@ instrumentation and reject evidence when the observed high-water mark exceeds
 the configured peak.
 
 Use a zero configured usable-memory value to request automatic discovery.
-Probe every runnable executor from an executor-side task and require a finite
-cgroup memory limit. Bound the discovered worker budget by:
+Probe every runnable executor from an executor-side task. Start with a
+conservative Spark configuration envelope and tighten it with finite cgroup
+telemetry when that telemetry is exposed. Bound the discovered worker budget
+by:
 
 - `spark.executor.pyspark.memory`, when configured;
 - otherwise explicit or Spark-derived `spark.executor.memoryOverhead`, after a
   separate JVM-native/container reserve;
-- cgroup memory currently free at the probe after excluding reclaimable file
-  cache; and
-- cgroup capacity remaining after the configured executor heap, Spark off-heap
-  reservation, and—when PySpark memory is separate—the executor overhead.
+- when a finite cgroup limit is available, cgroup memory currently free at the
+  probe after excluding reclaimable file cache; and
+- when a finite cgroup limit is available, cgroup capacity remaining after the
+  configured executor heap, Spark off-heap reservation, and—when PySpark memory
+  is separate—the executor overhead.
 
 Use the minimum result across observed executors and retain the existing
 headroom calculation before approving slots. Retry a bounded number of probe
 stages to cover every executor identity discovered from Spark monitoring.
 Persist the source, effective Spark memory settings, cgroup limit/current
-usage, reclaimable cache, Python worker RSS, and per-executor deductions. Fail
-rather than infer a budget from host/node RAM when cgroup limits or complete
-executor probe coverage are unavailable. A positive operator override remains
-supported but must be labeled so evaluation cannot mistake it for
-runtime-derived evidence. If the cgroup limit is no larger than the configured
-JVM/off-heap reservations, direct the operator to reduce JVM heap or select a
-larger container/node; increasing overhead alone cannot create capacity inside
-an unchanged limit.
+usage, reclaimable cache, checked cgroup paths, Python worker RSS, and
+per-executor deductions. When Fabric exposes only an unbounded parent cgroup,
+retain the Spark configuration envelope for that executor and label the
+evidence as configuration-only. Fail rather than infer a budget from host/node
+RAM when complete executor probe coverage is unavailable. A positive operator
+override remains supported but must be labeled so evaluation cannot mistake it
+for runtime-derived evidence. If a finite cgroup limit is no larger than the
+configured JVM/off-heap reservations, direct the operator to reduce JVM heap or
+select a larger container/node; increasing overhead alone cannot create
+capacity inside an unchanged limit.
 
 ## 7. Partition planning
 

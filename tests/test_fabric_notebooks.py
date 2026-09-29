@@ -1,5 +1,6 @@
 import ast
 import hashlib
+import io
 import json
 import math
 import re
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from people_counter.runtime import RuntimeCompatibilityError
@@ -292,7 +293,7 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertEqual(explicit["reserved_outside_workers_bytes"], 30 * gib)
         self.assertEqual(
             explicit["source"],
-            "spark.executor.memoryOverhead+cgroup",
+            "spark.executor.memoryOverhead",
         )
 
         pyspark = derive(
@@ -306,7 +307,7 @@ class FabricNotebookTests(unittest.TestCase):
         )
         self.assertEqual(pyspark["configured_worker_budget_bytes"], 8 * gib)
         self.assertEqual(pyspark["reserved_outside_workers_bytes"], 34 * gib)
-        self.assertEqual(pyspark["source"], "spark.executor.pyspark.memory+cgroup")
+        self.assertEqual(pyspark["source"], "spark.executor.pyspark.memory")
 
         derived = derive({}, 28 * gib)
         derived_overhead = int((28 * gib // 1024**2) * 0.10) * 1024**2
@@ -314,7 +315,42 @@ class FabricNotebookTests(unittest.TestCase):
             derived["configured_worker_budget_bytes"],
             derived_overhead - int(derived_overhead * 0.25),
         )
-        self.assertEqual(derived["source"], "derived-spark-memory-overhead+cgroup")
+        self.assertEqual(derived["source"], "derived-spark-memory-overhead")
+
+    def test_executor_partition_reports_unbounded_fabric_cgroup(self):
+        sample_memory = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "executor_cgroup_memory_sample",
+        )["executor_cgroup_memory_sample"]
+
+        def fake_open(path, *args, **kwargs):
+            path = str(path)
+            if path == "/proc/self/statm":
+                return io.StringIO("100 10 0 0 0 0 0\n")
+            if path == "/proc/self/cgroup":
+                return io.StringIO("0::/system.slice/yarn-nm.service\n")
+            if path.endswith("/memory.max"):
+                return io.StringIO("max\n")
+            raise FileNotFoundError(path)
+
+        def fake_sysconf(name):
+            return 4_194_304 if name == "SC_PHYS_PAGES" else 4096
+
+        with patch("builtins.open", side_effect=fake_open), patch(
+            "os.sysconf", side_effect=fake_sysconf
+        ):
+            sample = sample_memory()
+
+        self.assertIsNone(sample["cgroup_limit_bytes"])
+        self.assertIsNone(sample["cgroup_current_bytes"])
+        self.assertEqual(sample["python_worker_rss_bytes"], 10 * 4096)
+        self.assertEqual(sample["physical_memory_bytes"], 16 * 1024**3)
+        self.assertIn(
+            "/sys/fs/cgroup/system.slice/yarn-nm.service/memory.max",
+            sample["cgroup_limit_paths_checked"],
+        )
+        self.assertIn("no finite readable limit", sample["cgroup_error"])
 
     def test_executor_partition_auto_memory_uses_smallest_executor_budget(self):
         namespace = cell_functions(
@@ -359,8 +395,56 @@ class FabricNotebookTests(unittest.TestCase):
             [item["usable_memory_bytes"] for item in details],
             [6 * gib, 2 * gib],
         )
+        self.assertEqual(
+            {item["budget_source"] for item in details},
+            {"spark-config-envelope+cgroup"},
+        )
         with self.assertRaisesRegex(RuntimeError, "did not cover every runnable executor"):
             calculate(probes[:1], {"1", "2"}, envelope)
+
+    def test_executor_partition_auto_memory_falls_back_to_spark_envelope(self):
+        namespace = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "executor_memory_probe_coverage",
+            "calculate_auto_usable_executor_memory_bytes",
+        )
+        calculate = namespace["calculate_auto_usable_executor_memory_bytes"]
+        gib = 1024**3
+        envelope = {
+            "configured_worker_budget_bytes": 6 * gib,
+            "reserved_outside_workers_bytes": 30 * gib,
+        }
+        checked_path = "/sys/fs/cgroup/system.slice/yarn-nm.service/memory.max"
+        probes = [
+            {
+                "probe_key": "executor-1",
+                "executor_id": "1",
+                "hostname": "worker-1",
+                "cgroup_limit_bytes": None,
+                "cgroup_current_bytes": None,
+                "cgroup_reclaimable_cache_bytes": None,
+                "cgroup_working_set_bytes": None,
+                "python_worker_rss_bytes": 1 * gib,
+                "physical_memory_bytes": 64 * gib,
+                "cgroup_limit_path": None,
+                "cgroup_limit_paths_checked": [checked_path],
+                "cgroup_error": "Executor memory cgroup has no finite readable limit",
+            }
+        ]
+
+        usable, details = calculate(probes, {"1"}, envelope)
+
+        self.assertEqual(usable, 6 * gib)
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["usable_memory_bytes"], 6 * gib)
+        self.assertEqual(details[0]["budget_source"], "spark-config-envelope")
+        self.assertEqual(details[0]["cgroup_limit_paths"], [checked_path])
+        self.assertIsNone(details[0]["cgroup_limit_bytes"])
+        self.assertEqual(
+            details[0]["cgroup_errors"],
+            ["Executor memory cgroup has no finite readable limit"],
+        )
 
     def test_executor_partition_parses_and_rounds_worker_peak_memory(self):
         parse_status = cell_functions(
