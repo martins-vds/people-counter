@@ -224,7 +224,11 @@ by:
 
 Use the minimum result across observed executors and retain the existing
 headroom calculation before approving slots. Retry a bounded number of probe
-stages to cover every executor identity discovered from Spark monitoring.
+stages to cover every executor identity discovered from Spark monitoring. Some
+Fabric Python workers expose `SPARK_EXECUTOR_ID` as the literal string `None`;
+normalize unavailable-ID sentinels before coverage evaluation and use distinct
+worker host/address identities as the fallback coverage key. Do not count a
+sentinel as an observed executor ID.
 Persist the source, effective Spark memory settings, cgroup limit/current
 usage, reclaimable cache, checked cgroup paths, Python worker RSS, and
 per-executor deductions. When Fabric exposes only an unbounded parent cgroup,

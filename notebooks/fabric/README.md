@@ -233,7 +233,11 @@ It retries coverage up to three times. Each executor probe attempts to read a
 finite cgroup memory limit, working set, and reclaimable file cache; it always
 records the Python worker RSS, visible physical memory, checked cgroup paths,
 and the executor or host that supplied the sample. The driver requires coverage
-for every runnable executor and uses the smallest resulting budget.
+for every runnable executor and uses the smallest resulting budget. Fabric can
+set `SPARK_EXECUTOR_ID` to the literal string `None`; the notebook treats
+`None`, `null`, `unknown`, and `driver` as unavailable executor IDs and then
+uses the worker hostname or address for the existing host-count coverage check.
+It never treats those sentinel strings as observed executor identities.
 
 The configured worker envelope is selected in this order:
 

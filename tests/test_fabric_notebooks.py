@@ -210,6 +210,7 @@ class FabricNotebookTests(unittest.TestCase):
             spark_config,
         )
         self.assertIn("executor_cgroup_memory_sample()", spark_config)
+        self.assertIn("normalize_executor_id(raw_executor_id)", spark_config)
         self.assertIn("calculate_auto_usable_executor_memory_bytes(", spark_config)
         self.assertIn("memory_characterization_mode = PEAK_WORKER_MEMORY_GIB == 0", spark_config)
         self.assertIn(
@@ -352,10 +353,38 @@ class FabricNotebookTests(unittest.TestCase):
         )
         self.assertIn("no finite readable limit", sample["cgroup_error"])
 
+    def test_executor_partition_ignores_fabric_none_executor_id(self):
+        namespace = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "normalize_executor_id",
+            "executor_memory_probe_coverage",
+        )
+        normalize = namespace["normalize_executor_id"]
+        coverage = namespace["executor_memory_probe_coverage"]
+        probes = [
+            {
+                "probe_key": "vm-c7249084",
+                "executor_id": "None",
+                "executor_id_raw": "None",
+            }
+        ]
+
+        self.assertEqual(normalize(" 1 "), "1")
+        self.assertEqual(normalize("None"), "")
+        complete, details = coverage(probes, {"1"})
+
+        self.assertTrue(complete)
+        self.assertEqual(details["identity_mode"], "host-fallback")
+        self.assertEqual(details["observed_probe_keys"], ["vm-c7249084"])
+        self.assertEqual(details["ignored_executor_id_values"], ["None"])
+        self.assertEqual(details["missing_executor_count"], 0)
+
     def test_executor_partition_auto_memory_uses_smallest_executor_budget(self):
         namespace = cell_functions(
             EXECUTOR_PROTOTYPE,
             "spark-config",
+            "normalize_executor_id",
             "executor_memory_probe_coverage",
             "calculate_auto_usable_executor_memory_bytes",
         )
@@ -406,6 +435,7 @@ class FabricNotebookTests(unittest.TestCase):
         namespace = cell_functions(
             EXECUTOR_PROTOTYPE,
             "spark-config",
+            "normalize_executor_id",
             "executor_memory_probe_coverage",
             "calculate_auto_usable_executor_memory_bytes",
         )
