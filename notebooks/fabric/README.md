@@ -125,10 +125,14 @@ Before running the prototype:
   integer for sequential application-local batches; capped runs also require
   `spark.speculation=false` in startup configuration and are not cluster-wide
   admission control;
-- leave `ALLOW_ASSUMED_RESOURCES=False` for normal runs. If the Spark monitoring
-  REST endpoint is unavailable and an operator explicitly enables assumed
-  resources, the notebook labels and persists the fallback rather than treating
-  it as observed allocation;
+- leave `ALLOW_ASSUMED_RESOURCES=False` for normal runs. Notebook 15 first reads
+  active executor summaries from the running driver's Spark status store and
+  uses the Spark monitoring REST endpoint only as a bounded fallback. If both
+  are unavailable and an operator explicitly enables assumed resources, the
+  notebook labels and persists the fallback rather than treating it as observed
+  allocation. Fabric Spark UI URLs can include routing query parameters; the
+  REST fallback preserves those parameters while inserting the
+  `/api/v1/applications/.../executors` path before the query string;
 - provide a batch-specific `OUTPUT_TXN_APP_ID` and a non-negative,
   monotonically managed `OUTPUT_TXN_VERSION`; the defaults intentionally fail
   closed;
@@ -310,6 +314,11 @@ measurement evidence, not capacity approval. Copy the suggestion into
 `PEAK_WORKER_MEMORY_GIB`, choose a new `BENCHMARK_BATCH_ID`, and run the
 pipeline again. A normal run also measures `VmHWM` and is rejected if the
 observed peak exceeds the configured value.
+
+If inference fails before producing complete peak-memory evidence, evaluation
+reports that characterization did not complete and includes the underlying
+evidence failures. It does not present a missing recommendation as
+`PEAK_WORKER_MEMORY_GIB=None`.
 
 Use representative worst-case inputs for characterization, including the
 largest resolution, largest inference batch, and most memory-intensive model

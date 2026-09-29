@@ -4,11 +4,12 @@ import json
 import math
 import re
 import unittest
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from people_counter.runtime import RuntimeCompatibilityError
 
@@ -200,7 +201,7 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertNotIn('conf.set("spark.task.cpus"', spark_config)
         self.assertNotIn("configure_cpu_runtime(", spark_config)
         self.assertIn(
-            "spark-monitoring-rest-v1",
+            "spark-driver-status-store",
             spark_config,
         )
         self.assertIn(
@@ -409,6 +410,100 @@ class FabricNotebookTests(unittest.TestCase):
             0,
         )
 
+    def test_executor_partition_preserves_fabric_spark_ui_query_parameters(self):
+        endpoint = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "spark_monitoring_executors_endpoint",
+            quote=quote,
+            urlsplit=urlsplit,
+            urlunsplit=urlunsplit,
+        )["spark_monitoring_executors_endpoint"]
+
+        self.assertEqual(
+            endpoint(
+                "https://example.test/sparkui/activity/?artifactId=item&workspace=dev",
+                "application/1",
+            ),
+            "https://example.test/sparkui/activity/api/v1/applications/"
+            "application%2F1/executors?artifactId=item&workspace=dev",
+        )
+        self.assertEqual(
+            endpoint("http://localhost:4040/", "application-1"),
+            "http://localhost:4040/api/v1/applications/application-1/executors",
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid Spark UI URL"):
+            endpoint("sparkui/activity?artifactId=item", "application-1")
+
+    def test_executor_partition_reads_active_executor_status_summaries(self):
+        @dataclass
+        class Resource:
+            executor_id: str
+            host_port: str
+            total_cores: int
+            max_storage_memory_bytes: int
+            active_tasks: int
+
+        class Summary:
+            def __init__(self, identifier, active, cores):
+                self.identifier = identifier
+                self.active = active
+                self.cores = cores
+
+            def id(self):
+                return self.identifier
+
+            def isActive(self):
+                return self.active
+
+            def totalCores(self):
+                return self.cores
+
+            def hostPort(self):
+                return f"{self.identifier}:1234"
+
+            def maxMemory(self):
+                return 1024
+
+            def activeTasks(self):
+                return 1
+
+        class Iterator:
+            def __init__(self, values):
+                self.values = iter(values)
+                self.current = None
+
+            def hasNext(self):
+                if self.current is None:
+                    self.current = next(self.values, None)
+                return self.current is not None
+
+            def next(self):
+                value, self.current = self.current, None
+                return value
+
+        converter = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "executor_resources_from_summaries",
+            ExecutorResource=Resource,
+        )["executor_resources_from_summaries"]
+        resources = converter(
+            Iterator(
+                [
+                    Summary("2", True, 4),
+                    Summary("driver", True, 4),
+                    Summary("1", True, 2),
+                    Summary("removed", False, 4),
+                ]
+            )
+        )
+
+        self.assertEqual([item.executor_id for item in resources], ["1", "2"])
+        self.assertEqual([item.total_cores for item in resources], [2, 4])
+        with self.assertRaisesRegex(ValueError, "Invalid active executor summary"):
+            converter(Iterator([Summary("bad", True, 0)]))
+
     def test_executor_partition_scopes_and_persists_benchmark_identity(self):
         parameters = cell_source(EXECUTOR_PROTOTYPE, "parameters")
         spark_config = cell_source(EXECUTOR_PROTOTYPE, "spark-config")
@@ -547,6 +642,38 @@ class FabricNotebookTests(unittest.TestCase):
             deterministic_work_id("batch", 1, "video.mp4"),
         )
 
+    def test_executor_benchmark_reports_incomplete_characterization_without_none_value(self):
+        helpers = cell_functions(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-helpers",
+            "characterization_rejection_message",
+            "optional_text",
+        )
+        rejection_message = helpers["characterization_rejection_message"]
+        intentional_failure = (
+            "characterization-only run cannot pass benchmark approval; rerun "
+            "with a new batch ID and PEAK_WORKER_MEMORY_GIB=2.25"
+        )
+
+        self.assertEqual(helpers["optional_text"](None), "")
+        self.assertEqual(helpers["optional_text"](" batch-a "), "batch-a")
+        self.assertEqual(
+            rejection_message(2.25, [intentional_failure]),
+            "Executor peak-memory characterization completed but cannot be "
+            "approved; use a new benchmark batch ID with "
+            "PEAK_WORKER_MEMORY_GIB=2.25",
+        )
+        incomplete = rejection_message(
+            None,
+            [
+                "expected exactly one run metric row, found 0",
+                intentional_failure,
+            ],
+        )
+        self.assertIn("characterization did not complete", incomplete)
+        self.assertIn("expected exactly one run metric row, found 0", incomplete)
+        self.assertNotIn("PEAK_WORKER_MEMORY_GIB=None", incomplete)
+
     def test_executor_benchmark_resolves_attached_lakehouse_file_api_paths(self):
         namespace = cell_functions(
             EXECUTOR_BENCHMARK_CONTROL,
@@ -665,7 +792,6 @@ class FabricNotebookTests(unittest.TestCase):
             'metric["suggested_peak_worker_memory_gib"]',
             evaluation,
         )
-
         pipeline = json.loads(
             EXECUTOR_BENCHMARK_PIPELINE.read_text(encoding="utf-8")
         )

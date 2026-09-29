@@ -122,6 +122,18 @@ loading models. Before implementation, validate which monitoring backend is
 accessible and supported in the deployed Fabric runtime. Isolate fallbacks and
 do not document or implement a fabricated working discovery API.
 
+The primary running-session backend is the Spark driver's `AppStatusStore`.
+`executorList(true)` supplies typed active executor summaries without crossing
+the Fabric Spark UI HTTP proxy. The REST endpoint remains a bounded fallback;
+both sources must exclude the driver and persist their distinct discovery
+source.
+
+Fabric `SparkContext.uiWebUrl` values may include query parameters required by
+the Spark UI proxy. REST discovery must append the
+`/api/v1/applications/.../executors` route to the parsed URL path and then
+preserve the original query string; concatenating the route after the raw URL
+turns it into query data and can produce HTTP 406 responses.
+
 ## 5. Slot calculation
 
 For each active executor `i` with `C_i` cores and effective task CPU request
