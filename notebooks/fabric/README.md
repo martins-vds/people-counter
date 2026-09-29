@@ -107,8 +107,13 @@ Before running the prototype:
   `spark.task.cpus` value requested by `%%configure`. The notebook fails with
   restart instructions when the requested and effective values differ and never
   changes scheduler allocation after startup;
-- measure peak worker memory for the exact pipeline and settings, then set
-  `PEAK_WORKER_MEMORY_GIB`. Leave `USABLE_EXECUTOR_MEMORY_GIB=0` to have the
+- leave `PEAK_WORKER_MEMORY_GIB=0` on the first run to characterize one
+  executor Python worker over the submitted representative videos. The
+  notebook forces one sequential partition, persists the measured Linux
+  process high-water mark, and reports a rounded-up suggested value. That run
+  is characterization-only and cannot pass the benchmark gate. Rerun with a
+  new batch ID and the suggested positive value. Leave
+  `USABLE_EXECUTOR_MEMORY_GIB=0` to have the
   notebook discover a conservative per-executor Python/native budget from
   executor cgroup limits and the effective Spark memory configuration, or
   supply a positive reviewed override. The notebook additionally reserves
@@ -276,6 +281,44 @@ discovery reports too little memory, change the startup allocation—normally
 `spark.executor.memoryOverhead` or `spark.executor.pyspark.memory` in the
 `%%configure` `conf` object—and restart the session. Do not inflate the
 notebook parameter without changing the executor container allocation.
+
+#### First-run peak worker characterization
+
+`PEAK_WORKER_MEMORY_GIB=0` enables characterization mode. Notebook 15 ignores
+the normal task cap and partition-wave count for that run, sets planned
+concurrency and partition count to one, and processes the complete submitted
+sample sequentially in one executor Python worker. Spark speculation must
+remain disabled.
+
+The worker reads `VmRSS` and `VmHWM` from `/proc/self/status` immediately before
+loading/processing the partition and after all videos finish. `VmHWM` is the
+Linux process-lifetime resident-set high-water mark, so it includes the Python
+runtime, loaded models, OpenCV/PyTorch native allocations, frames, tensors, and
+tracking state held by that worker. The run persists:
+
+- `memory_characterization_mode=true`;
+- `measured_peak_worker_memory_gib`;
+- `suggested_peak_worker_memory_gib`, rounded above the observation by at least
+  one `0.25 GiB` quantum;
+- `peak_worker_memory_measurement_complete`; and
+- worker-lifetime high-water marks observed at each partition in
+  `peak_worker_memory_details_json`.
+
+The pipeline evaluation activity intentionally rejects this run with a message
+containing the suggested value. This is expected: a characterization run is
+measurement evidence, not capacity approval. Copy the suggestion into
+`PEAK_WORKER_MEMORY_GIB`, choose a new `BENCHMARK_BATCH_ID`, and run the
+pipeline again. A normal run also measures `VmHWM` and is rejected if the
+observed peak exceeds the configured value.
+
+Use representative worst-case inputs for characterization, including the
+largest resolution, largest inference batch, and most memory-intensive model
+configuration intended for production. The characterization batch may be a
+smaller worst-case sample rather than the full approval corpus; the subsequent
+run with the suggested value must use a new batch ID and the complete benchmark
+sample. Python child-process memory is not included; the current inference
+implementations execute their model and OpenCV/PyTorch allocations in the
+worker process.
 
 The notebook derives application slots from each observed executor separately,
 uses deterministic largest-cost-first bucket planning with bounded driver
@@ -4254,7 +4297,7 @@ without turning the overall pipeline green.
 | `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
 | `PARTITION_WAVES` | `Int` | Number of planned partition waves. |
 | `RUNTIME_AFFINITY_MAX_IMBALANCE` | `Float` | Maximum projected-load penalty accepted to retain a model-runtime affinity bucket. |
-| `PEAK_WORKER_MEMORY_GIB`, `USABLE_EXECUTOR_MEMORY_GIB`, `EXECUTOR_MEMORY_HEADROOM_FRACTION` | `Float` | Memory-safety inputs. Peak worker memory must be measured. Leave usable executor memory at `0` for runtime discovery or provide a positive reviewed override. |
+| `PEAK_WORKER_MEMORY_GIB`, `USABLE_EXECUTOR_MEMORY_GIB`, `EXECUTOR_MEMORY_HEADROOM_FRACTION` | `Float` | Memory-safety inputs. Leave peak worker memory at `0` for a characterization-only first run, then rerun under a new batch ID with the reported suggestion. Leave usable executor memory at `0` for runtime discovery or provide a positive reviewed override. |
 | `OUTPUT_TXN_VERSION` | `Int` | Stable non-negative version for this unique batch; normally `0`. |
 | `INPUT_TXN_VERSION` | `Int` | Idempotent Delta transaction version for preparation; normally `0`. |
 | `ATTACHED_LAKEHOUSE_ID` | `String` | Exact item ID of the notebook's attached default Lakehouse. Every benchmark `video_uri` must reference this ID. |
@@ -4288,6 +4331,10 @@ never joins evidence by timestamps or table-wide state.
   backend, and contain no assumed executors;
 - the memory-safety calculation passed and no executor/task reported a
   conflicting native-thread budget;
+- the run was not a peak-worker characterization run;
+- complete `linux-proc-vmhwm` worker-memory evidence was recorded; and
+- the observed worker-lifetime peak did not exceed the configured
+  `PEAK_WORKER_MEMORY_GIB`;
 - `metrics_complete=true`, `assumed_duration_count=0`, and no batch was resumed;
 - observed concurrency does not exceed planned concurrency;
 - the run lasted at least `MIN_WALL_SECONDS`;

@@ -184,6 +184,17 @@ Reducing the total number of partitions alone is not per-executor memory
 protection, because Spark placement can still colocate memory-heavy tasks on the
 same executor.
 
+When no peak measurement exists, a zero configured peak selects a
+characterization-only run. Force planned concurrency and physical partition
+count to one regardless of the normal cap or wave settings, execute the complete
+representative sample sequentially, and capture the executor Python process
+`VmHWM` before and after the partition. Persist the maximum observed value and a
+recommendation rounded above it by at least one 0.25 GiB quantum. The evaluation gate must always
+reject characterization mode and tell the operator to rerun under a new batch
+identity with the recommendation. Normal runs should retain the same
+instrumentation and reject evidence when the observed high-water mark exceeds
+the configured peak.
+
 Use a zero configured usable-memory value to request automatic discovery.
 Probe every runnable executor from an executor-side task and require a finite
 cgroup memory limit. Bound the discovered worker budget by:

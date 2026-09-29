@@ -192,6 +192,7 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("CPUS_PER_TASK = 1", parameters)
         self.assertIn('PARALLEL_TASKS = "auto"', parameters)
         self.assertIn("PARTITION_WAVES = 3", parameters)
+        self.assertIn("PEAK_WORKER_MEMORY_GIB = 0.0", parameters)
         self.assertIn("USABLE_EXECUTOR_MEMORY_GIB = 0.0", parameters)
         self.assertNotIn("\nEXECUTOR_CORES =", parameters)
         self.assertNotIn("\nACTIVE_TASKS_PER_EXECUTOR =", parameters)
@@ -208,6 +209,12 @@ class FabricNotebookTests(unittest.TestCase):
         )
         self.assertIn("executor_cgroup_memory_sample()", spark_config)
         self.assertIn("calculate_auto_usable_executor_memory_bytes(", spark_config)
+        self.assertIn("memory_characterization_mode = PEAK_WORKER_MEMORY_GIB == 0", spark_config)
+        self.assertIn(
+            "planned_concurrency = 1 if memory_characterization_mode",
+            planning,
+        )
+        self.assertIn("if memory_characterization_mode", planning)
         self.assertIn("choose_bucket(", planning)
         self.assertIn("toLocalIterator()", planning)
         self.assertIn(".partitionBy(", partition)
@@ -216,6 +223,8 @@ class FabricNotebookTests(unittest.TestCase):
             "configure_cpu_runtime(driver_cores=task_cpus, active_workers=1)",
             partition,
         )
+        self.assertIn("worker_lifetime_peak_rss_bytes", partition)
+        self.assertIn("linux-proc-vmhwm", partition)
         self.assertIn("models_dir is required for offline executor inference", partition)
         self.assertIn("supports only CPU inference", partition)
 
@@ -351,6 +360,37 @@ class FabricNotebookTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "did not cover every runnable executor"):
             calculate(probes[:1], {"1", "2"}, envelope)
+
+    def test_executor_partition_parses_and_rounds_worker_peak_memory(self):
+        parse_status = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "map-partitions",
+            "parse_proc_status_memory",
+        )["parse_proc_status_memory"]
+        rounded_peak = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "controlled-delta-persistence",
+            "rounded_peak_memory_gib",
+            math=math,
+        )["rounded_peak_memory_gib"]
+
+        self.assertEqual(
+            parse_status("Name:\tpython\nVmHWM:\t2097152 kB\nVmRSS:\t1048576 kB\n"),
+            {
+                "rss_bytes": 1 * 1024**3,
+                "peak_rss_bytes": 2 * 1024**3,
+            },
+        )
+        self.assertEqual(
+            rounded_peak(int(2.01 * 1024**3)),
+            2.25,
+        )
+        self.assertEqual(
+            rounded_peak(2 * 1024**3),
+            2.25,
+        )
+        with self.assertRaisesRegex(RuntimeError, "positive VmRSS and VmHWM"):
+            parse_status("VmRSS:\t1024 kB\n")
 
     def test_executor_partition_bucket_choice_is_balanced_and_stable(self):
         choose_bucket = cell_functions(
@@ -579,6 +619,10 @@ class FabricNotebookTests(unittest.TestCase):
             BOOTSTRAP,
             "bootstrap-schema-evolution",
         )
+        evaluation = cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "evaluate-benchmark",
+        )
         for suffix in (
             "executor_partition_input",
             "executor_partition_records",
@@ -597,8 +641,30 @@ class FabricNotebookTests(unittest.TestCase):
             self.assertIn(f'"{suffix}":', bootstrap_evolution)
         self.assertIn("usable_executor_memory_source STRING NOT NULL", bootstrap_create)
         self.assertIn("memory_budget_details_json STRING NOT NULL", bootstrap_create)
+        self.assertIn("memory_characterization_mode BOOLEAN NOT NULL", bootstrap_create)
+        self.assertIn("suggested_peak_worker_memory_gib DOUBLE", bootstrap_create)
+        self.assertIn("peak_worker_memory_details_json STRING NOT NULL", bootstrap_create)
         self.assertIn('"usable_executor_memory_source": "STRING"', bootstrap_evolution)
         self.assertIn('"memory_budget_details_json": "STRING"', bootstrap_evolution)
+        self.assertIn('"memory_characterization_mode": "BOOLEAN"', bootstrap_evolution)
+        self.assertIn('"suggested_peak_worker_memory_gib": "DOUBLE"', bootstrap_evolution)
+        self.assertIn('"peak_worker_memory_details_json": "STRING"', bootstrap_evolution)
+        self.assertIn(
+            "characterization-only run cannot pass benchmark approval",
+            evaluation,
+        )
+        self.assertIn(
+            "configured peak worker memory changed during execution",
+            evaluation,
+        )
+        self.assertIn(
+            'if float(PEAK_WORKER_MEMORY_GIB) == 0:',
+            evaluation,
+        )
+        self.assertIn(
+            'metric["suggested_peak_worker_memory_gib"]',
+            evaluation,
+        )
 
         pipeline = json.loads(
             EXECUTOR_BENCHMARK_PIPELINE.read_text(encoding="utf-8")
@@ -643,6 +709,10 @@ class FabricNotebookTests(unittest.TestCase):
         pipeline_parameters = pipeline["properties"]["parameters"]
         self.assertEqual(
             pipeline_parameters["USABLE_EXECUTOR_MEMORY_GIB"]["defaultValue"],
+            0.0,
+        )
+        self.assertEqual(
+            pipeline_parameters["PEAK_WORKER_MEMORY_GIB"]["defaultValue"],
             0.0,
         )
         for optional_parameter in (
