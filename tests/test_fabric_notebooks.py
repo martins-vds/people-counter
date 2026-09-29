@@ -192,6 +192,7 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("CPUS_PER_TASK = 1", parameters)
         self.assertIn('PARALLEL_TASKS = "auto"', parameters)
         self.assertIn("PARTITION_WAVES = 3", parameters)
+        self.assertIn("USABLE_EXECUTOR_MEMORY_GIB = 0.0", parameters)
         self.assertNotIn("\nEXECUTOR_CORES =", parameters)
         self.assertNotIn("\nACTIVE_TASKS_PER_EXECUTOR =", parameters)
         self.assertNotIn("\nTARGET_PARTITIONS =", parameters)
@@ -205,6 +206,8 @@ class FabricNotebookTests(unittest.TestCase):
             "sum(item[\"slots\"] for item in slot_details)",
             spark_config,
         )
+        self.assertIn("executor_cgroup_memory_sample()", spark_config)
+        self.assertIn("calculate_auto_usable_executor_memory_bytes(", spark_config)
         self.assertIn("choose_bucket(", planning)
         self.assertIn("toLocalIterator()", planning)
         self.assertIn(".partitionBy(", partition)
@@ -243,8 +246,111 @@ class FabricNotebookTests(unittest.TestCase):
 
         self.assertEqual(parse_spark_memory_bytes("1.5g"), int(1.5 * 1024**3))
         self.assertEqual(parse_spark_memory_bytes("512 MiB"), 512 * 1024**2)
+        self.assertEqual(
+            parse_spark_memory_bytes("4096", default_unit="m"),
+            4 * 1024**3,
+        )
         with self.assertRaisesRegex(ValueError, "Unsupported Spark memory value"):
             parse_spark_memory_bytes("unbounded")
+
+    def test_executor_partition_derives_spark_worker_memory_envelope(self):
+        namespace = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "parse_spark_memory_bytes",
+            "optional_spark_memory_bytes",
+            "configured_executor_memory_envelope",
+            math=math,
+            re=re,
+        )
+        gib = 1024**3
+        derive = namespace["configured_executor_memory_envelope"]
+
+        explicit = derive(
+            {
+                "spark.executor.memoryOverhead": "6144",
+                "spark.memory.offHeap.enabled": "true",
+                "spark.memory.offHeap.size": "2g",
+            },
+            28 * gib,
+        )
+        self.assertEqual(
+            explicit["configured_worker_budget_bytes"],
+            int(4.5 * gib),
+        )
+        self.assertEqual(explicit["executor_native_reserve_bytes"], int(1.5 * gib))
+        self.assertEqual(explicit["reserved_outside_workers_bytes"], 30 * gib)
+        self.assertEqual(
+            explicit["source"],
+            "spark.executor.memoryOverhead+cgroup",
+        )
+
+        pyspark = derive(
+            {
+                "spark.executor.memoryOverhead": "4g",
+                "spark.executor.pyspark.memory": "8g",
+                "spark.memory.offHeap.enabled": "true",
+                "spark.memory.offHeap.size": "2g",
+            },
+            28 * gib,
+        )
+        self.assertEqual(pyspark["configured_worker_budget_bytes"], 8 * gib)
+        self.assertEqual(pyspark["reserved_outside_workers_bytes"], 34 * gib)
+        self.assertEqual(pyspark["source"], "spark.executor.pyspark.memory+cgroup")
+
+        derived = derive({}, 28 * gib)
+        derived_overhead = int((28 * gib // 1024**2) * 0.10) * 1024**2
+        self.assertEqual(
+            derived["configured_worker_budget_bytes"],
+            derived_overhead - int(derived_overhead * 0.25),
+        )
+        self.assertEqual(derived["source"], "derived-spark-memory-overhead+cgroup")
+
+    def test_executor_partition_auto_memory_uses_smallest_executor_budget(self):
+        namespace = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "executor_memory_probe_coverage",
+            "calculate_auto_usable_executor_memory_bytes",
+        )
+        calculate = namespace["calculate_auto_usable_executor_memory_bytes"]
+        gib = 1024**3
+        envelope = {
+            "configured_worker_budget_bytes": 6 * gib,
+            "reserved_outside_workers_bytes": 30 * gib,
+        }
+        probes = [
+            {
+                "probe_key": "executor-1",
+                "executor_id": "1",
+                "hostname": "worker-1",
+                "cgroup_limit_bytes": 40 * gib,
+                "cgroup_current_bytes": 10 * gib,
+                "python_worker_rss_bytes": 1 * gib,
+                "physical_memory_bytes": 64 * gib,
+                "cgroup_limit_path": "/sys/fs/cgroup/memory.max",
+            },
+            {
+                "probe_key": "executor-2",
+                "executor_id": "2",
+                "hostname": "worker-2",
+                "cgroup_limit_bytes": 40 * gib,
+                "cgroup_current_bytes": 38 * gib,
+                "python_worker_rss_bytes": 2 * gib,
+                "physical_memory_bytes": 64 * gib,
+                "cgroup_limit_path": "/sys/fs/cgroup/memory.max",
+            },
+        ]
+
+        usable, details = calculate(probes, {"1", "2"}, envelope)
+
+        self.assertEqual(usable, 2 * gib)
+        self.assertEqual(
+            [item["usable_memory_bytes"] for item in details],
+            [6 * gib, 2 * gib],
+        )
+        with self.assertRaisesRegex(RuntimeError, "did not cover every runnable executor"):
+            calculate(probes[:1], {"1", "2"}, envelope)
 
     def test_executor_partition_bucket_choice_is_balanced_and_stable(self):
         choose_bucket = cell_functions(
@@ -402,19 +508,27 @@ class FabricNotebookTests(unittest.TestCase):
         )
 
     def test_executor_benchmark_resolves_attached_lakehouse_file_api_paths(self):
-        resolver = cell_functions(
+        namespace = cell_functions(
             EXECUTOR_BENCHMARK_CONTROL,
             "control-helpers",
+            "normalized_text_parameter",
             "onelake_file_api_path",
+            json=json,
             unquote=unquote,
             urlsplit=urlsplit,
-        )["onelake_file_api_path"]
+        )
+        normalize = namespace["normalized_text_parameter"]
+        resolver = namespace["onelake_file_api_path"]
         lakehouse_id = "883cff91-eaa8-40be-870f-6e9716303cb2"
         uri = (
             "abfss://workspace@onelake.dfs.fabric.microsoft.com/"
             f"{lakehouse_id}/Files/videos/sample%20clip.mp4"
         )
 
+        self.assertEqual(normalize(lakehouse_id, "ID"), lakehouse_id)
+        self.assertEqual(normalize(json.dumps(lakehouse_id), "ID"), lakehouse_id)
+        with self.assertRaisesRegex(ValueError, "invalid JSON string quoting"):
+            normalize('"unterminated', "ID")
         self.assertEqual(
             resolver(uri, lakehouse_id, "/lakehouse/default/"),
             "/lakehouse/default/Files/videos/sample clip.mp4",
@@ -481,6 +595,10 @@ class FabricNotebookTests(unittest.TestCase):
             "executor_inference_runs",
         ):
             self.assertIn(f'"{suffix}":', bootstrap_evolution)
+        self.assertIn("usable_executor_memory_source STRING NOT NULL", bootstrap_create)
+        self.assertIn("memory_budget_details_json STRING NOT NULL", bootstrap_create)
+        self.assertIn('"usable_executor_memory_source": "STRING"', bootstrap_evolution)
+        self.assertIn('"memory_budget_details_json": "STRING"', bootstrap_evolution)
 
         pipeline = json.loads(
             EXECUTOR_BENCHMARK_PIPELINE.read_text(encoding="utf-8")
@@ -516,10 +634,26 @@ class FabricNotebookTests(unittest.TestCase):
         prepare_parameters = activities["PrepareExecutorBenchmark"][
             "typeProperties"
         ]["parameters"]
-        self.assertIn("ATTACHED_LAKEHOUSE_ID", prepare_parameters)
+        self.assertEqual(
+            prepare_parameters["ATTACHED_LAKEHOUSE_ID"]["value"]["value"],
+            "@concat('\"', pipeline().parameters.ATTACHED_LAKEHOUSE_ID, '\"')",
+        )
         self.assertIn("LAKEHOUSE_FILE_API_ROOT", prepare_parameters)
         self.assertNotIn("STAGING_ROOT", prepare_parameters)
         pipeline_parameters = pipeline["properties"]["parameters"]
+        self.assertEqual(
+            pipeline_parameters["USABLE_EXECUTOR_MEMORY_GIB"]["defaultValue"],
+            0.0,
+        )
+        for optional_parameter in (
+            "BASELINE_BENCHMARK_BATCH_ID",
+            "BASELINE_CONFIG_SHA256",
+            "CAMERA_MOTION_COMPENSATION",
+        ):
+            self.assertEqual(
+                pipeline_parameters[optional_parameter]["defaultValue"],
+                "",
+            )
         self.assertEqual(
             pipeline_parameters["ATTACHED_LAKEHOUSE_ID"]["defaultValue"],
             "883cff91-eaa8-40be-870f-6e9716303cb2",

@@ -52,7 +52,7 @@
                         },
                         "ATTACHED_LAKEHOUSE_ID": {
                             "value": {
-                                "value": "@pipeline().parameters.ATTACHED_LAKEHOUSE_ID",
+                                "value": "@concat('\"', pipeline().parameters.ATTACHED_LAKEHOUSE_ID, '\"')",
                                 "type": "Expression"
                             },
                             "type": "string"

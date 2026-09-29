@@ -108,13 +108,14 @@ Before running the prototype:
   restart instructions when the requested and effective values differ and never
   changes scheduler allocation after startup;
 - measure peak worker memory for the exact pipeline and settings, then set
-  `PEAK_WORKER_MEMORY_GIB`; separately set
-  `USABLE_EXECUTOR_MEMORY_GIB` to the measured or approved per-executor
-  Python/native budget remaining after JVM, storage, off-heap, and system
-  reserves. The notebook additionally reserves
+  `PEAK_WORKER_MEMORY_GIB`. Leave `USABLE_EXECUTOR_MEMORY_GIB=0` to have the
+  notebook discover a conservative per-executor Python/native budget from
+  executor cgroup limits and the effective Spark memory configuration, or
+  supply a positive reviewed override. The notebook additionally reserves
   `EXECUTOR_MEMORY_HEADROOM_FRACTION` and rejects a CPU slot plan that is not
-  memory-safe. Do not use `spark.executor.memory` (JVM heap) as the Python
-  worker budget;
+  memory-safe. It fails rather than guessing from host RAM when executor cgroup
+  limits are unavailable. Do not use `spark.executor.memory` (JVM heap) as the
+  Python worker budget;
 - use `PARALLEL_TASKS="auto"` for maximum useful throughput, or a positive
   integer for sequential application-local batches; capped runs also require
   `spark.speculation=false` in startup configuration and are not cluster-wide
@@ -213,6 +214,68 @@ intentionally absent from this notebook because their IDs, names, paths, and
 pool choice are deployment-specific. Add them only when the notebook must
 override its attached Environment, pinned Lakehouse, or workspace pool; keep
 credentials and secrets out of the cell.
+
+#### Automatic executor memory budget
+
+`USABLE_EXECUTOR_MEMORY_GIB=0` enables fail-closed runtime discovery. Notebook
+15 starts lightweight probe tasks across the currently approved Spark slots.
+It retries coverage up to three times. Each executor probe reads its finite
+cgroup memory limit, working set, and reclaimable file cache, records the Python
+worker RSS and visible physical memory, and identifies the executor or host
+that supplied the sample. The driver requires coverage for every runnable
+executor and uses the smallest resulting budget.
+
+The configured worker envelope is selected in this order:
+
+1. `spark.executor.pyspark.memory`, when explicitly configured;
+2. `spark.executor.memoryOverhead` minus a native-executor reserve of the
+   greater of `384 MiB` or 25%, when explicitly configured; or
+3. Spark's derived executor overhead:
+   `max(executor heap MiB * spark.executor.memoryOverheadFactor,
+   spark.executor.minMemoryOverhead)`, using Spark defaults of `0.10` and
+   `384 MiB` when those settings are absent, followed by the same
+   native-executor reserve.
+
+Unitless values for Spark executor heap, overhead, minimum overhead, and
+PySpark memory are interpreted as MiB, matching Spark. Unitless
+`spark.memory.offHeap.size` remains bytes.
+
+For every observed executor the notebook caps that envelope by both current
+cgroup working-set free space and:
+
+```text
+cgroup limit - JVM heap - configured Spark off-heap reservation
+```
+
+When `spark.executor.pyspark.memory` is configured, executor memory overhead is
+also reserved outside the worker budget because Spark adds the PySpark
+allocation separately to the executor container request. The smallest
+per-executor result becomes `usable_executor_memory_gib`; the existing
+`EXECUTOR_MEMORY_HEADROOM_FRACTION` is then applied before worker-slot
+approval.
+
+This deliberately leaves part of `memoryOverhead` for JVM native memory,
+Netty/direct buffers, thread stacks, and allocator arenas rather than assigning
+the whole container-overhead allocation to Python workers.
+
+The successful run persists `usable_executor_memory_source` and the complete
+calculation inputs in `memory_budget_details_json`. Auto mode fails if the
+cgroup limit is unlimited or unreadable, probe coverage is incomplete, or the
+remaining budget is not positive. It does not substitute node RAM or the Spark
+REST API's `maxMemory`, which is storage-memory telemetry rather than a Python
+worker limit.
+
+Automatic mode also requires observed executor identities. If an operator
+enables `ALLOW_ASSUMED_RESOURCES`, they must either restore monitoring-based
+resource discovery or provide a positive reviewed usable-memory override;
+synthetic executor identities cannot prove probe coverage.
+
+An explicit positive `USABLE_EXECUTOR_MEMORY_GIB` remains available as a
+reviewed operator override and is labeled `operator-override`. If automatic
+discovery reports too little memory, change the startup allocation—normally
+`spark.executor.memoryOverhead` or `spark.executor.pyspark.memory` in the
+`%%configure` `conf` object—and restart the session. Do not inflate the
+notebook parameter without changing the executor container allocation.
 
 The notebook derives application slots from each observed executor separately,
 uses deterministic largest-cost-first bucket planning with bounded driver
@@ -4191,11 +4254,18 @@ without turning the overall pipeline green.
 | `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
 | `PARTITION_WAVES` | `Int` | Number of planned partition waves. |
 | `RUNTIME_AFFINITY_MAX_IMBALANCE` | `Float` | Maximum projected-load penalty accepted to retain a model-runtime affinity bucket. |
-| `PEAK_WORKER_MEMORY_GIB`, `USABLE_EXECUTOR_MEMORY_GIB`, `EXECUTOR_MEMORY_HEADROOM_FRACTION` | `Float` | Reviewed memory-safety inputs. |
+| `PEAK_WORKER_MEMORY_GIB`, `USABLE_EXECUTOR_MEMORY_GIB`, `EXECUTOR_MEMORY_HEADROOM_FRACTION` | `Float` | Memory-safety inputs. Peak worker memory must be measured. Leave usable executor memory at `0` for runtime discovery or provide a positive reviewed override. |
 | `OUTPUT_TXN_VERSION` | `Int` | Stable non-negative version for this unique batch; normally `0`. |
 | `INPUT_TXN_VERSION` | `Int` | Idempotent Delta transaction version for preparation; normally `0`. |
 | `ATTACHED_LAKEHOUSE_ID` | `String` | Exact item ID of the notebook's attached default Lakehouse. Every benchmark `video_uri` must reference this ID. |
 | `LAKEHOUSE_FILE_API_ROOT` | `String` | Absolute mounted File API root for the attached Lakehouse; normally `/lakehouse/default`. |
+
+The checked-in pipeline JSON-quotes `ATTACHED_LAKEHOUSE_ID` before passing it
+to the notebook. Keep that expression intact. Fabric can otherwise render a
+UUID beginning with digits as unquoted Python in its generated base-parameter
+cell, causing a `SyntaxError` before the notebook's first executable statement.
+The control notebook accepts both the JSON-quoted pipeline representation and
+an ordinary string supplied during an interactive run.
 
 Notebook 15 implements `INPUT_BATCH_ID` and rejects partially supplied
 benchmark identity. Before counting or planning, it filters

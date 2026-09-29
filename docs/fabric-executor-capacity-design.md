@@ -184,6 +184,31 @@ Reducing the total number of partitions alone is not per-executor memory
 protection, because Spark placement can still colocate memory-heavy tasks on the
 same executor.
 
+Use a zero configured usable-memory value to request automatic discovery.
+Probe every runnable executor from an executor-side task and require a finite
+cgroup memory limit. Bound the discovered worker budget by:
+
+- `spark.executor.pyspark.memory`, when configured;
+- otherwise explicit or Spark-derived `spark.executor.memoryOverhead`, after a
+  separate JVM-native/container reserve;
+- cgroup memory currently free at the probe after excluding reclaimable file
+  cache; and
+- cgroup capacity remaining after the configured executor heap, Spark off-heap
+  reservation, and—when PySpark memory is separate—the executor overhead.
+
+Use the minimum result across observed executors and retain the existing
+headroom calculation before approving slots. Retry a bounded number of probe
+stages to cover every executor identity discovered from Spark monitoring.
+Persist the source, effective Spark memory settings, cgroup limit/current
+usage, reclaimable cache, Python worker RSS, and per-executor deductions. Fail
+rather than infer a budget from host/node RAM when cgroup limits or complete
+executor probe coverage are unavailable. A positive operator override remains
+supported but must be labeled so evaluation cannot mistake it for
+runtime-derived evidence. If the cgroup limit is no larger than the configured
+JVM/off-heap reservations, direct the operator to reduce JVM heap or select a
+larger container/node; increasing overhead alone cannot create capacity inside
+an unchanged limit.
+
 ## 7. Partition planning
 
 Plan partition count as:
