@@ -4207,6 +4207,11 @@ write a second gate notebook manually.
 5. Set a new `BENCHMARK_BATCH_ID`, the exact `RUNTIME_VERSION` and
    `CAPACITY_SKU`, the exact `ATTACHED_LAKEHOUSE_ID`, an executor-visible
    `MODELS_DIR`, and a non-empty `BENCHMARK_ITEMS` array. Keep
+   `TABLE_PREFIX=people_counter` and `DATABASE` empty unless the bootstrap,
+   control, and inference notebooks were all deployed with the same reviewed
+   alternative. The pipeline passes both values to every notebook activity so
+   preparation, inference, and evaluation cannot silently resolve different
+   Delta tables. Keep
    `LAKEHOUSE_FILE_API_ROOT=/lakehouse/default` unless the notebook uses a
    different attached-Lakehouse mount. Do not reuse a batch ID after failure
    or cancellation.
@@ -4325,6 +4330,8 @@ without turning the overall pipeline green.
 |---|---|---|
 | `BENCHMARK_BATCH_ID` | `String` | Unique identity for one configuration and attempt. Never reuse it after a failed or cancelled inference activity. |
 | `BENCHMARK_ITEMS` | `Array` | Representative videos; preparation derives the Delta input rows. |
+| `DATABASE` | `String` | Optional database/schema qualifier shared by preparation, inference, and evaluation. Empty uses the attached Lakehouse default. |
+| `TABLE_PREFIX` | `String` | Shared Delta-table prefix for every notebook activity. The checked-in bootstrap and pipeline default to `people_counter`. |
 | `CAPACITY_SKU` | `String` | Reviewed capacity label used for comparison, not resource discovery. |
 | `RUNTIME_VERSION` | `String` | Exact pinned Fabric runtime label. |
 | `BASELINE_BENCHMARK_BATCH_ID` | `String` | Optional notebook-04 benchmark batch over the same sample mix and inference settings. |

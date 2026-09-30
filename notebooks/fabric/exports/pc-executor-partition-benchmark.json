@@ -29,6 +29,20 @@
                             },
                             "type": "string"
                         },
+                        "DATABASE": {
+                            "value": {
+                                "value": "@pipeline().parameters.DATABASE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": {
+                                "value": "@pipeline().parameters.TABLE_PREFIX",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
                         "BENCHMARK_ITEMS_JSON": {
                             "value": {
                                 "value": "@string(pipeline().parameters.BENCHMARK_ITEMS)",
@@ -257,6 +271,20 @@
                             },
                             "type": "string"
                         },
+                        "DATABASE": {
+                            "value": {
+                                "value": "@pipeline().parameters.DATABASE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": {
+                                "value": "@pipeline().parameters.TABLE_PREFIX",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
                         "CAPACITY_SKU": {
                             "value": {
                                 "value": "@pipeline().parameters.CAPACITY_SKU",
@@ -415,6 +443,20 @@
                         "BENCHMARK_BATCH_ID": {
                             "value": {
                                 "value": "@pipeline().parameters.BENCHMARK_BATCH_ID",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "DATABASE": {
+                            "value": {
+                                "value": "@pipeline().parameters.DATABASE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "TABLE_PREFIX": {
+                            "value": {
+                                "value": "@pipeline().parameters.TABLE_PREFIX",
                                 "type": "Expression"
                             },
                             "type": "string"
@@ -687,6 +729,14 @@
         "parameters": {
             "BENCHMARK_BATCH_ID": {
                 "type": "string"
+            },
+            "DATABASE": {
+                "type": "string",
+                "defaultValue": ""
+            },
+            "TABLE_PREFIX": {
+                "type": "string",
+                "defaultValue": "people_counter"
             },
             "BENCHMARK_ITEMS": {
                 "type": "array",

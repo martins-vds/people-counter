@@ -905,6 +905,12 @@ class FabricNotebookTests(unittest.TestCase):
             self.assertIn(f'"{stage}"', prepare)
 
     def test_executor_benchmark_bootstrap_and_pipeline_contract(self):
+        bootstrap_parameters = cell_source(BOOTSTRAP, "bootstrap-parameters")
+        inference_parameters = cell_source(EXECUTOR_PROTOTYPE, "parameters")
+        control_parameters = cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-parameters",
+        )
         bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
         bootstrap_evolution = cell_source(
             BOOTSTRAP,
@@ -959,6 +965,10 @@ class FabricNotebookTests(unittest.TestCase):
         pipeline = json.loads(
             EXECUTOR_BENCHMARK_PIPELINE.read_text(encoding="utf-8")
         )
+        expected_prefix_assignment = 'TABLE_PREFIX = "people_counter"'
+        self.assertIn(expected_prefix_assignment, bootstrap_parameters)
+        self.assertIn(expected_prefix_assignment, inference_parameters)
+        self.assertIn(expected_prefix_assignment, control_parameters)
         activities = {
             activity["name"]: activity
             for activity in pipeline["properties"]["activities"]
@@ -997,6 +1007,24 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("LAKEHOUSE_FILE_API_ROOT", prepare_parameters)
         self.assertNotIn("STAGING_ROOT", prepare_parameters)
         pipeline_parameters = pipeline["properties"]["parameters"]
+        self.assertEqual(
+            pipeline_parameters["TABLE_PREFIX"]["defaultValue"],
+            "people_counter",
+        )
+        self.assertEqual(pipeline_parameters["DATABASE"]["defaultValue"], "")
+        for activity_name in (
+            "PrepareExecutorBenchmark",
+            "RunExecutorPartitionInference",
+            "EvaluateExecutorBenchmark",
+        ):
+            activity_parameters = activities[activity_name]["typeProperties"][
+                "parameters"
+            ]
+            for table_parameter in ("DATABASE", "TABLE_PREFIX"):
+                self.assertEqual(
+                    activity_parameters[table_parameter]["value"]["value"],
+                    f"@pipeline().parameters.{table_parameter}",
+                )
         self.assertEqual(
             pipeline_parameters["USABLE_EXECUTOR_MEMORY_GIB"]["defaultValue"],
             0.0,

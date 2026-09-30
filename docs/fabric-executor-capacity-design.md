@@ -433,6 +433,10 @@ applications and would not exercise executor-partition scheduling.
 The control notebook is separate from notebook 15 so source validation, direct
 File API probing, and executor-access checks are not included in measured
 inference throughput, while their own timing remains available for diagnosis.
+The pipeline passes one `DATABASE` and `TABLE_PREFIX` value to preparation,
+inference, and evaluation. The checked-in default is
+`TABLE_PREFIX=people_counter`, matching the bootstrap notebook; the three
+activities must never rely on independent table-name defaults.
 
 ### 14.2 Prepare, run, evaluate
 
