@@ -1034,6 +1034,7 @@ class FabricNotebookTests(unittest.TestCase):
             self.assertIn(f'"{suffix}":', bootstrap_evolution)
         self.assertIn("usable_executor_memory_source STRING NOT NULL", bootstrap_create)
         self.assertIn("memory_budget_details_json STRING NOT NULL", bootstrap_create)
+        self.assertIn("executor_resources_json STRING NOT NULL", bootstrap_create)
         self.assertIn("memory_characterization_mode BOOLEAN NOT NULL", bootstrap_create)
         self.assertIn("suggested_peak_worker_memory_gib DOUBLE", bootstrap_create)
         self.assertIn("native_threads_per_worker INT NOT NULL", bootstrap_create)
@@ -1072,6 +1073,8 @@ class FabricNotebookTests(unittest.TestCase):
             'int(metric["native_threads_per_worker"]) != expected_native_threads',
             evaluation,
         )
+        self.assertIn('F.col("executor_resources_json")', evaluation)
+        self.assertNotIn('F.col("executor_details_json")', evaluation)
         pipeline = json.loads(
             EXECUTOR_BENCHMARK_PIPELINE.read_text(encoding="utf-8")
         )
