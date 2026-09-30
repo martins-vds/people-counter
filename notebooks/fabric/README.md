@@ -4364,6 +4364,12 @@ Python `None` or the text `"None"`. Both notebooks normalize null, `None`, and
 `"null"` to an empty qualifier before constructing table names, so the default
 continues to resolve tables in the attached Lakehouse.
 
+Some Fabric runtimes expose `TaskContext.cpus()` as an integral floating-point
+value such as `1.0`. Notebook 15 normalizes positive integral numeric values to
+an integer before comparing them with `CPUS_PER_TASK`, configuring native
+threads, and persisting task evidence. Fractional, zero, non-finite, Boolean,
+and nonnumeric allocations remain fatal.
+
 Notebook 15 implements `INPUT_BATCH_ID` and rejects partially supplied
 benchmark identity. Before counting or planning, it filters
 `people_counter_executor_partition_input` by the exact batch ID, capacity,

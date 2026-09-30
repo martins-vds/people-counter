@@ -221,7 +221,7 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("choose_bucket(", planning)
         self.assertIn("toLocalIterator()", planning)
         self.assertIn(".partitionBy(", partition)
-        self.assertIn("task_cpus = context.cpus()", partition)
+        self.assertIn("task_cpus = normalize_task_cpus(context.cpus())", partition)
         self.assertIn(
             "configure_cpu_runtime(driver_cores=task_cpus, active_workers=1)",
             partition,
@@ -230,6 +230,25 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("linux-proc-vmhwm", partition)
         self.assertIn("models_dir is required for offline executor inference", partition)
         self.assertIn("supports only CPU inference", partition)
+
+    def test_executor_partition_normalizes_integral_task_cpu_allocations(self):
+        normalize_task_cpus = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "map-partitions",
+            "normalize_task_cpus",
+            math=math,
+        )["normalize_task_cpus"]
+
+        for value in (1, 1.0, "1", "1.0", 4.0):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_task_cpus(value), int(float(value)))
+        for value in (True, None, 0, 0.0, 1.5, float("inf"), "invalid"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Invalid Spark task CPU allocation",
+                ):
+                    normalize_task_cpus(value)
 
     def test_executor_partition_slot_details_preserve_executor_boundaries(self):
         executor_slot_details = cell_functions(

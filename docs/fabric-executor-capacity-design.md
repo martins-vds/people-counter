@@ -296,9 +296,7 @@ def partition_records(rows):
     if context is None:
         raise RuntimeError("Partition inference requires a Spark task context")
 
-    task_cpus = context.cpus()
-    if not isinstance(task_cpus, int) or task_cpus < 1:
-        raise RuntimeError(f"Invalid Spark task CPU allocation: {task_cpus}")
+    task_cpus = normalize_task_cpus(context.cpus())
 
     configure_cpu_runtime(driver_cores=task_cpus, active_workers=1)
 
@@ -307,6 +305,9 @@ def partition_records(rows):
 ```
 
 `TaskContext.cpus()` is the task's allocated CPU count, not an idle CPU count.
+Fabric can expose this count as an integral floating-point value such as
+`1.0`; normalize positive integral numeric representations to `int`, while
+rejecting fractional, zero, non-finite, Boolean, and nonnumeric values.
 Passing `driver_cores=task_cpus` and `active_workers=1` is mathematically
 correct with the current helper, though the `driver_cores` name is misleading in
 task context. A later implementation may add a task-oriented wrapper while
