@@ -196,6 +196,25 @@ Reducing the total number of partitions alone is not per-executor memory
 protection, because Spark placement can still colocate memory-heavy tasks on the
 same executor.
 
+When a measured worker limit `M` is below an executor's CPU slot count, the
+minimum safe task reservation for an executor with `C` cores is:
+
+```text
+minimum_safe_cpus_per_task = floor(C / (M + 1)) + 1
+```
+
+For `C=16` and `M=3`, the minimum is `5`, which yields three scheduler slots.
+Changing `CPUS_PER_TASK` changes native-thread allocation, so characterize
+again with `PEAK_WORKER_MEMORY_GIB=0` under the new CPU setting before seeking
+approval.
+
+The characterization evaluator derives this minimum from persisted
+`usable_executor_memory_gib`, the configured headroom fraction, the suggested
+worker peak, and the observed per-executor `total_cores` values. It must include
+both the suggested peak and minimum task CPUs in its terminal recommendation.
+An approval request below that evidence-derived minimum remains a hard safety
+failure rather than a warning.
+
 When no peak measurement exists, a zero configured peak selects a
 characterization-only run. Force planned concurrency and physical partition
 count to one regardless of the normal cap or wave settings, execute the complete

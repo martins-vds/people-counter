@@ -342,11 +342,25 @@ tracking state held by that worker. The run persists:
   `peak_worker_memory_details_json`.
 
 The pipeline evaluation activity intentionally rejects this run with a message
-containing the suggested value. This is expected: a characterization run is
-measurement evidence, not capacity approval. Copy the suggestion into
-`PEAK_WORKER_MEMORY_GIB`, choose a new `BENCHMARK_BATCH_ID`, and run the
-pipeline again. A normal run also measures `VmHWM` and is rejected if the
-observed peak exceeds the configured value.
+containing the suggested peak and evidence-derived minimum safe
+`CPUS_PER_TASK`. This is expected: a characterization run is measurement
+evidence, not capacity approval. If the suggested task CPU value exceeds the
+characterization value, choose a new batch ID, set that `CPUS_PER_TASK`, keep
+`PEAK_WORKER_MEMORY_GIB=0`, and characterize again because the native-thread
+allocation changed. Once the recommended task CPU value no longer changes,
+choose another new batch ID and run approval with the suggested positive
+`PEAK_WORKER_MEMORY_GIB`. A normal run also measures `VmHWM` and is rejected if
+the observed peak exceeds the configured value.
+
+If the approval run reports fewer memory-safe workers than CPU slots, use its
+`minimum_safe_cpus_per_task` value as the next `CPUS_PER_TASK`. Because that
+changes the worker's native-thread allocation, use a new batch ID and set
+`PEAK_WORKER_MEMORY_GIB=0` again to characterize that CPU configuration before
+approval. For example, a 16-core executor limited to three memory-safe workers
+requires at least `CPUS_PER_TASK=5`, yielding `floor(16 / 5) = 3` scheduler
+slots. Do not substitute a lower `PARALLEL_TASKS` value: a global partition cap
+does not guarantee that Spark will avoid colocating those tasks on one
+executor.
 
 If inference fails before producing complete peak-memory evidence, evaluation
 reports that characterization did not complete and includes the underlying

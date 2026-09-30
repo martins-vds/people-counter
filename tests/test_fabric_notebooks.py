@@ -251,11 +251,14 @@ class FabricNotebookTests(unittest.TestCase):
                     normalize_task_cpus(value)
 
     def test_executor_partition_slot_details_preserve_executor_boundaries(self):
-        executor_slot_details = cell_functions(
+        helpers = cell_functions(
             EXECUTOR_PROTOTYPE,
             "spark-config",
             "executor_slot_details",
-        )["executor_slot_details"]
+            "minimum_task_cpus_for_worker_limit",
+        )
+        executor_slot_details = helpers["executor_slot_details"]
+        minimum_task_cpus = helpers["minimum_task_cpus_for_worker_limit"]
         executors = [
             MagicMock(executor_id="executor-a", total_cores=8),
             MagicMock(executor_id="executor-b", total_cores=5),
@@ -266,6 +269,18 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertEqual([item["slots"] for item in details], [2, 1])
         self.assertEqual([item["fragment_cores"] for item in details], [2, 2])
         self.assertEqual(sum(item["slots"] for item in details), 3)
+        self.assertEqual(minimum_task_cpus(16, 3), 5)
+        self.assertEqual(minimum_task_cpus(16, 2), 6)
+        self.assertEqual(minimum_task_cpus(16, 16), 1)
+        for invalid in ((0, 3), (16, 0), (16, True), (16.0, 3)):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    minimum_task_cpus(*invalid)
+
+        spark_config = cell_source(EXECUTOR_PROTOTYPE, "spark-config")
+        self.assertIn("minimum_safe_cpus_per_task=", spark_config)
+        self.assertIn("characterize again", spark_config)
+        self.assertIn("not rely on spark.executor.memoryOverhead", spark_config)
 
     def test_executor_partition_memory_parser_uses_binary_units(self):
         parse_spark_memory_bytes = cell_functions(
@@ -830,9 +845,15 @@ class FabricNotebookTests(unittest.TestCase):
             EXECUTOR_BENCHMARK_CONTROL,
             "control-helpers",
             "characterization_rejection_message",
+            "characterization_capacity_recommendation",
             "optional_text",
+            json=json,
+            math=math,
         )
         rejection_message = helpers["characterization_rejection_message"]
+        capacity_recommendation = helpers[
+            "characterization_capacity_recommendation"
+        ]
         intentional_failure = (
             "characterization-only run cannot pass benchmark approval; rerun "
             "with a new batch ID and PEAK_WORKER_MEMORY_GIB=2.25"
@@ -840,14 +861,37 @@ class FabricNotebookTests(unittest.TestCase):
 
         self.assertEqual(helpers["optional_text"](None), "")
         self.assertEqual(helpers["optional_text"](" batch-a "), "batch-a")
+        recommendation = capacity_recommendation(
+            8.0,
+            0.25,
+            2.0,
+            json.dumps([{"executor_id": "1", "total_cores": 16}]),
+        )
         self.assertEqual(
-            rejection_message(2.25, [intentional_failure]),
+            recommendation,
+            {
+                "memory_safe_workers_per_executor": 3,
+                "minimum_safe_cpus_per_task": 5,
+                "executor_cores": [16],
+            },
+        )
+        self.assertEqual(
+            rejection_message(2.25, 5, 1, [intentional_failure]),
+            "Executor peak-memory characterization completed but the current "
+            "CPU slot plan is not memory-safe; use a new benchmark batch ID "
+            "with CPUS_PER_TASK=5 and PEAK_WORKER_MEMORY_GIB=0 to characterize "
+            "the changed native-thread allocation before approval",
+        )
+        self.assertEqual(
+            rejection_message(2.25, 5, 5, [intentional_failure]),
             "Executor peak-memory characterization completed but cannot be "
             "approved; use a new benchmark batch ID with "
-            "PEAK_WORKER_MEMORY_GIB=2.25",
+            "PEAK_WORKER_MEMORY_GIB=2.25 and CPUS_PER_TASK=5",
         )
         incomplete = rejection_message(
             None,
+            None,
+            1,
             [
                 "expected exactly one run metric row, found 0",
                 intentional_failure,
@@ -979,6 +1023,10 @@ class FabricNotebookTests(unittest.TestCase):
         )
         self.assertIn(
             'metric["suggested_peak_worker_memory_gib"]',
+            evaluation,
+        )
+        self.assertIn(
+            '"suggested_cpus_per_task": suggested_task_cpus',
             evaluation,
         )
         pipeline = json.loads(
