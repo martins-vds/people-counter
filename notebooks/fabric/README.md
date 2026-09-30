@@ -119,8 +119,10 @@ Before running the prototype:
   limits when Fabric exposes finite limits, or supply a positive reviewed
   override. The notebook additionally reserves
   `EXECUTOR_MEMORY_HEADROOM_FRACTION` and rejects a CPU slot plan that is not
-  memory-safe. It never substitutes host RAM or Spark storage-memory telemetry
-  when executor cgroup limits are unavailable. Do not use
+  memory-safe. When cgroup limits are unavailable, it uses executor-visible
+  physical node memory under Fabric's documented one-node-per-executor model;
+  it never uses capacity SKU or Spark storage-memory telemetry as a memory
+  proxy. Do not use
   `spark.executor.memory` (JVM heap) as the Python worker budget;
 - use `PARALLEL_TASKS="auto"` for maximum useful throughput, or a positive
   integer for sequential application-local batches; capped runs also require
@@ -149,7 +151,6 @@ that a Fabric pipeline Notebook activity can override:
 | `DRIVER_MEMORY` | `driverMemory` | `28g` | Driver memory requested for the session. |
 | `DRIVER_CORES` | `driverCores` | `4` | Driver vCores requested for the session. |
 | `EXECUTOR_MEMORY` | `executorMemory` | `28g` | JVM heap requested for each executor. |
-| `EXECUTOR_MEMORY_OVERHEAD` | `conf.spark.executor.memoryOverhead` | `4g` | Non-heap executor allocation for Python workers, JVM native memory, direct buffers, and related overhead. The heap plus overhead must fit the selected pool node. |
 | `EXECUTOR_CORES` | `executorCores` | `4` | vCores requested for each executor. |
 | `CPUS_PER_TASK` | `conf.spark.task.cpus` | `1` | Scheduler CPUs reserved for each inference task. Pass the same integer to the notebook parameter cell. |
 | `MIN_EXECUTORS` | `conf.spark.dynamicAllocation.minExecutors` | `1` | Dynamic-allocation lower bound. |
@@ -251,15 +252,23 @@ The configured worker envelope is selected in this order:
    `384 MiB` when those settings are absent, followed by the same
    native-executor reserve.
 
-The benchmark pipeline explicitly requests
-`EXECUTOR_MEMORY_OVERHEAD="4g"` at session startup. With no separate
-`spark.executor.pyspark.memory`, this leaves a 3 GiB worker envelope after the
-25% native reserve; the separate 25% planner headroom then admits against
-2.25 GiB. Fabric's 384 MiB minimum overhead would be entirely consumed by the
-384 MiB native reserve and therefore cannot support automatic characterization.
-The notebook validates that the requested overhead matches the effective Spark
-configuration and tells the operator to restart if Fabric reused an older
-session.
+Fabric can retain its managed `spark.executor.memoryOverhead=384m` even when a
+different value is supplied in `%%configure`. The notebook therefore does not
+assume that changing this property changed the allocation. Fabric documents a
+1:1 node-to-executor ratio and physical node sizes of 32, 64, 128, 256, and
+512 GB. The executor probe reads that node memory directly and calculates:
+
+```text
+node capacity = physical node memory - JVM heap - Spark off-heap reservation
+worker budget = node capacity - max(384 MiB, 25% of node capacity)
+```
+
+For a Small node that exposes 32 GiB with a 28 GiB executor heap, this produces
+a 4 GiB node capacity and a 3 GiB worker envelope. The separate 25% planner
+headroom then admits against 2.25 GiB. When
+`spark.executor.pyspark.memory` is explicitly configured, its positive value
+remains an additional cap and executor overhead stays outside the worker
+budget.
 
 Unitless values for Spark executor heap, overhead, minimum overhead, and
 PySpark memory are interpreted as MiB, matching Spark. Unitless
@@ -284,18 +293,19 @@ Netty/direct buffers, thread stacks, and allocator arenas rather than assigning
 the whole container-overhead allocation to Python workers.
 
 If Fabric exposes only an unbounded parent cgroup such as
-`system.slice/yarn-nm.service`, the notebook retains the conservative Spark
-configuration envelope for that executor and labels its budget source
-`spark-config-envelope`. This is not a node-RAM estimate: the budget still comes
-from `spark.executor.pyspark.memory`, explicit `spark.executor.memoryOverhead`,
-or Spark's derived memory-overhead allocation after the native reserve.
+`system.slice/yarn-nm.service`, the notebook uses the conservative Fabric node
+envelope and labels its budget source `fabric-node-envelope`. This is valid for
+Fabric Spark because one node is assigned to each executor; the executor probe
+also persists the observed physical memory used in the calculation. A positive
+Spark worker envelope, when available, tightens rather than expands this node
+budget.
 
 The successful run persists `usable_executor_memory_source` and the complete
 calculation inputs in `memory_budget_details_json`, including cgroup
 unavailability diagnostics. Auto mode fails if probe coverage is incomplete or
-the configured/observed remaining budget is not positive. It does not
-substitute node RAM or the Spark REST API's `maxMemory`, which is
-storage-memory telemetry rather than a Python worker limit.
+the configured/observed remaining budget is not positive. It does not use the
+capacity SKU or the Spark REST API's `maxMemory`, which is storage-memory
+telemetry rather than a Python worker limit.
 
 Automatic mode also requires observed executor identities. If an operator
 enables `ALLOW_ASSUMED_RESOURCES`, they must either restore monitoring-based
@@ -304,10 +314,10 @@ synthetic executor identities cannot prove probe coverage.
 
 An explicit positive `USABLE_EXECUTOR_MEMORY_GIB` remains available as a
 reviewed operator override and is labeled `operator-override`. If automatic
-discovery reports too little memory, change the startup allocation—normally
-`spark.executor.memoryOverhead` or `spark.executor.pyspark.memory` in the
-`%%configure` `conf` object—and restart the session. Do not inflate the
-notebook parameter without changing the executor container allocation.
+discovery reports too little memory, lower `EXECUTOR_MEMORY`, choose a larger
+workspace-pool node, reduce model/batch memory, or configure a supported
+`spark.executor.pyspark.memory` allocation and restart the session. Do not
+inflate the notebook parameter without changing the underlying allocation.
 
 #### First-run peak worker characterization
 
@@ -4325,7 +4335,7 @@ without turning the overall pipeline green.
 | `PIPELINE`, `BATCH_SIZE`, `SAMPLE_FPS`, `DETECTION_THRESHOLD`, `DETECTOR_MODEL`, `CAMERA_MOTION_COMPENSATION` | matching types | Exact inference configuration shared with the baseline. |
 | `LINE` | `Array` | Empty for no counting line, or four integer coordinates. It participates in the configuration hash. |
 | `CPUS_PER_TASK` | `Int` | Passed both to notebook 15's `%%configure` parameter and its Python parameter cell. |
-| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_MEMORY_OVERHEAD`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. `EXECUTOR_MEMORY` is JVM heap; `EXECUTOR_MEMORY_OVERHEAD` reserves non-heap/Python capacity and defaults to `4g`. Ensure their combined allocation fits the workspace pool node. Select executor bounds from the capacity-SKU reference above, then lower them for shared-capacity headroom and workspace-pool limits. |
+| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. `EXECUTOR_MEMORY` is JVM heap. Ensure it leaves enough physical node memory for Python/native work. Select executor bounds from the capacity-SKU reference above, then lower them for shared-capacity headroom and workspace-pool limits. |
 | `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
 | `PARTITION_WAVES` | `Int` | Number of planned partition waves. |
 | `RUNTIME_AFFINITY_MAX_IMBALANCE` | `Float` | Maximum projected-load penalty accepted to retain a model-runtime affinity bucket. |

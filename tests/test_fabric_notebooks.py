@@ -180,13 +180,6 @@ class FabricNotebookTests(unittest.TestCase):
             },
         )
         self.assertEqual(configuration["conf"]["spark.speculation"], "false")
-        self.assertEqual(
-            configuration["conf"]["spark.executor.memoryOverhead"],
-            {
-                "parameterName": "EXECUTOR_MEMORY_OVERHEAD",
-                "defaultValue": "4g",
-            },
-        )
         self.assertEqual(configuration["executorCores"]["defaultValue"], 4)
         self.assertEqual(configuration["executorMemory"]["defaultValue"], "28g")
 
@@ -203,7 +196,6 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("PARTITION_WAVES = 3", parameters)
         self.assertIn("PEAK_WORKER_MEMORY_GIB = 0.0", parameters)
         self.assertIn("USABLE_EXECUTOR_MEMORY_GIB = 0.0", parameters)
-        self.assertIn('EXECUTOR_MEMORY_OVERHEAD = "4g"', parameters)
         self.assertNotIn("\nEXECUTOR_CORES =", parameters)
         self.assertNotIn("\nACTIVE_TASKS_PER_EXECUTOR =", parameters)
         self.assertNotIn("\nTARGET_PARTITIONS =", parameters)
@@ -325,8 +317,14 @@ class FabricNotebookTests(unittest.TestCase):
             derived_overhead - int(derived_overhead * 0.25),
         )
         self.assertEqual(derived["source"], "derived-spark-memory-overhead")
-        with self.assertRaisesRegex(RuntimeError, "leave no Python/native worker budget"):
-            derive({"spark.executor.memoryOverhead": "384m"}, 28 * gib)
+        managed_minimum = derive(
+            {"spark.executor.memoryOverhead": "384m"}, 28 * gib
+        )
+        self.assertEqual(managed_minimum["configured_worker_budget_bytes"], 0)
+        self.assertEqual(
+            managed_minimum["source"],
+            "fabric-node-memory-minus-spark-reservations",
+        )
 
     def test_executor_partition_reports_unbounded_fabric_cgroup(self):
         sample_memory = cell_functions(
@@ -436,7 +434,7 @@ class FabricNotebookTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["budget_source"] for item in details},
-            {"spark-config-envelope+cgroup"},
+            {"spark-config+fabric-node-envelope+cgroup"},
         )
         with self.assertRaisesRegex(RuntimeError, "did not cover every runnable executor"):
             calculate(probes[:1], {"1", "2"}, envelope)
@@ -478,13 +476,55 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertEqual(usable, 6 * gib)
         self.assertEqual(len(details), 1)
         self.assertEqual(details[0]["usable_memory_bytes"], 6 * gib)
-        self.assertEqual(details[0]["budget_source"], "spark-config-envelope")
+        self.assertEqual(
+            details[0]["budget_source"],
+            "spark-config+fabric-node-envelope",
+        )
         self.assertEqual(details[0]["cgroup_limit_paths"], [checked_path])
         self.assertIsNone(details[0]["cgroup_limit_bytes"])
         self.assertEqual(
             details[0]["cgroup_errors"],
             ["Executor memory cgroup has no finite readable limit"],
         )
+
+    def test_executor_partition_uses_fabric_node_memory_for_managed_overhead(self):
+        namespace = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "normalize_executor_id",
+            "executor_memory_probe_coverage",
+            "calculate_auto_usable_executor_memory_bytes",
+        )
+        calculate = namespace["calculate_auto_usable_executor_memory_bytes"]
+        gib = 1024**3
+        envelope = {
+            "configured_worker_budget_bytes": 0,
+            "reserved_outside_workers_bytes": 28 * gib,
+            "executor_native_reserve_bytes": 384 * 1024**2,
+            "executor_pyspark_memory_bytes": None,
+        }
+        probes = [
+            {
+                "probe_key": "worker-1",
+                "executor_id": None,
+                "executor_id_raw": "None",
+                "hostname": "worker-1",
+                "cgroup_limit_bytes": None,
+                "cgroup_current_bytes": None,
+                "python_worker_rss_bytes": 1 * gib,
+                "physical_memory_bytes": 32 * gib,
+                "cgroup_limit_paths_checked": ["/sys/fs/cgroup/memory.max"],
+                "cgroup_error": "no finite readable limit",
+            }
+        ]
+
+        usable, details = calculate(probes, {"1"}, envelope)
+
+        self.assertEqual(usable, 3 * gib)
+        self.assertEqual(details[0]["fabric_node_capacity_bytes"], 4 * gib)
+        self.assertEqual(details[0]["fabric_node_native_reserve_bytes"], 1 * gib)
+        self.assertEqual(details[0]["fabric_node_worker_budget_bytes"], 3 * gib)
+        self.assertEqual(details[0]["budget_source"], "fabric-node-envelope")
 
     def test_executor_partition_parses_and_rounds_worker_peak_memory(self):
         parse_status = cell_functions(
@@ -870,22 +910,9 @@ class FabricNotebookTests(unittest.TestCase):
             BOOTSTRAP,
             "bootstrap-schema-evolution",
         )
-        control_parameters = cell_source(
-            EXECUTOR_BENCHMARK_CONTROL,
-            "control-parameters",
-        )
-        control_helpers = cell_source(
-            EXECUTOR_BENCHMARK_CONTROL,
-            "control-helpers",
-        )
         evaluation = cell_source(
             EXECUTOR_BENCHMARK_CONTROL,
             "evaluate-benchmark",
-        )
-        self.assertIn('EXECUTOR_MEMORY_OVERHEAD = "4g"', control_parameters)
-        self.assertIn(
-            '"executor_memory_overhead": str(EXECUTOR_MEMORY_OVERHEAD)',
-            control_helpers,
         )
         for suffix in (
             "executor_partition_input",
@@ -956,7 +983,6 @@ class FabricNotebookTests(unittest.TestCase):
         ]["parameters"]
         self.assertIn("CPUS_PER_TASK", run_parameters)
         self.assertIn("CONFIG_SHA256", run_parameters)
-        self.assertIn("EXECUTOR_MEMORY_OVERHEAD", run_parameters)
         self.assertEqual(
             activities["PrepareExecutorBenchmark"]["typeProperties"]["notebookId"],
             "efd68f39-e6f6-42fb-9797-9e7ced47a8a0",
@@ -971,19 +997,6 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("LAKEHOUSE_FILE_API_ROOT", prepare_parameters)
         self.assertNotIn("STAGING_ROOT", prepare_parameters)
         pipeline_parameters = pipeline["properties"]["parameters"]
-        self.assertEqual(
-            pipeline_parameters["EXECUTOR_MEMORY_OVERHEAD"]["defaultValue"],
-            "4g",
-        )
-        for activity_name in (
-            "PrepareExecutorBenchmark",
-            "RunExecutorPartitionInference",
-            "EvaluateExecutorBenchmark",
-        ):
-            self.assertIn(
-                "EXECUTOR_MEMORY_OVERHEAD",
-                activities[activity_name]["typeProperties"]["parameters"],
-            )
         self.assertEqual(
             pipeline_parameters["USABLE_EXECUTOR_MEMORY_GIB"]["defaultValue"],
             0.0,

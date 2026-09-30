@@ -232,24 +232,25 @@ sentinel as an observed executor ID.
 Persist the source, effective Spark memory settings, cgroup limit/current
 usage, reclaimable cache, checked cgroup paths, Python worker RSS, and
 per-executor deductions. When Fabric exposes only an unbounded parent cgroup,
-retain the Spark configuration envelope for that executor and label the
-evidence as configuration-only. Fail rather than infer a budget from host/node
-RAM when complete executor probe coverage is unavailable. A positive operator
-override remains supported but must be labeled so evaluation cannot mistake it
-for runtime-derived evidence. If a finite cgroup limit is no larger than the
-configured JVM/off-heap reservations, direct the operator to reduce JVM heap or
-select a larger container/node; increasing overhead alone cannot create
-capacity inside an unchanged limit.
+use the executor-visible physical node memory as the outer envelope. Microsoft
+Fabric documents a 1:1 node-to-executor ratio (except single-node sessions,
+which are outside this benchmark shape) and node sizes from 32 GB upward.
+Subtract the configured JVM heap and Spark off-heap reservation, then reserve
+the greater of 384 MiB or 25% of the remaining node capacity for JVM native
+memory, direct buffers, thread stacks, and allocator arenas. Label this
+evidence `fabric-node-envelope` and persist the observed physical memory and
+all deductions. A positive Spark/PySpark worker envelope, when available, can
+tighten but must never expand the Fabric node envelope.
 
-The benchmark pipeline must expose `EXECUTOR_MEMORY_OVERHEAD` and pass it to
-`conf.spark.executor.memoryOverhead` in the first `%%configure` cell. Use `4g`
-as the prototype default: after the greater-of-384-MiB-or-25% native reserve,
-the Spark configuration envelope retains 3 GiB for Python/native workers before
-the planner's separate headroom fraction. Include this request in the benchmark
-configuration hash and verify it equals the effective Spark setting. The JVM
-heap plus memory overhead must fit the selected workspace-pool node; this
-parameter changes the executor container allocation and is not merely a
-notebook-side accounting override.
+Fabric can retain a managed `spark.executor.memoryOverhead=384m` despite a
+different `%%configure` request, so the benchmark must not claim that this
+property created additional container memory. Fail rather than infer a budget
+from capacity SKU or storage-memory telemetry when complete executor probe
+coverage or a positive node envelope is unavailable. A positive operator
+override remains supported but must be labeled so evaluation cannot mistake it
+for runtime-derived evidence. If the physical node does not exceed configured
+JVM/off-heap reservations, direct the operator to lower JVM heap or select a
+larger pool node.
 
 ## 7. Partition planning
 
