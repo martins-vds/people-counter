@@ -4231,6 +4231,11 @@ write a second gate notebook manually.
    or cancellation.
 6. Set `CPUS_PER_TASK` once on the pipeline. The export passes that value both
    to notebook 15's first `%%configure` cell and to its Python parameter cell.
+   The Run activity serializes the value as a string because
+   `conf.spark.task.cpus` is a Spark string property; notebook 15 normalizes the
+   injected Python value back to a positive integer before comparing it with
+   the running allocation. Do not change the Run activity mapping back to an
+   integer or Fabric can retain the magic cell's string default.
    Review the driver/executor memory, core, and dynamic-allocation bounds before
    every capacity test.
 7. For characterization, use `MIN_WALL_SECONDS=0`, no baseline ID, and
@@ -4355,7 +4360,7 @@ without turning the overall pipeline green.
 | `MODELS_DIR` | `String` | Executor-visible pinned model tree. |
 | `PIPELINE`, `BATCH_SIZE`, `SAMPLE_FPS`, `DETECTION_THRESHOLD`, `DETECTOR_MODEL`, `CAMERA_MOTION_COMPENSATION` | matching types | Exact inference configuration shared with the baseline. |
 | `LINE` | `Array` | Empty for no counting line, or four integer coordinates. It participates in the configuration hash. |
-| `CPUS_PER_TASK` | `Int` | Passed both to notebook 15's `%%configure` parameter and its Python parameter cell. |
+| `CPUS_PER_TASK` | `Int` | Pipeline-level positive integer. The Run activity converts it to text for the string-valued `conf.spark.task.cpus` setting; notebook 15 converts the injected Python parameter back to an integer and verifies the effective scheduler allocation. |
 | `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. `EXECUTOR_MEMORY` is JVM heap. Ensure it leaves enough physical node memory for Python/native work. Select executor bounds from the capacity-SKU reference above, then lower them for shared-capacity headroom and workspace-pool limits. |
 | `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
 | `PARTITION_WAVES` | `Int` | Number of planned partition waves. |

@@ -502,6 +502,12 @@ Notebook 15 then runs in one Notebook activity. The activity passes both
 session configuration parameters for its first `%%configure` cell and normal
 notebook parameters. `CPUS_PER_TASK` must be the same pipeline parameter for
 both surfaces. Retries remain disabled.
+The pipeline-level value is an integer, but the notebook Run activity must
+serialize it as text because `spark.task.cpus` is carried inside the
+string-valued Spark `conf` map. Notebook 15 then normalizes the injected Python
+parameter back to a positive integer before comparing requested and effective
+allocation. Passing the Run activity parameter as an integer can leave the
+parameterizable magic cell's string default in effect. Retries remain disabled.
 
 The evaluator runs with an **On completion** dependency so failed inference
 still produces diagnostics. It reads the exact batch and configuration identity

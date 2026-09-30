@@ -256,9 +256,12 @@ class FabricNotebookTests(unittest.TestCase):
             "spark-config",
             "executor_slot_details",
             "minimum_task_cpus_for_worker_limit",
+            "positive_int_parameter",
+            re=re,
         )
         executor_slot_details = helpers["executor_slot_details"]
         minimum_task_cpus = helpers["minimum_task_cpus_for_worker_limit"]
+        positive_int_parameter = helpers["positive_int_parameter"]
         executors = [
             MagicMock(executor_id="executor-a", total_cores=8),
             MagicMock(executor_id="executor-b", total_cores=5),
@@ -276,6 +279,12 @@ class FabricNotebookTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(ValueError, "positive integer"):
                     minimum_task_cpus(*invalid)
+        self.assertEqual(positive_int_parameter(5, "CPUS_PER_TASK"), 5)
+        self.assertEqual(positive_int_parameter("5", "CPUS_PER_TASK"), 5)
+        for invalid in (0, True, 5.0, "0", "5.0", "auto", None):
+            with self.subTest(invalid_parameter=invalid):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    positive_int_parameter(invalid, "CPUS_PER_TASK")
 
         spark_config = cell_source(EXECUTOR_PROTOTYPE, "spark-config")
         self.assertIn("minimum_safe_cpus_per_task=", spark_config)
@@ -1058,7 +1067,16 @@ class FabricNotebookTests(unittest.TestCase):
         run_parameters = activities["RunExecutorPartitionInference"][
             "typeProperties"
         ]["parameters"]
-        self.assertIn("CPUS_PER_TASK", run_parameters)
+        self.assertEqual(
+            run_parameters["CPUS_PER_TASK"],
+            {
+                "value": {
+                    "value": "@string(pipeline().parameters.CPUS_PER_TASK)",
+                    "type": "Expression",
+                },
+                "type": "string",
+            },
+        )
         self.assertIn("CONFIG_SHA256", run_parameters)
         self.assertEqual(
             activities["PrepareExecutorBenchmark"]["typeProperties"]["notebookId"],
