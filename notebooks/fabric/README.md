@@ -4310,37 +4310,109 @@ capacity benchmark table.
    to finish even when the dialog remains on **Please wait...** for several
    minutes.
 5. Confirm Model explorer contains the original capacity fact and all six
-   executor tables. Do not add relationships merely to make a visual filter
-   across tables. The executor overview below uses only
-   `people_counter_executor_inference_runs`; an optional event table remains
-   table-local.
+   executor tables. Do not add fact-to-fact or many-to-many relationships
+   merely to make a visual filter across tables. Run-level visuals remain
+   table-local. Matched-video measures described below cross the facts
+   explicitly with `TREATAS`, using this reviewed path:
+
+   ```text
+   people_counter_processing_benchmarks[sample_name]
+     -> people_counter_executor_partition_input[sample_name]
+     -> people_counter_executor_partition_input[work_id]
+     -> people_counter_executor_partition_records[work_id]
+   ```
+
+   The measures also map selected executor-input `benchmark_batch_id` values
+   explicitly to partition records. Do not create a Direct Lake calculated
+   union table for this purpose: calculated tables that depend on Direct Lake
+   columns require an explicit connection with granular access control.
+   An optional event table remains table-local.
 6. Select **Refresh** and wait for Direct Lake framing to complete. Confirm
    no table has an orange Direct Lake warning. Save the model if the editor
    exposes a Save action; otherwise wait for autosave to complete.
 7. Open `pc_benchmark_report` in **Edit** mode. Refresh the browser/report if
    the Data pane still shows only
    `people_counter_processing_benchmarks`.
-8. Add a report page named **Executor Benchmark**.
+
+Before laying out the report pages, create these measures under
+`people_counter_processing_benchmarks`:
+
+| Measure | Purpose |
+|---|---|
+| `Executor Benchmark Runs` | Distinct executor benchmark batches in the current run filter context |
+| `Executor Videos` | Planned/persisted executor video count |
+| `Executor Successful Videos` | Successfully processed executor videos |
+| `Executor Success Rate` | Successful videos divided by executor videos; format as a percentage |
+| `Executor Average Throughput` | Average persisted source-video minutes per wall minute |
+| `Executor Average Native Threads` | Average native threads per executor worker |
+| `Executor Comparison Readiness` | Run-selection/readiness label for the executor overview |
+| `Executor Average Processing Seconds` | Mean matched `video_result` processing time |
+| `Executor P95 Processing Seconds` | P95 matched `video_result` processing time |
+| `Executor Average Processed Frames` | Mean matched processed-frame count |
+| `Executor Throughput x` | Matched source duration divided by executor processing time |
+| `Execution Time Delta Seconds` | Executor processing seconds minus notebook-04 end-to-end seconds |
+| `Execution Time Improvement %` | `(notebook-04 time - executor time) / notebook-04 time`; format as a percentage |
+| `Throughput Delta x` | Executor throughput minus notebook-04 `Average Speed x` |
+| `Faster Approach` | `EXECUTOR`, `NOTEBOOK 04`, `TIE`, or `NO MATCH` |
+
+For the matched measures, first capture the current capacity sample values
+with
+`VALUES(people_counter_processing_benchmarks[sample_name])`. Apply those
+values to `people_counter_executor_partition_input[sample_name]` with
+`TREATAS`, collect the resulting distinct `work_id` values, and apply those
+IDs to `people_counter_executor_partition_records[work_id]`. Apply selected
+`people_counter_executor_partition_input[benchmark_batch_id]` values to the
+record-table batch column in the same measure. Filter record calculations to
+`record_type = "video_result"` and successful rows. Return `BLANK()` or
+`NO MATCH` when either side has no matched value; do not turn an unmatched
+sample into a zero-duration or zero-throughput result.
+
+This measure pattern deliberately supports both axes used below:
+
+- capacity `sample_name` on **Approach Comparison**;
+- executor-input `sample_name` on **Executor Stage Timing & Samples**.
+
+8. Add a report page named **Executor Run Comparison**. If the report already
+   has the earlier **Executor Benchmark** page, rename and update that page
+   rather than retaining a third, overlapping executor overview.
 9. Add a Slicer using
    `people_counter_executor_inference_runs[benchmark_batch_id]`. Keep the
-   slicer on this table so the selected batch filters every executor overview
-   visual without a cross-table relationship.
-10. Add one Card visual containing these selected-run fields, or use six
-    separate Cards if the report theme needs independent sizing:
+   slicer on this table so it filters every run-comparison visual without a
+   cross-table relationship. Leave all batches selected for the default
+   comparison view.
+10. Add six Card visuals so the page mirrors the capacity run overview:
 
     ```text
-    effective_task_cpus
-    native_threads_per_worker
-    planned_concurrency
-    observed_concurrency
-    measured_peak_worker_memory_gib
-    throughput_video_minutes_per_wall_minute
+    Executor Benchmark Runs
+    Executor Videos
+    Executor Success Rate
+    Executor Average Throughput
+    Executor Average Native Threads
+    Executor Comparison Readiness
     ```
 
-    With exactly one batch selected, the default numeric aggregation returns
-    the persisted run value. Do not interpret a sum across several selected
-    batch IDs as one executor configuration.
-11. Add a Table visual using these
+    Keep `Executor Comparison Readiness` visible even when all batches are
+    selected; `SELECT ONE RUN` is an operator prompt, not an error. Selecting
+    one approval batch should replace it with that run's readiness result.
+11. Add a **Clustered column chart** titled
+    `Executor throughput by run`:
+
+    | Visual field well | Field |
+    |---|---|
+    | X-axis | `benchmark_batch_id` |
+    | Y-axis | `throughput_video_minutes_per_wall_minute` |
+
+    There is one inference-run row per batch, so the default numeric
+    aggregation returns that batch's persisted value.
+12. Add a second **Clustered column chart** titled
+    `Planned versus observed concurrency`:
+
+    | Visual field well | Field |
+    |---|---|
+    | X-axis | `benchmark_batch_id` |
+    | Y-axis | `planned_concurrency`; `observed_concurrency` |
+
+13. Add a Table visual using these
     `people_counter_executor_inference_runs` fields:
 
     ```text
@@ -4364,7 +4436,71 @@ capacity benchmark table.
     Make the table wide enough to retain the context and gate-evidence
     columns. Horizontal scrolling is acceptable; do not remove failure,
     completeness, or throughput evidence merely to fit the first viewport.
-12. Optionally add a separate Table visual from
+14. Add a second report page named
+    **Executor Stage Timing & Samples**.
+15. Add these Slicers from
+    `people_counter_executor_partition_records`:
+
+    ```text
+    benchmark_batch_id
+    status
+    record_type
+    ```
+
+    Select `video_result` in the `record_type` slicer for the default
+    per-video sample view. Operators can select `partition_metric`,
+    `telemetry`, or `error` when diagnosing stage, runtime, or failure
+    evidence. Because the slicers share one table, their available values can
+    narrow each other; clearing `record_type` exposes failed batches that have
+    no `video_result` row.
+16. Add two **Clustered bar charts**:
+
+    | Title | Y-axis | X-axis |
+    |---|---|---|
+    | `Processing seconds by source video` | `source_video` | `processing_seconds` |
+    | `Processed frames by source video` | `source_video` | `processed_frames` |
+
+    `source_video` is the persisted record-table sample identity. Do not use
+    `sample_name` from `people_counter_executor_partition_input` on these
+    visuals without first designing and validating an explicit relationship.
+17. Retain those partition-diagnostic charts, then add these matched-sample
+    charts using
+    `people_counter_executor_partition_input[sample_name]` on the X-axis:
+
+    | Title | Y-axis |
+    |---|---|
+    | `Executor processing latency by sample` | `Executor Average Processing Seconds`; `Executor P95 Processing Seconds` |
+    | `Executor throughput by sample` | `Executor Throughput x` |
+
+    These measures perform the reviewed `sample_name -> work_id -> record`
+    mapping internally. They must show `people_crossing`, `subway`, and
+    `three_people_walking` separately when those samples exist in the selected
+    executor batch.
+18. Add a Table visual using these
+    `people_counter_executor_partition_records` fields:
+
+    ```text
+    benchmark_batch_id
+    source_video
+    work_id
+    record_type
+    status
+    planned_bucket_id
+    physical_partition_id
+    task_cpus
+    native_threads
+    processed_frames
+    processing_seconds
+    task_started_at_utc
+    task_finished_at_utc
+    error_type
+    error_message
+    ```
+
+    Keep failed and error rows available through the `record_type` and
+    `status` slicers. Do not remove error columns because successful default
+    filtering leaves them blank.
+19. Optionally add a separate Table visual from
     `people_counter_executor_benchmark_events` with:
 
     ```text
@@ -4376,8 +4512,70 @@ capacity benchmark table.
 
     Without a reviewed relationship, use this as an independent event log;
     the inference-run slicer does not filter it.
-13. Save the report, switch to **Reading view**, and select one successful
-    approval batch. Verify the report shows:
+20. Add a third report page named **Approach Comparison**. Add these Slicers:
+
+    | Label | Field |
+    |---|---|
+    | `Capacity benchmark batch` | `people_counter_processing_benchmarks[benchmark_batch_id]` |
+    | `Executor benchmark batch` | `people_counter_executor_partition_input[benchmark_batch_id]` |
+    | `Video sample` | `people_counter_processing_benchmarks[sample_name]` |
+
+    Keep the two batch slicers separate. Selecting a capacity batch must not
+    implicitly select an executor batch, and vice versa.
+21. Add these Card visuals:
+
+    ```text
+    Average End-to-End Seconds
+    Executor Average Processing Seconds
+    Execution Time Delta Seconds
+    Execution Time Improvement %
+    Average Speed x
+    Executor Throughput x
+    Throughput Delta x
+    Faster Approach
+    ```
+
+    Negative execution-time delta and positive improvement percentage mean
+    the executor is faster. Positive throughput delta means the executor is
+    faster. Keep the `Faster Approach` card visible so operators do not need
+    to infer the winner from signs alone.
+22. Add two **Clustered column charts** with
+    `people_counter_processing_benchmarks[sample_name]` on the X-axis:
+
+    | Title | Y-axis |
+    |---|---|
+    | `Execution time by sample` | `Average End-to-End Seconds`; `Executor Average Processing Seconds` |
+    | `Throughput by sample` | `Average Speed x`; `Executor Throughput x` |
+
+23. Add a matched-sample Table with:
+
+    ```text
+    sample_name
+    Average End-to-End Seconds
+    Executor Average Processing Seconds
+    Execution Time Delta Seconds
+    Execution Time Improvement %
+    Average Speed x
+    Executor Throughput x
+    Throughput Delta x
+    Faster Approach
+    ```
+
+    Every shared sample must appear once. A sample with no executor input or
+    no successful `video_result` must show blank executor metrics and
+    `NO MATCH`; it must not disappear silently or be labeled as a winner.
+24. Save the report and switch to **Reading view**. Confirm the Pages pane
+    contains the original capacity pages plus:
+
+    ```text
+    Executor Run Comparison
+    Executor Stage Timing & Samples
+    Approach Comparison
+    ```
+
+    On **Executor Run Comparison**, confirm every batch appears in the slicer,
+    both charts respond to it, and the details table retains failed runs. Then
+    select one successful approval batch and verify:
 
     ```text
     effective_task_cpus = 1
@@ -4394,7 +4592,32 @@ capacity benchmark table.
     `dev-f8-t1-20260929-r23` displayed `1`, `5`, `3`, `3`, `3`,
     `1.85 GiB`, three successful videos, zero failed videos, and approximately
     `0.19` source-video minutes per wall minute.
-14. After every executor run, confirm the pipeline's
+
+    On **Executor Stage Timing & Samples**, confirm `video_result` is selected
+    by default, the diagnostic charts show per-source values, the matched
+    charts show average/P95 latency and throughput per sample, and the table
+    includes the corresponding task CPU, native-thread, timing, frame, and
+    error columns. Clear or change `record_type` and confirm partition,
+    telemetry, and error evidence remains accessible.
+
+    On **Approach Comparison**, choose one capacity batch and one executor
+    batch that contain the same sample names. Confirm the table contains each
+    shared sample once and that every card agrees with the corresponding table
+    total. For each row:
+
+    - negative `Execution Time Delta Seconds` must agree with a positive
+      `Execution Time Improvement %` and an `EXECUTOR` winner;
+    - positive `Throughput Delta x` means executor throughput is higher;
+    - `Faster Approach` must be `NO MATCH` when either approach has no matched
+      value.
+
+    In the development workspace, the saved default view showed three matched
+    samples. Its totals were approximately `276.26` seconds for notebook 04,
+    `139.87` seconds for the executor, `-136.39` seconds delta, `49.37%`
+    executor improvement, `0.109x` notebook-04 throughput, `1.08x` executor
+    throughput, and an `EXECUTOR` winner. Treat these as validation examples,
+    not hard-coded gates.
+25. After every executor run, confirm the pipeline's
     `RefreshBenchmarkModel` activity refreshed the entire semantic model. If a
     new batch is missing, inspect that activity and the semantic-model refresh
     history first. A report visual refresh cannot add a table that was never
