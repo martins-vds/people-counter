@@ -1051,6 +1051,37 @@ class FabricNotebookTests(unittest.TestCase):
             "/lakehouse/default",
         )
 
+    def test_executor_benchmark_treats_fabric_null_database_as_unqualified(self):
+        control_identifier = cell_functions(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-helpers",
+            "identifier",
+            IDENTIFIER=re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$"),
+        )["identifier"]
+        inference_identifier = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "spark-config",
+            "identifier",
+            re=re,
+        )["identifier"]
+
+        for identifier in (control_identifier, inference_identifier):
+            for empty_value in (None, "", " ", "None", "none", "NULL", " null "):
+                with self.subTest(
+                    helper=identifier.__module__,
+                    empty_value=empty_value,
+                ):
+                    self.assertEqual(
+                        identifier(empty_value, "DATABASE", allow_empty=True),
+                        "",
+                    )
+            self.assertEqual(
+                identifier("analytics", "DATABASE", allow_empty=True),
+                "analytics",
+            )
+            with self.assertRaisesRegex(ValueError, "valid SQL identifier"):
+                identifier("invalid.database", "DATABASE", allow_empty=True)
+
     def test_benchmark_rejects_placeholder_runtime_labels(self):
         required_runtime_label = cell_functions(
             BENCHMARK,

@@ -4359,6 +4359,11 @@ cell, causing a `SyntaxError` before the notebook's first executable statement.
 The control notebook accepts both the JSON-quoted pipeline representation and
 an ordinary string supplied during an interactive run.
 
+Fabric can render an empty expression-backed `DATABASE` notebook parameter as
+Python `None` or the text `"None"`. Both notebooks normalize null, `None`, and
+`"null"` to an empty qualifier before constructing table names, so the default
+continues to resolve tables in the attached Lakehouse.
+
 Notebook 15 implements `INPUT_BATCH_ID` and rejects partially supplied
 benchmark identity. Before counting or planning, it filters
 `people_counter_executor_partition_input` by the exact batch ID, capacity,

@@ -437,6 +437,9 @@ The pipeline passes one `DATABASE` and `TABLE_PREFIX` value to preparation,
 inference, and evaluation. The checked-in default is
 `TABLE_PREFIX=people_counter`, matching the bootstrap notebook; the three
 activities must never rely on independent table-name defaults.
+Fabric may render an empty pipeline string parameter as Python `None`; both
+notebooks normalize null sentinels to an empty database qualifier before
+resolving those shared tables.
 
 ### 14.2 Prepare, run, evaluate
 
