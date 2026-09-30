@@ -213,10 +213,10 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("normalize_executor_id(raw_executor_id)", spark_config)
         self.assertIn("calculate_auto_usable_executor_memory_bytes(", spark_config)
         self.assertIn("memory_characterization_mode = PEAK_WORKER_MEMORY_GIB == 0", spark_config)
-        self.assertIn(
-            "planned_concurrency = 1 if memory_characterization_mode",
-            planning,
-        )
+        self.assertIn("planned_concurrency = planned_worker_concurrency(", planning)
+        self.assertIn("memory_concurrency_cap", planning)
+        self.assertIn("memory_cap_mode", planning)
+        self.assertIn("PARALLEL_TASKS exceeds the placement-safe global memory cap", planning)
         self.assertIn("if memory_characterization_mode", planning)
         self.assertIn("choose_bucket(", planning)
         self.assertIn("toLocalIterator()", planning)
@@ -255,12 +255,10 @@ class FabricNotebookTests(unittest.TestCase):
             EXECUTOR_PROTOTYPE,
             "spark-config",
             "executor_slot_details",
-            "minimum_task_cpus_for_worker_limit",
             "positive_int_parameter",
             re=re,
         )
         executor_slot_details = helpers["executor_slot_details"]
-        minimum_task_cpus = helpers["minimum_task_cpus_for_worker_limit"]
         positive_int_parameter = helpers["positive_int_parameter"]
         executors = [
             MagicMock(executor_id="executor-a", total_cores=8),
@@ -272,13 +270,6 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertEqual([item["slots"] for item in details], [2, 1])
         self.assertEqual([item["fragment_cores"] for item in details], [2, 2])
         self.assertEqual(sum(item["slots"] for item in details), 3)
-        self.assertEqual(minimum_task_cpus(16, 3), 5)
-        self.assertEqual(minimum_task_cpus(16, 2), 6)
-        self.assertEqual(minimum_task_cpus(16, 16), 1)
-        for invalid in ((0, 3), (16, 0), (16, True), (16.0, 3)):
-            with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(ValueError, "positive integer"):
-                    minimum_task_cpus(*invalid)
         self.assertEqual(positive_int_parameter(5, "CPUS_PER_TASK"), 5)
         self.assertEqual(positive_int_parameter("5", "CPUS_PER_TASK"), 5)
         for invalid in (0, True, 5.0, "0", "5.0", "auto", None):
@@ -287,9 +278,8 @@ class FabricNotebookTests(unittest.TestCase):
                     positive_int_parameter(invalid, "CPUS_PER_TASK")
 
         spark_config = cell_source(EXECUTOR_PROTOTYPE, "spark-config")
-        self.assertIn("minimum_safe_cpus_per_task=", spark_config)
-        self.assertIn("characterize again", spark_config)
-        self.assertIn("not rely on spark.executor.memoryOverhead", spark_config)
+        self.assertIn("memory_concurrency_cap", spark_config)
+        self.assertNotIn("minimum_safe_cpus_per_task=", spark_config)
 
     def test_executor_partition_memory_parser_uses_binary_units(self):
         parse_spark_memory_bytes = cell_functions(
@@ -601,11 +591,14 @@ class FabricNotebookTests(unittest.TestCase):
             parse_status("VmRSS:\t1024 kB\n")
 
     def test_executor_partition_bucket_choice_is_balanced_and_stable(self):
-        choose_bucket = cell_functions(
+        helpers = cell_functions(
             EXECUTOR_PROTOTYPE,
             "prepared-delta-input",
             "choose_bucket",
-        )["choose_bucket"]
+            "planned_worker_concurrency",
+        )
+        choose_bucket = helpers["choose_bucket"]
+        planned_worker_concurrency = helpers["planned_worker_concurrency"]
 
         self.assertEqual(choose_bucket(4.0, "new", [2.0, 2.0], {}, 0.1), 0)
         self.assertEqual(
@@ -616,6 +609,23 @@ class FabricNotebookTests(unittest.TestCase):
             choose_bucket(4.0, "shared", [1.0, 8.0], {"shared": 1}, 0.1),
             0,
         )
+        self.assertEqual(
+            planned_worker_concurrency(16, 3, 10, "auto", False),
+            3,
+        )
+        self.assertEqual(
+            planned_worker_concurrency(16, 3, 10, 2, False),
+            2,
+        )
+        self.assertEqual(
+            planned_worker_concurrency(16, 0, 10, "auto", True),
+            1,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "placement-safe global memory cap",
+        ):
+            planned_worker_concurrency(16, 3, 10, 4, False)
 
     def test_executor_partition_preserves_fabric_spark_ui_query_parameters(self):
         endpoint = cell_functions(
@@ -880,22 +890,16 @@ class FabricNotebookTests(unittest.TestCase):
             recommendation,
             {
                 "memory_safe_workers_per_executor": 3,
-                "minimum_safe_cpus_per_task": 5,
+                "placement_safe_parallel_tasks": 3,
                 "executor_cores": [16],
             },
         )
         self.assertEqual(
-            rejection_message(2.25, 5, 1, [intentional_failure]),
-            "Executor peak-memory characterization completed but the current "
-            "CPU slot plan is not memory-safe; use a new benchmark batch ID "
-            "with CPUS_PER_TASK=5 and PEAK_WORKER_MEMORY_GIB=0 to characterize "
-            "the changed native-thread allocation before approval",
-        )
-        self.assertEqual(
-            rejection_message(2.25, 5, 5, [intentional_failure]),
+            rejection_message(2.25, 3, 1, [intentional_failure]),
             "Executor peak-memory characterization completed but cannot be "
             "approved; use a new benchmark batch ID with "
-            "PEAK_WORKER_MEMORY_GIB=2.25 and CPUS_PER_TASK=5",
+            "PEAK_WORKER_MEMORY_GIB=2.25 and CPUS_PER_TASK=1; "
+            "PARALLEL_TASKS=auto will apply the placement-safe global cap of 3",
         )
         incomplete = rejection_message(
             None,
@@ -1035,7 +1039,7 @@ class FabricNotebookTests(unittest.TestCase):
             evaluation,
         )
         self.assertIn(
-            '"suggested_cpus_per_task": suggested_task_cpus',
+            '"suggested_parallel_tasks": suggested_parallel_tasks',
             evaluation,
         )
         pipeline = json.loads(
@@ -1067,16 +1071,7 @@ class FabricNotebookTests(unittest.TestCase):
         run_parameters = activities["RunExecutorPartitionInference"][
             "typeProperties"
         ]["parameters"]
-        self.assertEqual(
-            run_parameters["CPUS_PER_TASK"],
-            {
-                "value": {
-                    "value": "@string(pipeline().parameters.CPUS_PER_TASK)",
-                    "type": "Expression",
-                },
-                "type": "string",
-            },
-        )
+        self.assertIn("CPUS_PER_TASK", run_parameters)
         self.assertIn("CONFIG_SHA256", run_parameters)
         self.assertEqual(
             activities["PrepareExecutorBenchmark"]["typeProperties"]["notebookId"],

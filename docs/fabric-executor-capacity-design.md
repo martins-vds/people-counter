@@ -187,33 +187,25 @@ memory_safe_workers = floor(usable_executor_memory / peak_worker_memory)
 ```
 
 Include headroom for JVM, Python worker, native allocations, and storage/shuffle
-overheads. If the memory ceiling is below the CPU slot count, revise or reject
-the startup plan. Options include increasing `CPUS_PER_TASK` to reduce
-colocation, requesting more executor memory, using smaller inference batches, or
-choosing different models/settings.
+overheads. When Fabric retains a managed `spark.task.cpus=1`, memory safety must
+not depend on increasing scheduler CPUs. Instead, cap each submitted inference
+batch to at most `memory_safe_workers`. Because this is a global cap no larger
+than one executor's safe limit, no placement can colocate more memory-heavy
+tasks on any executor. Execute additional planned partitions in sequential
+batches.
 
-Reducing the total number of partitions alone is not per-executor memory
-protection, because Spark placement can still colocate memory-heavy tasks on the
-same executor.
+This placement-independent cap is conservative with multiple executors because
+it does not multiply by executor count. Multiplying the cap would be unsafe
+without enforceable executor affinity: Spark could place several partitions on
+one executor. A lower explicit `PARALLEL_TASKS` value is safe but
+underutilized and should emit a warning; a value above the measured cap must be
+rejected.
 
-When a measured worker limit `M` is below an executor's CPU slot count, the
-minimum safe task reservation for an executor with `C` cores is:
-
-```text
-minimum_safe_cpus_per_task = floor(C / (M + 1)) + 1
-```
-
-For `C=16` and `M=3`, the minimum is `5`, which yields three scheduler slots.
-Changing `CPUS_PER_TASK` changes native-thread allocation, so characterize
-again with `PEAK_WORKER_MEMORY_GIB=0` under the new CPU setting before seeking
-approval.
-
-The characterization evaluator derives this minimum from persisted
-`usable_executor_memory_gib`, the configured headroom fraction, the suggested
-worker peak, and the observed per-executor `total_cores` values. It must include
-both the suggested peak and minimum task CPUs in its terminal recommendation.
-An approval request below that evidence-derived minimum remains a hard safety
-failure rather than a warning.
+The characterization evaluator derives the cap from persisted
+`usable_executor_memory_gib`, the configured headroom fraction, and the
+suggested worker peak. It includes the suggested peak, the effective
+`CPUS_PER_TASK`, and the placement-safe task cap in its terminal
+recommendation.
 
 When no peak measurement exists, a zero configured peak selects a
 characterization-only run. Force planned concurrency and physical partition
@@ -502,12 +494,10 @@ Notebook 15 then runs in one Notebook activity. The activity passes both
 session configuration parameters for its first `%%configure` cell and normal
 notebook parameters. `CPUS_PER_TASK` must be the same pipeline parameter for
 both surfaces. Retries remain disabled.
-The pipeline-level value is an integer, but the notebook Run activity must
-serialize it as text because `spark.task.cpus` is carried inside the
-string-valued Spark `conf` map. Notebook 15 then normalizes the injected Python
-parameter back to a positive integer before comparing requested and effective
-allocation. Passing the Run activity parameter as an integer can leave the
-parameterizable magic cell's string default in effect. Retries remain disabled.
+The running session value remains authoritative. If Fabric retains
+`spark.task.cpus=1` despite a parameterized `%%configure` request, use `1` and
+enforce memory-safe concurrency through sequential global task batches rather
+than claiming the scheduler allocation changed. Retries remain disabled.
 
 The evaluator runs with an **On completion** dependency so failed inference
 still produces diagnostics. It reads the exact batch and configuration identity

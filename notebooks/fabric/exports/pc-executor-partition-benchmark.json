@@ -322,10 +322,10 @@
                         },
                         "CPUS_PER_TASK": {
                             "value": {
-                                "value": "@string(pipeline().parameters.CPUS_PER_TASK)",
+                                "value": "@pipeline().parameters.CPUS_PER_TASK",
                                 "type": "Expression"
                             },
-                            "type": "string"
+                            "type": "int"
                         },
                         "PARALLEL_TASKS": {
                             "value": {

@@ -342,25 +342,23 @@ tracking state held by that worker. The run persists:
   `peak_worker_memory_details_json`.
 
 The pipeline evaluation activity intentionally rejects this run with a message
-containing the suggested peak and evidence-derived minimum safe
-`CPUS_PER_TASK`. This is expected: a characterization run is measurement
-evidence, not capacity approval. If the suggested task CPU value exceeds the
-characterization value, choose a new batch ID, set that `CPUS_PER_TASK`, keep
-`PEAK_WORKER_MEMORY_GIB=0`, and characterize again because the native-thread
-allocation changed. Once the recommended task CPU value no longer changes,
-choose another new batch ID and run approval with the suggested positive
-`PEAK_WORKER_MEMORY_GIB`. A normal run also measures `VmHWM` and is rejected if
-the observed peak exceeds the configured value.
+containing the suggested peak and evidence-derived placement-safe global task
+cap. This is expected: a characterization run is measurement evidence, not
+capacity approval. Choose a new batch ID, keep the effective
+`CPUS_PER_TASK`, set the suggested positive `PEAK_WORKER_MEMORY_GIB`, and leave
+`PARALLEL_TASKS=auto`. Notebook 15 automatically executes sequential batches
+containing at most the memory-safe worker count. A normal run also measures
+`VmHWM` and is rejected if the observed peak exceeds the configured value.
 
-If the approval run reports fewer memory-safe workers than CPU slots, use its
-`minimum_safe_cpus_per_task` value as the next `CPUS_PER_TASK`. Because that
-changes the worker's native-thread allocation, use a new batch ID and set
-`PEAK_WORKER_MEMORY_GIB=0` again to characterize that CPU configuration before
-approval. For example, a 16-core executor limited to three memory-safe workers
-requires at least `CPUS_PER_TASK=5`, yielding `floor(16 / 5) = 3` scheduler
-slots. Do not substitute a lower `PARALLEL_TASKS` value: a global partition cap
-does not guarantee that Spark will avoid colocating those tasks on one
-executor.
+Fabric may retain `spark.task.cpus=1` even when a pipeline parameter requests a
+higher value. The notebook therefore treats the running Spark value as
+authoritative and uses a placement-independent global memory cap. If one
+executor is safe for three workers, each submitted inference batch contains at
+most three partitions, so no executor can receive more than three model-heavy
+tasks. This is conservative when multiple executors are available, but it does
+not depend on Spark distributing tasks evenly. An explicit `PARALLEL_TASKS`
+below the measured cap is allowed with an underutilization warning; a value
+above it is rejected.
 
 If inference fails before producing complete peak-memory evidence, evaluation
 reports that characterization did not complete and includes the underlying
@@ -4231,11 +4229,9 @@ write a second gate notebook manually.
    or cancellation.
 6. Set `CPUS_PER_TASK` once on the pipeline. The export passes that value both
    to notebook 15's first `%%configure` cell and to its Python parameter cell.
-   The Run activity serializes the value as a string because
-   `conf.spark.task.cpus` is a Spark string property; notebook 15 normalizes the
-   injected Python value back to a positive integer before comparing it with
-   the running allocation. Do not change the Run activity mapping back to an
-   integer or Fabric can retain the magic cell's string default.
+   The running Spark allocation remains authoritative. In the current Fabric
+   runtime, keep this at `1` unless the attached Environment is proven to start
+   sessions with a different `spark.task.cpus` value.
    Review the driver/executor memory, core, and dynamic-allocation bounds before
    every capacity test.
 7. For characterization, use `MIN_WALL_SECONDS=0`, no baseline ID, and
@@ -4360,7 +4356,7 @@ without turning the overall pipeline green.
 | `MODELS_DIR` | `String` | Executor-visible pinned model tree. |
 | `PIPELINE`, `BATCH_SIZE`, `SAMPLE_FPS`, `DETECTION_THRESHOLD`, `DETECTOR_MODEL`, `CAMERA_MOTION_COMPENSATION` | matching types | Exact inference configuration shared with the baseline. |
 | `LINE` | `Array` | Empty for no counting line, or four integer coordinates. It participates in the configuration hash. |
-| `CPUS_PER_TASK` | `Int` | Pipeline-level positive integer. The Run activity converts it to text for the string-valued `conf.spark.task.cpus` setting; notebook 15 converts the injected Python parameter back to an integer and verifies the effective scheduler allocation. |
+| `CPUS_PER_TASK` | `Int` | Requested scheduler CPUs per task. It must match the running `spark.task.cpus`; keep `1` when Fabric retains its managed default. Memory-safe concurrency is enforced separately with sequential global task batches. |
 | `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. `EXECUTOR_MEMORY` is JVM heap. Ensure it leaves enough physical node memory for Python/native work. Select executor bounds from the capacity-SKU reference above, then lower them for shared-capacity headroom and workspace-pool limits. |
 | `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
 | `PARTITION_WAVES` | `Int` | Number of planned partition waves. |
