@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import MagicMock, call, patch
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
+from people_counter.cpu_runtime import calculate_placement_safe_thread_budget
 from people_counter.runtime import RuntimeCompatibilityError
 
 
@@ -216,6 +217,14 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("planned_concurrency = planned_worker_concurrency(", planning)
         self.assertIn("memory_concurrency_cap", planning)
         self.assertIn("memory_cap_mode", planning)
+        self.assertIn(
+            "native_thread_budget = calculate_placement_safe_thread_budget(",
+            planning,
+        )
+        self.assertIn(
+            "(executor.total_cores for executor in resource_snapshot_before.executors)",
+            planning,
+        )
         self.assertIn("PARALLEL_TASKS exceeds the placement-safe global memory cap", planning)
         self.assertIn("if memory_characterization_mode", planning)
         self.assertIn("choose_bucket(", planning)
@@ -223,9 +232,15 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn(".partitionBy(", partition)
         self.assertIn("task_cpus = normalize_task_cpus(context.cpus())", partition)
         self.assertIn(
-            "configure_cpu_runtime(driver_cores=task_cpus, active_workers=1)",
+            "driver_cores=native_thread_budget_cores",
             partition,
         )
+        self.assertIn(
+            "active_workers=native_thread_budget_workers",
+            partition,
+        )
+        self.assertNotIn("driver_cores=task_cpus", partition)
+        self.assertIn("thread_budget.threads_per_worker != native_threads_per_worker", partition)
         self.assertIn("worker_lifetime_peak_rss_bytes", partition)
         self.assertIn("linux-proc-vmhwm", partition)
         self.assertIn("models_dir is required for offline executor inference", partition)
@@ -866,6 +881,7 @@ class FabricNotebookTests(unittest.TestCase):
             "characterization_rejection_message",
             "characterization_capacity_recommendation",
             "optional_text",
+            calculate_placement_safe_thread_budget=calculate_placement_safe_thread_budget,
             json=json,
             math=math,
         )
@@ -885,6 +901,7 @@ class FabricNotebookTests(unittest.TestCase):
             0.25,
             2.0,
             json.dumps([{"executor_id": "1", "total_cores": 16}]),
+            1,
         )
         self.assertEqual(
             recommendation,
@@ -892,16 +909,19 @@ class FabricNotebookTests(unittest.TestCase):
                 "memory_safe_workers_per_executor": 3,
                 "placement_safe_parallel_tasks": 3,
                 "executor_cores": [16],
+                "native_threads_per_worker_at_cap": 5,
             },
         )
         self.assertEqual(
-            rejection_message(2.25, 3, 1, [intentional_failure]),
+            rejection_message(2.25, 3, 5, 1, [intentional_failure]),
             "Executor peak-memory characterization completed but cannot be "
             "approved; use a new benchmark batch ID with "
             "PEAK_WORKER_MEMORY_GIB=2.25 and CPUS_PER_TASK=1; "
-            "PARALLEL_TASKS=auto will apply the placement-safe global cap of 3",
+            "PARALLEL_TASKS=auto will apply the placement-safe global cap of 3 "
+            "and derive 5 native threads per worker at that cap",
         )
         incomplete = rejection_message(
+            None,
             None,
             None,
             1,
@@ -1016,11 +1036,13 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("memory_budget_details_json STRING NOT NULL", bootstrap_create)
         self.assertIn("memory_characterization_mode BOOLEAN NOT NULL", bootstrap_create)
         self.assertIn("suggested_peak_worker_memory_gib DOUBLE", bootstrap_create)
+        self.assertIn("native_threads_per_worker INT NOT NULL", bootstrap_create)
         self.assertIn("peak_worker_memory_details_json STRING NOT NULL", bootstrap_create)
         self.assertIn('"usable_executor_memory_source": "STRING"', bootstrap_evolution)
         self.assertIn('"memory_budget_details_json": "STRING"', bootstrap_evolution)
         self.assertIn('"memory_characterization_mode": "BOOLEAN"', bootstrap_evolution)
         self.assertIn('"suggested_peak_worker_memory_gib": "DOUBLE"', bootstrap_evolution)
+        self.assertIn('"native_threads_per_worker": "INT"', bootstrap_evolution)
         self.assertIn('"peak_worker_memory_details_json": "STRING"', bootstrap_evolution)
         self.assertIn(
             "characterization-only run cannot pass benchmark approval",
@@ -1040,6 +1062,14 @@ class FabricNotebookTests(unittest.TestCase):
         )
         self.assertIn(
             '"suggested_parallel_tasks": suggested_parallel_tasks',
+            evaluation,
+        )
+        self.assertIn(
+            '"suggested_native_threads_per_worker": suggested_native_threads',
+            evaluation,
+        )
+        self.assertIn(
+            'int(metric["native_threads_per_worker"]) != expected_native_threads',
             evaluation,
         )
         pipeline = json.loads(

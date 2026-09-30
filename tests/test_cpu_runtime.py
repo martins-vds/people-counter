@@ -3,7 +3,11 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-from people_counter.cpu_runtime import calculate_thread_budget, configure_cpu_runtime
+from people_counter.cpu_runtime import (
+    calculate_placement_safe_thread_budget,
+    calculate_thread_budget,
+    configure_cpu_runtime,
+)
 
 
 class CpuRuntimeTests(unittest.TestCase):
@@ -55,13 +59,56 @@ class CpuRuntimeTests(unittest.TestCase):
             ],
         )
 
+    def test_placement_safe_budget_uses_worst_case_executor_placement(self):
+        budget = calculate_placement_safe_thread_budget([16], 1, 3)
+        self.assertEqual(budget.driver_cores, 16)
+        self.assertEqual(budget.active_workers, 3)
+        self.assertEqual(budget.threads_per_worker, 5)
+
+        heterogeneous = calculate_placement_safe_thread_budget([16, 8], 1, 3)
+        self.assertEqual(heterogeneous.driver_cores, 8)
+        self.assertEqual(heterogeneous.active_workers, 3)
+        self.assertEqual(heterogeneous.threads_per_worker, 2)
+
+        fragmented = calculate_placement_safe_thread_budget([5, 8], 3, 10)
+        self.assertEqual(fragmented.driver_cores, 8)
+        self.assertEqual(fragmented.active_workers, 2)
+        self.assertEqual(fragmented.threads_per_worker, 4)
+
+        single_core = calculate_placement_safe_thread_budget([1], 1, 1)
+        self.assertEqual(single_core.driver_cores, 1)
+        self.assertEqual(single_core.active_workers, 1)
+        self.assertEqual(single_core.threads_per_worker, 1)
+
+        runnable = calculate_placement_safe_thread_budget([2, 8], 3, 2)
+        self.assertEqual(runnable.driver_cores, 8)
+        self.assertEqual(runnable.active_workers, 2)
+        self.assertEqual(runnable.threads_per_worker, 4)
+
+    def test_placement_safe_budget_rejects_invalid_or_unrunnable_resources(self):
+        for args, message in (
+            (([], 1, 1), "executor_cores contain no runnable executor"),
+            (([0], 1, 1), "executor_cores must contain positive integers"),
+            (([4.0], 1, 1), "executor_cores must contain positive integers"),
+            (([4], 0, 1), "task_cpus must be a positive integer"),
+            (([4], 1, 0), "planned_concurrency must be a positive integer"),
+            (([2], 3, 1), "executor_cores contain no runnable executor"),
+        ):
+            with self.subTest(args=args):
+                with self.assertRaises(ValueError) as raised:
+                    calculate_placement_safe_thread_budget(*args)
+                self.assertEqual(str(raised.exception), message)
+
     def test_configure_cpu_runtime_sets_environment_budget(self):
         environ = {}
 
-        with self.assertLogs(
-            "people_counter.cpu_runtime",
-            level="INFO",
-        ) as logs:
+        with (
+            patch.dict(sys.modules, {"cv2": None, "torch": None}),
+            self.assertLogs(
+                "people_counter.cpu_runtime",
+                level="INFO",
+            ) as logs,
+        ):
             budget = configure_cpu_runtime(
                 4,
                 3,
@@ -85,7 +132,10 @@ class CpuRuntimeTests(unittest.TestCase):
         )
 
     def test_configure_cpu_runtime_can_update_process_environment(self):
-        with patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.dict(sys.modules, {"cv2": None, "torch": None}),
+        ):
             budget = configure_cpu_runtime(
                 1,
                 1,
@@ -98,7 +148,10 @@ class CpuRuntimeTests(unittest.TestCase):
     def test_configure_cpu_runtime_overrides_existing_environment(self):
         environ = {"OMP_NUM_THREADS": "4"}
 
-        with self.assertLogs("people_counter.cpu_runtime", level="WARNING") as logs:
+        with (
+            patch.dict(sys.modules, {"cv2": None, "torch": None}),
+            self.assertLogs("people_counter.cpu_runtime", level="WARNING") as logs,
+        ):
             budget = configure_cpu_runtime(
                 4,
                 2,
@@ -146,7 +199,7 @@ class CpuRuntimeTests(unittest.TestCase):
         )
         torch.set_num_threads.assert_called_once_with(2)
         torch.set_num_interop_threads.assert_called_once_with(1)
-        cv2.setNumThreads.assert_called_once_with(1)
+        cv2.setNumThreads.assert_called_once_with(2)
         self.assertEqual(
             logs.output,
             [
@@ -207,7 +260,7 @@ class CpuRuntimeTests(unittest.TestCase):
         )
         torch.set_num_threads.assert_called_once_with(4)
         torch.get_num_interop_threads.assert_called_once_with()
-        cv2.setNumThreads.assert_called_once_with(1)
+        cv2.setNumThreads.assert_called_once_with(4)
 
     def test_configure_cpu_runtime_recognizes_existing_interop_limit(self):
         cv2 = MagicMock()

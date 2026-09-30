@@ -360,6 +360,25 @@ not depend on Spark distributing tasks evenly. An explicit `PARALLEL_TASKS`
 below the measured cap is allowed with an underutilization warning; a value
 above it is rejected.
 
+Scheduler CPU tokens and native inference threads are decoupled. For every
+runnable executor, notebook 15 calculates the maximum inference workers that
+could be colocated there as the smaller of planned global concurrency and that
+executor's Spark task slots. It divides the executor's observed cores by that
+worker count, then uses the minimum result across executors. With a 16-core
+executor, `spark.task.cpus=1`, and a placement-safe concurrency of three, each
+worker receives five OpenMP, MKL, OpenBLAS, PyTorch intra-op, and OpenCV
+threads. Spark still reports one scheduler CPU per task, while at most three
+inference tasks use approximately 15 cores. The evaluator independently
+recomputes this budget from the persisted executor snapshot.
+
+This changes peak-memory evidence because native thread pools can allocate
+additional memory. After deploying this version, discard the earlier 2 GiB
+measurement obtained with one native thread and rerun characterization with a
+new batch ID and `PEAK_WORKER_MEMORY_GIB=0`. Characterization uses one worker
+with all placement-safe executor threads; its recommendation is therefore
+conservative for the lower per-worker thread count used by a multi-worker
+approval run.
+
 If inference fails before producing complete peak-memory evidence, evaluation
 reports that characterization did not complete and includes the underlying
 evidence failures. It does not present a missing recommendation as
@@ -377,13 +396,14 @@ worker process.
 The notebook derives application slots from each observed executor separately,
 uses deterministic largest-cost-first bucket planning with bounded driver
 buffers, and persists both the plan and its one-to-one physical-partition
-mapping. Each executor task reads `TaskContext.cpus()` and applies matching
-OpenMP, MKL, PyTorch, and OpenCV limits before loading a model runtime. A reused
-Python worker accepts the same limits but fails rather than silently changing an
-already initialized native runtime. Pre/post resource snapshots, batch timing,
-observed concurrency, balance inputs, errors, and source-video throughput are
-persisted to prototype telemetry tables. Missing duration metadata is explicitly
-labeled and prevents the notebook from claiming complete throughput.
+mapping. Each executor task reads `TaskContext.cpus()` to validate scheduler
+allocation, then applies the separately derived placement-safe native thread
+budget before loading a model runtime. A reused Python worker accepts the same
+limits but fails rather than silently changing an already initialized native
+runtime. Pre/post resource snapshots, batch timing, observed concurrency,
+balance inputs, errors, and source-video throughput are persisted to prototype
+telemetry tables. Missing duration metadata is explicitly labeled and prevents
+the notebook from claiming complete throughput.
 
 Manifest generation is a producer-side responsibility, not another Fabric
 inference notebook. For a large historical load, use the
@@ -4212,7 +4232,8 @@ write a second gate notebook manually.
 3. Stop writers and run
    [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb) in its
    documented maintenance window. It creates the six executor benchmark Delta
-   tables and adds the four identity columns to compatible prototype tables.
+   tables and evolves compatible prototype tables with the required identity,
+   memory, and native-thread evidence columns.
 4. Import the pipeline export, select the environment's Lakehouse connection
    for all three Notebook activities, and verify the semantic-model connection
    on `RefreshBenchmarkModel`.
@@ -4381,9 +4402,11 @@ continues to resolve tables in the attached Lakehouse.
 
 Some Fabric runtimes expose `TaskContext.cpus()` as an integral floating-point
 value such as `1.0`. Notebook 15 normalizes positive integral numeric values to
-an integer before comparing them with `CPUS_PER_TASK`, configuring native
-threads, and persisting task evidence. Fractional, zero, non-finite, Boolean,
-and nonnumeric allocations remain fatal.
+an integer before comparing them with `CPUS_PER_TASK` and persisting scheduler
+evidence. It does not use this value directly as the native thread limit.
+Instead, it derives native threads from observed executor cores, scheduler
+slots, and placement-safe planned concurrency. Fractional, zero, non-finite,
+Boolean, and nonnumeric scheduler allocations remain fatal.
 
 Notebook 15 implements `INPUT_BATCH_ID` and rejects partially supplied
 benchmark identity. Before counting or planning, it filters
@@ -4404,8 +4427,9 @@ never joins evidence by timestamps or table-wide state.
 - requested and effective `spark.task.cpus` match;
 - pre/post resource snapshots are complete, use the supported monitoring
   backend, and contain no assumed executors;
-- the memory-safety calculation passed and no executor/task reported a
-  conflicting native-thread budget;
+- the memory-safety calculation passed and every task reported the same
+  native-thread budget independently recomputed from observed executor cores
+  and placement-safe planned concurrency;
 - the run was not a peak-worker characterization run;
 - complete `linux-proc-vmhwm` worker-memory evidence was recorded; and
 - the observed worker-lifetime peak did not exceed the configured

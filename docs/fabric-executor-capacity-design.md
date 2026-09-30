@@ -2,16 +2,15 @@
 
 Date: September 27, 2026
 
-Status: Proposed
+Status: Implemented prototype
 
 Target: `notebooks/fabric/15_executor_partition_inference.ipynb`
 
-This document is a design proposal only. It records the approved capacity-aware
-executor-partition inference design and the current-code facts verified against
+This document records the implemented capacity-aware executor-partition
+inference design and the current-code facts verified against
 `notebooks/fabric/15_executor_partition_inference.ipynb`,
 `src/people_counter/cpu_runtime.py`, and
-`src/people_counter/fabric_executor_partition.py`. It does not implement
-notebook, SDK, or settings changes.
+`src/people_counter/fabric_executor_partition.py`.
 
 ## 1. Objective
 
@@ -36,20 +35,18 @@ and writes compact result records. It does not currently participate in notebook
 
 Verified current behavior:
 
-- `notebooks/fabric/15_executor_partition_inference.ipynb` manually supplies
-  `EXECUTOR_CORES = 4`, `ACTIVE_TASKS_PER_EXECUTOR = 4`, and
-  `TARGET_PARTITIONS = 4`.
-- The notebook calculates `threads_per_worker` from
-  `max(1, EXECUTOR_CORES // ACTIVE_TASKS_PER_EXECUTOR)` through
-  `calculate_thread_budget`.
-- The notebook calls `spark_session.conf.set("spark.task.cpus", ...)` after the
-  Spark session exists; this must not be treated as validated scheduler
-  allocation for already-started resources.
-- The notebook repartitions prepared work with
-  `.repartition(TARGET_PARTITIONS, F.col("work_id"))`, which is hash-based and
-  has no video-cost awareness.
-- The notebook has no validation that the requested executor/task CPU allocation
-  matches the allocation granted by Fabric/Spark.
+- `notebooks/fabric/15_executor_partition_inference.ipynb` uses a first-code-cell
+  parameterized `%%configure`, then discovers the executor cores actually
+  granted to the running application.
+- The notebook validates requested `CPUS_PER_TASK` against both
+  `spark.task.cpus` and executor-side `TaskContext.cpus()` evidence.
+- The notebook calculates native threads independently from the scheduler CPU
+  token using observed executor cores and placement-safe planned concurrency.
+- Prepared videos are assigned largest-cost-first to persisted planned buckets,
+  with bounded runtime-affinity retention and explicit physical partition
+  mappings.
+- Memory-heavy inference partitions run in sequential global batches no larger
+  than the measured placement-safe memory cap.
 - `src/people_counter/fabric_executor_partition.py` creates a default
   `SdkRuntimeProcessor()` inside each `process_video_partition` invocation when
   no processor is supplied. That processor has an `ExecutorRuntimeCache`, but
@@ -63,9 +60,9 @@ Verified current behavior:
   environment variables, PyTorch, and OpenCV. Its process-level guard rejects a
   later request for a changed native process budget.
 
-## 3. Proposed notebook controls
+## 3. Notebook controls
 
-Replace the manual core/concurrency inputs with these proposed notebook
+The prototype replaces manual core/concurrency inputs with these notebook
 controls:
 
 ```python
@@ -80,7 +77,7 @@ These are initial benchmark values, not validated production defaults.
 | Control | Semantics |
 |---|---|
 | `CPUS_PER_TASK` | Positive integer CPUs requested per Spark task before Spark resources start. This controls scheduler allocation when applied through a supported Fabric startup configuration mechanism. |
-| `PARALLEL_TASKS = "auto"` | Derive the application-local inference slot count from the allocated executors and `CPUS_PER_TASK`. |
+| `PARALLEL_TASKS = "auto"` | Derive placement-safe application-local inference concurrency from observed scheduler slots, measured memory, and video count. |
 | `PARALLEL_TASKS = N` | Positive integer lower application-local inference cap. It queues no more than `N` inference partitions at a time in explicit-cap mode, but it is not a cluster-wide admission control. |
 | `PARTITION_WAVES` | Positive integer multiplier that queues additional planned partitions beyond immediate slots so Spark has work available as tasks complete. |
 | `RESOURCE_DISCOVERY_TIMEOUT_SECONDS` | Bounded discovery/bootstrap wait for observing the running allocation. Timeout behavior must be explicit and must label any fallback resource values as assumed. |
@@ -159,7 +156,7 @@ These ceilings are capacity ceilings, not guaranteed occupancy. Reject zero-slot
 plans. Warn about fragments such as the unused 2 cores per 8-core executor when
 `T = 3`.
 
-In auto mode:
+Before applying the memory cap, the scheduler slot ceiling is:
 
 ```text
 planned_concurrency = min(approved_slots, video_count)
@@ -204,8 +201,8 @@ rejected.
 The characterization evaluator derives the cap from persisted
 `usable_executor_memory_gib`, the configured headroom fraction, and the
 suggested worker peak. It includes the suggested peak, the effective
-`CPUS_PER_TASK`, and the placement-safe task cap in its terminal
-recommendation.
+`CPUS_PER_TASK`, the placement-safe task cap, and the derived native threads per
+worker at that cap in its terminal recommendation.
 
 When no peak measurement exists, a zero configured peak selects a
 characterization-only run. Force planned concurrency and physical partition
@@ -297,7 +294,31 @@ are also valid on executor nodes.
 
 ## 8. Task native threads
 
-The proposed partition function conceptually becomes:
+Spark scheduler CPUs and native inference threads are separate budgets.
+`TaskContext.cpus()` validates the effective scheduler allocation, but it must
+not directly cap CPU-heavy native inference when placement-safe batching leaves
+executor cores idle.
+
+For executor `i`, let:
+
+```text
+C_i = observed executor cores
+T = effective spark.task.cpus
+P = planned global inference concurrency
+slots_i = floor(C_i / T)
+max_colocated_workers_i = min(P, slots_i)
+native_threads_i = floor(C_i / max_colocated_workers_i)
+
+native_threads_per_worker = min(native_threads_i across runnable executors)
+```
+
+Taking the minimum makes the budget safe for heterogeneous executors and
+worst-case task placement. For one observed 16-core executor, `T=1`, and
+`P=3`, each worker receives `floor(16 / 3) = 5` native threads. Spark still
+records one scheduler CPU per task, while the globally bounded inference stage
+contains at most three tasks and therefore uses at most 15 native threads.
+
+The partition function conceptually becomes:
 
 ```python
 def partition_records(rows):
@@ -308,8 +329,13 @@ def partition_records(rows):
         raise RuntimeError("Partition inference requires a Spark task context")
 
     task_cpus = normalize_task_cpus(context.cpus())
+    if task_cpus != CPUS_PER_TASK:
+        raise RuntimeError("Spark task CPU allocation changed")
 
-    configure_cpu_runtime(driver_cores=task_cpus, active_workers=1)
+    configure_cpu_runtime(
+        driver_cores=native_thread_budget_cores,
+        active_workers=native_thread_budget_workers,
+    )
 
     dictionaries = (row.asDict(recursive=True) for row in rows)
     yield from process_video_partition(dictionaries, config_builder=build_config)
@@ -319,15 +345,20 @@ def partition_records(rows):
 Fabric can expose this count as an integral floating-point value such as
 `1.0`; normalize positive integral numeric representations to `int`, while
 rejecting fractional, zero, non-finite, Boolean, and nonnumeric values.
-Passing `driver_cores=task_cpus` and `active_workers=1` is mathematically
-correct with the current helper, though the `driver_cores` name is misleading in
-task context. A later implementation may add a task-oriented wrapper while
-preserving the public helper API.
 
 Configure native threads before constructing or loading models. Retain the
 existing guard that rejects conflicting native process budgets unless it is
 explicitly redesigned. Validate uniform allocation within a session, restart
 between benchmark settings, and test worker reuse plus changed-budget handling.
+Persist the derived budget in the run metric and the applied value in every
+task record. Evaluation must independently recompute the expected value from
+the before-run executor snapshot and reject mismatches.
+
+Characterization mode uses one planned worker and therefore gives that worker
+all cores of the smallest applicable executor. This measures peak memory under
+the largest native thread pool the planner can assign. Any peak measured under
+the earlier one-native-thread implementation is not valid evidence for this
+design; rerun characterization with `PEAK_WORKER_MEMORY_GIB=0` after deployment.
 
 Native library thread limits are not OS-level CPU isolation. Decode, I/O, and
 nested library threads must be measured rather than assumed controlled.
@@ -375,12 +406,13 @@ production publication protocol remains separate from this notebook 15 design.
 
 ## 12. Implementation sequence
 
-Document only for this PR. Future implementation should proceed in this order:
+The prototype was implemented in this order:
 
 1. Define typed resource, plan, and metric records.
 2. Implement supported resource discovery and request/effective validation.
 3. Separate startup configuration guidance from execution-time discovery.
-4. Apply per-task native thread limits from `TaskContext.cpus()`.
+4. Derive native thread limits from observed executor cores and placement-safe
+   concurrency, independently of `TaskContext.cpus()`.
 5. Implement cost-aware planning and persisted planned-bucket mapping.
 6. Implement auto mode and explicit sequential batches.
 7. Add memory safety checks and metrics.
@@ -388,7 +420,7 @@ Document only for this PR. Future implementation should proceed in this order:
 
 ## 13. Tests and acceptance
 
-Future tests should cover:
+Tests and live Fabric validation should cover:
 
 - heterogeneous executors, CPU fragments, invalid CPU values, missing resources,
   and driver exclusion;

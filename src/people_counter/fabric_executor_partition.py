@@ -19,6 +19,7 @@ from people_counter.api import (
 from people_counter.config import RFDetrBotsortConfig, RTDetrOsnetConfig
 from people_counter.cpu_runtime import (
     ThreadBudget,
+    calculate_placement_safe_thread_budget,
     calculate_thread_budget,
     configure_cpu_runtime,
 )

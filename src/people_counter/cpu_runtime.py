@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
 from typing import cast
 
@@ -49,6 +49,39 @@ def calculate_thread_budget(
         driver_cores=driver_cores,
         active_workers=active_workers,
         threads_per_worker=max(1, driver_cores // active_workers),
+    )
+
+
+def calculate_placement_safe_thread_budget(
+    executor_cores: Iterable[int],
+    task_cpus: int,
+    planned_concurrency: int,
+) -> ThreadBudget:
+    """Budget native threads for the worst-case Spark task placement."""
+    if type(task_cpus) is not int or task_cpus < 1:
+        raise ValueError("task_cpus must be a positive integer")
+    if type(planned_concurrency) is not int or planned_concurrency < 1:
+        raise ValueError("planned_concurrency must be a positive integer")
+
+    candidates = []
+    for cores in executor_cores:
+        if type(cores) is not int or cores < 1:
+            raise ValueError("executor_cores must contain positive integers")
+        scheduler_slots = cores // task_cpus
+        if scheduler_slots < 1:
+            continue
+        colocated_workers = min(planned_concurrency, scheduler_slots)
+        candidates.append(calculate_thread_budget(cores, colocated_workers))
+
+    if not candidates:
+        raise ValueError("executor_cores contain no runnable executor")
+    return min(
+        candidates,
+        key=lambda budget: (
+            budget.threads_per_worker,
+            budget.driver_cores,
+            budget.active_workers,
+        ),
     )
 
 
@@ -100,7 +133,7 @@ def configure_cpu_runtime(
                 "Could not change PyTorch inter-op threads after runtime initialization: %s",
                 error,
             )
-        cv2.setNumThreads(1)
+        cv2.setNumThreads(budget.threads_per_worker)
         _NATIVE_THREAD_BUDGET = ThreadBudget(
             driver_cores=budget.driver_cores,
             active_workers=budget.active_workers,
