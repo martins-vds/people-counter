@@ -3493,13 +3493,16 @@ Use these artifacts:
 
 | Artifact | Purpose |
 |---|---|
-| `pc_benchmark_model` | Direct Lake model over the durable benchmark fact |
-| `pc_benchmark_report` | Run comparison, throughput, capacity-planning, and stage-timing visuals |
+| `pc_benchmark_model` | Direct Lake model over the durable capacity and executor benchmark facts |
+| `pc_benchmark_report` | Capacity-run comparison plus executor placement, memory, concurrency, and throughput diagnostics |
 
 The report is a comparison and diagnostic surface. The
 `EvaluateCapacityGate` notebook activity remains the authoritative approval
 gate because `people_counter_processing_benchmarks` does not persist
-`EXPECTED_BATCH_MEMBERS` or the gate's final pass/fail result.
+`EXPECTED_BATCH_MEMBERS` or the gate's final pass/fail result. Likewise,
+`EvaluateExecutorBenchmark` remains authoritative for executor-partition
+approval; Power BI displays its persisted evidence but does not replace the
+gate.
 
 ##### Create the benchmark semantic model
 
@@ -3528,8 +3531,11 @@ gate because `people_counter_processing_benchmarks` does not persist
    table directly and does not require SQL views or SQL-endpoint security.
    The SQL analytics endpoint can lag a recent Delta append while Direct Lake
    already sees the new files.
-6. If the model opens in **Viewing** mode, switch to **Editing** mode. No
-   relationships are required because this model contains one fact table.
+6. If the model opens in **Viewing** mode, switch to **Editing** mode. At
+   initial creation the model contains one fact table, so no relationships are
+   required. After deploying the executor benchmark, extend this same model
+   with the six executor tables by following section 7.4.8. Keep the executor
+   visuals table-local unless reviewed relationships are added deliberately.
 7. Create every measure below with
    `people_counter_processing_benchmarks` as its home table:
 
@@ -3942,9 +3948,10 @@ and under-duration runs without a manual semantic-model refresh.
    The current UI labels the second field **Semantic model**, not
    **Dataset**. Select the semantic model, not `pc_benchmark_report`.
 10. Refresh the **Table(s)** list only if needed to confirm the connection,
-   then leave all table and partition selections unset. An empty selection
-   requests the whole semantic model; selecting only the benchmark table is
-   unnecessary for this one-table model.
+    then leave all table and partition selections unset. An empty selection
+    requests the whole semantic model. After section 7.4.8 adds executor
+    tables, do not select only `people_counter_processing_benchmarks`; that
+    would leave executor framing stale.
 11. Expand **Advanced** and configure:
 
    | Setting | Value |
@@ -4271,6 +4278,127 @@ The checked-in export is bound to workspace
 `efd68f39-e6f6-42fb-9797-9e7ced47a8a0`, and semantic model
 `1bcc8dd2-66f1-4cde-8225-d07ba944da09`. Replace those IDs for another
 workspace.
+
+##### Extend the benchmark semantic model and report
+
+Refreshing `pc_benchmark_model` does not discover new Lakehouse tables
+automatically. Extend the existing model once after bootstrap creates the
+executor tables; do not create a second executor-only model or replace the
+capacity benchmark table.
+
+1. Run bootstrap in the documented stopped-writer maintenance window and
+   confirm these six physical Delta tables exist:
+
+   ```text
+   people_counter_executor_benchmark_events
+   people_counter_executor_inference_runs
+   people_counter_executor_partition_input
+   people_counter_executor_partition_plans
+   people_counter_executor_partition_records
+   people_counter_executor_resource_snapshots
+   ```
+
+2. Open `pc_benchmark_model` in **Editing** mode. If the modeling extension
+   fails to load under `app.fabric.microsoft.com`, open the same workspace and
+   semantic model from the native `https://app.powerbi.com` host. Preserve the
+   workspace and semantic-model IDs; changing hosts is a UI recovery step, not
+   a model migration.
+3. Open **TMDL view**, right-click
+   `people_counter_processing_benchmarks`, and select **Edit tables**.
+4. Select all six executor tables listed above and choose **Confirm**. Keep
+   `people_counter_processing_benchmarks` selected. Wait for the model update
+   to finish even when the dialog remains on **Please wait...** for several
+   minutes.
+5. Confirm Model explorer contains the original capacity fact and all six
+   executor tables. Do not add relationships merely to make a visual filter
+   across tables. The executor overview below uses only
+   `people_counter_executor_inference_runs`; an optional event table remains
+   table-local.
+6. Select **Refresh** and wait for Direct Lake framing to complete. Confirm
+   no table has an orange Direct Lake warning. Save the model if the editor
+   exposes a Save action; otherwise wait for autosave to complete.
+7. Open `pc_benchmark_report` in **Edit** mode. Refresh the browser/report if
+   the Data pane still shows only
+   `people_counter_processing_benchmarks`.
+8. Add a report page named **Executor Benchmark**.
+9. Add a Slicer using
+   `people_counter_executor_inference_runs[benchmark_batch_id]`. Keep the
+   slicer on this table so the selected batch filters every executor overview
+   visual without a cross-table relationship.
+10. Add one Card visual containing these selected-run fields, or use six
+    separate Cards if the report theme needs independent sizing:
+
+    ```text
+    effective_task_cpus
+    native_threads_per_worker
+    planned_concurrency
+    observed_concurrency
+    measured_peak_worker_memory_gib
+    throughput_video_minutes_per_wall_minute
+    ```
+
+    With exactly one batch selected, the default numeric aggregation returns
+    the persisted run value. Do not interpret a sum across several selected
+    batch IDs as one executor configuration.
+11. Add a Table visual using these
+    `people_counter_executor_inference_runs` fields:
+
+    ```text
+    benchmark_batch_id
+    capacity_sku
+    runtime_version
+    effective_task_cpus
+    native_threads_per_worker
+    planned_concurrency
+    observed_concurrency
+    memory_safe_workers_per_executor
+    measured_peak_worker_memory_gib
+    video_count
+    succeeded_videos
+    failed_videos
+    wall_seconds
+    throughput_video_minutes_per_wall_minute
+    metrics_complete
+    ```
+
+    Make the table wide enough to retain the context and gate-evidence
+    columns. Horizontal scrolling is acceptable; do not remove failure,
+    completeness, or throughput evidence merely to fit the first viewport.
+12. Optionally add a separate Table visual from
+    `people_counter_executor_benchmark_events` with:
+
+    ```text
+    benchmark_batch_id
+    event_type
+    status
+    created_at_utc
+    ```
+
+    Without a reviewed relationship, use this as an independent event log;
+    the inference-run slicer does not filter it.
+13. Save the report, switch to **Reading view**, and select one successful
+    approval batch. Verify the report shows:
+
+    ```text
+    effective_task_cpus = 1
+    native_threads_per_worker = 5
+    planned_concurrency = 3
+    observed_concurrency <= 3
+    memory_safe_workers_per_executor = 3
+    failed_videos = 0
+    metrics_complete = true
+    ```
+
+    Compare memory and throughput with the same
+    `EvaluateExecutorBenchmark` output. In the development workspace,
+    `dev-f8-t1-20260929-r23` displayed `1`, `5`, `3`, `3`, `3`,
+    `1.85 GiB`, three successful videos, zero failed videos, and approximately
+    `0.19` source-video minutes per wall minute.
+14. After every executor run, confirm the pipeline's
+    `RefreshBenchmarkModel` activity refreshed the entire semantic model. If a
+    new batch is missing, inspect that activity and the semantic-model refresh
+    history first. A report visual refresh cannot add a table that was never
+    included in the model and cannot repair stale Direct Lake framing.
 
 ##### Benchmark item contract
 
