@@ -148,7 +148,8 @@ that a Fabric pipeline Notebook activity can override:
 |---|---|---:|---|
 | `DRIVER_MEMORY` | `driverMemory` | `28g` | Driver memory requested for the session. |
 | `DRIVER_CORES` | `driverCores` | `4` | Driver vCores requested for the session. |
-| `EXECUTOR_MEMORY` | `executorMemory` | `28g` | Memory requested for each executor. |
+| `EXECUTOR_MEMORY` | `executorMemory` | `28g` | JVM heap requested for each executor. |
+| `EXECUTOR_MEMORY_OVERHEAD` | `conf.spark.executor.memoryOverhead` | `4g` | Non-heap executor allocation for Python workers, JVM native memory, direct buffers, and related overhead. The heap plus overhead must fit the selected pool node. |
 | `EXECUTOR_CORES` | `executorCores` | `4` | vCores requested for each executor. |
 | `CPUS_PER_TASK` | `conf.spark.task.cpus` | `1` | Scheduler CPUs reserved for each inference task. Pass the same integer to the notebook parameter cell. |
 | `MIN_EXECUTORS` | `conf.spark.dynamicAllocation.minExecutors` | `1` | Dynamic-allocation lower bound. |
@@ -249,6 +250,16 @@ The configured worker envelope is selected in this order:
    spark.executor.minMemoryOverhead)`, using Spark defaults of `0.10` and
    `384 MiB` when those settings are absent, followed by the same
    native-executor reserve.
+
+The benchmark pipeline explicitly requests
+`EXECUTOR_MEMORY_OVERHEAD="4g"` at session startup. With no separate
+`spark.executor.pyspark.memory`, this leaves a 3 GiB worker envelope after the
+25% native reserve; the separate 25% planner headroom then admits against
+2.25 GiB. Fabric's 384 MiB minimum overhead would be entirely consumed by the
+384 MiB native reserve and therefore cannot support automatic characterization.
+The notebook validates that the requested overhead matches the effective Spark
+configuration and tells the operator to restart if Fabric reused an older
+session.
 
 Unitless values for Spark executor heap, overhead, minimum overhead, and
 PySpark memory are interpreted as MiB, matching Spark. Unitless
@@ -4314,7 +4325,7 @@ without turning the overall pipeline green.
 | `PIPELINE`, `BATCH_SIZE`, `SAMPLE_FPS`, `DETECTION_THRESHOLD`, `DETECTOR_MODEL`, `CAMERA_MOTION_COMPENSATION` | matching types | Exact inference configuration shared with the baseline. |
 | `LINE` | `Array` | Empty for no counting line, or four integer coordinates. It participates in the configuration hash. |
 | `CPUS_PER_TASK` | `Int` | Passed both to notebook 15's `%%configure` parameter and its Python parameter cell. |
-| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. Select executor bounds from the capacity-SKU reference above, then lower them for shared-capacity headroom and workspace-pool limits. |
+| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_MEMORY_OVERHEAD`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. `EXECUTOR_MEMORY` is JVM heap; `EXECUTOR_MEMORY_OVERHEAD` reserves non-heap/Python capacity and defaults to `4g`. Ensure their combined allocation fits the workspace pool node. Select executor bounds from the capacity-SKU reference above, then lower them for shared-capacity headroom and workspace-pool limits. |
 | `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
 | `PARTITION_WAVES` | `Int` | Number of planned partition waves. |
 | `RUNTIME_AFFINITY_MAX_IMBALANCE` | `Float` | Maximum projected-load penalty accepted to retain a model-runtime affinity bucket. |

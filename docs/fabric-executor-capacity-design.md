@@ -241,6 +241,16 @@ configured JVM/off-heap reservations, direct the operator to reduce JVM heap or
 select a larger container/node; increasing overhead alone cannot create
 capacity inside an unchanged limit.
 
+The benchmark pipeline must expose `EXECUTOR_MEMORY_OVERHEAD` and pass it to
+`conf.spark.executor.memoryOverhead` in the first `%%configure` cell. Use `4g`
+as the prototype default: after the greater-of-384-MiB-or-25% native reserve,
+the Spark configuration envelope retains 3 GiB for Python/native workers before
+the planner's separate headroom fraction. Include this request in the benchmark
+configuration hash and verify it equals the effective Spark setting. The JVM
+heap plus memory overhead must fit the selected workspace-pool node; this
+parameter changes the executor container allocation and is not merely a
+notebook-side accounting override.
+
 ## 7. Partition planning
 
 Plan partition count as:

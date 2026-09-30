@@ -155,6 +155,13 @@
                             },
                             "type": "string"
                         },
+                        "EXECUTOR_MEMORY_OVERHEAD": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY_OVERHEAD",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
                         "EXECUTOR_CORES": {
                             "value": {
                                 "value": "@pipeline().parameters.EXECUTOR_CORES",
@@ -362,6 +369,13 @@
                             },
                             "type": "string"
                         },
+                        "EXECUTOR_MEMORY_OVERHEAD": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY_OVERHEAD",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
                         "EXECUTOR_CORES": {
                             "value": {
                                 "value": "@pipeline().parameters.EXECUTOR_CORES",
@@ -559,6 +573,13 @@
                         "EXECUTOR_MEMORY": {
                             "value": {
                                 "value": "@pipeline().parameters.EXECUTOR_MEMORY",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
+                        "EXECUTOR_MEMORY_OVERHEAD": {
+                            "value": {
+                                "value": "@pipeline().parameters.EXECUTOR_MEMORY_OVERHEAD",
                                 "type": "Expression"
                             },
                             "type": "string"
@@ -807,6 +828,10 @@
             "EXECUTOR_MEMORY": {
                 "type": "string",
                 "defaultValue": "28g"
+            },
+            "EXECUTOR_MEMORY_OVERHEAD": {
+                "type": "string",
+                "defaultValue": "4g"
             },
             "EXECUTOR_CORES": {
                 "type": "int",
