@@ -3511,7 +3511,7 @@ gate.
    validate the report, but only an uncontaminated run sustained for at least
    six hours is eligible for capacity approval.
 2. Open `<lakehouse-name>` in Lakehouse view and confirm this physical Delta
-   table appears under **Tables**:
+   table appears under **Tables** and includes the `model_format` column:
 
    ```text
    people_counter_processing_benchmarks
@@ -4015,6 +4015,7 @@ and under-duration runs without a manual semantic-model refresh.
    | `benchmark_batch_id` | Dropdown | `Benchmark run` |
    | `capacity_sku` | Dropdown | `Capacity SKU` |
    | `runtime_version` | Dropdown | `Runtime` |
+   | `model_format` | Dropdown | `Model format` |
    | `config_sha256` | Dropdown | `Configuration` |
    | `sample_name` | Dropdown | `Sample` |
 
@@ -4065,6 +4066,7 @@ and under-duration runs without a manual semantic-model refresh.
    capacity_sku
    runtime_version
    sdk_version
+   model_format
    config_sha256
    concurrent_workers
    ```
@@ -4093,10 +4095,12 @@ and under-duration runs without a manual semantic-model refresh.
    benchmark_batch_id
    capacity_sku
    runtime_version
+   model_format
    sample_name
    ```
 
-   Title them `Benchmark run`, `Capacity SKU`, `Runtime`, and `Sample`.
+   Title them `Benchmark run`, `Capacity SKU`, `Runtime`, `Model format`,
+   and `Sample`.
 10. Add a **Clustered bar chart** titled
     `Average stage timing by run`:
 
@@ -4131,6 +4135,7 @@ and under-duration runs without a manual semantic-model refresh.
     capacity_sku
     runtime_version
     sdk_version
+    model_format
     concurrent_workers
     driver_cores
     threads_per_worker
@@ -4301,22 +4306,55 @@ capacity benchmark table.
    people_counter_executor_resource_snapshots
    ```
 
-2. Open `pc_benchmark_model` in **Editing** mode. If the modeling extension
+   Also confirm that `model_format` exists in both
+   `people_counter_processing_benchmarks` and
+   `people_counter_executor_inference_runs`. Do not continue to the report
+   editor until both physical columns exist.
+2. Open `pc_benchmark_model`. Select the mode button labeled **Viewing**, then
+   choose **Editing - Make any changes**. If the modeling extension
    fails to load under `app.fabric.microsoft.com`, open the same workspace and
    semantic model from the native `https://app.powerbi.com` host. Preserve the
    workspace and semantic-model IDs; changing hosts is a UI recovery step, not
    a model migration.
-3. Open **TMDL view**, right-click
-   `people_counter_processing_benchmarks`, and select **Edit tables**.
-4. Select all six executor tables listed above and choose **Confirm**. Keep
-   `people_counter_processing_benchmarks` selected. Wait for the model update
-   to finish even when the dialog remains on **Please wait...** for several
-   minutes.
+3. On the **Home** ribbon, select **Edit tables**. The dialog title is
+   **Edit semantic model** and its instruction is
+   **Select or deselect tables for the semantic model**.
+4. Select all six executor tables listed above and keep
+   `people_counter_processing_benchmarks` selected. Choose **Confirm**. After
+   a compatible schema change, open the same dialog and choose **Confirm**
+   again without changing the selected tables; this is the current web-model
+   workflow that discovers newly added physical columns. Wait for the dialog
+   to close even when it remains on **Please wait...** for several minutes.
 5. Confirm Model explorer contains the original capacity fact and all six
-   executor tables. Do not add fact-to-fact or many-to-many relationships
-   merely to make a visual filter across tables. Run-level visuals remain
-   table-local. Matched-video measures described below cross the facts
-   explicitly with `TREATAS`, using this reviewed path:
+   executor tables. Search Model explorer for `model_format` and confirm it is
+   visible in report view under:
+
+   ```text
+   people_counter_processing_benchmarks
+   people_counter_executor_inference_runs
+   people_counter_executor_partition_input
+   ```
+
+6. Select **Home -> Manage relationships**, then create these two active
+   relationships:
+
+   | From (one side) | To (many side) | Cardinality | Cross-filter direction |
+   |---|---|---|---|
+   | `people_counter_executor_inference_runs[benchmark_batch_id]` | `people_counter_executor_partition_input[benchmark_batch_id]` | One to many (`1:*`) | Single |
+   | `people_counter_executor_inference_runs[benchmark_batch_id]` | `people_counter_executor_partition_records[benchmark_batch_id]` | One to many (`1:*`) | Single |
+
+   Leave **Apply security filter in both directions** and
+   **Assume referential integrity** cleared. The inference-run table has one
+   row per benchmark batch, so it acts as the reviewed executor-run filter
+   surface. These relationships let its `model_format` slicer filter both
+   prepared-input and persisted-record visuals. Do not add a relationship
+   between either executor table and
+   `people_counter_processing_benchmarks`, and do not add fact-to-fact or
+   many-to-many relationships merely to make a visual filter cross benchmark
+   approaches.
+
+   Matched-video measures described below still cross the capacity and
+   executor facts explicitly with `TREATAS`, using this reviewed path:
 
    ```text
    people_counter_processing_benchmarks[sample_name]
@@ -4330,12 +4368,35 @@ capacity benchmark table.
    union table for this purpose: calculated tables that depend on Direct Lake
    columns require an explicit connection with granular access control.
    An optional event table remains table-local.
-6. Select **Refresh** and wait for Direct Lake framing to complete. Confirm
-   no table has an orange Direct Lake warning. Save the model if the editor
-   exposes a Save action; otherwise wait for autosave to complete.
-7. Open `pc_benchmark_report` in **Edit** mode. Refresh the browser/report if
-   the Data pane still shows only
-   `people_counter_processing_benchmarks`.
+7. Wait for autosave, open the **Editing** mode button, and choose
+   **Viewing - View, but make no changes**. Reopen Model explorer, search for
+   `model_format`, and confirm the three fields above are still present. This
+   mode switch is the publish boundary used by the current web editor. Return
+   to the workspace list, filter the item list for `pc_benchmark_model`, hover
+   over its row, and select the **Refresh now** quick action. Wait for the
+   **Preparing for refresh** and **Refreshing data** notifications to clear,
+   then confirm the row's **Refreshed** timestamp advances. This Direct Lake
+   refresh is required after adding source columns; publishing the model
+   alone can leave the report field list on the previous schema.
+8. Open `pc_benchmark_report`. From Reading view, select the left-side
+   **More options** button in the report toolbar and choose **Edit**. In the
+   **Data** pane, search for `model_format`. If it does not return the three
+   fields above, return to the semantic model, confirm it is in **Viewing**
+   mode, run the workspace-list **Refresh now** action again, wait for it to
+   finish, and reload the report before editing visuals.
+
+   To create each new model-format slicer in the current report editor:
+
+   1. Select a blank area of the report canvas.
+   2. In the **Data** pane, search for `model_format` and select the checkbox
+      for the required table. Power BI initially creates a Table visual.
+   3. In **Visualizations**, select **Build visual**, then select **Slicer**.
+   4. Select **Format visual -> General -> Title**, turn **Title** on, and set
+      the page-specific title listed below.
+
+   On a crowded page, resize and reposition the existing top-row or
+   right-column slicers before placing the new one. Do not cover an existing
+   card, chart, table, or slicer.
 
 Before laying out the report pages, create these measures under
 `people_counter_processing_benchmarks`:
@@ -4375,15 +4436,21 @@ This measure pattern deliberately supports both axes used below:
 - capacity `sample_name` on **Approach Comparison**;
 - executor-input `sample_name` on **Executor Stage Timing & Samples**.
 
-8. Add a report page named **Executor Run Comparison**. If the report already
+9. Add a report page named **Executor Run Comparison**. If the report already
    has the earlier **Executor Benchmark** page, rename and update that page
    rather than retaining a third, overlapping executor overview.
-9. Add a Slicer using
-   `people_counter_executor_inference_runs[benchmark_batch_id]`. Keep the
-   slicer on this table so it filters every run-comparison visual without a
-   cross-table relationship. Leave all batches selected for the default
-   comparison view.
-10. Add six Card visuals so the page mirrors the capacity run overview:
+10. Add two Slicer visuals from
+    `people_counter_executor_inference_runs`:
+
+    | Field | Slicer title |
+    |---|---|
+    | `benchmark_batch_id` | `Executor benchmark run` |
+    | `model_format` | `Model format` |
+
+    Leave all batches and both model formats selected for the default
+    comparison view. The run-table relationships from step 6 carry the model
+    format filter to executor input and record visuals.
+11. Add six Card visuals so the page mirrors the capacity run overview:
 
     ```text
     Executor Benchmark Runs
@@ -4397,29 +4464,37 @@ This measure pattern deliberately supports both axes used below:
     Keep `Executor Comparison Readiness` visible even when all batches are
     selected; `SELECT ONE RUN` is an operator prompt, not an error. Selecting
     one approval batch should replace it with that run's readiness result.
-11. Add a **Clustered column chart** titled
+12. Add a **Clustered column chart** titled
     `Executor throughput by run`:
 
     | Visual field well | Field |
     |---|---|
     | X-axis | `benchmark_batch_id` |
     | Y-axis | `throughput_video_minutes_per_wall_minute` |
+    | Legend | `model_format` |
 
     There is one inference-run row per batch, so the default numeric
     aggregation returns that batch's persisted value.
-12. Add a second **Clustered column chart** titled
+13. Add a second **Clustered column chart** titled
     `Planned versus observed concurrency`:
 
     | Visual field well | Field |
     |---|---|
     | X-axis | `benchmark_batch_id` |
     | Y-axis | `planned_concurrency`; `observed_concurrency` |
+    | Small multiples | `model_format` |
 
-13. Add a Table visual using these
+    The two Y-axis measures already define the chart series. In the current
+    Power BI editor, selecting `model_format` therefore assigns it to
+    **Small multiples**, not **Legend**. Keep that grouping so each model
+    format retains both planned and observed series.
+
+14. Add a Table visual using these
     `people_counter_executor_inference_runs` fields:
 
     ```text
     benchmark_batch_id
+    model_format
     capacity_sku
     runtime_version
     effective_task_cpus
@@ -4439,10 +4514,11 @@ This measure pattern deliberately supports both axes used below:
     Make the table wide enough to retain the context and gate-evidence
     columns. Horizontal scrolling is acceptable; do not remove failure,
     completeness, or throughput evidence merely to fit the first viewport.
-14. Add a second report page named
+15. Add a second report page named
     **Executor Stage Timing & Samples**.
-15. Add these Slicers from
-    `people_counter_executor_partition_records`:
+16. Add a `Model format` Slicer using
+    `people_counter_executor_inference_runs[model_format]`. Then add these
+    Slicers from `people_counter_executor_partition_records`:
 
     ```text
     benchmark_batch_id
@@ -4456,7 +4532,7 @@ This measure pattern deliberately supports both axes used below:
     evidence. Because the slicers share one table, their available values can
     narrow each other; clearing `record_type` exposes failed batches that have
     no `video_result` row.
-16. Add two **Clustered bar charts**:
+17. Add two **Clustered bar charts**:
 
     | Title | Y-axis | X-axis |
     |---|---|---|
@@ -4466,7 +4542,7 @@ This measure pattern deliberately supports both axes used below:
     `source_video` is the persisted record-table sample identity. Do not use
     `sample_name` from `people_counter_executor_partition_input` on these
     visuals without first designing and validating an explicit relationship.
-17. Retain those partition-diagnostic charts, then add these matched-sample
+18. Retain those partition-diagnostic charts, then add these matched-sample
     charts using
     `people_counter_executor_partition_input[sample_name]` on the X-axis:
 
@@ -4479,7 +4555,7 @@ This measure pattern deliberately supports both axes used below:
     mapping internally. They must show `people_crossing`, `subway`, and
     `three_people_walking` separately when those samples exist in the selected
     executor batch.
-18. Add a Table visual using these
+19. Add a Table visual using these
     `people_counter_executor_partition_records` fields:
 
     ```text
@@ -4503,7 +4579,7 @@ This measure pattern deliberately supports both axes used below:
     Keep failed and error rows available through the `record_type` and
     `status` slicers. Do not remove error columns because successful default
     filtering leaves them blank.
-19. Optionally add a separate Table visual from
+20. Optionally add a separate Table visual from
     `people_counter_executor_benchmark_events` with:
 
     ```text
@@ -4515,17 +4591,19 @@ This measure pattern deliberately supports both axes used below:
 
     Without a reviewed relationship, use this as an independent event log;
     the inference-run slicer does not filter it.
-20. Add a third report page named **Approach Comparison**. Add these Slicers:
+21. Add a third report page named **Approach Comparison**. Add these Slicers:
 
     | Label | Field |
     |---|---|
     | `Capacity benchmark batch` | `people_counter_processing_benchmarks[benchmark_batch_id]` |
+    | `Capacity model format` | `people_counter_processing_benchmarks[model_format]` |
     | `Executor benchmark batch` | `people_counter_executor_partition_input[benchmark_batch_id]` |
+    | `Executor model format` | `people_counter_executor_inference_runs[model_format]` |
     | `Video sample` | `people_counter_processing_benchmarks[sample_name]` |
 
     Keep the two batch slicers separate. Selecting a capacity batch must not
     implicitly select an executor batch, and vice versa.
-21. Add these Card visuals:
+22. Add these Card visuals:
 
     ```text
     Average End-to-End Seconds
@@ -4542,7 +4620,7 @@ This measure pattern deliberately supports both axes used below:
     the executor is faster. Positive throughput delta means the executor is
     faster. Keep the `Faster Approach` card visible so operators do not need
     to infer the winner from signs alone.
-22. Add two **Clustered column charts** with
+23. Add two **Clustered column charts** with
     `people_counter_processing_benchmarks[sample_name]` on the X-axis:
 
     | Title | Y-axis |
@@ -4550,7 +4628,7 @@ This measure pattern deliberately supports both axes used below:
     | `Execution time by sample` | `Average End-to-End Seconds`; `Executor Average Processing Seconds` |
     | `Throughput by sample` | `Average Speed x`; `Executor Throughput x` |
 
-23. Add a matched-sample Table with:
+24. Add a matched-sample Table with:
 
     ```text
     sample_name
@@ -4567,7 +4645,8 @@ This measure pattern deliberately supports both axes used below:
     Every shared sample must appear once. A sample with no executor input or
     no successful `video_result` must show blank executor metrics and
     `NO MATCH`; it must not disappear silently or be labeled as a winner.
-24. Save the report and switch to **Reading view**. Confirm the Pages pane
+25. Select **Save this report**, then switch to **Reading view**. Confirm the
+    Pages pane
     contains the original capacity pages plus:
 
     ```text
@@ -4613,6 +4692,12 @@ This measure pattern deliberately supports both axes used below:
     - positive `Throughput Delta x` means executor throughput is higher;
     - `Faster Approach` must be `NO MATCH` when either approach has no matched
       value.
+
+    On every page, select `pytorch` and `onnx` in the model-format slicers
+    when both values are present and confirm the expected visuals filter.
+    Rows written before `model_format` was persisted can appear as
+    **(Blank)**. Do not relabel or backfill those historical rows unless an
+    operator has independently verified the format used by each run.
 
     In the development workspace, the saved default view showed three matched
     samples. Its totals were approximately `276.26` seconds for notebook 04,
