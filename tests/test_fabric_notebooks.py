@@ -4,6 +4,8 @@ import io
 import json
 import math
 import re
+import sys
+import tempfile
 import unittest
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -1155,6 +1157,15 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn('"model_format": model_format', control_helpers)
         self.assertIn('"model_format": model_format', prepare_benchmark)
         self.assertIn(
+            "validate_executor_model_runtime(",
+            prepare_benchmark,
+        )
+        self.assertIn(
+            "Executor runtime preflight failed",
+            prepare_benchmark,
+        )
+        self.assertIn('"video_errors": video_errors', evaluation)
+        self.assertIn(
             'T.StructField("model_format", T.StringType(), False)',
             prepare_benchmark,
         )
@@ -1254,6 +1265,108 @@ class FabricNotebookTests(unittest.TestCase):
             pipeline_parameters["LAKEHOUSE_FILE_API_ROOT"]["defaultValue"],
             "/lakehouse/default",
         )
+
+    def test_executor_benchmark_preflights_onnx_artifacts_and_provider(self):
+        validate = cell_functions(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-helpers",
+            "validate_executor_model_runtime",
+            Path=Path,
+        )["validate_executor_model_runtime"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            models_dir = Path(directory)
+            detector_dir = (
+                models_dir
+                / "rtdetr_osnet"
+                / "rtdetr_v2_r18vd"
+            )
+            reid_dir = models_dir / "rtdetr_osnet" / "libre_reid_osnet"
+            detector_dir.mkdir(parents=True)
+            reid_dir.mkdir(parents=True)
+            for path in (
+                detector_dir / "config.json",
+                detector_dir / "preprocessor_config.json",
+                detector_dir / "model.onnx",
+                reid_dir / "osnet_ain_x0_25.onnx",
+            ):
+                path.touch()
+
+            runtime = MagicMock()
+            runtime.get_available_providers.return_value = [
+                "CPUExecutionProvider",
+            ]
+            with patch.dict(sys.modules, {"onnxruntime": runtime}):
+                result = validate(
+                    models_dir,
+                    "rtdetr-osnet",
+                    "onnx",
+                    "r18",
+                    "cpu",
+                )
+
+            self.assertEqual(result["onnx_provider"], "CPUExecutionProvider")
+            self.assertEqual(
+                result["artifact_paths"],
+                [
+                    str(detector_dir),
+                    str(detector_dir / "model.onnx"),
+                    str(reid_dir / "osnet_ain_x0_25.onnx"),
+                ],
+            )
+
+            with (
+                patch.dict(sys.modules, {"onnxruntime": None}),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    (
+                        "^ONNX executor inference requires the onnxruntime "
+                        "package in the attached Fabric Environment$"
+                    ),
+                ),
+            ):
+                validate(
+                    models_dir,
+                    "rtdetr-osnet",
+                    "onnx",
+                    "r18",
+                    "cpu",
+                )
+
+            runtime.get_available_providers.return_value = [
+                "AzureExecutionProvider",
+            ]
+            with (
+                patch.dict(sys.modules, {"onnxruntime": runtime}),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    (
+                        "^ONNX Runtime provider CPUExecutionProvider is "
+                        "unavailable; available providers: "
+                        "AzureExecutionProvider$"
+                    ),
+                ),
+            ):
+                validate(
+                    models_dir,
+                    "rtdetr-osnet",
+                    "onnx",
+                    "r18",
+                    "cpu",
+                )
+
+            (detector_dir / "model.onnx").unlink()
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "Offline model artifacts are missing: .*model.onnx",
+            ):
+                validate(
+                    models_dir,
+                    "rtdetr-osnet",
+                    "onnx",
+                    "r18",
+                    "cpu",
+                )
 
     def test_executor_benchmark_treats_fabric_null_database_as_unqualified(self):
         control_identifier = cell_functions(

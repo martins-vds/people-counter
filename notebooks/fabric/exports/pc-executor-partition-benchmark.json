@@ -778,7 +778,7 @@
             },
             "MODELS_DIR": {
                 "type": "string",
-                "defaultValue": "/lakehouse/default/Files/models/<release>"
+                "defaultValue": "/lakehouse/default/Files/models"
             },
             "MODEL_FORMAT": {
                 "type": "string",

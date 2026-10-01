@@ -4263,6 +4263,30 @@ write a second gate notebook manually.
    `LAKEHOUSE_FILE_API_ROOT=/lakehouse/default` unless the notebook uses a
    different attached-Lakehouse mount. Do not reuse a batch ID after failure
    or cancellation.
+
+   `MODELS_DIR=/lakehouse/default/Files/models` is valid only when the
+   pipeline directories are direct children of that path. If artifacts are
+   stored under a release directory, include that release in `MODELS_DIR`.
+   For `PIPELINE=rtdetr-osnet`, `DETECTOR_MODEL=r18`, and
+   `MODEL_FORMAT=onnx`, every executor must see:
+
+   ```text
+   <MODELS_DIR>/
+     rtdetr_osnet/
+       rtdetr_v2_r18vd/
+         config.json
+         preprocessor_config.json
+         model.onnx
+       libre_reid_osnet/
+         osnet_ain_x0_25.onnx
+   ```
+
+   The executor-partition implementation currently permits only CPU
+   inference. The attached Fabric Environment must therefore contain the
+   `onnxruntime` package and expose `CPUExecutionProvider`. Installing only
+   the PyTorch runtime dependencies is insufficient for `MODEL_FORMAT=onnx`.
+   Publish the updated Environment, stop the old Spark session, and use a new
+   benchmark batch ID after changing packages or artifacts.
 6. Set `CPUS_PER_TASK` once on the pipeline. The export passes that value both
    to notebook 15's first `%%configure` cell and to its Python parameter cell.
    The running Spark allocation remains authoritative. In the current Fabric
@@ -4757,8 +4781,10 @@ Optional reviewed metadata can avoid or verify probing:
 9. write complete pipeline/model settings and the shared executor-visible
    File API video/model paths to `people_counter_executor_partition_input`;
    and
-10. run a model-free Spark preflight that verifies every active executor can
-    read each direct File API video path and the configured `MODELS_DIR`.
+10. run a model-load-free Spark preflight that verifies every active executor
+    can read each direct File API video path, resolve the format-specific model
+    artifacts, import ONNX Runtime when selected, and expose the required ONNX
+    provider.
 
 Preparation is outside measured inference time. Its duration is persisted
 separately so source-access regressions remain visible without being confused
@@ -4767,6 +4793,12 @@ with notebook-15 throughput. During execution, the notebook prints structured
 `EXECUTOR_PREFLIGHT`, `INPUT_WRITE`, and `EVENT_WRITE`. If PREPARE stalls, use
 the last `STARTED` record without a matching `SUCCEEDED` record to identify the
 blocking operation.
+
+If executor readiness fails, `PrepareExecutorBenchmark` now reports
+`Executor runtime preflight failed` with the missing package, provider, or
+artifact path. If inference still reaches per-video failures, the evaluator
+includes up to five grouped `error_type`/`error_message` summaries in the
+pipeline failure instead of reporting only a failed-video count.
 
 `duration_seconds` is required for an approvable throughput result, but the
 operator no longer has to enter it: a successful trusted probe supplies it.
