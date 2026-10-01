@@ -64,6 +64,13 @@
                             },
                             "type": "string"
                         },
+                        "MODEL_FORMAT": {
+                            "value": {
+                                "value": "@pipeline().parameters.MODEL_FORMAT",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
                         "ATTACHED_LAKEHOUSE_ID": {
                             "value": {
                                 "value": "@concat('\"', pipeline().parameters.ATTACHED_LAKEHOUSE_ID, '\"')",
@@ -482,6 +489,13 @@
                             },
                             "type": "string"
                         },
+                        "MODEL_FORMAT": {
+                            "value": {
+                                "value": "@pipeline().parameters.MODEL_FORMAT",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
                         "CAPACITY_SKU": {
                             "value": {
                                 "value": "@pipeline().parameters.CAPACITY_SKU",
@@ -765,6 +779,10 @@
             "MODELS_DIR": {
                 "type": "string",
                 "defaultValue": "/lakehouse/default/Files/models/<release>"
+            },
+            "MODEL_FORMAT": {
+                "type": "string",
+                "defaultValue": "pytorch"
             },
             "ATTACHED_LAKEHOUSE_ID": {
                 "type": "string",

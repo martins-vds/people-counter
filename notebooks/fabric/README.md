@@ -102,7 +102,7 @@ Before running the prototype:
   `source_width`, and `source_height` without copying, verify executor-visible
   video/model paths, and create one input row per submitted whole video.
   Direct notebook runs still require those prepared rows and a non-empty
-  executor-visible `models_dir`;
+  executor-visible `models_dir` and a `model_format` of `pytorch` or `onnx`;
 - keep the `CPUS_PER_TASK` value in the parameter cell equal to the
   `spark.task.cpus` value requested by `%%configure`. The notebook fails with
   restart instructions when the requested and effective values differ and never
@@ -4235,7 +4235,8 @@ write a second gate notebook manually.
    created instead, replace both `notebookId` values in the imported pipeline.
 2. Attach the same default Lakehouse and pinned Fabric Environment to both
    notebooks. The environment must contain the project package, OpenCV, and
-   the pinned offline model dependencies.
+   the pinned offline model dependencies. ONNX runs additionally require the
+   export/runtime dependencies used by the converted models.
 3. Stop writers and run
    [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb) in its
    documented maintenance window. It creates the six executor benchmark Delta
@@ -4246,7 +4247,9 @@ write a second gate notebook manually.
    on `RefreshBenchmarkModel`.
 5. Set a new `BENCHMARK_BATCH_ID`, the exact `RUNTIME_VERSION` and
    `CAPACITY_SKU`, the exact `ATTACHED_LAKEHOUSE_ID`, an executor-visible
-   `MODELS_DIR`, and a non-empty `BENCHMARK_ITEMS` array. Keep
+   `MODELS_DIR`, `MODEL_FORMAT` (`pytorch` or `onnx`), and a non-empty
+   `BENCHMARK_ITEMS` array. The selected model tree must contain the matching
+   original or converted artifacts. Keep
    `TABLE_PREFIX=people_counter` and `DATABASE` empty unless the bootstrap,
    control, and inference notebooks were all deployed with the same reviewed
    alternative. The pipeline passes both values to every notebook activity so
@@ -4725,7 +4728,8 @@ without turning the overall pipeline green.
 | `BASELINE_CONFIG_SHA256` | `String` | Exact configuration hash from the selected notebook-04 batch; required when a baseline batch ID is set. |
 | `MIN_WALL_SECONDS` | `Int` | Minimum sustained inference wall time; use `21600` for an approval run. |
 | `MIN_THROUGHPUT_IMPROVEMENT_PERCENT` | `Float` | Required improvement over the compatible notebook-04 baseline; use `0` while characterizing. |
-| `MODELS_DIR` | `String` | Executor-visible pinned model tree. |
+| `MODELS_DIR` | `String` | Executor-visible pinned model tree containing the artifacts required by `MODEL_FORMAT`. |
+| `MODEL_FORMAT` | `String` | `pytorch` for original artifacts or `onnx` for converted artifacts. It participates in the configuration hash and executor runtime-affinity key. |
 | `PIPELINE`, `BATCH_SIZE`, `SAMPLE_FPS`, `DETECTION_THRESHOLD`, `DETECTOR_MODEL`, `CAMERA_MOTION_COMPENSATION` | matching types | Exact inference configuration shared with the baseline. |
 | `LINE` | `Array` | Empty for no counting line, or four integer coordinates. It participates in the configuration hash. |
 | `CPUS_PER_TASK` | `Int` | Requested scheduler CPUs per task. It must match the running `spark.task.cpus`; keep `1` when Fabric retains its managed default. Memory-safe concurrency is enforced separately with sequential global task batches. |
