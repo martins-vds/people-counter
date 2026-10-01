@@ -16,8 +16,11 @@ RTDETR_REQUIRED_FILES = (
 )
 OSNET_MODEL_DIR = "libre_reid_osnet"
 OSNET_FILENAME = "osnet_ain_x0_25.pt"
+OSNET_ONNX_FILENAME = "osnet_ain_x0_25.onnx"
 RFDETR_PIPELINE_DIR = "rfdetr_botsort"
 RFDETR_FILENAME = "rf-detr-large-2026.pth"
+RFDETR_ONNX_FILENAME = "rf-detr-large-2026.onnx"
+RTDETR_ONNX_FILENAME = "model.onnx"
 
 
 def _require_files(paths: tuple[Path, ...]) -> None:
@@ -49,3 +52,32 @@ def resolve_rfdetr_checkpoint(models_dir: Path) -> Path:
     )
     _require_files((checkpoint,))
     return checkpoint
+
+
+def resolve_rtdetr_osnet_onnx_artifacts(
+    models_dir: Path,
+    detector_model: Literal["r18", "r50"],
+) -> tuple[Path, Path, Path]:
+    pipeline_dir = models_dir.expanduser() / RTDETR_PIPELINE_DIR
+    detector_dir = pipeline_dir / RTDETR_MODEL_DIRS[detector_model]
+    detector_path = detector_dir / RTDETR_ONNX_FILENAME
+    reid_path = pipeline_dir / OSNET_MODEL_DIR / OSNET_ONNX_FILENAME
+    _require_files(
+        (
+            detector_dir / "config.json",
+            detector_dir / "preprocessor_config.json",
+            detector_path,
+            reid_path,
+        )
+    )
+    return detector_dir, detector_path, reid_path
+
+
+def resolve_rfdetr_onnx_model(models_dir: Path) -> Path:
+    model_path = (
+        models_dir.expanduser()
+        / RFDETR_PIPELINE_DIR
+        / RFDETR_ONNX_FILENAME
+    )
+    _require_files((model_path,))
+    return model_path

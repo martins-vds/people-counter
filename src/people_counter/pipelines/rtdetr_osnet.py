@@ -25,6 +25,7 @@ from people_counter.line_counting import (
 from people_counter.model_artifacts import (
     OSNET_FILENAME as REID_FILENAME,
     resolve_rtdetr_osnet_artifacts,
+    resolve_rtdetr_osnet_onnx_artifacts,
 )
 from people_counter.models import (
     Detection,
@@ -45,7 +46,11 @@ from people_counter.video import (
     read_video_metadata,
 )
 from scipy.optimize import linear_sum_assignment
-from transformers import AutoImageProcessor, RTDetrV2ForObjectDetection
+from transformers import (
+    AutoConfig,
+    AutoImageProcessor,
+    RTDetrV2ForObjectDetection,
+)
 
 REID_REPO_ID = "LibreYOLO/LibreReID-osnet"
 REID_REVISION = "5c7c20e54ccf80c9889a64020748f148ad5f7634"
@@ -96,6 +101,7 @@ class RTDetrRuntimeSpec:
     device: str
     detector_model: str
     models_dir: str | None
+    model_format: str = "pytorch"
 
 
 @dataclass(frozen=True)
@@ -114,6 +120,7 @@ def runtime_spec(config: RTDetrOsnetConfig) -> RTDetrRuntimeSpec:
         device_variant=config.device_variant,
         device=config.device,
         detector_model=config.detector_model,
+        model_format=config.model_format,
         models_dir=(
             str(config.models_dir.expanduser().resolve())
             if config.models_dir is not None
@@ -755,7 +762,40 @@ def load_runtime(config: RTDetrOsnetConfig) -> RTDetrRuntime:
     device = torch.device(config.device)
     if config.device_variant == "gpu":
         torch.backends.cudnn.benchmark = True
-    if config.models_dir is None:
+    if config.model_format == "onnx":
+        if config.models_dir is None:
+            raise ValueError("models_dir is required for ONNX model loading")
+        from people_counter.onnx_runtime import (
+            OSNetOnnxEmbedder,
+            RTDetrOnnxModel,
+            create_onnx_session,
+        )
+
+        detector_dir, detector_path, reid_path = (
+            resolve_rtdetr_osnet_onnx_artifacts(
+                config.models_dir,
+                config.detector_model,
+            )
+        )
+        processor = AutoImageProcessor.from_pretrained(
+            detector_dir,
+            local_files_only=True,
+        )
+        detector_config = AutoConfig.from_pretrained(
+            detector_dir,
+            local_files_only=True,
+        )
+        model = RTDetrOnnxModel(
+            create_onnx_session(detector_path, config.device_variant),
+            device,
+        )
+        reid_embedder = OSNetOnnxEmbedder(
+            create_onnx_session(reid_path, config.device_variant)
+        )
+        person_class_id = resolve_person_class_id(
+            detector_config.id2label
+        )
+    elif config.models_dir is None:
         detector_model: str | Path = DETECTOR_MODELS[config.detector_model]
         reid_embedder = load_reid_embedder(device)
         load_kwargs: dict[str, bool] = {}
@@ -766,21 +806,23 @@ def load_runtime(config: RTDetrOsnetConfig) -> RTDetrRuntime:
         )
         reid_embedder = load_reid_embedder(device, reid_path)
         load_kwargs = {"local_files_only": True}
-    processor = AutoImageProcessor.from_pretrained(
-        detector_model,
-        **load_kwargs,
-    )
-    model = RTDetrV2ForObjectDetection.from_pretrained(
-        detector_model,
-        **load_kwargs,
-    ).to(device)
+    if config.model_format == "pytorch":
+        processor = AutoImageProcessor.from_pretrained(
+            detector_model,
+            **load_kwargs,
+        )
+        model = RTDetrV2ForObjectDetection.from_pretrained(
+            detector_model,
+            **load_kwargs,
+        ).to(device)
+        person_class_id = resolve_person_class_id(model.config.id2label)
     return RTDetrRuntime(
         spec=runtime_spec(config),
         device=device,
         reid_embedder=reid_embedder,
         processor=processor,
         model=model,
-        person_class_id=resolve_person_class_id(model.config.id2label),
+        person_class_id=person_class_id,
     )
 
 
@@ -852,7 +894,9 @@ def predict_detector_results(
         images=detector_frames,
         do_resize=False,
         return_tensors="pt",
-    ).to(state.runtime.device)
+    )
+    if state.config.model_format == "pytorch":
+        inputs = inputs.to(state.runtime.device)
     with torch.inference_mode(), torch.autocast(
         device_type=state.runtime.device.type,
         dtype=torch.float16,
@@ -861,7 +905,11 @@ def predict_detector_results(
         outputs = state.runtime.model(**inputs)
     target_sizes = torch.tensor(
         [frame.shape[:2] for frame in frames],
-        device=state.runtime.device,
+        device=(
+            state.runtime.device
+            if state.config.model_format == "pytorch"
+            else None
+        ),
     )
     return state.runtime.processor.post_process_object_detection(
         outputs,

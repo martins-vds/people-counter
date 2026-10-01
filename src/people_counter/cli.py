@@ -203,6 +203,12 @@ def _common_parser() -> argparse.ArgumentParser:
             "directory and disable network-backed model loading."
         ),
     )
+    parser.add_argument(
+        "--model-format",
+        choices=("pytorch", "onnx"),
+        default="pytorch",
+        help="Model artifact format to load (default: pytorch).",
+    )
     return parser
 
 
@@ -338,6 +344,8 @@ def _execute(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.model_format == "onnx" and args.models_dir is None:
+        parser.error("--models-dir is required with --model-format onnx")
     try:
         args.output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
@@ -356,6 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "device": device,
         "batch_size": batch_size,
         "models_dir": args.models_dir,
+        "model_format": args.model_format,
         "sample_fps": args.sample_fps,
         "detection_threshold": args.detection_threshold,
         "use_fp16": use_fp16,

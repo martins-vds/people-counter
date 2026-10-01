@@ -322,6 +322,7 @@ class PipelineApiTests(unittest.TestCase):
             batch_size=1,
             detector_model="r50",
             models_dir=Path("models"),
+            model_format="onnx",
         )
 
         self.assertEqual(
@@ -331,6 +332,7 @@ class PipelineApiTests(unittest.TestCase):
                 device="cpu",
                 detector_model="r50",
                 models_dir=str(Path("models").resolve()),
+                model_format="onnx",
             ),
         )
 
@@ -348,6 +350,7 @@ class PipelineApiTests(unittest.TestCase):
             replace(expected, device_variant="gpu"),
             replace(expected, device="cuda"),
             replace(expected, detector_model="r50"),
+            replace(expected, model_format="onnx"),
             replace(expected, models_dir=str(Path("other-models").resolve())),
         )
 
@@ -430,6 +433,7 @@ class PipelineApiTests(unittest.TestCase):
             batch_size=4,
             use_fp16=True,
             models_dir=Path("models"),
+            model_format="onnx",
         )
 
         self.assertEqual(
@@ -440,6 +444,7 @@ class PipelineApiTests(unittest.TestCase):
                 batch_size=4,
                 use_fp16=True,
                 models_dir=str(Path("models").resolve()),
+                model_format="onnx",
             ),
         )
 
@@ -458,6 +463,7 @@ class PipelineApiTests(unittest.TestCase):
             replace(expected, device="cuda"),
             replace(expected, batch_size=1),
             replace(expected, use_fp16=True),
+            replace(expected, model_format="onnx"),
             replace(expected, models_dir=str(Path("other-models").resolve())),
         )
 

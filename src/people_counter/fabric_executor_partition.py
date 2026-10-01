@@ -97,6 +97,7 @@ def _runtime_cache_key(config: PipelineConfig) -> tuple[object, ...]:
             config.device_variant,
             config.device,
             config.detector_model,
+            config.model_format,
             _normalized_path(config.models_dir),
         )
     if isinstance(config, RFDetrBotsortConfig):
@@ -106,6 +107,7 @@ def _runtime_cache_key(config: PipelineConfig) -> tuple[object, ...]:
             config.device,
             config.batch_size,
             config.use_fp16,
+            config.model_format,
             _normalized_path(config.models_dir),
         )
     raise TypeError(

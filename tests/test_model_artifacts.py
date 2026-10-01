@@ -5,13 +5,18 @@ from pathlib import Path
 from people_counter.model_artifacts import (
     OSNET_FILENAME,
     OSNET_MODEL_DIR,
+    OSNET_ONNX_FILENAME,
     RFDETR_FILENAME,
+    RFDETR_ONNX_FILENAME,
     RFDETR_PIPELINE_DIR,
     RTDETR_MODEL_DIRS,
+    RTDETR_ONNX_FILENAME,
     RTDETR_PIPELINE_DIR,
     RTDETR_REQUIRED_FILES,
     resolve_rfdetr_checkpoint,
+    resolve_rfdetr_onnx_model,
     resolve_rtdetr_osnet_artifacts,
+    resolve_rtdetr_osnet_onnx_artifacts,
 )
 
 
@@ -95,6 +100,57 @@ class OfflineModelArtifactTests(unittest.TestCase):
             str(raised.exception),
             f"Offline model artifacts are missing: {expected}",
         )
+
+    def test_resolves_rtdetr_and_osnet_onnx_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            models_dir = Path(directory)
+            detector_dir = (
+                models_dir
+                / RTDETR_PIPELINE_DIR
+                / RTDETR_MODEL_DIRS["r18"]
+            )
+            detector_dir.mkdir(parents=True)
+            for filename in (
+                "config.json",
+                "preprocessor_config.json",
+                RTDETR_ONNX_FILENAME,
+            ):
+                (detector_dir / filename).touch()
+            reid_path = (
+                models_dir
+                / RTDETR_PIPELINE_DIR
+                / OSNET_MODEL_DIR
+                / OSNET_ONNX_FILENAME
+            )
+            reid_path.parent.mkdir()
+            reid_path.touch()
+
+            resolved = resolve_rtdetr_osnet_onnx_artifacts(
+                models_dir,
+                "r18",
+            )
+
+        self.assertEqual(
+            resolved,
+            (
+                detector_dir,
+                detector_dir / RTDETR_ONNX_FILENAME,
+                reid_path,
+            ),
+        )
+
+    def test_resolves_rfdetr_onnx_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            models_dir = Path(directory)
+            model_path = (
+                models_dir / RFDETR_PIPELINE_DIR / RFDETR_ONNX_FILENAME
+            )
+            model_path.parent.mkdir()
+            model_path.touch()
+
+            resolved = resolve_rfdetr_onnx_model(models_dir)
+
+        self.assertEqual(resolved, model_path)
 
 if __name__ == "__main__":
     unittest.main()

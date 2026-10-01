@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import MagicMock, call, patch
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
+from people_counter.config import RFDetrBotsortConfig, RTDetrOsnetConfig
 from people_counter.cpu_runtime import calculate_placement_safe_thread_budget
 from people_counter.runtime import RuntimeCompatibilityError
 
@@ -229,6 +230,8 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("if memory_characterization_mode", planning)
         self.assertIn("choose_bucket(", planning)
         self.assertIn("toLocalIterator()", planning)
+        self.assertIn('"model_format"', planning)
+        self.assertIn('text_column_or_empty("model_format")', planning)
         self.assertIn(".partitionBy(", partition)
         self.assertIn("task_cpus = normalize_task_cpus(context.cpus())", partition)
         self.assertIn(
@@ -244,7 +247,44 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("worker_lifetime_peak_rss_bytes", partition)
         self.assertIn("linux-proc-vmhwm", partition)
         self.assertIn("models_dir is required for offline executor inference", partition)
+        self.assertIn("model_format must be pytorch or onnx", partition)
         self.assertIn("supports only CPU inference", partition)
+
+    def test_executor_partition_builds_configs_with_prepared_model_format(self):
+        build_config = cell_functions(
+            EXECUTOR_PROTOTYPE,
+            "map-partitions",
+            "build_config",
+            Path=Path,
+            RTDetrOsnetConfig=RTDetrOsnetConfig,
+            RFDetrBotsortConfig=RFDetrBotsortConfig,
+        )["build_config"]
+        common = {
+            "local_video_path": "video.mp4",
+            "device_variant": "cpu",
+            "device": "cpu",
+            "models_dir": "models",
+            "model_format": "onnx",
+        }
+
+        rtdetr = build_config({**common, "pipeline": "rtdetr-osnet"})
+        rfdetr = build_config({**common, "pipeline": "rfdetr-botsort"})
+
+        self.assertIsInstance(rtdetr, RTDetrOsnetConfig)
+        self.assertIsInstance(rfdetr, RFDetrBotsortConfig)
+        self.assertEqual(rtdetr.model_format, "onnx")
+        self.assertEqual(rfdetr.model_format, "onnx")
+        with self.assertRaisesRegex(
+            ValueError,
+            "model_format must be pytorch or onnx",
+        ):
+            build_config(
+                {
+                    **common,
+                    "pipeline": "rtdetr-osnet",
+                    "model_format": "openvino",
+                }
+            )
 
     def test_executor_partition_normalizes_integral_task_cpu_allocations(self):
         normalize_task_cpus = cell_functions(
@@ -1007,6 +1047,14 @@ class FabricNotebookTests(unittest.TestCase):
             EXECUTOR_BENCHMARK_CONTROL,
             "control-parameters",
         )
+        control_helpers = cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "control-helpers",
+        )
+        prepare_benchmark = cell_source(
+            EXECUTOR_BENCHMARK_CONTROL,
+            "prepare-benchmark",
+        )
         bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
         bootstrap_evolution = cell_source(
             BOOTSTRAP,
@@ -1045,6 +1093,11 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn('"suggested_peak_worker_memory_gib": "DOUBLE"', bootstrap_evolution)
         self.assertIn('"native_threads_per_worker": "INT"', bootstrap_evolution)
         self.assertIn('"peak_worker_memory_details_json": "STRING"', bootstrap_evolution)
+        self.assertIn("model_format STRING NOT NULL", bootstrap_create)
+        self.assertIn(
+            '"executor_partition_input": {"model_format": "STRING"}',
+            bootstrap_evolution,
+        )
         self.assertIn(
             "characterization-only run cannot pass benchmark approval",
             evaluation,
@@ -1082,6 +1135,13 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn(expected_prefix_assignment, bootstrap_parameters)
         self.assertIn(expected_prefix_assignment, inference_parameters)
         self.assertIn(expected_prefix_assignment, control_parameters)
+        self.assertIn('MODEL_FORMAT = "pytorch"', control_parameters)
+        self.assertIn('"model_format": model_format', control_helpers)
+        self.assertIn('"model_format": model_format', prepare_benchmark)
+        self.assertIn(
+            'T.StructField("model_format", T.StringType(), False)',
+            prepare_benchmark,
+        )
         activities = {
             activity["name"]: activity
             for activity in pipeline["properties"]["activities"]
@@ -1119,12 +1179,27 @@ class FabricNotebookTests(unittest.TestCase):
         )
         self.assertIn("LAKEHOUSE_FILE_API_ROOT", prepare_parameters)
         self.assertNotIn("STAGING_ROOT", prepare_parameters)
+        for activity_name in (
+            "PrepareExecutorBenchmark",
+            "EvaluateExecutorBenchmark",
+        ):
+            model_format = activities[activity_name]["typeProperties"][
+                "parameters"
+            ]["MODEL_FORMAT"]
+            self.assertEqual(
+                model_format["value"]["value"],
+                "@pipeline().parameters.MODEL_FORMAT",
+            )
         pipeline_parameters = pipeline["properties"]["parameters"]
         self.assertEqual(
             pipeline_parameters["TABLE_PREFIX"]["defaultValue"],
             "people_counter",
         )
         self.assertEqual(pipeline_parameters["DATABASE"]["defaultValue"], "")
+        self.assertEqual(
+            pipeline_parameters["MODEL_FORMAT"]["defaultValue"],
+            "pytorch",
+        )
         for activity_name in (
             "PrepareExecutorBenchmark",
             "RunExecutorPartitionInference",

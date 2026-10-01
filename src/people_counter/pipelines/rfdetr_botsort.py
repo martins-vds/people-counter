@@ -27,7 +27,10 @@ from people_counter.models import (
     UNUSED_RESULT_ERROR,
 )
 from people_counter.runtime import RuntimeCompatibilityError
-from people_counter.model_artifacts import resolve_rfdetr_checkpoint
+from people_counter.model_artifacts import (
+    resolve_rfdetr_checkpoint,
+    resolve_rfdetr_onnx_model,
+)
 from people_counter.video import (
     FrameBatch,
     FrameReadState,
@@ -47,12 +50,13 @@ class RFDetrRuntimeSpec:
     batch_size: int
     use_fp16: bool
     models_dir: str | None
+    model_format: str = "pytorch"
 
 
 @dataclass(frozen=True)
 class RFDetrRuntime:
     spec: RFDetrRuntimeSpec
-    model: RFDETRLarge
+    model: Any
 
 
 def runtime_spec(config: RFDetrBotsortConfig) -> RFDetrRuntimeSpec:
@@ -62,6 +66,7 @@ def runtime_spec(config: RFDetrBotsortConfig) -> RFDetrRuntimeSpec:
         device=config.device,
         batch_size=config.batch_size,
         use_fp16=config.use_fp16,
+        model_format=config.model_format,
         models_dir=(
             str(config.models_dir.expanduser().resolve())
             if config.models_dir is not None
@@ -83,6 +88,20 @@ class RFDetrRunState:
 
 
 def load_runtime(config: RFDetrBotsortConfig) -> RFDetrRuntime:
+    if config.model_format == "onnx":
+        if config.models_dir is None:
+            raise ValueError("models_dir is required for ONNX model loading")
+        from people_counter.onnx_runtime import (
+            RFDetrOnnxModel,
+            create_onnx_session,
+        )
+
+        model_path = resolve_rfdetr_onnx_model(config.models_dir)
+        model = RFDetrOnnxModel(
+            create_onnx_session(model_path, config.device_variant)
+        )
+        return RFDetrRuntime(spec=runtime_spec(config), model=model)
+
     device = torch.device(config.device)
     model_kwargs: dict[str, Any] = {"device": str(device)}
     if config.models_dir is not None:

@@ -218,6 +218,7 @@ class CliTests(unittest.TestCase):
                 "line",
                 "output_dir",
                 "models_dir",
+                "model_format",
             },
         )
         self.assertEqual(common_actions["video"].type, video_file_path)
@@ -291,6 +292,15 @@ class CliTests(unittest.TestCase):
                 "Use models downloaded by scripts/download_models.py from "
                 "this directory and disable network-backed model loading."
             ),
+        )
+        self.assertEqual(
+            common_actions["model_format"].choices,
+            ("pytorch", "onnx"),
+        )
+        self.assertEqual(common_actions["model_format"].default, "pytorch")
+        self.assertEqual(
+            common_actions["model_format"].help,
+            "Model artifact format to load (default: pytorch).",
         )
 
         rtdetr_actions = {
@@ -493,6 +503,8 @@ class CliTests(unittest.TestCase):
                     str(output_dir),
                     "--models-dir",
                     str(models_dir),
+                    "--model-format",
+                    "onnx",
                     "--detector-model",
                     "r50",
                 ]
@@ -511,9 +523,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(config.line, (1, 2, 3, 4))
         self.assertEqual(config.detector_model, "r50")
         self.assertEqual(config.models_dir, models_dir)
+        self.assertEqual(config.model_format, "onnx")
         self.assertEqual(len(line_files), 1)
         self.assertIn("Running CPU variant on: cpu", output.getvalue())
         self.assertIn("Loading detector: RT-DETRv2 (R50)", output.getvalue())
+
+    def test_onnx_format_requires_models_directory(self):
+        with (
+            tempfile.NamedTemporaryFile(suffix=".mp4") as video,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertRaises(SystemExit),
+        ):
+            main(
+                [
+                    "rtdetr-osnet",
+                    video.name,
+                    "--device",
+                    "cpu",
+                    "--model-format",
+                    "onnx",
+                ]
+            )
+
+        self.assertTrue(
+            stderr.getvalue().endswith(
+                "people-counter: error: --models-dir is required with "
+                "--model-format onnx\n"
+            )
+        )
 
     def test_invalid_output_directory_fails_before_runner_load(self):
         with (

@@ -14,6 +14,7 @@ MAX_DISAPPEARED_SECONDS = 1.0
 MIN_CONFIRMATION_FRAMES = 2
 
 DeviceVariant = Literal["cpu", "gpu"]
+ModelFormat = Literal["pytorch", "onnx"]
 ProgressCallback = Callable[[RunResult], None]
 
 
@@ -33,6 +34,7 @@ class CommonPipelineConfig:
     sample_fps: float | None = 3.0
     detection_threshold: float = 0.6
     use_fp16: bool = False
+    model_format: ModelFormat = "pytorch"
     line: LineCoordinates | None = None
     result: RunResult = field(
         default_factory=RunResult,

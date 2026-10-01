@@ -72,9 +72,7 @@ uv run --extra cpu --extra export python scripts/download_models.py \
 Use `--convert openvino` to produce OpenVINO `.xml` and `.bin` files. The
 ONNX files are retained as the intermediate representation. Conversion
 artifacts are written beside their original weights, and existing complete
-artifacts are reused unless `--force` is supplied. The SDK currently loads
-the original PyTorch artifacts; the converted files are intended for custom
-ONNX Runtime or OpenVINO deployments.
+artifacts are reused unless `--force` is supplied.
 
 Copy that directory to the offline machine without changing its internal
 layout. Set `models_dir` on either SDK configuration to require local model
@@ -87,16 +85,30 @@ config = RTDetrOsnetConfig(
     device="cpu",
     batch_size=1,
     models_dir=Path("/data/people-counter-models"),
+    model_format="onnx",
 )
 result = run(config)
 ```
 
-For RT-DETR/OSNet, the SDK passes the selected local model directory to
-Transformers with `local_files_only=True` and reads OSNet directly from the
-downloaded file. For RF-DETR/BoT-SORT, it passes the downloaded checkpoint as
-`pretrain_weights`. Supervision and the configured BoT-SORT tracker do not
-require separate model files. Missing artifacts raise `FileNotFoundError`
-instead of falling back to a network download.
+Set `model_format="pytorch"` (the default) to load the original artifacts or
+`model_format="onnx"` to load the converted ONNX models with ONNX Runtime.
+Run ONNX pipelines with the export dependencies installed:
+
+```bash
+uv run --extra cpu --extra export people-counter \
+  rtdetr-osnet /data/entrance-camera.mp4 \
+  --device cpu \
+  --models-dir /data/people-counter-models \
+  --model-format onnx
+```
+
+For PyTorch RT-DETR/OSNet, the SDK passes the selected local model directory
+to Transformers with `local_files_only=True` and reads OSNet directly from
+the downloaded file. For PyTorch RF-DETR/BoT-SORT, it passes the downloaded
+checkpoint as `pretrain_weights`. ONNX mode uses the corresponding `.onnx`
+files in the same artifact tree. Supervision and the configured BoT-SORT
+tracker do not require separate model files. Missing artifacts raise
+`FileNotFoundError` instead of falling back to a network download.
 
 The CLI uses the same contract:
 

@@ -371,11 +371,26 @@ class FabricExecutorPartitionTests(unittest.TestCase):
         resolved_models = str(models_dir.resolve())
         self.assertEqual(
             cache.get_or_load.call_args_list[0].args[0],
-            ("rtdetr-osnet", "cpu", "cpu", "r18", resolved_models),
+            (
+                "rtdetr-osnet",
+                "cpu",
+                "cpu",
+                "r18",
+                "pytorch",
+                resolved_models,
+            ),
         )
         self.assertEqual(
             cache.get_or_load.call_args_list[1].args[0],
-            ("rfdetr-botsort", "cpu", "cpu", 2, False, resolved_models),
+            (
+                "rfdetr-botsort",
+                "cpu",
+                "cpu",
+                2,
+                False,
+                "pytorch",
+                resolved_models,
+            ),
         )
 
     def test_sdk_runtime_processor_uses_distinct_rfdetr_cache_keys(self):

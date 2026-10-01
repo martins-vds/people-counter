@@ -17,9 +17,12 @@ from people_counter.models import RunResult
 from people_counter.model_artifacts import (
     OSNET_FILENAME,
     OSNET_MODEL_DIR,
+    OSNET_ONNX_FILENAME,
     RFDETR_FILENAME,
+    RFDETR_ONNX_FILENAME,
     RFDETR_PIPELINE_DIR,
     RTDETR_MODEL_DIRS,
+    RTDETR_ONNX_FILENAME,
     RTDETR_PIPELINE_DIR,
     RTDETR_REQUIRED_FILES,
 )
@@ -289,24 +292,129 @@ class RuntimeLoadingTests(unittest.TestCase):
             local_files_only=True,
         )
 
+    def test_rtdetr_load_runtime_uses_onnx_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            models_dir = Path(directory)
+            detector_dir = (
+                models_dir
+                / RTDETR_PIPELINE_DIR
+                / RTDETR_MODEL_DIRS["r18"]
+            )
+            detector_dir.mkdir(parents=True)
+            for filename in (
+                "config.json",
+                "preprocessor_config.json",
+                RTDETR_ONNX_FILENAME,
+            ):
+                (detector_dir / filename).touch()
+            reid_path = (
+                models_dir
+                / RTDETR_PIPELINE_DIR
+                / OSNET_MODEL_DIR
+                / OSNET_ONNX_FILENAME
+            )
+            reid_path.parent.mkdir()
+            reid_path.touch()
+            config = RTDetrOsnetConfig(
+                video=Path("video.mp4"),
+                device_variant="cpu",
+                device="cpu",
+                batch_size=1,
+                models_dir=models_dir,
+                model_format="onnx",
+            )
+            processor = object()
+            detector_config = MagicMock(id2label={1: "person"})
+            detector_session = object()
+            reid_session = object()
+            detector_model = object()
+            reid_embedder = object()
+
+            with (
+                patch.object(
+                    rtdetr_osnet.AutoImageProcessor,
+                    "from_pretrained",
+                    return_value=processor,
+                ) as load_processor,
+                patch.object(
+                    rtdetr_osnet.AutoConfig,
+                    "from_pretrained",
+                    return_value=detector_config,
+                ) as load_config,
+                patch(
+                    "people_counter.onnx_runtime.create_onnx_session",
+                    side_effect=[detector_session, reid_session],
+                ) as create_session,
+                patch(
+                    "people_counter.onnx_runtime.RTDetrOnnxModel",
+                    return_value=detector_model,
+                ) as detector_type,
+                patch(
+                    "people_counter.onnx_runtime.OSNetOnnxEmbedder",
+                    return_value=reid_embedder,
+                ) as reid_type,
+            ):
+                runtime = rtdetr_osnet.load_runtime(config)
+
+        detector_path = detector_dir / RTDETR_ONNX_FILENAME
+        self.assertIs(runtime.model, detector_model)
+        self.assertEqual(runtime.spec, rtdetr_osnet.runtime_spec(config))
+        self.assertIs(runtime.reid_embedder, reid_embedder)
+        self.assertEqual(runtime.person_class_id, 1)
+        load_processor.assert_called_once_with(
+            detector_dir,
+            local_files_only=True,
+        )
+        load_config.assert_called_once_with(
+            detector_dir,
+            local_files_only=True,
+        )
+        self.assertEqual(
+            create_session.call_args_list,
+            [
+                unittest.mock.call(detector_path, "cpu"),
+                unittest.mock.call(reid_path, "cpu"),
+            ],
+        )
+        detector_type.assert_called_once_with(
+            detector_session,
+            torch.device("cpu"),
+        )
+        reid_type.assert_called_once_with(reid_session)
+
+    def test_rtdetr_onnx_requires_models_dir(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "^models_dir is required for ONNX model loading$",
+        ):
+            rtdetr_osnet.load_runtime(
+                RTDetrOsnetConfig(
+                    video=Path("video.mp4"),
+                    device_variant="cpu",
+                    device="cpu",
+                    batch_size=1,
+                    model_format="onnx",
+                )
+            )
+
     def test_botsort_load_runtime_configures_inference(self):
         model = MagicMock()
+        config = RFDetrBotsortConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=4,
+            use_fp16=True,
+        )
         with patch.object(
             rfdetr_botsort,
             "RFDETRLarge",
             return_value=model,
         ) as model_type:
-            runtime = rfdetr_botsort.load_runtime(
-                RFDetrBotsortConfig(
-                    video=Path("video.mp4"),
-                    device_variant="cpu",
-                    device="cpu",
-                    batch_size=4,
-                    use_fp16=True,
-                )
-            )
+            runtime = rfdetr_botsort.load_runtime(config)
 
         self.assertIs(runtime.model, model)
+        self.assertEqual(runtime.spec, rfdetr_botsort.runtime_spec(config))
         model_type.assert_called_once_with(device="cpu")
         model.inference.assert_called_once_with(
             compile=False,
@@ -367,6 +475,58 @@ class RuntimeLoadingTests(unittest.TestCase):
             device="cpu",
             pretrain_weights=str(checkpoint),
         )
+
+    def test_botsort_load_runtime_uses_onnx_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            models_dir = Path(directory)
+            model_path = (
+                models_dir / RFDETR_PIPELINE_DIR / RFDETR_ONNX_FILENAME
+            )
+            model_path.parent.mkdir()
+            model_path.touch()
+            config = RFDetrBotsortConfig(
+                video=Path("video.mp4"),
+                device_variant="cpu",
+                device="cpu",
+                batch_size=1,
+                models_dir=models_dir,
+                model_format="onnx",
+            )
+            session = object()
+            model = object()
+            with (
+                patch(
+                    "people_counter.onnx_runtime.create_onnx_session",
+                    return_value=session,
+                ) as create_session,
+                patch(
+                    "people_counter.onnx_runtime.RFDetrOnnxModel",
+                    return_value=model,
+                ) as model_type,
+                patch.object(rfdetr_botsort, "RFDETRLarge") as pytorch_model,
+            ):
+                runtime = rfdetr_botsort.load_runtime(config)
+
+        self.assertIs(runtime.model, model)
+        self.assertEqual(runtime.spec, rfdetr_botsort.runtime_spec(config))
+        create_session.assert_called_once_with(model_path, "cpu")
+        model_type.assert_called_once_with(session)
+        pytorch_model.assert_not_called()
+
+    def test_botsort_onnx_requires_models_dir(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "^models_dir is required for ONNX model loading$",
+        ):
+            rfdetr_botsort.load_runtime(
+                RFDetrBotsortConfig(
+                    video=Path("video.mp4"),
+                    device_variant="cpu",
+                    device="cpu",
+                    batch_size=1,
+                    model_format="onnx",
+                )
+            )
 
 
 class RunStateTests(unittest.TestCase):
@@ -805,6 +965,52 @@ class FrameProcessingTests(unittest.TestCase):
                 torch.tensor([[80, 120], [60, 100]]),
             )
         )
+
+    def test_rtdetr_onnx_prediction_keeps_inputs_and_sizes_on_cpu(self):
+        inputs = RecordingInputs()
+        processor = MagicMock(return_value=inputs)
+        processor.post_process_object_detection.return_value = []
+        config = RTDetrOsnetConfig(
+            video=Path("video.mp4"),
+            device_variant="cpu",
+            device="cpu",
+            batch_size=1,
+            model_format="onnx",
+        )
+        runtime = rtdetr_osnet.RTDetrRuntime(
+            spec=rtdetr_osnet.runtime_spec(config),
+            device=torch.device("cpu"),
+            reid_embedder=object(),
+            processor=processor,
+            model=MagicMock(return_value=object()),
+            person_class_id=0,
+        )
+        state = rtdetr_osnet.RTDetrRunState(
+            config=config,
+            runtime=runtime,
+            tracking=rtdetr_osnet.RTDetrTrackingState(),
+            metadata=VideoMetadata(30.0, 20, 10, 1),
+            sampling=SamplingConfig(1, 30.0, 1),
+            max_disappeared_frames=30,
+            max_reentry_frames=900,
+            max_centroid_displacement=2.0,
+            line_zone=None,
+        )
+        frame = np.zeros((10, 20, 3), dtype=np.uint8)
+        real_tensor = torch.tensor
+        with patch.object(
+            rtdetr_osnet.torch,
+            "tensor",
+            side_effect=real_tensor,
+        ) as tensor:
+            rtdetr_osnet.predict_detector_results(
+                state,
+                [frame],
+                [frame],
+            )
+
+        self.assertIsNone(inputs.device)
+        self.assertIsNone(tensor.call_args.kwargs["device"])
 
     def test_rtdetr_process_frame_wires_detection_tracking_and_line_counting(
         self,

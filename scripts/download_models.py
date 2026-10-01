@@ -16,6 +16,7 @@ from people_counter.model_artifacts import (
     RFDETR_FILENAME,
     RFDETR_PIPELINE_DIR,
     RTDETR_MODEL_DIRS,
+    RTDETR_ONNX_FILENAME,
     RTDETR_PIPELINE_DIR,
 )
 
@@ -176,7 +177,7 @@ def _export_rtdetr_onnx(
     *,
     force: bool,
 ) -> Path:
-    destination = model_dir / "model.onnx"
+    destination = model_dir / RTDETR_ONNX_FILENAME
     if destination.is_file() and not force:
         return destination
 
