@@ -21,6 +21,9 @@ NOTEBOOKS = Path(__file__).resolve().parents[1] / "notebooks" / "fabric"
 WORKER = NOTEBOOKS / "04_process_video.ipynb"
 BOOTSTRAP = NOTEBOOKS / "00_bootstrap_lakehouse.ipynb"
 BENCHMARK = NOTEBOOKS / "08_capacity_benchmark.ipynb"
+CAPACITY_BENCHMARK_PIPELINE = (
+    NOTEBOOKS / "exports" / "pc-capacity-benchmark.json"
+)
 EXECUTOR_PROTOTYPE = NOTEBOOKS / "15_executor_partition_inference.ipynb"
 EXECUTOR_BENCHMARK_CONTROL = NOTEBOOKS / "16_executor_partition_benchmark_control.ipynb"
 EXECUTOR_BENCHMARK_PIPELINE = (
@@ -190,6 +193,10 @@ class FabricNotebookTests(unittest.TestCase):
         spark_config = cell_source(EXECUTOR_PROTOTYPE, "spark-config")
         planning = cell_source(EXECUTOR_PROTOTYPE, "prepared-delta-input")
         partition = cell_source(EXECUTOR_PROTOTYPE, "map-partitions")
+        run_metrics = cell_source(
+            EXECUTOR_PROTOTYPE,
+            "controlled-delta-persistence",
+        )
 
         self.assertIn('OUTPUT_TXN_APP_ID = "UNSET"', parameters)
         self.assertIn("OUTPUT_TXN_VERSION = -1", parameters)
@@ -249,6 +256,15 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("models_dir is required for offline executor inference", partition)
         self.assertIn("model_format must be pytorch or onnx", partition)
         self.assertIn("supports only CPU inference", partition)
+        self.assertIn(
+            "Prepared input must contain exactly one model_format",
+            planning,
+        )
+        self.assertIn(
+            'T.StructField("model_format", T.StringType(), False)',
+            run_metrics,
+        )
+        self.assertIn('"model_format": run_model_format', run_metrics)
 
     def test_executor_partition_builds_configs_with_prepared_model_format(self):
         build_config = cell_functions(
@@ -1378,6 +1394,9 @@ class FabricNotebookTests(unittest.TestCase):
             self.assertIn(f'"{name}": "{data_type}"', bootstrap_evolution)
             self.assertIn(f'"{name}"', benchmark_run)
         self.assertIn('MODELS_DIR = ""', benchmark_parameters)
+        self.assertIn('MODEL_FORMAT = "pytorch"', benchmark_parameters)
+        self.assertIn('"model_format": model_format', benchmark_run)
+        self.assertIn('"model_format": "STRING"', bootstrap_evolution)
         self.assertIn("shutil.copytree(model_source, local_models)", benchmark_run)
         self.assertIn('"models_dir": local_models', benchmark_run)
         self.assertIn("runtime = load_runtime(config)", benchmark_run)
@@ -1393,6 +1412,32 @@ class FabricNotebookTests(unittest.TestCase):
         summary = cell_source(BENCHMARK, "benchmark-summary")
         self.assertIn("invalid_interop_benchmarks", summary)
         self.assertIn("and invalid_interop_benchmarks == 0", summary)
+
+    def test_capacity_benchmark_pipeline_propagates_model_format(self):
+        pipeline = json.loads(
+            CAPACITY_BENCHMARK_PIPELINE.read_text(encoding="utf-8")
+        )
+        activities = {
+            activity["name"]: activity
+            for activity in pipeline["properties"]["activities"]
+        }
+        worker = activities["ForEachBenchmarkItems"]["typeProperties"][
+            "activities"
+        ][0]
+        gate = activities["EvaluateCapacityGate"]
+
+        self.assertEqual(
+            pipeline["properties"]["parameters"]["MODEL_FORMAT"]["defaultValue"],
+            "pytorch",
+        )
+        for activity in (worker, gate):
+            model_format = activity["typeProperties"]["parameters"][
+                "MODEL_FORMAT"
+            ]
+            self.assertEqual(
+                model_format["value"]["value"],
+                "@pipeline().parameters.MODEL_FORMAT",
+            )
 
     def test_worker_reloads_after_runtime_compatibility_mismatch(self):
         namespace = self.worker_run_namespace()

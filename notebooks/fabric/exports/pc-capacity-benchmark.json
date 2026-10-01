@@ -84,6 +84,13 @@
                                         },
                                         "type": "string"
                                     },
+                                    "MODEL_FORMAT": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.MODEL_FORMAT",
+                                            "type": "Expression"
+                                        },
+                                        "type": "string"
+                                    },
                                     "CAPACITY_SKU": {
                                         "value": {
                                             "value": "@pipeline().parameters.CAPACITY_SKU",
@@ -332,6 +339,13 @@
                             },
                             "type": "string"
                         },
+                        "MODEL_FORMAT": {
+                            "value": {
+                                "value": "@pipeline().parameters.MODEL_FORMAT",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
                         "DEVICE_VARIANT": {
                             "value": "cpu",
                             "type": "string"
@@ -491,6 +505,10 @@
             "MODELS_DIR": {
                 "type": "string",
                 "defaultValue": "/lakehouse/default/Files/models/<release>"
+            },
+            "MODEL_FORMAT": {
+                "type": "string",
+                "defaultValue": "pytorch"
             },
             "DRIVER_CORES": {
                 "type": "int",
