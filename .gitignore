@@ -20,3 +20,8 @@ offline-models/
 
 # Temporary Python exports of Fabric notebooks
 /.nbsrc_*.py
+
+*.pptx
+*.xlsx
+*.docx
+*.pdf
