@@ -17,6 +17,8 @@ mutants/
 # Manifest and offline models
 manifest-package/
 offline-models/
+local-data/
+.env
 
 # Temporary Python exports of Fabric notebooks
 /.nbsrc_*.py

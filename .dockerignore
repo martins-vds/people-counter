@@ -1,0 +1,15 @@
+.git
+.venv
+.pytest_cache
+.coverage
+mutants
+outputs
+local-data
+offline-models
+manifest-package
+*.pptx
+*.xlsx
+*.docx
+*.pdf
+__pycache__
+*.py[cod]

@@ -1,5 +1,8 @@
 # People Counter
 
+For the two-worker local Spark development slice, see
+[Local Spark development](docs/local-spark-development.md).
+
 Run exactly one PyTorch variant at a time. Each command requires an explicit
 device selection and will fail instead of falling back to another device.
 The installed `people-counter` command provides `rtdetr-osnet` and

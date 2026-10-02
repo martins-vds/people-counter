@@ -1,0 +1,179 @@
+name: ${COMPOSE_PROJECT_NAME:-people-counter-local}
+
+x-image: &shared-image
+  image: ${PEOPLE_COUNTER_IMAGE:-people-counter-spark:4.1.1-delta4.2.0}
+  build:
+    context: .
+    dockerfile: docker/spark/Dockerfile
+    args:
+      PEOPLE_COUNTER_RELEASE_DIGEST: ${PEOPLE_COUNTER_RELEASE_DIGEST:-development}
+
+x-common: &common
+  <<: *shared-image
+  user: "185:185"
+  init: true
+  restart: unless-stopped
+  environment:
+    PEOPLE_COUNTER_RELEASE_DIGEST: ${PEOPLE_COUNTER_RELEASE_DIGEST:-development}
+    PEOPLE_COUNTER_IMAGE_DIGEST: ${PEOPLE_COUNTER_IMAGE_DIGEST:-local-build}
+    PYTHONUNBUFFERED: "1"
+  volumes:
+    - .:/workspace:ro
+    - ./samples:/data/samples:ro
+    - ./offline-models:/data/models:ro
+    - ./local-data/output:/data/output
+  networks:
+    - spark
+
+services:
+  spark-master:
+    <<: *common
+    hostname: spark-master
+    command: ["master"]
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 256
+    ports:
+      - "127.0.0.1:${SPARK_MASTER_UI_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/json/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  spark-worker-1:
+    <<: *common
+    hostname: spark-worker-1
+    command: ["worker"]
+    cpus: 1.25
+    mem_limit: 1536m
+    pids_limit: 256
+    environment:
+      PEOPLE_COUNTER_RELEASE_DIGEST: ${PEOPLE_COUNTER_RELEASE_DIGEST:-development}
+      PEOPLE_COUNTER_IMAGE_DIGEST: ${PEOPLE_COUNTER_IMAGE_DIGEST:-local-build}
+      PYTHONUNBUFFERED: "1"
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_WORKER_WEBUI_PORT: "8081"
+      SPARK_LOCAL_DIRS: /opt/spark/scratch
+    volumes:
+      - .:/workspace:ro
+      - ./samples:/data/samples:ro
+      - ./offline-models:/data/models:ro
+      - ./local-data/output:/data/output
+      - spark-worker-1-work:/opt/spark/work
+      - spark-worker-1-scratch:/opt/spark/scratch
+    ports:
+      - "127.0.0.1:${SPARK_WORKER_1_UI_PORT:-8081}:8081"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8081/json/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  spark-worker-2:
+    <<: *common
+    hostname: spark-worker-2
+    command: ["worker"]
+    cpus: 1.25
+    mem_limit: 1536m
+    pids_limit: 256
+    environment:
+      PEOPLE_COUNTER_RELEASE_DIGEST: ${PEOPLE_COUNTER_RELEASE_DIGEST:-development}
+      PEOPLE_COUNTER_IMAGE_DIGEST: ${PEOPLE_COUNTER_IMAGE_DIGEST:-local-build}
+      PYTHONUNBUFFERED: "1"
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_WORKER_WEBUI_PORT: "8082"
+      SPARK_LOCAL_DIRS: /opt/spark/scratch
+    volumes:
+      - .:/workspace:ro
+      - ./samples:/data/samples:ro
+      - ./offline-models:/data/models:ro
+      - ./local-data/output:/data/output
+      - spark-worker-2-work:/opt/spark/work
+      - spark-worker-2-scratch:/opt/spark/scratch
+    ports:
+      - "127.0.0.1:${SPARK_WORKER_2_UI_PORT:-8082}:8082"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8082/json/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  spark-client:
+    <<: *common
+    hostname: spark-client
+    command: ["client"]
+    cpus: 1.5
+    mem_limit: 2g
+    pids_limit: 384
+    environment:
+      PEOPLE_COUNTER_RELEASE_DIGEST: ${PEOPLE_COUNTER_RELEASE_DIGEST:-development}
+      PEOPLE_COUNTER_IMAGE_DIGEST: ${PEOPLE_COUNTER_IMAGE_DIGEST:-local-build}
+      PYTHONUNBUFFERED: "1"
+      SPARK_DRIVER_HOST: spark-client
+    ports:
+      - "127.0.0.1:${SPARK_DRIVER_UI_PORT:-4040}:4040"
+    volumes:
+      - .:/workspace:ro
+      - ./samples:/data/samples:ro
+      - ./offline-models:/data/models:ro
+      - ./local-data/output:/data/output
+      - spark-control:/var/lib/people-counter/control
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      spark-worker-1:
+        condition: service_healthy
+      spark-worker-2:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sqlite3; sqlite3.connect('/var/lib/people-counter/control/health.sqlite3').execute('select 1')"
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  spark-history:
+    <<: *common
+    profiles: ["history"]
+    hostname: spark-history
+    command: ["history"]
+    cpus: 0.5
+    mem_limit: 768m
+    pids_limit: 192
+    ports:
+      - "127.0.0.1:${SPARK_HISTORY_UI_PORT:-18080}:18080"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:18080/api/v1/applications"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+
+networks:
+  spark:
+    internal: true
+
+volumes:
+  spark-control:
+  spark-worker-1-work:
+  spark-worker-1-scratch:
+  spark-worker-2-work:
+  spark-worker-2-scratch:

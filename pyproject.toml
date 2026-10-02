@@ -30,6 +30,7 @@ dev = [
 people-counter = "people_counter.cli:main"
 people-counter-rtdetr = "people_counter.cli:rtdetr_osnet_main"
 people-counter-rfdetr = "people_counter.cli:rfdetr_botsort_main"
+people-counter-local = "people_counter.local_cli:main"
 prepare-manifests = "people_counter.manifest_publisher:prepare_main"
 publish-manifests = "people_counter.manifest_publisher:publish_main"
 
@@ -76,6 +77,15 @@ export = [
 publisher = [
     "azure-identity>=1.17.0,<2",
     "azure-storage-file-datalake>=12.16.0,<13",
+]
+local-spark = [
+    "delta-spark==4.2.0",
+    "pyspark==4.1.1",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "compose: requires the local Docker Compose Spark cluster",
 ]
 
 [tool.uv]

@@ -1448,6 +1448,19 @@ wheels = [
 ]
 
 [[package]]
+name = "delta-spark"
+version = "4.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "importlib-metadata" },
+    { name = "pyspark" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/37/e4/dcf0afa219bc454d5edab65a4defd4dc90e196fdb8c6fb5156ec6d7fc468/delta_spark-4.2.0.tar.gz", hash = "sha256:198079cf74ee40788895a73111900095ebaed2c631205315868b4406c521e0d5", size = 45896, upload-time = "2026-04-10T23:31:30.102Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/86/766c7cb36a5209c09222be74bad9c047da22690c8e562fab4be29b6a5776/delta_spark-4.2.0-py3-none-any.whl", hash = "sha256:46327eaeb50915aec3b66bb4ab8fb8db7f90774f2a3bb65bb859333cedc6ef8f", size = 53929, upload-time = "2026-04-10T23:31:28.884Z" },
+]
+
+[[package]]
 name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1685,6 +1698,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/5f/f7/abb373e5757eaec4b922b92f97ec8d6d7e057cf06778247604fbc4e7c3f3/idna-3.19.tar.gz", hash = "sha256:5e0811a4383b21dc5838069f801c4fb62113b7447663d2530d2bd6e77b49bf15", size = 215237, upload-time = "2026-08-18T05:14:24.27Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/57/b0/0e52c878c53f245edd3a11020f20979b3f490f245af532c7cae3027754b5/idna-3.19-py3-none-any.whl", hash = "sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4", size = 68550, upload-time = "2026-08-18T05:14:22.343Z" },
+]
+
+[[package]]
+name = "importlib-metadata"
+version = "8.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "zipp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f3/49/3b30cad09e7771a4982d9975a8cbf64f00d4a1ececb53297f1d9a7be1b10/importlib_metadata-8.7.1.tar.gz", hash = "sha256:49fef1ae6440c182052f407c8d34a68f72efc36db9ca90dc0113398f2fdde8bb", size = 57107, upload-time = "2025-12-21T10:00:19.278Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/5e/f8e9a1d23b9c20a551a8a02ea3637b4642e22c2626e3a13a9a29cdea99eb/importlib_metadata-8.7.1-py3-none-any.whl", hash = "sha256:5a1f80bf1daa489495071efbb095d75a634cf28a8bc299581244063b53176151", size = 27865, upload-time = "2025-12-21T10:00:18.329Z" },
 ]
 
 [[package]]
@@ -4097,6 +4122,10 @@ gpu = [
     { name = "torchvision", version = "0.26.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
     { name = "trackers" },
 ]
+local-spark = [
+    { name = "delta-spark" },
+    { name = "pyspark" },
+]
 publisher = [
     { name = "azure-identity" },
     { name = "azure-storage-file-datalake" },
@@ -4113,6 +4142,7 @@ dev = [
 requires-dist = [
     { name = "azure-identity", marker = "extra == 'publisher'", specifier = ">=1.17.0,<2" },
     { name = "azure-storage-file-datalake", marker = "extra == 'publisher'", specifier = ">=12.16.0,<13" },
+    { name = "delta-spark", marker = "extra == 'local-spark'", specifier = "==4.2.0" },
     { name = "huggingface-hub", specifier = ">=0.34.0" },
     { name = "ipykernel", marker = "extra == 'experiments'", specifier = ">=6.29.0" },
     { name = "jupyterlab", marker = "extra == 'experiments'", specifier = ">=4.4.0" },
@@ -4124,6 +4154,7 @@ requires-dist = [
     { name = "opencv-python", specifier = ">=4.11.0.86" },
     { name = "openvino", marker = "extra == 'export'", specifier = ">=2025.0,<2027" },
     { name = "pandas", marker = "extra == 'experiments'", specifier = ">=2.2.0" },
+    { name = "pyspark", marker = "extra == 'local-spark'", specifier = "==4.1.1" },
     { name = "rfdetr", marker = "extra == 'cpu'", specifier = "==1.10.1" },
     { name = "rfdetr", marker = "extra == 'gpu'", specifier = "==1.10.1" },
     { name = "rfdetr", extras = ["onnx"], marker = "extra == 'export'", specifier = "==1.10.1" },
@@ -4138,7 +4169,7 @@ requires-dist = [
     { name = "trackers", marker = "extra == 'gpu'", git = "https://github.com/roboflow/trackers?rev=3fb83d1618f29b7fdd4617757b6894e4ec71146d" },
     { name = "transformers", specifier = ">=5.1.0,<6" },
 ]
-provides-extras = ["cpu", "gpu", "experiments", "export", "publisher"]
+provides-extras = ["cpu", "gpu", "experiments", "export", "publisher", "local-spark"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4359,6 +4390,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/da/9f/abfd2959e9261dd5217ca8551d4de211ca6ab26fe9b72cf44731ff6c4442/pure_eval-0.2.4.tar.gz", hash = "sha256:260c2774686e651b79f8b8e7fc9d80b3599ea6a66334b47d5f4abb69fc2c0ea1", size = 20563, upload-time = "2026-09-10T21:41:22.836Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6d/18/83376915176eb058cb86470eb7396388a13350b09a8f233a79303bbcbc5b/pure_eval-0.2.4-py3-none-any.whl", hash = "sha256:96cae060a313cfaad51bb761278bfb0e62dc0248d9315a81173752dc546cd37a", size = 11893, upload-time = "2026-09-10T21:41:21.532Z" },
+]
+
+[[package]]
+name = "py4j"
+version = "0.10.9.9"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/38/31/0b210511177070c8d5d3059556194352e5753602fa64b85b7ab81ec1a009/py4j-0.10.9.9.tar.gz", hash = "sha256:f694cad19efa5bd1dee4f3e5270eb406613c974394035e5bfc4ec1aba870b879", size = 761089, upload-time = "2025-01-15T03:53:18.624Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bd/db/ea0203e495be491c85af87b66e37acfd3bf756fd985f87e46fc5e3bf022c/py4j-0.10.9.9-py2.py3-none-any.whl", hash = "sha256:c7c26e4158defb37b0bb124933163641a2ff6e3a3913f7811b0ddbe07ed61533", size = 203008, upload-time = "2025-01-15T03:53:15.648Z" },
 ]
 
 [[package]]
@@ -4601,6 +4641,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/b6/6d/f94028646d7bbe6d9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/5e/35c856e186b74678c24927847ad9895a51f1bc02a0c6126477a6c6040064/pyreadline3-3.5.6-py3-none-any.whl", hash = "sha256:8449b734232e42a5dcd74048e39b60db2839a4c38cf3ae2bf7707d58b5389c0d", size = 85243, upload-time = "2026-05-14T17:55:03.262Z" },
 ]
+
+[[package]]
+name = "pyspark"
+version = "4.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "py4j" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/19/bf/58ee13add151469c25825b7125bbf62c3bdcec05eec4d458fcb5c5516066/pyspark-4.1.1.tar.gz", hash = "sha256:77f78984aa84fbe865c717dd37b49913b4e5c97d76ef6824f932f1aefa6621ec", size = 455359625, upload-time = "2026-01-09T09:38:38.28Z" }
 
 [[package]]
 name = "pytest"
@@ -6705,4 +6754,13 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/cb/a5abcc2891249f393827c650c6296660ce40374ac22d99ab9aea41f9d2a2/websocket_client-1.9.2.tar.gz", hash = "sha256:0fcb57545848be86992e128218fd96dd87a6769ffdb1a968dff79632b85604d0", size = 84110, upload-time = "2026-08-31T14:08:40.964Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d5/d2/cc4dc1271e464942db7ee278baae2daa99ee77cb2af744025c04da585a3e/websocket_client-1.9.2-py3-none-any.whl", hash = "sha256:e1a673830a9c7bfa47b1cd3d5e4178f4c9651d80a4eab02c9c23a1c3ec6250ce", size = 95786, upload-time = "2026-08-31T14:08:39.899Z" },
+]
+
+[[package]]
+name = "zipp"
+version = "4.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b9/d8/eab98a517c14134c0b2eb4e2387bc5f457334293ec5d2dd3857ec2966802/zipp-4.1.0.tar.gz", hash = "sha256:4cb57381f544315db7688e976e922a2b18cdb513d21cc194eb42232ba2a3e602", size = 26214, upload-time = "2026-05-18T20:08:57.967Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3a/13/547360d81e6d88d58492968ffda9f9542854f11310ee556fef14260cc886/zipp-4.1.0-py3-none-any.whl", hash = "sha256:25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f", size = 10238, upload-time = "2026-05-18T20:08:57.045Z" },
 ]
