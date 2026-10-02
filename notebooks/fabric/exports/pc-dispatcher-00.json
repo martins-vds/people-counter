@@ -48,6 +48,10 @@
                             },
                             "type": "int"
                         },
+                        "PROCESSING_ENGINE": {
+                            "value": "NOTEBOOK_04",
+                            "type": "string"
+                        },
                         "DATABASE": {
                             "value": "",
                             "type": "string"
@@ -140,7 +144,7 @@
                             "type": "string"
                         },
                         "MODELS_DIR": {
-                            "value": "/lakehouse/default/Files/models/<release>",
+                            "value": "/lakehouse/default/Files/models",
                             "type": "string"
                         },
                         "SOURCE_STORAGE_ACCOUNT": {
@@ -189,7 +193,7 @@
         "parameters": {
             "MAX_CONCURRENT_WORKERS": {
                 "type": "int",
-                "defaultValue": 4
+                "defaultValue": 1
             },
             "CLAIM_LIMIT": {
                 "type": "int",

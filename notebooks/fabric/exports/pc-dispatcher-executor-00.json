@@ -1,0 +1,396 @@
+{
+  "properties": {
+    "activities": [
+      {
+        "name": "ClaimWorkExecutor",
+        "type": "TridentNotebook",
+        "dependsOn": [],
+        "policy": {
+          "timeout": "0.00:30:00",
+          "retry": 3,
+          "retryIntervalInSeconds": 30,
+          "secureOutput": false,
+          "secureInput": false,
+          "exponentialRetry": true,
+          "maxRetryIntervalInSeconds": 300
+        },
+        "typeProperties": {
+          "notebookId": "3cde34ec-2a2e-4726-9f2f-2d35c2f25b00",
+          "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+          "parameters": {
+            "DISPATCHER_ID": {
+              "value": {
+                "value": "@pipeline().RunId",
+                "type": "Expression"
+              },
+              "type": "string"
+            },
+            "MAX_CONCURRENT_WORKERS": {
+              "value": {
+                "value": "@pipeline().parameters.MAX_CONCURRENT_WORKERS",
+                "type": "Expression"
+              },
+              "type": "int"
+            },
+            "CLAIM_LIMIT": {
+              "value": {
+                "value": "@pipeline().parameters.CLAIM_LIMIT",
+                "type": "Expression"
+              },
+              "type": "int"
+            },
+            "LEASE_MINUTES": {
+              "value": {
+                "value": "@pipeline().parameters.LEASE_MINUTES",
+                "type": "Expression"
+              },
+              "type": "int"
+            },
+            "DATABASE": {
+              "value": "",
+              "type": "string"
+            },
+            "TABLE_PREFIX": {
+              "value": "people_counter",
+              "type": "string"
+            },
+            "PROCESSING_ENGINE": {
+              "value": "EXECUTOR_PARTITION",
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "HasClaimedWork",
+        "type": "IfCondition",
+        "dependsOn": [
+          {
+            "activity": "ClaimWorkExecutor",
+            "dependencyConditions": [
+              "Succeeded"
+            ]
+          }
+        ],
+        "typeProperties": {
+          "expression": {
+            "value": "@greater(json(activity('ClaimWorkExecutor').output.result.exitValue).claimed_count, 0)",
+            "type": "Expression"
+          },
+          "ifTrueActivities": [
+            {
+              "name": "ProcessVideoExecutor",
+              "type": "TridentNotebook",
+              "dependsOn": [],
+              "policy": {
+                "timeout": "0.06:00:00",
+                "retry": 0,
+                "retryIntervalInSeconds": 30,
+                "secureOutput": false,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "notebookId": "55e9b0a9-a7e3-4064-b19f-5ba8e523c05a",
+                "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                "parameters": {
+                  "WORK_ITEMS_JSON": {
+                    "value": {
+                      "value": "@string(json(activity('ClaimWorkExecutor').output.result.exitValue).items)",
+                      "type": "Expression"
+                    },
+                    "type": "string"
+                  },
+                  "WORK_ID": {
+                    "value": "",
+                    "type": "string"
+                  },
+                  "ATTEMPT_ID": {
+                    "value": "",
+                    "type": "string"
+                  },
+                  "MAX_ITEMS_PER_WORKER": {
+                    "value": {
+                      "value": "@pipeline().parameters.CLAIM_LIMIT",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "MAX_WORKER_LIFETIME_SECONDS": {
+                    "value": {
+                      "value": "@pipeline().parameters.MAX_WORKER_LIFETIME_SECONDS",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "PIPELINE_RUN_ID": {
+                    "value": {
+                      "value": "@pipeline().RunId",
+                      "type": "Expression"
+                    },
+                    "type": "string"
+                  },
+                  "ACTIVITY_RUN_ID": {
+                    "value": {
+                      "value": "@concat(pipeline().RunId, '/worker-executor')",
+                      "type": "Expression"
+                    },
+                    "type": "string"
+                  },
+                  "WORKER_EXECUTION_ID": {
+                    "value": {
+                      "value": "@guid()",
+                      "type": "Expression"
+                    },
+                    "type": "string"
+                  },
+                  "FABRIC_JOB_INSTANCE_ID": {
+                    "value": "",
+                    "type": "string"
+                  },
+                  "BUNDLE_MANIFEST_SHA256": {
+                    "value": {
+                      "value": "@pipeline().parameters.BUNDLE_MANIFEST_SHA256",
+                      "type": "Expression"
+                    },
+                    "type": "string"
+                  },
+                  "MODELS_DIR": {
+                    "value": "/lakehouse/default/Files/models",
+                    "type": "string"
+                  },
+                  "SOURCE_STORAGE_ACCOUNT": {
+                    "value": "peoplecountingfootage",
+                    "type": "string"
+                  },
+                  "SOURCE_CONTAINER": {
+                    "value": "videos",
+                    "type": "string"
+                  },
+                  "SOURCE_SHORTCUT_LOCAL_ROOT": {
+                    "value": "/lakehouse/default/Files/videos",
+                    "type": "string"
+                  },
+                  "DATABASE": {
+                    "value": "",
+                    "type": "string"
+                  },
+                  "TABLE_PREFIX": {
+                    "value": "people_counter",
+                    "type": "string"
+                  },
+                  "LEASE_MINUTES": {
+                    "value": {
+                      "value": "@pipeline().parameters.LEASE_MINUTES",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "HEARTBEAT_SECONDS": {
+                    "value": {
+                      "value": "@pipeline().parameters.HEARTBEAT_SECONDS",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "PROCESSING_ENGINE": {
+                    "value": "EXECUTOR_PARTITION",
+                    "type": "string"
+                  },
+                  "CPUS_PER_TASK": {
+                    "value": {
+                      "value": "@pipeline().parameters.CPUS_PER_TASK",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "PARALLEL_TASKS": {
+                    "value": {
+                      "value": "@pipeline().parameters.PARALLEL_TASKS",
+                      "type": "Expression"
+                    },
+                    "type": "string"
+                  },
+                  "PARTITION_WAVES": {
+                    "value": {
+                      "value": "@pipeline().parameters.PARTITION_WAVES",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "PEAK_WORKER_MEMORY_GIB": {
+                    "value": {
+                      "value": "@pipeline().parameters.PEAK_WORKER_MEMORY_GIB",
+                      "type": "Expression"
+                    },
+                    "type": "float"
+                  },
+                  "RESOURCE_DISCOVERY_TIMEOUT_SECONDS": {
+                    "value": {
+                      "value": "@pipeline().parameters.RESOURCE_DISCOVERY_TIMEOUT_SECONDS",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "MIN_APPROVED_SINGLE_VIDEO_SPEED_X": {
+                    "value": {
+                      "value": "@pipeline().parameters.MIN_APPROVED_SINGLE_VIDEO_SPEED_X",
+                      "type": "Expression"
+                    },
+                    "type": "float"
+                  },
+                  "LEASE_SAFETY_FACTOR": {
+                    "value": {
+                      "value": "@pipeline().parameters.LEASE_SAFETY_FACTOR",
+                      "type": "Expression"
+                    },
+                    "type": "float"
+                  },
+                  "LEASE_SAFETY_MARGIN_SECONDS": {
+                    "value": {
+                      "value": "@pipeline().parameters.LEASE_SAFETY_MARGIN_SECONDS",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "DRIVER_MEMORY": {
+                    "value": {
+                      "value": "@pipeline().parameters.DRIVER_MEMORY",
+                      "type": "Expression"
+                    },
+                    "type": "string"
+                  },
+                  "DRIVER_CORES": {
+                    "value": {
+                      "value": "@pipeline().parameters.DRIVER_CORES",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "EXECUTOR_MEMORY": {
+                    "value": {
+                      "value": "@pipeline().parameters.EXECUTOR_MEMORY",
+                      "type": "Expression"
+                    },
+                    "type": "string"
+                  },
+                  "EXECUTOR_CORES": {
+                    "value": {
+                      "value": "@pipeline().parameters.EXECUTOR_CORES",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "MIN_EXECUTORS": {
+                    "value": {
+                      "value": "@pipeline().parameters.MIN_EXECUTORS",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  },
+                  "MAX_EXECUTORS": {
+                    "value": {
+                      "value": "@pipeline().parameters.MAX_EXECUTORS",
+                      "type": "Expression"
+                    },
+                    "type": "int"
+                  }
+                }
+              }
+            }
+          ],
+          "ifFalseActivities": [
+            {
+              "name": "NoWork",
+              "type": "Wait",
+              "dependsOn": [],
+              "typeProperties": {
+                "waitTimeInSeconds": 1
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "parameters": {
+      "MAX_CONCURRENT_WORKERS": {
+        "type": "int",
+        "defaultValue": 1
+      },
+      "CLAIM_LIMIT": {
+        "type": "int",
+        "defaultValue": 1
+      },
+      "LEASE_MINUTES": {
+        "type": "int",
+        "defaultValue": 360
+      },
+      "BUNDLE_MANIFEST_SHA256": {
+        "type": "string"
+      },
+      "MAX_WORKER_LIFETIME_SECONDS": {
+        "type": "int",
+        "defaultValue": 19800
+      },
+      "HEARTBEAT_SECONDS": {
+        "type": "int",
+        "defaultValue": 600
+      },
+      "MIN_APPROVED_SINGLE_VIDEO_SPEED_X": {
+        "type": "float",
+        "defaultValue": 1.0
+      },
+      "LEASE_SAFETY_FACTOR": {
+        "type": "float",
+        "defaultValue": 1.5
+      },
+      "LEASE_SAFETY_MARGIN_SECONDS": {
+        "type": "int",
+        "defaultValue": 1200
+      },
+      "CPUS_PER_TASK": {
+        "type": "int",
+        "defaultValue": 1
+      },
+      "PARALLEL_TASKS": {
+        "type": "string",
+        "defaultValue": "auto"
+      },
+      "PARTITION_WAVES": {
+        "type": "int",
+        "defaultValue": 1
+      },
+      "PEAK_WORKER_MEMORY_GIB": {
+        "type": "float",
+        "defaultValue": 12.0
+      },
+      "RESOURCE_DISCOVERY_TIMEOUT_SECONDS": {
+        "type": "int",
+        "defaultValue": 120
+      },
+      "DRIVER_MEMORY": {
+        "type": "string",
+        "defaultValue": "28g"
+      },
+      "DRIVER_CORES": {
+        "type": "int",
+        "defaultValue": 4
+      },
+      "EXECUTOR_MEMORY": {
+        "type": "string",
+        "defaultValue": "28g"
+      },
+      "EXECUTOR_CORES": {
+        "type": "int",
+        "defaultValue": 16
+      },
+      "MIN_EXECUTORS": {
+        "type": "int",
+        "defaultValue": 1
+      },
+      "MAX_EXECUTORS": {
+        "type": "int",
+        "defaultValue": 4
+      }
+    }
+  }
+}

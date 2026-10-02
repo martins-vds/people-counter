@@ -8141,7 +8141,237 @@ rule running only when intake is healthy and it is safe to durably queue new
 work; otherwise repeat the stop sequence. Do not pause the capacity as a
 fallback.
 
-## 13. Official references
+## 13. Production executor dispatcher
+
+The production executor path is a separate dispatcher, not a replacement for
+notebook 04:
+
+```text
+pc-dispatcher-00
+  -> ClaimWork (PROCESSING_ENGINE=NOTEBOOK_04)
+  -> ProcessVideo (04_process_video)
+
+pc-dispatcher-executor-00
+  -> ClaimWorkExecutor (PROCESSING_ENGINE=EXECUTOR_PARTITION)
+  -> HasClaimedWork
+     -> true: ProcessVideoExecutor (17_process_video_executor)
+     -> false: NoWork
+```
+
+Explicit immutable routing prevents two worker implementations from claiming
+the same queue row. Event registration takes its authoritative engine from the
+deployment-level `pc-event-intake` pipeline parameter. Its Development default
+is `EXECUTOR_PARTITION`, so normal manifest generation remains
+destination-independent. A manifest may omit `processing_engine`; if it
+supplies one, it must match the configured intake engine. Blank, unknown, or
+conflicting values fail. Legacy null queue values are interpreted as
+`NOTEBOOK_04` only during the stopped-writer migration.
+
+### 13.1 Deployed Development items
+
+| Item | ID |
+|---|---|
+| Workspace | `c31ee864-230d-4005-8fd5-7c7130ebf774` |
+| Lakehouse `people_counter_dev` | `883cff91-eaa8-40be-870f-6e9716303cb2` |
+| Environment `people-counter-dev` | `3e580f48-9ff7-4bc6-af2e-a59158029ada` |
+| `03_claim_work` | `3cde34ec-2a2e-4726-9f2f-2d35c2f25b00` |
+| `04_process_video` | `737b6e2f-e899-4305-95ae-8a7c850d16a0` |
+| `17_process_video_executor` | `55e9b0a9-a7e3-4064-b19f-5ba8e523c05a` |
+| `pc-dispatcher-00` | `12e33015-5c82-4ea0-a54e-fe145694ad02` |
+| `pc-dispatcher-executor-00` | `bc5209e3-177c-4729-b647-eb48fd33ec95` |
+
+IDs in the checked-in exports are workspace-specific. Remap workspace,
+Lakehouse, Environment, notebook, connection, and pipeline IDs when promoting
+to another workspace.
+
+The schema migration was run only after all related schedules were disabled,
+the manifest-arrival rule was stopped, no pipeline or notebook job was live,
+no active lease state remained, and the control writer was unowned. Run
+`00_bootstrap_lakehouse` with `CONFIRM_WRITERS_STOPPED=true`; run
+`7060b2f1-a9e9-4e9d-b287-79235ba1320d` is the completed Development migration
+evidence. The migration notebook must retain its default Lakehouse attachment;
+run `7060b2f1-a9e9-4e9d-b287-79235ba1320d` also verifies the schema-evolution
+catalog refresh added after a stale Spark catalog allowed the earlier run to
+finish without exposing the evolved schema to a cached writer session.
+Validate `processing_engine`, its canonical backfill, unsupported count zero,
+and the `people_counter_executor_attempt_results` identity columns before
+publishing engine-aware notebooks.
+
+### 13.2 Current Fabric UI sequence
+
+On `https://app.fabric.microsoft.com`, use **Import -> Notebook -> From this
+computer** for a notebook, then attach the same Lakehouse and reviewed
+Environment. For a pipeline, create or open the Data pipeline, select a
+Notebook activity, and use:
+
+1. **General** for **Name**, **Description**, **Activity state**,
+   **Timeout**, **Enable retries**, **Retry**, **Retry interval type**,
+   **Retry conditions (preview)**, and **Advanced**.
+2. **Settings** for **Connection**, **Workspace**, **Notebook**, **Open**,
+   **New**, **Base parameters**, **Advanced settings**, and **Spark settings**.
+3. On **Base parameters**, add a row, select Literal unless the table below
+   says **Add dynamic content**, and preserve the exact Fabric type.
+4. Connect `ClaimWorkExecutor` success to `HasClaimedWork`. In the condition's
+   true branch add `ProcessVideoExecutor`; in the false branch add the
+   one-second `NoWork` Wait activity.
+5. Validate, then save/publish only after the stopped-writer migration and
+   notebook publication complete.
+
+The pipeline was created through the Fabric REST definition API after those
+same UI fields and live IDs were verified. The post-deployment definitions are
+[`pc-dispatcher-00.json`](./exports/pc-dispatcher-00.json) and
+[`pc-dispatcher-executor-00.json`](./exports/pc-dispatcher-executor-00.json).
+To refresh them in the UI, open each pipeline, download/export its definition,
+review IDs and parameter defaults, and replace only the corresponding export.
+
+`pc-event-intake` owns routing for newly published manifests. Its
+`PROCESSING_ENGINE` pipeline parameter defaults to `EXECUTOR_PARTITION` and is
+passed to `01_register_event` with **Add dynamic content**. Keep routing out of
+the manifest generator. Change the pipeline default only as an explicit
+deployment decision; manifests that contain an optional `processing_engine`
+must agree with it.
+
+### 13.3 Executor pipeline parameters
+
+| Parameter | Fabric type | Canary default |
+|---|---|---:|
+| `MAX_CONCURRENT_WORKERS` | `Int` | `1` |
+| `CLAIM_LIMIT` | `Int` | `1` |
+| `LEASE_MINUTES` | `Int` | `360` |
+| `BUNDLE_MANIFEST_SHA256` | `String` | deployed bundle `manifest.json` SHA-256 |
+| `MAX_WORKER_LIFETIME_SECONDS` | `Int` | `19800` |
+| `HEARTBEAT_SECONDS` | `Int` | `600` |
+| `MIN_APPROVED_SINGLE_VIDEO_SPEED_X` | `Float` | `1.0` |
+| `LEASE_SAFETY_FACTOR` | `Float` | `1.5` |
+| `LEASE_SAFETY_MARGIN_SECONDS` | `Int` | `1200` |
+| `CPUS_PER_TASK` | `Int` | `1` |
+| `PARALLEL_TASKS` | `String` | `auto` |
+| `PARTITION_WAVES` | `Int` | `1` |
+| `PEAK_WORKER_MEMORY_GIB` | `Float` | `12.0` |
+| `RESOURCE_DISCOVERY_TIMEOUT_SECONDS` | `Int` | `120` |
+| `DRIVER_MEMORY` / `EXECUTOR_MEMORY` | `String` | `28g` |
+| `DRIVER_CORES` | `Int` | `4` |
+| `EXECUTOR_CORES` | `Int` | `16` |
+| `MIN_EXECUTORS` / `MAX_EXECUTORS` | `Int` | `1` / `4` |
+| `MODELS_DIR` | `String` | `/lakehouse/default/Files/models` |
+
+`ClaimWorkExecutor` uses the original claim activity's 30-minute timeout,
+three exponential retries, and 30-second initial retry interval. Pass
+`DISPATCHER_ID=@pipeline().RunId`, the three admission/lease parameters with
+**Add dynamic content**, empty `DATABASE`, `TABLE_PREFIX=people_counter`, and
+literal `PROCESSING_ENGINE=EXECUTOR_PARTITION`.
+
+Set the If Condition expression, without surrounding quotes, to:
+
+```text
+@greater(json(activity('ClaimWorkExecutor').output.result.exitValue).claimed_count, 0)
+```
+
+`ProcessVideoExecutor` has a six-hour timeout and zero retries. Its key dynamic
+values are:
+
+```text
+WORK_ITEMS_JSON =
+@string(json(activity('ClaimWorkExecutor').output.result.exitValue).items)
+
+PIPELINE_RUN_ID = @pipeline().RunId
+ACTIVITY_RUN_ID = @concat(pipeline().RunId, '/worker-executor')
+WORKER_EXECUTION_ID = @guid()
+```
+
+Pass every executor resource and lease-safety value from the matching pipeline
+parameter with **Add dynamic content**. Keep `PROCESSING_ENGINE` literal
+`EXECUTOR_PARTITION`, `DATABASE` empty, `TABLE_PREFIX` literal
+`people_counter`, and source/model locations identical to notebook 04.
+
+### 13.4 Schedule, canary, and run history
+
+The executor schedule is a 10-minute Cron schedule in **Mountain Standard
+Time**, starting `2026-09-19 07:48`, five minutes after the original
+dispatcher's `07:43` schedule, with no practical end date. Its state is
+**UserDisabled**. Do not enable it without explicit approval and an alert for
+any future fixed end date.
+
+For a manual canary:
+
+1. Keep both dispatchers at `MAX_CONCURRENT_WORKERS=1`.
+2. Register and successfully process one fresh `NOTEBOOK_04` item first.
+3. Register one fresh `EXECUTOR_PARTITION` item, then manually run
+   `pc-dispatcher-executor-00`.
+4. In run history open `ClaimWorkExecutor` **Output** and inspect
+   `result.exitValue`. Require `claimed_count=1`,
+   `processing_engine=EXECUTOR_PARTITION`, and exactly one item.
+5. Confirm `ProcessVideoExecutor` receives that item, records effective Spark
+   resources, completes a heartbeat cycle within the 600-second bound, stages
+   one complete transaction, publishes independently, and commits once.
+6. Run notebooks 06 and 11. Require no unreceipted worker event, no retained
+   control-writer owner, no active lease, no unpublished staged success, and
+   committed output parity with notebook 04.
+
+Development canary evidence:
+
+- `NOTEBOOK_04` dispatcher run
+  `79fa6c2b-ce36-4a74-9f95-ee2bf2cabe87` completed and persisted the canary as
+  `SUCCEEDED`.
+- Executor dispatcher run `45d0c57c-64c3-4bc9-8b14-9b5f0b421715` completed
+  with one `SUCCEEDED` attempt, five immutable staging rows, three telemetry
+  rows, and one line-count row.
+- Original-dispatcher contention run
+  `ce2b5c0d-7b9c-4308-8f2f-6a1377abbf01` completed without claiming the active
+  `EXECUTOR_PARTITION` work.
+- Reconciliation run `d7b7c981-5f43-47d1-858d-fb7b9c27e863` and
+  observability run `122baca4-479c-439c-a72a-960c7997a358` completed after the
+  executor canary.
+
+The canary exposed two fail-closed recovery paths that are now part of the
+deployed contract: notebook 17 reads startup-only Spark properties from
+`SparkContext.getConf()` with Spark's documented one-CPU task default, and the
+watchdog falls back to `lease_acquired_at` when a worker fails before its first
+heartbeat. The production executor profile requests the observed 16 executor
+cores and rejects a future effective-profile mismatch.
+
+`NO_CAPACITY` means matching work exists but the engine-agnostic global
+admission limit is full. `NO_ELIGIBLE_WORK` means no due, runtime-compatible
+row exists for that engine. Do not increase admission or claim limits when the
+result is `NO_ELIGIBLE_WORK`.
+
+Abort the executor canary if projected lease demand exceeds
+`LEASE_MINUTES * 60`, the live wave projection exceeds the remaining lease,
+effective task/executor CPU settings differ from requested values, or one
+driver heartbeat cycle approaches 600 seconds. Pending-wave attempts remain
+`LEASED`; never add a background control thread.
+
+### 13.5 Staging retention, reconciliation, and rollback
+
+`people_counter_executor_attempt_results` is append-only during worker
+execution. Keep successful and failed/uncommitted rows for at least the
+existing 30-day failed-output retention period, and longer when an audit,
+incident, replay, or legal hold requires it. Delete only after notebook 06
+reports no unpublished staged success and during an approved stopped-writer
+maintenance window. Never delete staging rows in notebook 17 after commit.
+
+Inspect `people_counter_control_writer.owner_id` before and after every canary.
+The owner has no automatic expiry. If it remains set, stop every writer, prove
+the recorded owner cannot still run, record the recovery approval, and use the
+existing offline control-writer recovery procedure; never steal it in a live
+notebook.
+
+Rollback order:
+
+1. Keep the executor schedule disabled and stop new executor registration.
+2. Let healthy executor work drain; do not cancel it merely to shorten the
+   rollback.
+3. Route new manifests to `NOTEBOOK_04`; do not mutate existing work
+   identities.
+4. Run watchdog, reconciliation, and observability checks until there is no
+   active executor lease, unreceipted event, or unpublished staged success.
+5. Restore `pc-dispatcher-00.MAX_CONCURRENT_WORKERS` from the recorded
+   pre-canary value (`4` in Development) only after shared-capacity validation.
+6. Preserve notebook 17, executor pipeline definitions, attempt events, and
+   staging rows for diagnosis and retention. Remove schema objects only in a
+   later reviewed stopped-writer migration.
+
+## 14. Official references
 
 - [Fabric event delivery guarantees](https://learn.microsoft.com/fabric/real-time-hub/fabric-event-delivery-guarantees)
 - [Build event-driven Fabric pipelines](https://learn.microsoft.com/fabric/real-time-hub/tutorial-build-event-driven-data-pipelines)

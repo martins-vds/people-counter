@@ -28,9 +28,15 @@ CAPACITY_BENCHMARK_PIPELINE = (
 )
 EXECUTOR_PROTOTYPE = NOTEBOOKS / "15_executor_partition_inference.ipynb"
 EXECUTOR_BENCHMARK_CONTROL = NOTEBOOKS / "16_executor_partition_benchmark_control.ipynb"
+EXECUTOR_WORKER = NOTEBOOKS / "17_process_video_executor.ipynb"
 EXECUTOR_BENCHMARK_PIPELINE = (
     NOTEBOOKS / "exports" / "pc-executor-partition-benchmark.json"
 )
+DISPATCHER_PIPELINE = NOTEBOOKS / "exports" / "pc-dispatcher-00.json"
+EXECUTOR_DISPATCHER_PIPELINE = (
+    NOTEBOOKS / "exports" / "pc-dispatcher-executor-00.json"
+)
+EVENT_INTAKE_PIPELINE = NOTEBOOKS / "exports" / "pc-event-intake.json"
 
 
 def cell_source(path, cell_id):
@@ -189,6 +195,259 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertEqual(configuration["conf"]["spark.speculation"], "false")
         self.assertEqual(configuration["executorCores"]["defaultValue"], 4)
         self.assertEqual(configuration["executorMemory"]["defaultValue"], "28g")
+
+    def test_processing_engine_schema_registration_and_claim_contract(self):
+        bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
+        bootstrap_evolution = cell_source(BOOTSTRAP, "bootstrap-schema-evolution")
+        bootstrap_backfill = cell_source(BOOTSTRAP, "bootstrap-control-backfill")
+        event_source = code_source(NOTEBOOKS / "01_register_event.ipynb")
+        event_parameters = cell_source(
+            NOTEBOOKS / "01_register_event.ipynb",
+            "event-parameters",
+        )
+        event_intake = json.loads(
+            EVENT_INTAKE_PIPELINE.read_text(encoding="utf-8")
+        )
+        backfill_source = code_source(NOTEBOOKS / "02_register_backfill.ipynb")
+        claim_source = cell_source(NOTEBOOKS / "03_claim_work.ipynb", "claim-work")
+
+        self.assertIn("processing_engine STRING", bootstrap_create)
+        self.assertNotIn("processing_engine STRING NOT NULL", bootstrap_create)
+        self.assertIn('"processing_engine": "STRING"', bootstrap_evolution)
+        self.assertIn(
+            "spark_session.catalog.refreshTable(storage_name(suffix))",
+            bootstrap_evolution,
+        )
+        self.assertIn("missing evolved columns after refresh", bootstrap_evolution)
+        self.assertIn('set={"processing_engine": F.lit("NOTEBOOK_04")}', bootstrap_backfill)
+        self.assertIn("unsupported processing_engine values", bootstrap_backfill)
+        self.assertIn('PROCESSING_ENGINE = ""', event_parameters)
+        self.assertIn(
+            "configured_processing_engine = normalize_processing_engine(",
+            event_source,
+        )
+        self.assertIn("PROCESSING_ENGINE,\n    default=None,", event_source)
+        self.assertIn(
+            "manifest processing_engine conflicts with configured PROCESSING_ENGINE",
+            event_source,
+        )
+        self.assertIn(
+            '"processing_engine": configured_processing_engine',
+            event_source,
+        )
+        self.assertEqual(
+            event_intake["properties"]["parameters"]["PROCESSING_ENGINE"],
+            {"type": "string", "defaultValue": "EXECUTOR_PARTITION"},
+        )
+        intake_parameters = event_intake["properties"]["activities"][0][
+            "typeProperties"
+        ]["parameters"]
+        self.assertEqual(
+            intake_parameters["PROCESSING_ENGINE"],
+            {
+                "value": {
+                    "value": "@pipeline().parameters.PROCESSING_ENGINE",
+                    "type": "Expression",
+                },
+                "type": "string",
+            },
+        )
+        self.assertIn("spark_session.catalog.refreshTable(work_table)", event_source)
+        self.assertIn('"processing_engine",', backfill_source)
+        self.assertIn("normalize_processing_engine", backfill_source)
+        self.assertIn("spark_session.catalog.refreshTable(work_table)", backfill_source)
+        self.assertIn(
+            'processing_engine = normalize_processing_engine(PROCESSING_ENGINE)',
+            claim_source,
+        )
+        self.assertIn("spark_session.catalog.refreshTable(work_table)", claim_source)
+        self.assertGreaterEqual(
+            claim_source.count('F.coalesce("processing_engine", F.lit(NOTEBOOK_04))'),
+            3,
+        )
+        self.assertIn(
+            "coalesce(t.processing_engine, '{NOTEBOOK_04}')",
+            claim_source,
+        )
+        owned_guard = claim_source.split("owned_active = (", 1)[1].split(
+            "owned_rows =",
+            1,
+        )[0]
+        self.assertNotIn(
+            "processing_engine",
+            owned_guard.split(".where(", 1)[1].split("\n    .select(", 1)[0],
+        )
+        self.assertIn('"processing_engine": processing_engine', claim_source)
+        self.assertIn('"NO_CAPACITY"', claim_source)
+        self.assertIn('"NO_ELIGIBLE_WORK"', claim_source)
+
+    def test_executor_production_staging_and_operational_surfaces(self):
+        bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
+        reconcile = code_source(NOTEBOOKS / "06_reconcile_publication.ipynb")
+        replay = code_source(NOTEBOOKS / "10_replay_work.ipynb")
+        observability = code_source(
+            NOTEBOOKS / "11_validate_observability.ipynb"
+        )
+        reset = code_source(NOTEBOOKS / "14_reset_test_data.ipynb")
+
+        self.assertIn('"executor_attempt_results": """', bootstrap_create)
+        for column in (
+            "attempt_id STRING NOT NULL",
+            "work_id STRING NOT NULL",
+            "worker_execution_id STRING NOT NULL",
+            "record_type STRING NOT NULL",
+            "record_sequence BIGINT NOT NULL",
+            "txn_app_id STRING NOT NULL",
+            "txn_version BIGINT NOT NULL",
+        ):
+            self.assertIn(column, bootstrap_create)
+        self.assertIn("EXECUTOR_STAGED_SUCCESS_NOT_PUBLISHED", reconcile)
+        self.assertIn('"processing_engine": updated.get("processing_engine")', replay)
+        self.assertIn(
+            'groupBy("processing_engine", "status")',
+            observability,
+        )
+        self.assertIn('"executor_attempt_results",', reset)
+
+    def test_executor_worker_uses_two_stage_driver_owned_protocol(self):
+        notebook = json.loads(EXECUTOR_WORKER.read_text(encoding="utf-8"))
+        code_cells = [
+            cell for cell in notebook["cells"] if cell["cell_type"] == "code"
+        ]
+        self.assertEqual(code_cells[0]["id"], "spark-session-config")
+        self.assertEqual(code_cells[1]["id"], "executor-worker-parameters")
+        self.assertIn("parameters", code_cells[1]["metadata"]["tags"])
+        parameters = "".join(code_cells[1]["source"])
+        run_source = cell_source(EXECUTOR_WORKER, "executor-worker-run")
+
+        for name in (
+            "WORK_ITEMS_JSON",
+            "MAX_ITEMS_PER_WORKER",
+            "PROCESSING_ENGINE",
+            "CPUS_PER_TASK",
+            "PARALLEL_TASKS",
+            "PARTITION_WAVES",
+            "PEAK_WORKER_MEMORY_GIB",
+            "MIN_APPROVED_SINGLE_VIDEO_SPEED_X",
+            "LEASE_SAFETY_FACTOR",
+            "LEASE_SAFETY_MARGIN_SECONDS",
+        ):
+            self.assertIn(f"{name} =", parameters)
+        self.assertLess(
+            run_source.index("if not worker_items:"),
+            run_source.index("spark_candidate ="),
+        )
+        self.assertIn("validate_claimed_rows", run_source)
+        self.assertIn("require_configured_lease_budget", run_source)
+        self.assertIn("require_live_wave_budget", run_source)
+        self.assertIn(
+            "spark_configuration = spark_session.sparkContext.getConf()",
+            run_source,
+        )
+        self.assertIn(
+            'spark_configuration.get("spark.task.cpus", "1")',
+            run_source,
+        )
+        self.assertIn(
+            "spark_session.createDataFrame(planned_rows, planned_schema)",
+            run_source,
+        )
+        self.assertIn(
+            'StructField("planned_partition", IntegerType(), False)',
+            run_source,
+        )
+        self.assertIn("EXECUTOR_CORES = 16", parameters)
+        configuration = json.loads("".join(code_cells[0]["source"]).split("\n", 1)[1])
+        self.assertEqual(configuration["executorCores"]["defaultValue"], 16)
+        self.assertNotIn(
+            'spark_session.conf.get("spark.task.cpus"',
+            run_source,
+        )
+        self.assertIn(".rdd.mapPartitions(execute_partition)", run_source)
+        self.assertEqual(
+            run_source.count(".saveAsTable(staging_table)"),
+            1,
+        )
+        self.assertIn("validate_staging_records(materialized_rows", run_source)
+        self.assertIn('client.submit("commit", {})', run_source)
+        self.assertNotIn("Thread(", run_source)
+        self.assertNotIn("concurrent.futures", run_source)
+
+    def test_production_dispatcher_exports_route_one_engine_each(self):
+        dispatcher = json.loads(DISPATCHER_PIPELINE.read_text(encoding="utf-8"))
+        executor = json.loads(
+            EXECUTOR_DISPATCHER_PIPELINE.read_text(encoding="utf-8")
+        )
+
+        dispatcher_parameters = dispatcher["properties"]["parameters"]
+        self.assertEqual(
+            dispatcher_parameters["MAX_CONCURRENT_WORKERS"]["defaultValue"],
+            1,
+        )
+        claim = dispatcher["properties"]["activities"][0]
+        self.assertEqual(claim["name"], "ClaimWork")
+        self.assertEqual(
+            claim["typeProperties"]["parameters"]["PROCESSING_ENGINE"],
+            {"value": "NOTEBOOK_04", "type": "string"},
+        )
+
+        executor_parameters = executor["properties"]["parameters"]
+        self.assertEqual(
+            executor_parameters["EXECUTOR_CORES"]["defaultValue"],
+            16,
+        )
+        self.assertEqual(
+            {
+                name: executor_parameters[name]["defaultValue"]
+                for name in (
+                    "MAX_CONCURRENT_WORKERS",
+                    "CLAIM_LIMIT",
+                    "LEASE_MINUTES",
+                    "HEARTBEAT_SECONDS",
+                    "LEASE_SAFETY_FACTOR",
+                    "LEASE_SAFETY_MARGIN_SECONDS",
+                )
+            },
+            {
+                "MAX_CONCURRENT_WORKERS": 1,
+                "CLAIM_LIMIT": 1,
+                "LEASE_MINUTES": 360,
+                "HEARTBEAT_SECONDS": 600,
+                "LEASE_SAFETY_FACTOR": 1.5,
+                "LEASE_SAFETY_MARGIN_SECONDS": 1200,
+            },
+        )
+        executor_claim, condition = executor["properties"]["activities"]
+        self.assertEqual(executor_claim["name"], "ClaimWorkExecutor")
+        self.assertEqual(
+            executor_claim["typeProperties"]["parameters"]["PROCESSING_ENGINE"],
+            {"value": "EXECUTOR_PARTITION", "type": "string"},
+        )
+        self.assertEqual(condition["name"], "HasClaimedWork")
+        self.assertEqual(
+            condition["typeProperties"]["expression"]["value"],
+            "@greater(json(activity('ClaimWorkExecutor').output.result."
+            "exitValue).claimed_count, 0)",
+        )
+        self.assertEqual(
+            [activity["name"] for activity in condition["typeProperties"]["ifFalseActivities"]],
+            ["NoWork"],
+        )
+        worker = condition["typeProperties"]["ifTrueActivities"][0]
+        self.assertEqual(worker["name"], "ProcessVideoExecutor")
+        self.assertEqual(
+            worker["typeProperties"]["notebookId"],
+            "55e9b0a9-a7e3-4064-b19f-5ba8e523c05a",
+        )
+        self.assertEqual(worker["policy"]["retry"], 0)
+        self.assertEqual(
+            worker["typeProperties"]["parameters"]["WORK_ITEMS_JSON"]["value"]["value"],
+            "@string(json(activity('ClaimWorkExecutor').output.result.exitValue).items)",
+        )
+        self.assertEqual(
+            worker["typeProperties"]["parameters"]["PROCESSING_ENGINE"],
+            {"value": "EXECUTOR_PARTITION", "type": "string"},
+        )
 
     def test_executor_partition_prototype_is_capacity_aware(self):
         parameters = cell_source(EXECUTOR_PROTOTYPE, "parameters")
@@ -1920,6 +2179,18 @@ class FabricNotebookTests(unittest.TestCase):
                 drain = "process_worker_events(spark_session, writer, table_prefix=prefix, database=database)"
                 self.assertIn(drain, source)
                 self.assertLess(source.index(drain), source.index(candidate))
+
+    def test_watchdog_recovers_attempts_that_fail_before_first_heartbeat(self):
+        source = code_source(NOTEBOOKS / "05_watchdog_recovery.ipynb")
+
+        self.assertIn(
+            'F.coalesce(F.col("last_heartbeat_at"), F.col("lease_acquired_at"))',
+            source,
+        )
+        self.assertIn(
+            "COALESCE(t.last_heartbeat_at, t.lease_acquired_at) < s.heartbeat_cutoff",
+            source,
+        )
 
     def test_administrative_notebooks_default_to_closed_stop_gate(self):
         for name in ("00_bootstrap_lakehouse", "09_maintain_delta", "14_reset_test_data"):

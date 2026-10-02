@@ -77,6 +77,13 @@
                             "value": "people_counter",
                             "type": "string"
                         },
+                        "PROCESSING_ENGINE": {
+                            "value": {
+                                "value": "@pipeline().parameters.PROCESSING_ENGINE",
+                                "type": "Expression"
+                            },
+                            "type": "string"
+                        },
                         "MAX_ATTEMPTS": {
                             "value": "4",
                             "type": "int"
@@ -155,6 +162,10 @@
             },
             "MANIFEST_URI": {
                 "type": "string"
+            },
+            "PROCESSING_ENGINE": {
+                "type": "string",
+                "defaultValue": "EXECUTOR_PARTITION"
             }
         },
         "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",
