@@ -153,8 +153,10 @@ that a Fabric pipeline Notebook activity can override:
 | `EXECUTOR_MEMORY` | `executorMemory` | `28g` | JVM heap requested for each executor. |
 | `EXECUTOR_CORES` | `executorCores` | `4` | vCores requested for each executor. |
 | `CPUS_PER_TASK` | `conf.spark.task.cpus` | `1` | Scheduler CPUs reserved for each inference task. Pass the same integer to the notebook parameter cell. |
-| `MIN_EXECUTORS` | `conf.spark.dynamicAllocation.minExecutors` | `1` | Dynamic-allocation lower bound. |
-| `MAX_EXECUTORS` | `conf.spark.dynamicAllocation.maxExecutors` | `4` | Dynamic-allocation upper bound; it is not proof that this many executors were granted. |
+| `NUM_EXECUTORS` | `numExecutors` | `5` | Fixed executor count. With the Development six-node XX-Large pool, five executors leave one node for the driver. |
+| `DYNAMIC_ALLOCATION_ENABLED` | `conf.spark.dynamicAllocation.enabled` | `false` | Selects static or dynamic allocation for this session. The Development pool must keep allocation capability enabled and bounded even when this session setting is `false`. |
+| `MIN_EXECUTORS` | `conf.spark.dynamicAllocation.minExecutors` | `1` | Lower bound used only when dynamic allocation is enabled. |
+| `MAX_EXECUTORS` | `conf.spark.dynamicAllocation.maxExecutors` | `5` | Upper bound used only when dynamic allocation is enabled; keep it within the pool's worker-node limit. |
 
 #### Capacity-SKU executor reference
 
@@ -172,40 +174,44 @@ executors fits the SKU's base Spark-vCore allocation. The burst column is an
 absolute capacity ceiling when job-level bursting is enabled and the workspace
 pool is configured to scale that far.
 
-| Capacity SKU | Base Spark vCores | Burst Spark vCores | `MIN_EXECUTORS` starting reference | `MAX_EXECUTORS` no-burst ceiling | `MAX_EXECUTORS` burst ceiling |
-|---|---:|---:|---:|---:|---:|
-| F2 | 4 | 20 | `1`* | `0` | `4` |
-| F4 | 8 | 24 | `1` | `1` | `5` |
-| F8 | 16 | 48 | `1` | `3` | `11` |
-| F16 | 32 | 96 | `1` | `7` | `23` |
-| F32 | 64 | 192 | `1` | `15` | `47` |
-| F64 | 128 | 384 | `1` | `31` | `95` |
-| F128 | 256 | 768 | `1` | `63` | `191` |
-
-\* With this 4-core driver and 4-core executor shape, F2 cannot admit one
-executor from its four base Spark vCores; `MIN_EXECUTORS=1` requires burst
-capacity to be available.
+| Capacity SKU | Base Spark vCores | Burst Spark vCores | `NUM_EXECUTORS` no-burst ceiling | `NUM_EXECUTORS` burst ceiling |
+|---|---:|---:|---:|---:|
+| F2 | 4 | 20 | `0` | `4` |
+| F4 | 8 | 24 | `1` | `5` |
+| F8 | 16 | 48 | `3` | `11` |
+| F16 | 32 | 96 | `7` | `23` |
+| F32 | 64 | 192 | `15` | `47` |
+| F64 | 128 | 384 | `31` | `95` |
+| F128 | 256 | 768 | `63` | `191` |
 
 Treat these values as planning ceilings, not guaranteed allocations.
-`MAX_EXECUTORS` must be no greater than the workspace pool maximum and should
-normally be lower when the capacity is shared. `MIN_EXECUTORS` controls the
-job's admission footprint, so keep it at `1` for characterization unless a
-dedicated capacity has been sized for a larger fixed minimum. For the shared
-F8 characterization used by this project, start with `MIN_EXECUTORS=1` and
-`MAX_EXECUTORS=2`; the F8 no-burst ceiling of `3` assumes the application can
-consume the remaining base Spark vCores after its driver. The checked-in F64
-pipeline default of `MIN_EXECUTORS=2` and `MAX_EXECUTORS=8` is deliberately
-below F64's ceiling.
+`NUM_EXECUTORS` must leave room for the driver and must not exceed the
+workspace pool's worker-node count. The Development pool is fixed at six
+XX-Large nodes with autoscale disabled. Keep the pool's dynamic-executor
+allocation capability enabled and bounded to `MIN_EXECUTORS=1` and
+`MAX_EXECUTORS=5`. Fabric evaluates that pool policy while merging settings
+before it starts Livy; disabling the capability caused admission to use a
+ten-node XX-Large fallback (`640` cores and `4000` GB), which exceeds the
+six-node pool limit (`384` cores and `2400` GB). The checked-in pipeline still
+sets `DYNAMIC_ALLOCATION_ENABLED=false` and `NUM_EXECUTORS=5`, so benchmark
+sessions use a fixed five executors and leave one node for the driver. To opt
+a run into dynamic allocation, set `DYNAMIC_ALLOCATION_ENABLED=true`, treat
+`NUM_EXECUTORS` as the initial executor count, and review
+`MIN_EXECUTORS` and `MAX_EXECUTORS` against the pool and capacity limits
+before starting the run.
 
 If `DRIVER_CORES` or `EXECUTOR_CORES` changes, do not reuse the table's executor
 counts; recalculate both ceilings with the formula. Actual scale-up can be
 lower because other Spark jobs, pool node limits, memory/node shape, disabled
 job-level bursting, or capacity throttling consume or restrict the same
 resources. Notebook 15 still uses observed executor allocation, not
-`MAX_EXECUTORS`, to calculate inference slots.
+`NUM_EXECUTORS`, to calculate inference slots.
 
 The cell also sets `spark.speculation=false`, which is required for explicit
-`PARALLEL_TASKS` benchmark caps, and enables dynamic allocation. Edit the
+`PARALLEL_TASKS` benchmark caps, defaults dynamic allocation off, and supplies
+the fixed/initial executor count plus optional allocation bounds. Notebook 16
+uses the same startup configuration so its
+PREPARE and EVALUATE sessions cannot inherit an unsafe workspace fallback. Edit the
 interactive `defaultValue` entries before running directly, or pass matching
 Notebook activity parameters from a pipeline. Fabric scheduled notebook runs do
 not support parameterized session configuration, so scheduled runs use the
@@ -4850,7 +4856,7 @@ without turning the overall pipeline green.
 | `PIPELINE`, `BATCH_SIZE`, `SAMPLE_FPS`, `DETECTION_THRESHOLD`, `DETECTOR_MODEL`, `CAMERA_MOTION_COMPENSATION` | matching types | Exact inference configuration shared with the baseline. |
 | `LINE` | `Array` | Empty for no counting line, or four integer coordinates. It participates in the configuration hash. |
 | `CPUS_PER_TASK` | `Int` | Requested scheduler CPUs per task. It must match the running `spark.task.cpus`; keep `1` when Fabric retains its managed default. Memory-safe concurrency is enforced separately with sequential global task batches. |
-| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to notebook 15's first `%%configure` cell. `EXECUTOR_MEMORY` is JVM heap. Ensure it leaves enough physical node memory for Python/native work. Select executor bounds from the capacity-SKU reference above, then lower them for shared-capacity headroom and workspace-pool limits. |
+| `DRIVER_MEMORY`, `DRIVER_CORES`, `EXECUTOR_MEMORY`, `EXECUTOR_CORES`, `NUM_EXECUTORS`, `DYNAMIC_ALLOCATION_ENABLED`, `MIN_EXECUTORS`, `MAX_EXECUTORS` | matching types | Passed to the first `%%configure` cell in notebooks 15 and 16. `EXECUTOR_MEMORY` is JVM heap. Ensure it leaves enough physical node memory for Python/native work. The Development F64 pool keeps allocation capability enabled with bounds `1..5` so Fabric admission honors the six-node limit. The pipeline defaults session-level allocation off and uses five executors, reserving one node for the driver. To enable dynamic allocation for a run, review the initial, minimum, and maximum executor counts together. |
 | `PARALLEL_TASKS` | `String` | `auto` or a positive integer encoded as text for the pipeline; the notebook control layer normalizes it. |
 | `PARTITION_WAVES` | `Int` | Number of planned partition waves. |
 | `RUNTIME_AFFINITY_MAX_IMBALANCE` | `Float` | Maximum projected-load penalty accepted to retain a model-runtime affinity bucket. |

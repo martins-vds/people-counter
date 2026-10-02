@@ -193,6 +193,34 @@ class FabricNotebookTests(unittest.TestCase):
             },
         )
         self.assertEqual(configuration["conf"]["spark.speculation"], "false")
+        self.assertEqual(
+            configuration["conf"]["spark.dynamicAllocation.enabled"],
+            {
+                "parameterName": "DYNAMIC_ALLOCATION_ENABLED",
+                "defaultValue": "false",
+            },
+        )
+        self.assertEqual(
+            configuration["numExecutors"],
+            {
+                "parameterName": "NUM_EXECUTORS",
+                "defaultValue": 5,
+            },
+        )
+        self.assertEqual(
+            configuration["conf"]["spark.dynamicAllocation.minExecutors"],
+            {
+                "parameterName": "MIN_EXECUTORS",
+                "defaultValue": "1",
+            },
+        )
+        self.assertEqual(
+            configuration["conf"]["spark.dynamicAllocation.maxExecutors"],
+            {
+                "parameterName": "MAX_EXECUTORS",
+                "defaultValue": "5",
+            },
+        )
         self.assertEqual(configuration["executorCores"]["defaultValue"], 4)
         self.assertEqual(configuration["executorMemory"]["defaultValue"], "28g")
 
@@ -490,6 +518,7 @@ class FabricNotebookTests(unittest.TestCase):
             "native_thread_budget = calculate_placement_safe_thread_budget(",
             planning,
         )
+
         self.assertIn(
             "(executor.total_cores for executor in resource_snapshot_before.executors)",
             planning,
@@ -526,6 +555,38 @@ class FabricNotebookTests(unittest.TestCase):
             run_metrics,
         )
         self.assertIn('"model_format": run_model_format', run_metrics)
+
+    def test_executor_benchmark_control_uses_bounded_static_session(self):
+        notebook = json.loads(
+            EXECUTOR_BENCHMARK_CONTROL.read_text(encoding="utf-8")
+        )
+        code_cells = [
+            cell for cell in notebook["cells"] if cell["cell_type"] == "code"
+        ]
+        self.assertEqual(code_cells[0]["id"], "control-spark-session-config")
+        self.assertEqual(code_cells[1]["id"], "control-parameters")
+        configuration = json.loads(
+            "".join(code_cells[0]["source"]).split("\n", 1)[1]
+        )
+        self.assertEqual(
+            configuration["numExecutors"],
+            {
+                "parameterName": "NUM_EXECUTORS",
+                "defaultValue": 5,
+            },
+        )
+        self.assertEqual(
+            configuration["conf"]["spark.dynamicAllocation.enabled"],
+            {
+                "parameterName": "DYNAMIC_ALLOCATION_ENABLED",
+                "defaultValue": "false",
+            },
+        )
+        parameters = "".join(code_cells[1]["source"])
+        self.assertIn("NUM_EXECUTORS = 5", parameters)
+        self.assertIn("DYNAMIC_ALLOCATION_ENABLED = False", parameters)
+        self.assertIn("MIN_EXECUTORS = 1", parameters)
+        self.assertIn("MAX_EXECUTORS = 5", parameters)
 
     def test_executor_partition_builds_configs_with_prepared_model_format(self):
         build_config = cell_functions(
@@ -1484,7 +1545,7 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertEqual(pipeline_parameters["DATABASE"]["defaultValue"], "")
         self.assertEqual(
             pipeline_parameters["MODEL_FORMAT"]["defaultValue"],
-            "pytorch",
+            "onnx",
         )
         for activity_name in (
             "PrepareExecutorBenchmark",
@@ -1507,6 +1568,42 @@ class FabricNotebookTests(unittest.TestCase):
             pipeline_parameters["PEAK_WORKER_MEMORY_GIB"]["defaultValue"],
             0.0,
         )
+        self.assertEqual(
+            pipeline_parameters["NUM_EXECUTORS"]["defaultValue"],
+            5,
+        )
+        self.assertFalse(
+            pipeline_parameters["DYNAMIC_ALLOCATION_ENABLED"]["defaultValue"]
+        )
+        self.assertEqual(
+            pipeline_parameters["MIN_EXECUTORS"]["defaultValue"],
+            1,
+        )
+        self.assertEqual(
+            pipeline_parameters["MAX_EXECUTORS"]["defaultValue"],
+            5,
+        )
+        for activity_name in (
+            "PrepareExecutorBenchmark",
+            "RunExecutorPartitionInference",
+            "EvaluateExecutorBenchmark",
+        ):
+            activity_parameters = activities[activity_name]["typeProperties"][
+                "parameters"
+            ]
+            self.assertEqual(
+                activity_parameters["NUM_EXECUTORS"]["value"]["value"],
+                "@pipeline().parameters.NUM_EXECUTORS",
+            )
+            for parameter_name in (
+                "DYNAMIC_ALLOCATION_ENABLED",
+                "MIN_EXECUTORS",
+                "MAX_EXECUTORS",
+            ):
+                self.assertEqual(
+                    activity_parameters[parameter_name]["value"]["value"],
+                    f"@pipeline().parameters.{parameter_name}",
+                )
         for optional_parameter in (
             "BASELINE_BENCHMARK_BATCH_ID",
             "BASELINE_CONFIG_SHA256",

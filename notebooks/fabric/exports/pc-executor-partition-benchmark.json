@@ -183,6 +183,20 @@
                             },
                             "type": "int"
                         },
+                        "NUM_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.NUM_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DYNAMIC_ALLOCATION_ENABLED": {
+                            "value": {
+                                "value": "@pipeline().parameters.DYNAMIC_ALLOCATION_ENABLED",
+                                "type": "Expression"
+                            },
+                            "type": "bool"
+                        },
                         "MIN_EXECUTORS": {
                             "value": {
                                 "value": "@pipeline().parameters.MIN_EXECUTORS",
@@ -403,6 +417,20 @@
                                 "type": "Expression"
                             },
                             "type": "int"
+                        },
+                        "NUM_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.NUM_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DYNAMIC_ALLOCATION_ENABLED": {
+                            "value": {
+                                "value": "@pipeline().parameters.DYNAMIC_ALLOCATION_ENABLED",
+                                "type": "Expression"
+                            },
+                            "type": "bool"
                         },
                         "MIN_EXECUTORS": {
                             "value": {
@@ -626,6 +654,20 @@
                             },
                             "type": "int"
                         },
+                        "NUM_EXECUTORS": {
+                            "value": {
+                                "value": "@pipeline().parameters.NUM_EXECUTORS",
+                                "type": "Expression"
+                            },
+                            "type": "int"
+                        },
+                        "DYNAMIC_ALLOCATION_ENABLED": {
+                            "value": {
+                                "value": "@pipeline().parameters.DYNAMIC_ALLOCATION_ENABLED",
+                                "type": "Expression"
+                            },
+                            "type": "bool"
+                        },
                         "MIN_EXECUTORS": {
                             "value": {
                                 "value": "@pipeline().parameters.MIN_EXECUTORS",
@@ -746,7 +788,8 @@
                 "defaultValue": "<env>-f<capacity_sku>-t<cpus>-yyyyMMdd-<model_format>-r<number>"
             },
             "DATABASE": {
-                "type": "string"
+                "type": "string",
+                "defaultValue": ""
             },
             "TABLE_PREFIX": {
                 "type": "string",
@@ -793,10 +836,12 @@
                 "defaultValue": "/lakehouse/default"
             },
             "BASELINE_BENCHMARK_BATCH_ID": {
-                "type": "string"
+                "type": "string",
+                "defaultValue": ""
             },
             "BASELINE_CONFIG_SHA256": {
-                "type": "string"
+                "type": "string",
+                "defaultValue": ""
             },
             "MIN_WALL_SECONDS": {
                 "type": "int",
@@ -831,7 +876,8 @@
                 "defaultValue": "r18"
             },
             "CAMERA_MOTION_COMPENSATION": {
-                "type": "string"
+                "type": "string",
+                "defaultValue": ""
             },
             "CPUS_PER_TASK": {
                 "type": "int",
@@ -877,13 +923,21 @@
                 "type": "int",
                 "defaultValue": 4
             },
+            "NUM_EXECUTORS": {
+                "type": "int",
+                "defaultValue": 5
+            },
+            "DYNAMIC_ALLOCATION_ENABLED": {
+                "type": "bool",
+                "defaultValue": false
+            },
             "MIN_EXECUTORS": {
                 "type": "int",
-                "defaultValue": 2
+                "defaultValue": 1
             },
             "MAX_EXECUTORS": {
                 "type": "int",
-                "defaultValue": 8
+                "defaultValue": 5
             },
             "INPUT_TXN_VERSION": {
                 "type": "int",
