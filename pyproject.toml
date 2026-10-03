@@ -35,6 +35,7 @@ pc-control-sjd = "people_counter.sjd_control:main"
 pc-process-sjd = "people_counter.sjd_process:main"
 pc-gold-sjd = "people_counter.sjd_gold:main"
 pc-local-orchestrate = "people_counter.sjd_orchestrate:main"
+pc-fabric-canary = "people_counter.fabric_canary_tool:main"
 prepare-manifests = "people_counter.manifest_publisher:prepare_main"
 publish-manifests = "people_counter.manifest_publisher:publish_main"
 

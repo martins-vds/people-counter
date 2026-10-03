@@ -42,6 +42,11 @@ test doubles, not claims of OneLake compatibility or Fabric throughput.
 Fabric stores remain explicit unsupported seams until a reviewed SJD canary
 implements them.
 
+The isolated Runtime 2.0 canary and its dry-run/deployment tooling are
+documented in
+[docs/fabric-runtime2-sjd-canary.md](docs/fabric-runtime2-sjd-canary.md).
+It does not enable the fail-closed production Fabric adapters.
+
 Run exactly one PyTorch variant at a time. Each command requires an explicit
 device selection and will fail instead of falling back to another device.
 The installed `people-counter` command provides `rtdetr-osnet` and

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Protocol, TypeAlias
 
-import cv2
 from numpy.typing import NDArray
 
 
@@ -39,6 +38,8 @@ def read_video_metadata(
     capture: VideoCapture,
     input_path: Path,
 ) -> VideoMetadata:
+    import cv2
+
     fps = capture.get(cv2.CAP_PROP_FPS)
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))

@@ -370,7 +370,8 @@ class SjdProcessTests(unittest.TestCase):
             },
         }
 
-        def configure(*args):
+        def configure(*args, **kwargs):
+            self.assertTrue(kwargs["apply_native_limits"])
             events.append("cpu")
             return type("Budget", (), {"threads_per_worker": 1})()
 
@@ -409,10 +410,11 @@ class SjdProcessTests(unittest.TestCase):
         with patch(
             "people_counter.sjd_process.configure_cpu_runtime",
             return_value=budget,
-        ):
+        ) as configure:
             records = DirectExecutionHarness().execute(
                 envelope, plan, LOCAL_TWO_WORKERS, "probe"
             )
+        configure.assert_called_with(1, 1, apply_native_limits=False)
         self.assertEqual(len(records), 2)
         self.assertEqual(
             {record["partition_id"] for record in records}, {0, 1}

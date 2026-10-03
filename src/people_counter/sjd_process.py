@@ -492,10 +492,14 @@ def execute_sjd_partition(
     task_cpus = _positive_int(materialized[0].get("task_cpus"), "task_cpus")
     if task_cpus != 1 or profile_cores != 1:
         raise ProcessValidationError("executor callable requires the fixed one-core profile")
-    budget = configure_cpu_runtime(profile_cores, 1)
     mode = materialized[0].get("mode")
     if mode not in {"probe", "sdk"}:
         raise ProcessValidationError(f"unsupported processor mode: {mode!r}")
+    budget = configure_cpu_runtime(
+        profile_cores,
+        1,
+        apply_native_limits=mode == "sdk",
+    )
     if mode == "sdk":
         processor: Any = _CountingSdkProcessor()
     else:
