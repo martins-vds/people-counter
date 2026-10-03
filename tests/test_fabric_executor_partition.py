@@ -480,11 +480,29 @@ class FabricExecutorPartitionTests(unittest.TestCase):
 
         first = cache.get_or_load(("rtdetr", "cpu"), loader)
         second = cache.get_or_load(("rtdetr", "cpu"), loader)
+        repeated = cache.get_or_load(("rtdetr", "cpu"), loader)
         third = cache.get_or_load(("rtdetr", "gpu"), loader)
 
         self.assertIs(first, second)
+        self.assertIs(first, repeated)
         self.assertIsNot(first, third)
         self.assertEqual(loader.call_count, 2)
+        self.assertEqual(cache.loads, 2)
+        self.assertEqual(cache.hits, 2)
+
+    def test_runtime_cache_counts_only_successful_load_and_allows_retry(self):
+        cache = ExecutorRuntimeCache()
+        installed = object()
+        loader = MagicMock(side_effect=[RuntimeError("load failed"), installed])
+
+        with self.assertRaisesRegex(RuntimeError, "load failed"):
+            cache.get_or_load(("rtdetr", "cpu"), loader)
+        self.assertEqual((cache.loads, cache.hits), (0, 0))
+
+        self.assertIs(cache.get_or_load(("rtdetr", "cpu"), loader), installed)
+        self.assertIs(cache.get_or_load(("rtdetr", "cpu"), loader), installed)
+        self.assertEqual(loader.call_count, 2)
+        self.assertEqual((cache.loads, cache.hits), (1, 1))
 
     def test_process_video_partition_emits_summary_records_and_errors(self):
         result = RunResult(

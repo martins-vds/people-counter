@@ -38,6 +38,10 @@ class StagingValidationError(RuntimeError):
     """Attempt-scoped staging is incomplete or internally inconsistent."""
 
 
+class OptionalLocalSparkDependencyError(RuntimeError):
+    """The explicitly selected Spark/Delta backend is not installed."""
+
+
 @dataclass(frozen=True)
 class BatchStaging:
     batch_id: str
@@ -287,7 +291,14 @@ def create_local_spark_session(
     app_name: str,
     correlation_id: str,
 ) -> Any:
-    from pyspark.sql import SparkSession
+    try:
+        from pyspark.sql import SparkSession
+        import delta  # noqa: F401
+    except ImportError as error:
+        raise OptionalLocalSparkDependencyError(
+            "Spark/Delta execution requires optional dependencies; install "
+            "'people-counter[local-spark]' or select the direct harness/JSON backend"
+        ) from error
 
     return (
         SparkSession.builder.master(master)

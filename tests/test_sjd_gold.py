@@ -1,0 +1,662 @@
+import hashlib
+import json
+import sqlite3
+import sys
+import tempfile
+import types
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from people_counter.sjd_control import SQLiteControlStore
+from people_counter.sjd_gold import (
+    FabricGoldStore,
+    GoldSourceError,
+    GoldValidationError,
+    LocalGoldJob,
+    LocalJsonGoldStore,
+    UnsupportedGoldBackendError,
+    _load_delta_output_document,
+    _optional_float,
+    _sha256_json,
+    main,
+)
+
+
+NOW = datetime(2026, 10, 2, 17, 0, tzinfo=timezone.utc)
+
+
+def test_zero_metric_is_valid_and_preserved():
+    assert _optional_float(0) == 0.0
+    assert _optional_float("0") == 0.0
+
+
+def test_delta_output_decoder_uses_active_session_and_verifies_records():
+    records = [
+        {
+            "work_id": "work",
+            "attempt_id": "attempt",
+            "record_type": "video_result",
+            "record_sequence": 0,
+            "payload_json": json.dumps({"captured_at_utc": "2026-01-01T00:00:00Z"}),
+            "processing_seconds": 1.0,
+            "processed_frames": 1,
+            "status": "SUCCEEDED",
+        }
+    ]
+
+    class Reader:
+        def format(self, value):
+            assert value == "delta"
+            return self
+
+        def load(self, value):
+            assert value.endswith("attempt")
+            return self
+
+        def where(self, value):
+            assert "work_id" in value or "attempt_id" in value
+            return self
+
+        def select(self, value):
+            assert value == "record_json"
+            return self
+
+        def collect(self):
+            return [{"record_json": json.dumps(records[0])}]
+
+    active = types.SimpleNamespace(read=Reader())
+    spark_session = types.SimpleNamespace(
+        getActiveSession=lambda: active,
+    )
+    pyspark = types.ModuleType("pyspark")
+    pyspark_sql = types.ModuleType("pyspark.sql")
+    pyspark_sql.SparkSession = spark_session
+    pyspark.sql = pyspark_sql
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(sys.modules, "pyspark", pyspark)
+        monkeypatch.setitem(sys.modules, "pyspark.sql", pyspark_sql)
+        document = _load_delta_output_document(
+            Path("/delta/attempt"),
+            _sha256_json(records),
+            verify_hash=True,
+            work_id="work",
+            attempt_id="attempt",
+        )
+    assert document["run"]["work_id"] == "work"
+    assert document["run"]["attempt_id"] == "attempt"
+    assert document["run"]["captured_at_utc"] == "2026-01-01T00:00:00Z"
+
+
+def test_delta_output_decoder_rejects_missing_identity_and_bad_digest():
+    with pytest.raises(GoldSourceError):
+        _load_delta_output_document(
+            Path("/delta/attempt"),
+            "",
+            verify_hash=False,
+            work_id=None,
+            attempt_id="attempt",
+        )
+
+    class Reader:
+        def format(self, value):
+            return self
+
+        def load(self, value):
+            return self
+
+        def where(self, value):
+            return self
+
+        def select(self, value):
+            return self
+
+        def collect(self):
+            return [
+                {
+                    "record_json": json.dumps(
+                        {
+                            "work_id": "work",
+                            "attempt_id": "attempt",
+                            "record_type": "video_result",
+                            "record_sequence": 0,
+                            "payload_json": "{}",
+                        }
+                    )
+                }
+            ]
+
+    active = types.SimpleNamespace(read=Reader())
+    pyspark = types.ModuleType("pyspark")
+    pyspark_sql = types.ModuleType("pyspark.sql")
+    pyspark_sql.SparkSession = types.SimpleNamespace(
+        getActiveSession=lambda: active,
+    )
+    pyspark.sql = pyspark_sql
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setitem(sys.modules, "pyspark", pyspark)
+        monkeypatch.setitem(sys.modules, "pyspark.sql", pyspark_sql)
+        with pytest.raises(GoldSourceError, match="digest mismatch"):
+            _load_delta_output_document(
+                Path("/delta/attempt"),
+                "0" * 64,
+                verify_hash=True,
+                work_id="work",
+                attempt_id="attempt",
+            )
+
+
+class GoldFixture:
+    def __init__(self, root):
+        self.root = root
+        self.database = root / "control.sqlite3"
+        self.control = SQLiteControlStore(
+            self.database,
+            root / "control-content",
+            clock=lambda: NOW.timestamp(),
+            id_factory=self._next_id,
+        )
+        self.identifiers = iter(f"id-{index}" for index in range(100))
+        self.gold_root = root / "gold"
+
+    def _next_id(self):
+        return next(self.identifiers)
+
+    def register(self, work_id, *, captured_at="2026-10-01T23:59:30Z"):
+        self.control.register(
+            work_id,
+            {
+                "asset_id": f"asset-{work_id}",
+                "asset_version": "v1",
+                "camera_id": "camera-a",
+                "location_id": "lobby",
+                "camera_timezone": "UTC",
+                "captured_at_utc": captured_at,
+                "duration_seconds": 120.0,
+                "config_sha256": "config-a",
+                "config_json": {
+                    "pipeline": "rtdetr",
+                    "batch_size": 4,
+                    "line": [[0, 1], [2, 3]],
+                },
+            },
+            runtime_key="runtime",
+            duration_seconds=120,
+            config_sha256="config-a",
+            release_digest="release-a",
+            available_at=NOW.timestamp(),
+        )
+
+    def publish(self, work_id, *, commit=True, lines=None):
+        self.register(work_id)
+        batch = self.control.claim(
+            "driver",
+            max_items=1,
+            minimum_items=1,
+            lease_seconds=1000,
+            minimum_speed_x=1,
+            safety_factor=1,
+            margin_seconds=1,
+        )
+        assert batch is not None
+        item = batch.items[0]
+        output = {
+            "run": {
+                "work_id": work_id,
+                "attempt_id": item.attempt_id,
+                "captured_at_utc": "2026-10-01T23:59:30Z",
+                "camera_id": "camera-a",
+                "location_id": "lobby",
+                "config_sha256": "config-a",
+                "duration_seconds": 120.0,
+                "processing_seconds": 30.0,
+                "distinct_people": 3,
+                "line_in_count": 4,
+                "line_out_count": 1,
+            },
+            "line_counts": lines
+            if lines is not None
+            else [
+                {
+                    "work_id": work_id,
+                    "attempt_id": item.attempt_id,
+                    "observed_at_utc": "2026-10-01T23:59:50Z",
+                    "frame_in_count": 2,
+                    "frame_out_count": 1,
+                },
+                {
+                    "work_id": work_id,
+                    "attempt_id": item.attempt_id,
+                    "observed_at_utc": "2026-10-02T00:00:10Z",
+                    "frame_in_count": 2,
+                    "frame_out_count": 0,
+                },
+            ],
+        }
+        path = self.root / f"{item.attempt_id}.json"
+        content = json.dumps(output, sort_keys=True).encode()
+        path.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        envelope = self.control.load_claim_envelope(batch.batch_id)
+        self.control.seal_batch(
+            batch.batch_id,
+            [
+                {
+                    "work_id": work_id,
+                    "attempt_id": item.attempt_id,
+                    "output_path": str(path),
+                    "output_sha256": digest,
+                    "records": [
+                        {
+                            "executor_identity": "executor",
+                            "partition_id": 0,
+                            "task_attempt_id": 0,
+                            "record_sequence": 0,
+                        }
+                    ],
+                }
+            ],
+            envelope_sha256=batch.envelope_sha256,
+            membership_sha256=envelope["membership_sha256"],
+        )
+        if commit:
+            self.control.commit_batch(batch.batch_id)
+        return item.attempt_id
+
+    def job(self):
+        return LocalGoldJob(
+            self.database,
+            self.gold_root,
+            clock=lambda: NOW,
+        )
+
+    def rewrite_output(self, attempt_id, update):
+        path = self.root / f"{attempt_id}.json"
+        payload = json.loads(path.read_text())
+        update(payload)
+        content = json.dumps(payload, sort_keys=True).encode()
+        path.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "UPDATE attempts SET output_sha256 = ? WHERE attempt_id = ?",
+                (digest, attempt_id),
+            )
+            connection.execute(
+                "UPDATE publications SET output_sha256 = ? WHERE attempt_id = ?",
+                (digest, attempt_id),
+            )
+
+
+@pytest.fixture
+def gold_fixture():
+    with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+        yield GoldFixture(Path(temporary))
+
+
+def test_only_committed_pointer_output_is_visible(gold_fixture):
+    committed_attempt = gold_fixture.publish("committed")
+    gold_fixture.publish(
+        "sealed-only",
+        commit=False,
+        lines=[
+            {
+                "observed_at_utc": "2026-10-02T00:00:20Z",
+                "frame_in_count": 99,
+                "frame_out_count": 0,
+            }
+        ],
+    )
+
+    outputs = gold_fixture.job().committed_outputs()
+
+    assert [(item.work_id, item.attempt_id) for item in outputs] == [
+        ("committed", committed_attempt)
+    ]
+
+
+def test_planning_and_fact_build_cover_cross_midnight_dates(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+
+    plan = job.plan()
+    outcome = job.build_facts(dates=plan.items)
+
+    assert plan.items == ("2026-10-01", "2026-10-02")
+    assert outcome["rows"] == {
+        "gold_flow_minute": 2,
+        "gold_flow_hour": 2,
+        "gold_video": 1,
+        "gold_operations_hour": 1,
+    }
+    minute = job.store.read_table("gold_flow_minute")
+    assert [(row["flow_date"], row["entries"], row["exits"]) for row in minute] == [
+        ("2026-10-01", 2, 1),
+        ("2026-10-02", 2, 0),
+    ]
+    assert job.store.read_table("gold_video")[0]["speed_x_realtime"] == 4.0
+    operations = job.store.read_table("gold_operations_hour")
+    assert operations[0]["queued"] == 1
+    assert operations[0]["started"] == 1
+    assert operations[0]["succeeded"] == 1
+
+
+def test_sdk_relative_line_timestamp_is_derived_from_capture_time(gold_fixture):
+    gold_fixture.publish(
+        "relative-line",
+        lines=[
+            {
+                "video_seconds": "45.5",
+                "frame_in_count": 1,
+                "frame_out_count": 0,
+            }
+        ],
+    )
+    job = gold_fixture.job()
+
+    assert job.plan().items == ("2026-10-01", "2026-10-02")
+    job.build_facts(dates=["2026-10-02"])
+    row = job.store.read_table("gold_flow_minute")[0]
+    assert row["minute_utc"] == "2026-10-02T00:00:00Z"
+    assert row["entries"] == 1
+
+
+def test_uncommitted_claim_changes_only_operations_source(gold_fixture):
+    gold_fixture.publish("committed")
+    job = gold_fixture.job()
+    job.run()
+    flow_before = job.source_checkpoint()
+    operations_before = job.operations_source_checkpoint()
+
+    gold_fixture.register("uncommitted")
+    gold_fixture.control.claim(
+        "driver",
+        max_items=1,
+        minimum_items=1,
+        lease_seconds=1000,
+        minimum_speed_x=1,
+        safety_factor=1,
+        margin_seconds=1,
+    )
+
+    assert job.source_checkpoint() == flow_before
+    assert job.operations_source_checkpoint() != operations_before
+    assert job.build_facts()["skipped"] is False
+    operations = job.store.read_table("gold_operations_hour")
+    assert sum(row["queued"] for row in operations) == 2
+    assert sum(row["started"] for row in operations) == 2
+    assert sum(row["succeeded"] for row in operations) == 1
+
+
+def test_empty_partition_replacement_removes_stale_rows(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    stale = {
+        "minute_utc": "2026-10-03T00:00:00Z",
+        "flow_date": "2026-10-03",
+    }
+    job.store.replace_partition(
+        "gold_flow_minute", "flow_date", "2026-10-03", [stale]
+    )
+
+    result = job.build_facts(dates=["2026-10-03"])
+
+    assert result["rows"]["gold_flow_minute"] == 0
+    assert job.store.read_table("gold_flow_minute") == []
+
+
+def test_dimensions_and_referential_validation(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    job.build_facts(dates=["2026-10-01", "2026-10-02"])
+
+    result = job.build_dimensions()
+
+    assert result["rows"]["gold_dim_time"] == 1440
+    assert job.store.read_table("gold_dim_camera")[0]["camera_id"] == "camera-a"
+    assert job.store.read_table("gold_dim_video")[0]["work_id"] == "work-1"
+    assert job.store.read_table("gold_dim_model_config")[0]["pipeline"] == "rtdetr"
+    assert job.validate()["rules_checked"] == 22
+
+
+def test_validation_rejects_an_unresolved_fact_key(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    job.build_facts(dates=["2026-10-01", "2026-10-02"])
+    job.build_dimensions()
+    rows = job.store.read_table("gold_video")
+    rows[0]["camera_id"] = "missing-camera"
+    job.store.replace_table("gold_video", rows)
+
+    with pytest.raises(GoldValidationError, match="unresolved"):
+        job.validate()
+
+
+def test_validation_rejects_null_dimension_primary_key(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    job.build_facts(dates=["2026-10-01", "2026-10-02"])
+    job.build_dimensions()
+    cameras = job.store.read_table("gold_dim_camera")
+    cameras[0]["camera_id"] = None
+    job.store.replace_table("gold_dim_camera", cameras)
+
+    with pytest.raises(GoldValidationError, match="non-null and unique"):
+        job.validate()
+
+
+def test_automatic_rerun_uses_source_and_target_checkpoints(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+
+    first_facts = job.build_facts()
+    first_dimensions = job.build_dimensions()
+    fact_versions = job.store.versions(
+        (
+            "gold_flow_minute",
+            "gold_flow_hour",
+            "gold_video",
+            "gold_operations_hour",
+        )
+    )
+
+    assert first_facts["skipped"] is False
+    assert first_dimensions["skipped"] is False
+    assert job.build_facts()["skipped"] is True
+    assert job.build_dimensions()["skipped"] is True
+    assert job.store.versions(fact_versions) == fact_versions
+
+
+def test_run_builds_both_stages_and_validates(gold_fixture):
+    gold_fixture.publish("work-1")
+
+    result = gold_fixture.job().run()
+
+    assert result["facts"]["skipped"] is False
+    assert result["dimensions"]["skipped"] is False
+    assert result["validation"]["valid"] is True
+    assert result["pending_refreshes"] == 2
+
+
+def test_refresh_outbox_is_deduplicated_and_locally_acknowledged(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    job.build_facts(dates=["2026-10-01"])
+    job.build_facts(dates=["2026-10-01"])
+
+    pending = job.state.pending_refreshes()
+
+    assert len(pending) == 2
+    assert pending[0]["payload"]["reason"] == "gold facts changed"
+    assert job.state.acknowledge_refresh(pending[0]["outbox_id"], "test") is True
+    assert job.state.acknowledge_refresh(pending[0]["outbox_id"], "test") is False
+    assert len(job.state.pending_refreshes()) == 1
+
+
+def test_cli_help_is_spark_free_and_fabric_placeholder_fails_closed(
+    gold_fixture, capsys
+):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--help"])
+
+    assert exit_info.value.code == 0
+    assert "build-facts" in capsys.readouterr().out
+    with pytest.raises(UnsupportedGoldBackendError, match="unsupported"):
+        FabricGoldStore()
+
+
+def test_local_store_rejects_cross_partition_rows(gold_fixture):
+    store = LocalJsonGoldStore(gold_fixture.gold_root)
+
+    with pytest.raises(ValueError, match="outside"):
+        store.replace_partition(
+            "gold_video",
+            "capture_date",
+            "2026-10-01",
+            [{"capture_date": "2026-10-02"}],
+        )
+
+
+def test_first_and_forced_plans_include_history_outside_lookback(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+
+    assert job.plan(lookback_hours=1).items == ("2026-10-01", "2026-10-02")
+    job.build_facts()
+
+    assert job.plan(lookback_hours=1, reset=True).items == (
+        "2026-10-01",
+        "2026-10-02",
+    )
+
+
+def test_plan_includes_claimed_sealed_and_completed_operational_dates(
+    gold_fixture,
+):
+    attempt_id = gold_fixture.publish("work-1")
+    with sqlite3.connect(gold_fixture.database) as connection:
+        batch_id = connection.execute(
+            "SELECT batch_id FROM attempts WHERE attempt_id = ?",
+            (attempt_id,),
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE attempts SET created_at = ?, sealed_at = ? "
+            "WHERE attempt_id = ?",
+            (
+                datetime(2026, 10, 2, 12, tzinfo=timezone.utc).timestamp(),
+                datetime(2026, 10, 3, 12, tzinfo=timezone.utc).timestamp(),
+                attempt_id,
+            ),
+        )
+        completed = datetime(
+            2026, 10, 4, 12, tzinfo=timezone.utc
+        ).timestamp()
+        connection.execute(
+            "UPDATE batches SET sealed_at = ?, committed_at = ? "
+            "WHERE batch_id = ?",
+            (
+                datetime(2026, 10, 3, 12, tzinfo=timezone.utc).timestamp(),
+                completed,
+                batch_id,
+            ),
+        )
+        connection.execute(
+            "UPDATE publications SET published_at = ? WHERE attempt_id = ?",
+            (completed, attempt_id),
+        )
+
+    assert gold_fixture.job().plan().items == (
+        "2026-10-01",
+        "2026-10-02",
+        "2026-10-03",
+        "2026-10-04",
+    )
+
+
+def test_explicit_partition_build_does_not_advance_complete_checkpoint(
+    gold_fixture,
+):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+
+    result = job.build_facts(dates=["2026-10-01"])
+
+    assert result["complete_checkpoint_advanced"] is False
+    assert job.state.checkpoint("facts") is None
+    assert job.state.checkpoint("facts:partition:2026-10-01") is not None
+    automatic = job.build_facts()
+    assert automatic["skipped"] is False
+    assert automatic["complete_checkpoint_advanced"] is True
+    assert job.state.checkpoint("facts") is not None
+
+
+def test_changed_or_deleted_fact_target_prevents_skip(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    job.build_facts()
+    job.store.replace_table("gold_flow_minute", [])
+
+    result = job.build_facts()
+
+    assert result["skipped"] is False
+    assert len(job.store.read_table("gold_flow_minute")) == 2
+
+
+def test_refresh_ack_can_require_the_observed_dedupe_key(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    job.build_facts()
+    pending = job.state.pending_refreshes()[0]
+
+    assert (
+        job.state.acknowledge_refresh(
+            pending["outbox_id"],
+            "test",
+            expected_dedupe_key="not-the-observed-key",
+        )
+        is False
+    )
+    assert (
+        job.state.acknowledge_refresh(
+            pending["outbox_id"],
+            "test",
+            expected_dedupe_key=pending["dedupe_key"],
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        lambda payload: payload["run"].__setitem__("captured_at_utc", "2026-10-01T23:59:30"),
+        lambda payload: payload["run"].__setitem__("processing_seconds", True),
+        lambda payload: payload["run"].__setitem__("distinct_people", float("inf")),
+        lambda payload: payload["line_counts"][0].__setitem__("frame_in_count", -1),
+    ],
+)
+def test_source_validation_rejects_naive_or_invalid_metrics(
+    gold_fixture, update
+):
+    attempt_id = gold_fixture.publish("work-1")
+    gold_fixture.rewrite_output(attempt_id, update)
+
+    with pytest.raises(GoldSourceError):
+        gold_fixture.job().build_facts()
+
+
+def test_dimension_build_rejects_invalid_camera_timezone(gold_fixture):
+    attempt_id = gold_fixture.publish("work-1")
+    gold_fixture.rewrite_output(
+        attempt_id,
+        lambda payload: payload["run"].__setitem__(
+            "camera_timezone", "Mars/Olympus_Mons"
+        ),
+    )
+    job = gold_fixture.job()
+    job.build_facts()
+
+    with pytest.raises(GoldSourceError, match="invalid IANA timezone"):
+        job.build_dimensions()

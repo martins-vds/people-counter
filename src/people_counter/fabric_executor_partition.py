@@ -59,6 +59,8 @@ class ExecutorRuntimeCache:
 
     def __init__(self) -> None:
         self._items: dict[tuple[object, ...], PipelineRuntime] = {}
+        self.loads = 0
+        self.hits = 0
 
     def get_or_load(
         self,
@@ -66,10 +68,13 @@ class ExecutorRuntimeCache:
         loader: Callable[[], PipelineRuntime],
     ) -> PipelineRuntime:
         runtime = self._items.get(key)
-        if runtime is None:
-            runtime = loader()
-            self._items[key] = runtime
-        return runtime
+        if runtime is not None:
+            self.hits += 1
+            return runtime
+        loaded = loader()
+        self._items[key] = loaded
+        self.loads += 1
+        return loaded
 
     def clear(self) -> None:
         self._items.clear()

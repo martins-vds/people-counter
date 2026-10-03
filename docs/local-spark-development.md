@@ -6,6 +6,245 @@ are distributed with `mapPartitions`; each executor process reuses the existing
 `SdkRuntimeProcessor` cache in SDK mode. Results first land in immutable,
 batch-attempt-scoped local Delta staging.
 
+## Candidate A Spark Job Definitions
+
+The current package also installs four lazy-import console commands:
+
+```bash
+uv run pc-control-sjd --help
+uv run pc-process-sjd --help
+uv run pc-gold-sjd --help
+uv run pc-local-orchestrate --help
+```
+
+`pc-control-sjd` never initializes inference or Spark. `pc-process-sjd` never
+claims work: it accepts only a durable batch ID and reloads the immutable claim
+envelope. `pc-gold-sjd` sees an attempt only through the SQLite committed
+pointer. Mutable local control changes stay on the driver under SQLite
+`BEGIN IMMEDIATE`; executors receive only primitive immutable values.
+
+### Fast end-to-end probe
+
+This path needs neither Spark nor models but exercises the production planner,
+staging validation, create-only marker, fence recheck, pointer transaction,
+reconciliation, gold builders, checkpoints, and refresh outbox:
+
+```bash
+rm -rf local-data/candidate-a-probe
+uv run pc-local-orchestrate pipeline \
+  --root local-data/candidate-a-probe \
+  --fixture-count 2 \
+  --mode probe \
+  --profile local-two-workers \
+  --harness direct
+```
+
+Repeating the command reopens the identical complete attempt and pointers. It
+does not execute inference or replace an existing winner.
+
+The two-worker Compose equivalent is:
+
+```bash
+export COMPOSE_PROJECT_NAME=people-counter-candidate-a
+docker compose up -d --wait spark-master spark-worker-1 spark-worker-2 spark-client
+docker compose exec -T spark-client pc-local-orchestrate pipeline \
+  --root /data/output/candidate-a-probe \
+  --fixture-count 2 \
+  --mode probe \
+  --profile local-two-workers \
+  --harness spark \
+  --spark-master spark://spark-master:7077
+```
+
+The result's `executor_identities` must name both physical workers. The fixed
+profile requires two one-core executors, `spark.task.cpus=1`, fixed allocation,
+and `spark.speculation=false`; conflicting overrides fail before processing.
+
+### Opt-in Candidate A Compose E2E
+
+The Candidate A E2E is intentionally separate from
+`tests/test_local_compose.py`, which remains the `people-counter-local` smoke.
+The E2E builds the current checkout under a unique image tag, starts a uniquely
+named Compose project, and runs `pc-local-orchestrate` with the real
+`SparkExecutionHarness`, Delta attempt adapter, and path-Delta gold store:
+
+```bash
+RUN_CANDIDATE_A_COMPOSE_E2E=1 \
+  uv run pytest -m compose tests/test_candidate_a_compose.py -q
+```
+
+Prerequisites are a running Docker Engine with Compose v2, network access for
+the pinned image/dependency build when those layers are not cached, and enough
+resources for the master, client, and two one-core workers (approximately 6
+GiB of Docker memory). The test verifies exact worker hosts, the built release
+identity, committed-pointer-only gold visibility, an idempotent rerun,
+path-based Delta output, and recovery of an expired lease. It always requests
+Compose shutdown with volumes and orphans removed, then removes only its unique
+output root, event logs, and image tag. Without the opt-in environment variable
+the module is collection-safe and skipped; Docker is not probed.
+
+The Compose image already installs the `local-spark` extra and resolves the
+matching Delta JARs at build time, so the host running this E2E does not need
+PySpark. For host-side Spark development instead, install the optional
+dependencies explicitly with `uv sync --extra local-spark`; direct-harness and
+ordinary unit tests do not require that extra.
+
+### Per-job commands
+
+Bootstrap creates or validates local control and gold metadata:
+
+```bash
+CONTROL=local-data/candidate-a/control/control.sqlite3
+CONTENT=local-data/candidate-a/content
+STAGING=local-data/candidate-a/attempts
+GOLD=local-data/candidate-a/gold
+
+uv run pc-control-sjd \
+  --database "$CONTROL" --content-root "$CONTENT" bootstrap
+```
+
+Registration accepts a JSON array, an `{"items": [...]}` object, a single JSON
+object, or JSONL. Each item has immutable request metadata:
+
+```json
+{
+  "work_id": "camera-a-20261002T170000Z-v1",
+  "runtime_key": "rtdetr-osnet:cpu:pytorch:r18",
+  "duration_seconds": 120.0,
+  "config_sha256": "configuration identity",
+  "release_digest": "source/image release identity",
+  "max_attempts": 3,
+  "payload": {
+    "source_video": "/data/samples/three_people_walking.mp4",
+    "pipeline": "rtdetr-osnet",
+    "batch_size": 1,
+    "models_dir": "/data/models",
+    "captured_at_utc": "2026-10-02T17:00:00Z",
+    "camera_id": "camera-a",
+    "location_id": "lobby",
+    "camera_timezone": "UTC"
+  }
+}
+```
+
+Register and claim one homogeneous bounded application:
+
+```bash
+uv run pc-control-sjd \
+  --database "$CONTROL" --content-root "$CONTENT" \
+  register --manifest work.jsonl
+
+uv run pc-control-sjd \
+  --database "$CONTROL" --content-root "$CONTENT" \
+  claim --owner local-driver --max-items 2 --minimum-items 1 \
+  --lease-seconds 900 --minimum-speed-x 1 \
+  --safety-factor 1.25 --margin-seconds 60
+```
+
+Copy only the returned `batch_id` into the process command:
+
+```bash
+uv run pc-process-sjd run \
+  --batch-id "$BATCH_ID" \
+  --database "$CONTROL" --content-root "$CONTENT" \
+  --staging-root "$STAGING" \
+  --profile local-two-workers --mode probe --harness direct
+```
+
+Use `--mode sdk` only with local model artifacts and source videos. Detector
+batch size is restricted to `1`, `2`, or `4` for characterization. Sampling,
+model choice, quantization, and whole-video tracking behavior are unchanged.
+
+Inspect and recover the control plane:
+
+```bash
+uv run pc-control-sjd --database "$CONTROL" status
+uv run pc-control-sjd --database "$CONTROL" reconcile
+uv run pc-control-sjd --database "$CONTROL" recover
+uv run pc-control-sjd --database "$CONTROL" replay \
+  --work-id "$WORK_ID" --operator operator@example.com \
+  --reason "reviewed transient source failure"
+```
+
+Build gold only from committed pointers:
+
+```bash
+uv run pc-gold-sjd plan \
+  --control-db "$CONTROL" --gold-root "$GOLD" --backend delta
+uv run pc-gold-sjd build-facts \
+  --control-db "$CONTROL" --gold-root "$GOLD"
+uv run pc-gold-sjd build-dimensions \
+  --control-db "$CONTROL" --gold-root "$GOLD"
+uv run pc-gold-sjd validate \
+  --control-db "$CONTROL" --gold-root "$GOLD"
+uv run pc-gold-sjd run \
+  --control-db "$CONTROL" --gold-root "$GOLD" --backend delta
+```
+
+`delta` is the default and stores every gold table at a path beneath
+`--gold-root`; it never requires a metastore. `--backend json` is the
+dependency-light direct-harness substitute used by pure-Python tests.
+
+### Publication and recovery contract
+
+The process job writes attempt records first and validates expected
+work/attempt membership, one terminal per video, provenance, task identity, and
+payload hashes by reading staging back. It rechecks every fence, writes a
+create-only `_SUCCESS` marker last, rereads it, seals the attempt, then changes
+successful committed-attempt pointers in one SQLite transaction. Failed videos
+remain immutable failed attempts and independently return to `READY` or
+`DEAD`; successful siblings remain published. A different attempt cannot
+replace a pointer.
+
+Crash handling is deterministic:
+
+1. Before `_SUCCESS`, partial staging is rejected rather than guessed complete.
+2. After `_SUCCESS` but before the pointer, a retry validates and reuses the
+   identical sealed bytes.
+3. After pointer commit, a retry returns the existing publication sequences.
+4. An expired lease is fenced by `recover`; stale executors cannot publish.
+5. `reconcile` persists stable finding IDs and resolves findings when their
+   underlying condition disappears.
+
+### Layout and schemas
+
+```text
+<root>/
+  control/control.sqlite3       # serialized work, attempts, fences, pointers
+  content/sha256/..             # immutable claim envelopes
+  attempts/batch=*/attempt=*/
+    records.json or _delta_log/ # immutable task/provenance records
+    _SUCCESS                    # create-only seal written last
+  gold/gold_*/_delta_log/       # path-Delta facts/dimensions (default)
+```
+
+Staging records carry batch, domain attempt/fence, Spark stage/partition/task
+attempt, record sequence, executor, manifest/config/model/release identities,
+planned cost, source/processing durations, CPU budget, detector batch size,
+runtime load/cache counters, and payload hashes. Production line output keeps
+crossing changes plus the final cumulative record.
+
+Gold tables are `gold_flow_minute`, `gold_flow_hour`, `gold_video`, and
+`gold_operations_hour`, plus date/time/camera/location/video/model-config
+dimensions. Checkpoints bind source publication sequence and source versions.
+Replacing an affected date with zero rows removes stale rows. The local
+semantic-refresh outbox is acknowledged by `pc-local-orchestrate`; it does not
+pretend to refresh a Fabric semantic model.
+
+### Current limits and next Fabric canary
+
+The JSON gold store and SQLite control store are local authoritative adapters.
+The Spark path uses path-based Delta and no metastore. Fabric adapter classes
+fail explicitly because OneLake paths, identities, Delta concurrency, and
+semantic refresh require a separately reviewed implementation. No local result
+is evidence of Fabric throughput or cost.
+
+The next Fabric SJD canary should deploy these same immutable envelope,
+partition, validation, marker, and pointer contracts into a pinned Fabric
+Environment, run a small fixed-allocation runtime-homogeneous batch, verify
+executor placement and OneLake create-only behavior, and compare Spark output
+with the direct SDK harness before any sustained capacity claim.
+
 ## Runtime pins
 
 - Base image:

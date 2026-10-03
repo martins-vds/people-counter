@@ -3,6 +3,45 @@
 For the two-worker local Spark development slice, see
 [Local Spark development](docs/local-spark-development.md).
 
+## Candidate A Spark job suite
+
+The importable Candidate A suite runs one bounded, runtime-homogeneous
+multi-video application per nonempty claim:
+
+- `pc-control-sjd` owns serialized SQLite registration, claims, fences,
+  recovery, reconciliation, replay, and committed-attempt pointers.
+- `pc-process-sjd` consumes only a durable `batch_id`, processes each complete
+  video sequentially in an explicitly planned partition, seals immutable
+  attempt output, and advances successful pointers only after validation.
+- `pc-gold-sjd` reads only committed pointers and incrementally replaces
+  affected date partitions for facts and dimensions.
+- `pc-local-orchestrate pipeline` runs all three jobs and acknowledges the
+  local semantic-refresh outbox.
+
+All commands import and display `--help` without Spark. A no-model local
+end-to-end run is:
+
+```bash
+uv run pc-local-orchestrate pipeline \
+  --root local-data/candidate-a \
+  --fixture-count 2 \
+  --mode probe \
+  --harness direct
+```
+
+Use `--harness spark --spark-master spark://spark-master:7077` inside the
+Compose client to execute the same planner, staging, seal, pointer, and gold
+protocol on the two one-core workers. SDK mode requires an immutable manifest
+whose payloads point to videos and offline models. Exact per-job commands,
+manifest shape, recovery procedure, output layout, the opt-in current-source
+Candidate A Compose E2E, and limitations are in
+[Local Spark development](docs/local-spark-development.md#candidate-a-spark-job-definitions).
+
+The local SQLite/content-addressed/path-Delta adapters are production-contract
+test doubles, not claims of OneLake compatibility or Fabric throughput.
+Fabric stores remain explicit unsupported seams until a reviewed SJD canary
+implements them.
+
 Run exactly one PyTorch variant at a time. Each command requires an explicit
 device selection and will fail instead of falling back to another device.
 The installed `people-counter` command provides `rtdetr-osnet` and
@@ -179,10 +218,9 @@ Generate a platform-specific CPU or GPU deployment bundle, upload its wheels
 to a Fabric Environment, and attach that environment to the notebook. A
 Fabric Data Pipeline can then invoke the notebook as an activity.
 
-Process each video sequentially in one notebook process because tracking state
-depends on frame order. Parallelize across videos with separate notebook
-activities rather than distributing frames from one video across Spark
-executors.
+Process each video sequentially because tracking state depends on frame order.
+Candidate A parallelizes complete videos across explicitly mapped Spark
+partitions; it never distributes frames from one video across executors.
 
 Use a Lakehouse file path that OpenCV can open:
 
