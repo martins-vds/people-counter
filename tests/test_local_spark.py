@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from people_counter.local_spark import (
@@ -11,6 +12,7 @@ from people_counter.local_spark import (
     StagingValidationError,
     _attempt_staging_path,
     _bounded_partition_count,
+    _localized_models_dir,
     _process_partition,
     _require_primitive_tree,
     read_claimed_manifest,
@@ -42,6 +44,74 @@ def manifest(item_updates=None):
 
 
 class LocalSparkTests(unittest.TestCase):
+    def test_localized_models_are_confined_copied_verified_and_reused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_root = Path(temporary) / "source"
+            source_root.mkdir()
+            source = source_root / "model.bin"
+            source.write_bytes(b"model")
+            spark_root = Path(temporary) / "spark"
+            spark_files = SimpleNamespace(
+                get=lambda name: str(source_root / name),
+                getRootDirectory=lambda: str(spark_root),
+            )
+            work = {
+                "model_identity": "identity-1",
+                "spark_localized_models": {
+                    "pipeline/model.bin": {
+                        "localized_name": "model.bin",
+                        "sha256": hashlib.sha256(b"model").hexdigest(),
+                    }
+                },
+            }
+            with patch.dict(
+                "sys.modules",
+                {"pyspark": SimpleNamespace(SparkFiles=spark_files)},
+            ):
+                first = _localized_models_dir(work)
+                second = _localized_models_dir(work)
+                self.assertEqual(first, second)
+                self.assertEqual(
+                    first,
+                    spark_root / "people-counter-models" / "identity-1",
+                )
+                self.assertEqual(
+                    (first / "pipeline/model.bin").read_bytes(), b"model"
+                )
+                with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                    _localized_models_dir(
+                        {
+                            **work,
+                            "spark_localized_models": {
+                                "pipeline/model.bin": {
+                                    "localized_name": "model.bin",
+                                    "sha256": "0" * 64,
+                                }
+                            },
+                        }
+                    )
+
+    def test_localized_models_reject_empty_and_unsafe_mappings(self):
+        self.assertIsNone(_localized_models_dir({}))
+        spark_files = SimpleNamespace(getRootDirectory=lambda: "/safe")
+        with patch.dict(
+            "sys.modules",
+            {"pyspark": SimpleNamespace(SparkFiles=spark_files)},
+        ):
+            for value in (
+                {},
+                {"/absolute": {}},
+                {"../escape": {}},
+                {"safe": "not-a-mapping"},
+            ):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    _localized_models_dir(
+                        {
+                            "model_identity": "identity-1",
+                            "spark_localized_models": value,
+                        }
+                    )
+
     def test_manifest_is_hash_verified_and_primitive_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "manifest.json"

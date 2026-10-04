@@ -246,13 +246,52 @@ class CommittedOutput:
 
 
 class FabricGoldStore:
-    """Fail-closed placeholder for a reviewed Fabric catalog implementation."""
+    """Lazy facade for the typed Fabric catalog implementation."""
 
-    def __init__(self, *_: object, **__: object) -> None:
-        raise UnsupportedGoldBackendError(
-            "Fabric gold writes are unsupported here; use the reviewed Fabric "
-            "Lakehouse implementation or the path-Delta helper"
+    def __init__(self, spark_session: Any | None = None, **kwargs: Any) -> None:
+        if spark_session is None:
+            raise UnsupportedGoldBackendError(
+                "Fabric gold storage is unsupported without an explicit "
+                "Fabric Spark session"
+            )
+        from people_counter.fabric_candidate_a_gold import (
+            FabricGoldStoreImpl,
         )
+
+        self._implementation = FabricGoldStoreImpl(
+            spark_session, **kwargs
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._implementation, name)
+
+
+class FabricGoldSource:
+    """Lazy facade for committed-pointer Fabric source reads."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        from people_counter.fabric_candidate_a_gold import (
+            FabricCommittedSource,
+        )
+
+        self._implementation = FabricCommittedSource(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._implementation, name)
+
+
+class FabricGoldState:
+    """Lazy facade for Fabric checkpoint and refresh-outbox state."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        from people_counter.fabric_candidate_a_gold import (
+            FabricGoldState as Implementation,
+        )
+
+        self._implementation = Implementation(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._implementation, name)
 
 
 class LocalJsonGoldStore:
@@ -912,6 +951,7 @@ class LocalGoldJob:
         lookback_hours: int = 48,
         force: bool = False,
         full_rebuild: bool = False,
+        save_state: bool = True,
     ) -> dict[str, Any]:
         flow_source = self.source_checkpoint()
         operations_source = self.operations_source_checkpoint()
@@ -922,13 +962,13 @@ class LocalGoldJob:
         targets_current = _checkpoint_targets_match(
             previous, current_versions
         )
-        if (
-            automatic
-            and not force
-            and not full_rebuild
-            and previous
-            and previous["source_key"] == source.key
-            and targets_current
+        if _normal_incremental_facts_noop(
+            automatic=automatic,
+            force=force,
+            full_rebuild=full_rebuild,
+            checkpoint=previous,
+            source_key=source.key,
+            targets_current=targets_current,
         ):
             return {
                 "stage": "facts",
@@ -990,13 +1030,17 @@ class LocalGoldJob:
                         target_versions,
                     ),
                 }
-        outbox_id = self.state.save_checkpoints_and_enqueue(
-            checkpoints,
-            "gold facts changed" if selected else None,
-            source,
-            target_versions,
+        outbox_id = (
+            self.state.save_checkpoints_and_enqueue(
+                checkpoints,
+                "gold facts changed" if selected else None,
+                source,
+                target_versions,
+            )
+            if save_state
+            else None
         )
-        return {
+        result = {
             "stage": "facts",
             "skipped": False,
             "source_key": source.key,
@@ -1007,12 +1051,16 @@ class LocalGoldJob:
             "outbox_id": outbox_id,
             "complete_checkpoint_advanced": complete_current,
         }
+        if not save_state:
+            result["_checkpoint_updates"] = checkpoints
+        return result
 
     def build_dimensions(
         self,
         *,
         full_rebuild: bool = False,
         force: bool = False,
+        save_state: bool = True,
     ) -> dict[str, Any]:
         source = self.source_checkpoint()
         fact_versions = self.store.versions(FACT_TABLES)
@@ -1047,13 +1095,18 @@ class LocalGoldJob:
             for table in DIMENSION_TABLES
         }
         target_versions = self.store.versions(DIMENSION_TABLES)
-        outbox_id = self.state.save_checkpoints_and_enqueue(
-            {"dimensions": (dimension_source, target_versions)},
-            "gold dimensions changed",
-            dimension_source,
-            target_versions,
+        checkpoints = {"dimensions": (dimension_source, target_versions)}
+        outbox_id = (
+            self.state.save_checkpoints_and_enqueue(
+                checkpoints,
+                "gold dimensions changed",
+                dimension_source,
+                target_versions,
+            )
+            if save_state
+            else None
         )
-        return {
+        result = {
             "stage": "dimensions",
             "skipped": False,
             "source_key": dimension_source.key,
@@ -1061,6 +1114,9 @@ class LocalGoldJob:
             "target_versions": target_versions,
             "outbox_id": outbox_id,
         }
+        if not save_state:
+            result["_checkpoint_updates"] = checkpoints
+        return result
 
     def validate(self) -> dict[str, Any]:
         tables = {
@@ -1085,15 +1141,35 @@ class LocalGoldJob:
             lookback_hours=lookback_hours,
             force=force,
             full_rebuild=full_rebuild,
+            save_state=False,
         )
         dimensions = self.build_dimensions(
-            full_rebuild=full_rebuild, force=force
+            full_rebuild=full_rebuild,
+            force=force,
+            save_state=False,
         )
         validation = self.validate()
+        outbox_id = None
+        if not facts["skipped"] or not dimensions["skipped"]:
+            flow_source = self.source_checkpoint()
+            refresh_source = self._fact_source(
+                flow_source, self.operations_source_checkpoint()
+            )
+            checkpoint_updates = {
+                **facts.pop("_checkpoint_updates", {}),
+                **dimensions.pop("_checkpoint_updates", {}),
+            }
+            outbox_id = self.state.save_checkpoints_and_enqueue(
+                checkpoint_updates,
+                "gold run changed",
+                refresh_source,
+                self.store.versions(FACT_TABLES + DIMENSION_TABLES),
+            )
         return {
             "facts": facts,
             "dimensions": dimensions,
             "validation": validation,
+            "outbox_id": outbox_id,
             "pending_refreshes": len(self.state.pending_refreshes()),
         }
 
@@ -2197,6 +2273,25 @@ def _checkpoint_targets_match(
     except (KeyError, TypeError, json.JSONDecodeError):
         return False
     return saved == dict(current)
+
+
+def _normal_incremental_facts_noop(
+    *,
+    automatic: bool,
+    force: bool,
+    full_rebuild: bool,
+    checkpoint: Mapping[str, Any] | None,
+    source_key: str,
+    targets_current: bool,
+) -> bool:
+    return bool(
+        automatic
+        and not force
+        and not full_rebuild
+        and checkpoint
+        and checkpoint.get("source_key") == source_key
+        and targets_current
+    )
 
 
 def _spark_schema(name: str) -> Any:

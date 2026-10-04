@@ -158,6 +158,7 @@ def process_video_partition(
             config = config_builder(work)
             result = runner.run(config)
         except Exception as error:
+            message = _exception_message(error)
             retryable, category = (
                 error_classifier(error)
                 if error_classifier is not None
@@ -170,10 +171,10 @@ def process_video_partition(
                 {
                     "error_category": category,
                     "error_type": type(error).__name__,
-                    "error_message": str(error),
+                    "error_message": message,
                 },
                 error_type=type(error).__name__,
-                error_message=str(error),
+                error_message=message,
                 retryable=retryable,
             )
             continue
@@ -199,6 +200,19 @@ def process_video_partition(
             yield _record("telemetry", work, "SUCCEEDED", item)
         for item in line_count_records(result):
             yield _record("line_count", work, "SUCCEEDED", item)
+
+
+def _exception_message(error: Exception) -> str:
+    """Retain bounded chained-cause context for immutable executor failures."""
+    messages: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(messages) < 5:
+        seen.add(id(current))
+        text = str(current).strip() or type(current).__name__
+        messages.append(text)
+        current = current.__cause__ or current.__context__
+    return " | caused by: ".join(messages)
 
 
 def _record(

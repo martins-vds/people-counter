@@ -80,7 +80,7 @@ class ClaimedWork:
 @dataclass(frozen=True)
 class ClaimedBatch:
     batch_id: str
-    envelope_path: Path
+    envelope_path: str | Path
     envelope_sha256: str
     runtime_key: str
     lease_expires_at: float
@@ -113,6 +113,12 @@ class ReplayRequest:
     reason: str
     generation: int
     requested_at: float
+
+
+@dataclass(frozen=True)
+class ControlBatchState:
+    status: str
+    lease_expires_at: float
 
 
 class ControlStore(Protocol):
@@ -160,14 +166,65 @@ class ControlStore(Protocol):
     ) -> ReplayRequest: ...
 
 
-class FabricControlStore:
-    """Explicit placeholder: local execution must never fake Fabric success."""
+class ProcessControlStore(Protocol):
+    """Control operations required by the backend-neutral process orchestrator."""
 
-    def __init__(self, *_: object, **__: object) -> None:
-        raise UnsupportedControlStoreError(
-            "Fabric ControlStore is unsupported by sjd_control; use the reviewed "
-            "Fabric Lakehouse control implementation"
+    def load_claim_envelope_with_digest(
+        self, batch_id: str
+    ) -> tuple[dict[str, Any], str]: ...
+
+    def process_batch_state(self, envelope: Any) -> ControlBatchState: ...
+
+    def assert_process_fence(self, envelope: Any) -> None: ...
+
+    def heartbeat_process(self, envelope: Any, extension_seconds: float) -> None: ...
+
+    def seal_batch(
+        self,
+        batch_id: str,
+        outputs: Sequence[Mapping[str, Any]],
+        *,
+        envelope_sha256: str,
+        membership_sha256: str,
+    ) -> None: ...
+
+    def commit_batch(self, batch_id: str) -> tuple[int, ...]: ...
+
+    def now(self) -> float: ...
+
+
+class FabricControlStore:
+    """Lazy facade for the Delta-backed Fabric implementation."""
+
+    def __init__(self, spark_session: Any | None = None, **kwargs: Any) -> None:
+        if spark_session is None:
+            raise UnsupportedControlStoreError(
+                "FabricControlStore requires an explicit Fabric Spark session"
+            )
+        from people_counter.fabric_candidate_a_control import (
+            FabricControlStoreImpl,
         )
+
+        self._implementation = FabricControlStoreImpl(
+            spark_session, **kwargs
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._implementation, name)
+
+
+class OneLakeEnvelopeWriter:
+    """Lazy public facade for immutable Candidate A claim envelopes."""
+
+    def __init__(self, root: str, files: Any | None = None) -> None:
+        from people_counter.fabric_candidate_a_control import (
+            OneLakeEnvelopeWriter as Implementation,
+        )
+
+        self._implementation = Implementation(root, files)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._implementation, name)
 
 
 class SQLiteControlStore:
@@ -769,6 +826,146 @@ class SQLiteControlStore:
         ):
             raise BatchValidationError("claim envelope version or batch mismatch")
         return envelope
+
+    def load_claim_envelope_with_digest(
+        self, batch_id: str
+    ) -> tuple[dict[str, Any], str]:
+        identity = _required_text(batch_id, "batch_id")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT envelope_sha256 FROM batches WHERE batch_id = ?",
+                (identity,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(batch_id)
+        digest = str(row["envelope_sha256"])
+        return (
+            self.load_claim_envelope(identity, envelope_sha256=digest),
+            digest,
+        )
+
+    def now(self) -> float:
+        """Return the backend clock used for lease decisions."""
+        return self._now()
+
+    def process_batch_state(self, envelope: Any) -> ControlBatchState:
+        with self._connect() as connection:
+            batch = connection.execute(
+                "SELECT * FROM batches WHERE batch_id = ?",
+                (envelope.batch_id,),
+            ).fetchone()
+            if batch is None:
+                raise KeyError(envelope.batch_id)
+            self._assert_process_rows(
+                connection, envelope, str(batch["status"])
+            )
+            return ControlBatchState(
+                str(batch["status"]), float(batch["lease_expires_at"])
+            )
+
+    def assert_process_fence(self, envelope: Any) -> None:
+        live = self.process_batch_state(envelope)
+        if live.status == "COMMITTED":
+            return
+        if (
+            live.status not in {"LEASED", "SEALED"}
+            or live.lease_expires_at <= self._now()
+        ):
+            raise LeaseLostError(
+                f"batch {envelope.batch_id} does not own a live fence"
+            )
+
+    def heartbeat_process(
+        self, envelope: Any, extension_seconds: float
+    ) -> None:
+        extension = _positive_finite(extension_seconds, "extension_seconds")
+        now = self._now()
+        with self._transaction() as connection:
+            batch = connection.execute(
+                "SELECT * FROM batches WHERE batch_id = ?",
+                (envelope.batch_id,),
+            ).fetchone()
+            if (
+                batch is None
+                or batch["status"] != "LEASED"
+                or float(batch["lease_expires_at"]) <= now
+            ):
+                raise LeaseLostError("heartbeat lost the batch lease")
+            self._assert_process_rows(connection, envelope, "LEASED")
+            expires = max(float(batch["lease_expires_at"]), now + extension)
+            connection.execute(
+                "UPDATE batches SET lease_expires_at = ? WHERE batch_id = ?",
+                (expires, envelope.batch_id),
+            )
+            connection.execute(
+                "UPDATE attempts SET lease_expires_at = ? "
+                "WHERE batch_id = ? AND status = 'LEASED'",
+                (expires, envelope.batch_id),
+            )
+            for item in envelope.items:
+                updated = connection.execute(
+                    "UPDATE work SET lease_expires_at = ?, updated_at = ? "
+                    "WHERE work_id = ? AND status = 'LEASED' "
+                    "AND lease_attempt_id = ? AND fence = ?",
+                    (
+                        expires,
+                        now,
+                        item.work_id,
+                        item.attempt_id,
+                        item.fence,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise LeaseLostError(
+                        f"heartbeat lost fence for {item.work_id}"
+                    )
+
+    @staticmethod
+    def _assert_process_rows(
+        connection: sqlite3.Connection,
+        envelope: Any,
+        batch_status: str,
+    ) -> None:
+        rows = connection.execute(
+            "SELECT a.attempt_id, a.work_id, a.fence, a.payload_sha256, "
+            "a.status, w.status work_status, w.lease_attempt_id, "
+            "w.fence work_fence, b.envelope_sha256, b.membership_sha256 "
+            "FROM attempts a JOIN work w ON w.work_id = a.work_id "
+            "JOIN batches b ON b.batch_id = a.batch_id "
+            "WHERE a.batch_id = ?",
+            (envelope.batch_id,),
+        ).fetchall()
+        expected = {
+            (item.work_id, item.attempt_id, item.fence, item.payload_sha256)
+            for item in envelope.items
+        }
+        observed = {
+            (
+                str(row["work_id"]),
+                str(row["attempt_id"]),
+                int(row["fence"]),
+                str(row["payload_sha256"]),
+            )
+            for row in rows
+        }
+        if observed != expected:
+            raise LeaseLostError("authoritative attempt membership changed")
+        for row in rows:
+            if (
+                row["envelope_sha256"] != envelope.envelope_sha256
+                or row["membership_sha256"] != envelope.membership_sha256
+            ):
+                raise BatchValidationError(
+                    "authoritative envelope identity changed"
+                )
+            if batch_status in {"LEASED", "SEALED"} and (
+                row["work_status"] != "LEASED"
+                or row["lease_attempt_id"] != row["attempt_id"]
+                or int(row["work_fence"]) != int(row["fence"])
+            ):
+                raise LeaseLostError(
+                    f"attempt {row['attempt_id']} lost its work fence"
+                )
 
     def seal_batch(
         self,

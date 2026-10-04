@@ -37,15 +37,27 @@ manifest shape, recovery procedure, output layout, the opt-in current-source
 Candidate A Compose E2E, and limitations are in
 [Local Spark development](docs/local-spark-development.md#candidate-a-spark-job-definitions).
 
-The local SQLite/content-addressed/path-Delta adapters are production-contract
-test doubles, not claims of OneLake compatibility or Fabric throughput.
-Fabric stores remain explicit unsupported seams until a reviewed SJD canary
-implements them.
+The local SQLite/content-addressed/path-Delta adapters remain
+production-contract test doubles. Version 0.7.1 contains the fixed,
+canary-scoped
+Candidate A Fabric Phase 1 adapters and thin SJD entry points, but their local
+tests are not a claim of Fabric throughput or a deployment approval.
+
+Normal gold runs are checkpointed and idempotent: unchanged committed source
+and unchanged target versions do not rewrite gold tables or enqueue another
+semantic refresh. A changed full gold run commits its stage checkpoints with
+one combined semantic-refresh outbox row after validation. Process results
+report the driver package version, and every staged executor record carries
+the executor package version validated against the driver installation.
+`--force` deliberately resets normal incremental planning and rebuilds current
+partitions; it is non-idempotent maintenance behavior, not the normal
+production path.
 
 The isolated Runtime 2.0 canary and its dry-run/deployment tooling are
 documented in
 [docs/fabric-runtime2-sjd-canary.md](docs/fabric-runtime2-sjd-canary.md).
-It does not enable the fail-closed production Fabric adapters.
+The original Runtime 2.0 startup canary remains isolated from the Candidate A
+Phase 1 jobs.
 
 Run exactly one PyTorch variant at a time. Each command requires an explicit
 device selection and will fail instead of falling back to another device.

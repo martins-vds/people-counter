@@ -6,9 +6,27 @@ This repository contains one isolated canary item:
 `people_counter_dev` Lakehouse
 `883cff91-eaa8-40be-870f-6e9716303cb2`.
 
-The canary does **not** enable `pc-control-sjd`, `pc-process-sjd`, or
-`pc-gold-sjd` in Fabric. Their Fabric control/attempt adapters remain
-unsupported and fail closed.
+The startup canary remains separate from the Candidate A control, process, and
+gold jobs in Fabric. Version 0.7.1 contains their Phase 1 implementation and
+local contract tests.
+
+The separate Phase 1 boundary is fixed to Environment
+`3e580f48-9ff7-4bc6-af2e-a59158029ada`, Runtime `2.0`, table prefix
+`pc_ca_canary_v1_`, and
+`Files/_canary/people-counter/candidate-a/v1/`. Its checked-in entry points
+under `fabric/candidate_a/` import the installed wheel only. The Environment
+must be published in Full library mode; inline libraries, session installs,
+and source fallbacks are rejected.
+
+Candidate A gold runs without `--force` use source and target checkpoints as
+the idempotent production path. When both are unchanged, the run performs no
+table replacement, target-version advancement, logical-row churn, or refresh
+enqueue. A changed full run writes one combined semantic-refresh outbox row
+after validation and commits that row with the stage checkpoints. Process
+proof records the installed package version on the driver result and every
+validated executor record. `--force` is explicit non-idempotent maintenance
+behavior because it resets incremental planning and rewrites current
+partitions.
 
 ## Safety boundary
 
@@ -68,7 +86,7 @@ Check a bundle before building:
 uv run pc-fabric-canary build \
   --environment-id 00000000-0000-0000-0000-000000000000 \
   --bundle build/people-counter-runtime2-wheelhouse.zip \
-  --lib build/people_counter-0.6.0-py3-none-any.whl \
+  --lib build/people_counter-0.7.1-py3-none-any.whl \
   --output build/pc-ca-r20-sjd-canary-v001.json
 ```
 

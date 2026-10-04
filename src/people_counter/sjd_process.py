@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
 import socket
-import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -32,7 +32,7 @@ from people_counter.sjd_control import (
     BatchValidationError,
     ImmutableConflictError,
     LeaseLostError,
-    SQLiteControlStore,
+    ProcessControlStore,
 )
 
 
@@ -42,6 +42,15 @@ RECORD_TYPES = frozenset({"video_result", "error", "telemetry", "line_count"})
 DETECTOR_BATCH_SIZES = frozenset({1, 2, 4})
 MIB = 1024 * 1024
 GIB = 1024 * MIB
+
+
+def _package_version() -> str:
+    try:
+        return importlib.metadata.version("people-counter")
+    except importlib.metadata.PackageNotFoundError as error:
+        raise ProcessValidationError(
+            "people-counter distribution metadata is unavailable"
+        ) from error
 
 
 class ProcessValidationError(RuntimeError):
@@ -552,6 +561,7 @@ def execute_sjd_partition(
                 "config_sha256": row["config_sha256"],
                 "model_identity": row["model_identity"],
                 "release_digest": row["release_digest"],
+                "package_version": _package_version(),
                 "runtime_key": row["runtime_key"],
                 "duration_seconds": row["duration_seconds"],
                 "planned_cost_seconds": row["planned_cost_seconds"],
@@ -657,6 +667,7 @@ def _executor_row(
         "config_sha256": item.config_sha256,
         "model_identity": _model_identity(item.payload),
         "release_digest": item.release_digest,
+        "package_version": _package_version(),
         "runtime_key": item.runtime_key,
         "duration_seconds": item.duration_seconds,
         "planned_cost_seconds": planned.planned_cost_seconds,
@@ -724,8 +735,19 @@ class DirectExecutionHarness:
 class SparkExecutionHarness:
     """Spark mapPartitions seam; importing this module still does not import Spark."""
 
-    def __init__(self, spark_session: Any) -> None:
+    def __init__(
+        self,
+        spark_session: Any,
+        *,
+        verify_settings: bool = True,
+        row_enrichment: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
         self.spark_session = spark_session
+        self.verify_settings = verify_settings
+        self.row_enrichment = {
+            str(key): dict(value)
+            for key, value in (row_enrichment or {}).items()
+        }
 
     def execute(
         self,
@@ -734,16 +756,20 @@ class SparkExecutionHarness:
         profile: ExecutionProfile,
         mode: Mode,
     ) -> list[dict[str, Any]]:
-        _verify_live_spark_settings(self.spark_session, profile)
+        if self.verify_settings:
+            _verify_live_spark_settings(self.spark_session, profile)
         by_partition = {
             bucket.physical_partition: [
-                _executor_row(
-                    item,
-                    envelope,
-                    profile,
-                    mode,
-                    plan.concurrency,
-                )
+                {
+                    **_executor_row(
+                        item,
+                        envelope,
+                        profile,
+                        mode,
+                        plan.concurrency,
+                    ),
+                    **self.row_enrichment.get(item.item.work_id, {}),
+                }
                 for item in bucket.items
             ]
             for bucket in plan.buckets
@@ -773,7 +799,9 @@ def _verify_live_spark_settings(spark: Any, profile: ExecutionProfile) -> None:
 
 
 class AttemptAdapter(Protocol):
-    def attempt_path(self, batch_id: str, process_attempt_id: str) -> Path: ...
+    def attempt_path(
+        self, batch_id: str, process_attempt_id: str
+    ) -> str | Path: ...
 
     def load_complete(
         self, batch_id: str, process_attempt_id: str
@@ -946,13 +974,179 @@ class SparkDeltaAttemptAdapter:
         )
 
 
-class FabricAttemptAdapter:
-    """Explicit placeholder until a reviewed Fabric Lakehouse adapter exists."""
+class OneLakeDeltaAttemptAdapter:
+    """Immutable path-Delta attempts with create-only OneLake seals."""
 
-    def __init__(self, *_: object, **__: object) -> None:
-        raise UnsupportedAttemptStoreError(
-            "Fabric process attempt storage is unsupported by sjd_process"
+    _SCHEMA = (
+        "work_id string, attempt_id string, record_type string, "
+        "record_sequence long, record_json string"
+    )
+
+    def __init__(
+        self,
+        root: str | None = None,
+        spark_session: Any | None = None,
+        files: Any | None = None,
+    ) -> None:
+        if root is None or spark_session is None:
+            raise UnsupportedAttemptStoreError(
+                "Fabric attempt storage is unsupported without an explicit "
+                "OneLake root and Fabric Spark session"
+            )
+        from people_counter.fabric_candidate_a_control import (
+            NotebookUtilsOneLakeFiles,
         )
+        from people_counter.fabric_candidate_a import FabricCandidateAConfig
+
+        self.root = root.rstrip("/")
+        self.config = FabricCandidateAConfig()
+        expected = self.config.file_path("attempts").rstrip("/")
+        if self.root != expected:
+            raise ProcessValidationError(
+                f"OneLake attempts require the fixed Candidate A root {expected!r}"
+            )
+        self.spark_session = spark_session
+        self.files = files or NotebookUtilsOneLakeFiles()
+
+    def attempt_path(self, batch_id: str, process_attempt_id: str) -> str:
+        return (
+            f"{self.root}/process/batch={_path_segment(batch_id)}/"
+            f"attempt={_path_segment(process_attempt_id)}"
+        )
+
+    def load_complete(
+        self, batch_id: str, process_attempt_id: str
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+        path = self.attempt_path(batch_id, process_attempt_id)
+        has_delta = self.files.exists(f"{path}/_delta_log")
+        has_marker = self.files.exists(f"{path}/_SUCCESS")
+        if not has_delta and not has_marker:
+            return None
+        if not has_delta or not has_marker:
+            raise StagingConflictError(
+                f"partial OneLake Delta attempt staging exists at {path}"
+            )
+        records = self.read_records(batch_id, process_attempt_id)
+        try:
+            marker = json.loads(self.files.read_text(f"{path}/_SUCCESS"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise StagingConflictError(
+                f"invalid OneLake _SUCCESS at {path}"
+            ) from error
+        if not isinstance(marker, dict):
+            raise StagingConflictError("_SUCCESS marker must be an object")
+        return records, marker
+
+    def write_records(
+        self,
+        batch_id: str,
+        process_attempt_id: str,
+        records: Sequence[Mapping[str, Any]],
+    ) -> str:
+        path = self.attempt_path(batch_id, process_attempt_id)
+        if self.files.exists(f"{path}/_delta_log") or self.files.exists(
+            f"{path}/_SUCCESS"
+        ):
+            raise StagingConflictError(
+                f"attempt staging already exists at {path}"
+            )
+        ordered = _ordered_records(records)
+        rows = [
+            {
+                "work_id": _text(record.get("work_id"), "work_id"),
+                "attempt_id": _text(record.get("attempt_id"), "attempt_id"),
+                "record_type": _text(
+                    record.get("record_type"), "record_type"
+                ),
+                "record_sequence": _nonnegative_int(
+                    record.get("record_sequence"), "record_sequence"
+                ),
+                "record_json": _canonical(record),
+            }
+            for record in ordered
+        ]
+        frame = self.spark_session.createDataFrame(rows, schema=self._SCHEMA)
+        spark_path = self.config.abfss_path(path)
+        (
+            frame.write.format("delta")
+            .mode("errorifexists")
+            .option("txnAppId", f"people-counter-candidate-a:{process_attempt_id}")
+            .option("txnVersion", "0")
+            .save(spark_path)
+        )
+        readback = self.read_records(batch_id, process_attempt_id)
+        if [_canonical(record) for record in readback] != [
+            _canonical(record) for record in ordered
+        ]:
+            raise StagingConflictError(
+                "OneLake Delta exact readback/cardinality verification failed"
+            )
+        return path
+
+    def read_records(
+        self, batch_id: str, process_attempt_id: str
+    ) -> list[dict[str, Any]]:
+        path = self.attempt_path(batch_id, process_attempt_id)
+        if not self.files.exists(f"{path}/_delta_log"):
+            raise StagingConflictError(
+                f"attempt Delta records are missing at {path}"
+            )
+        rows = (
+            self.spark_session.read.format("delta")
+            .load(self.config.abfss_path(path))
+            .select(
+                "work_id",
+                "attempt_id",
+                "record_type",
+                "record_sequence",
+                "record_json",
+            )
+            .collect()
+        )
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                record = json.loads(row["record_json"])
+            except (TypeError, json.JSONDecodeError) as error:
+                raise StagingConflictError(
+                    "OneLake Delta record_json is invalid"
+                ) from error
+            if (
+                not isinstance(record, dict)
+                or record.get("work_id") != row["work_id"]
+                or record.get("attempt_id") != row["attempt_id"]
+                or record.get("record_type") != row["record_type"]
+                or record.get("record_sequence") != row["record_sequence"]
+            ):
+                raise StagingConflictError(
+                    "OneLake Delta record columns differ from record_json"
+                )
+            records.append(record)
+        return _ordered_records(records)
+
+    def create_success(
+        self,
+        batch_id: str,
+        process_attempt_id: str,
+        marker: Mapping[str, Any],
+    ) -> None:
+        path = (
+            self.attempt_path(batch_id, process_attempt_id) + "/_SUCCESS"
+        )
+        content = _canonical(dict(marker))
+        try:
+            self.files.create_text(path, content)
+        except FileExistsError:
+            if self.files.read_text(path) != content:
+                raise ImmutableConflictError(
+                    "_SUCCESS marker conflicts with this attempt"
+                )
+        if self.files.read_text(path) != content:
+            raise StagingConflictError("_SUCCESS exact readback failed")
+
+
+class FabricAttemptAdapter(OneLakeDeltaAttemptAdapter):
+    """Compatibility name for the reviewed OneLake Delta adapter."""
 
 
 @dataclass(frozen=True)
@@ -962,107 +1156,20 @@ class LiveBatch:
 
 
 class ProcessControl:
-    """Process-side fence/heartbeat facade over the authoritative control DB."""
+    """Backend-neutral process-side fence and heartbeat facade."""
 
-    def __init__(self, store: SQLiteControlStore) -> None:
+    def __init__(self, store: ProcessControlStore) -> None:
         self.store = store
 
     def live_batch(self, envelope: VerifiedEnvelope) -> LiveBatch:
-        with sqlite3.connect(self.store.database) as connection:
-            connection.row_factory = sqlite3.Row
-            batch = connection.execute(
-                "SELECT * FROM batches WHERE batch_id = ?", (envelope.batch_id,)
-            ).fetchone()
-            if batch is None:
-                raise KeyError(envelope.batch_id)
-            self._assert_rows(connection, envelope, str(batch["status"]))
-            return LiveBatch(str(batch["status"]), float(batch["lease_expires_at"]))
+        state = self.store.process_batch_state(envelope)
+        return LiveBatch(state.status, state.lease_expires_at)
 
     def assert_fence(self, envelope: VerifiedEnvelope) -> None:
-        live = self.live_batch(envelope)
-        if live.status == "COMMITTED":
-            return
-        if (
-            live.status not in {"LEASED", "SEALED"}
-            or live.lease_expires_at <= self.store._now()
-        ):
-            raise LeaseLostError(f"batch {envelope.batch_id} does not own a live fence")
+        self.store.assert_process_fence(envelope)
 
     def heartbeat(self, envelope: VerifiedEnvelope, extension_seconds: float) -> None:
-        extension = _positive_float(extension_seconds, "extension_seconds")
-        now = self.store._now()
-        with self.store._transaction() as connection:
-            batch = connection.execute(
-                "SELECT * FROM batches WHERE batch_id = ?", (envelope.batch_id,)
-            ).fetchone()
-            if (
-                batch is None
-                or batch["status"] != "LEASED"
-                or float(batch["lease_expires_at"]) <= now
-            ):
-                raise LeaseLostError("heartbeat lost the batch lease")
-            self._assert_rows(connection, envelope, "LEASED")
-            expires = max(float(batch["lease_expires_at"]), now + extension)
-            connection.execute(
-                "UPDATE batches SET lease_expires_at = ? WHERE batch_id = ?",
-                (expires, envelope.batch_id),
-            )
-            connection.execute(
-                "UPDATE attempts SET lease_expires_at = ? "
-                "WHERE batch_id = ? AND status = 'LEASED'",
-                (expires, envelope.batch_id),
-            )
-            for item in envelope.items:
-                updated = connection.execute(
-                    "UPDATE work SET lease_expires_at = ?, updated_at = ? "
-                    "WHERE work_id = ? AND status = 'LEASED' "
-                    "AND lease_attempt_id = ? AND fence = ?",
-                    (expires, now, item.work_id, item.attempt_id, item.fence),
-                )
-                if updated.rowcount != 1:
-                    raise LeaseLostError(f"heartbeat lost fence for {item.work_id}")
-
-    @staticmethod
-    def _assert_rows(
-        connection: sqlite3.Connection,
-        envelope: VerifiedEnvelope,
-        batch_status: str,
-    ) -> None:
-        rows = connection.execute(
-            "SELECT a.attempt_id, a.work_id, a.fence, a.payload_sha256, a.status, "
-            "w.status work_status, w.lease_attempt_id, w.fence work_fence, "
-            "b.envelope_sha256, b.membership_sha256 "
-            "FROM attempts a JOIN work w ON w.work_id = a.work_id "
-            "JOIN batches b ON b.batch_id = a.batch_id WHERE a.batch_id = ?",
-            (envelope.batch_id,),
-        ).fetchall()
-        expected = {
-            (item.work_id, item.attempt_id, item.fence, item.payload_sha256)
-            for item in envelope.items
-        }
-        observed = {
-            (
-                str(row["work_id"]),
-                str(row["attempt_id"]),
-                int(row["fence"]),
-                str(row["payload_sha256"]),
-            )
-            for row in rows
-        }
-        if observed != expected:
-            raise LeaseLostError("authoritative attempt membership changed")
-        for row in rows:
-            if (
-                row["envelope_sha256"] != envelope.envelope_sha256
-                or row["membership_sha256"] != envelope.membership_sha256
-            ):
-                raise BatchValidationError("authoritative envelope identity changed")
-            if batch_status in {"LEASED", "SEALED"} and (
-                row["work_status"] != "LEASED"
-                or row["lease_attempt_id"] != row["attempt_id"]
-                or int(row["work_fence"]) != int(row["fence"])
-            ):
-                raise LeaseLostError(f"attempt {row['attempt_id']} lost its work fence")
+        self.store.heartbeat_process(envelope, extension_seconds)
 
 
 class _Heartbeat:
@@ -1145,6 +1252,7 @@ def validate_staged_records(
             "config_sha256": item.config_sha256,
             "model_identity": _model_identity(item.payload),
             "release_digest": item.release_digest,
+            "package_version": _package_version(),
             "runtime_key": item.runtime_key,
             "source_video": item.payload.get("source_video"),
             "duration_seconds": item.duration_seconds,
@@ -1198,6 +1306,7 @@ def _validate_staged_record_schema(
         "process_attempt_id",
         "config_sha256",
         "release_digest",
+        "package_version",
         "runtime_key",
         "executor_identity",
         "executor_host",
@@ -1370,18 +1479,19 @@ def _verify_marker(
 class ProcessResult:
     batch_id: str
     process_attempt_id: str
-    staging_path: Path
+    staging_path: str | Path
     record_count: int
     failed_work_ids: tuple[str, ...]
     publication_sequences: tuple[int, ...]
     resumed: bool
+    driver_package_version: str
 
 
 CrashHook = Callable[[str], None]
 
 
 def run_process_batch(
-    store: SQLiteControlStore,
+    store: ProcessControlStore,
     batch_id: str,
     profile: ExecutionProfile,
     mode: Mode,
@@ -1395,15 +1505,13 @@ def run_process_batch(
     """Execute, validate, seal, publish, and only then settle one claimed batch."""
     if mode not in {"probe", "sdk"}:
         raise ProcessValidationError(f"unsupported processor mode: {mode!r}")
-    envelope_data = store.load_claim_envelope(batch_id)
-    with sqlite3.connect(store.database) as connection:
-        row = connection.execute(
-            "SELECT envelope_sha256 FROM batches WHERE batch_id = ?", (batch_id,)
-        ).fetchone()
-    if row is None:
-        raise KeyError(batch_id)
+    envelope_data, authoritative_digest = store.load_claim_envelope_with_digest(
+        batch_id
+    )
     envelope = verify_envelope(
-        envelope_data, batch_id=batch_id, envelope_sha256=str(row[0])
+        envelope_data,
+        batch_id=batch_id,
+        envelope_sha256=authoritative_digest,
     )
     control = ProcessControl(store)
     live = control.live_batch(envelope)
@@ -1425,7 +1533,7 @@ def run_process_batch(
         plan,
         profile,
         lease_expires_at=live.lease_expires_at,
-        now=(store._now() if clock is None else clock()),
+        now=(store.now() if clock is None else clock()),
     )
     complete = attempts.load_complete(batch_id, envelope.execution_attempt_id)
     resumed = complete is not None
@@ -1523,6 +1631,7 @@ def _process_result(
         ),
         publication_sequences=sequences,
         resumed=resumed,
+        driver_package_version=_package_version(),
     )
 
 
@@ -1673,6 +1782,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the local Candidate A process command."""
     arguments = _parser().parse_args(argv)
     profile = resolve_profile(arguments.profile)
+    from people_counter.sjd_control import SQLiteControlStore
+
     store = SQLiteControlStore(arguments.database, arguments.content_root)
     spark = None
     if arguments.harness == "direct":

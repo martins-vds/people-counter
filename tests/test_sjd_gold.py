@@ -6,18 +6,25 @@ import tempfile
 import types
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, call
 
 import pytest
 
 from people_counter.sjd_control import SQLiteControlStore
 from people_counter.sjd_gold import (
+    DIMENSION_TABLES,
+    FACT_TABLES,
     FabricGoldStore,
+    FabricGoldSource,
+    FabricGoldState,
     GoldSourceError,
     GoldValidationError,
     LocalGoldJob,
     LocalJsonGoldStore,
+    SourceCheckpoint,
     UnsupportedGoldBackendError,
     _load_delta_output_document,
+    _checkpoint_targets_match,
     _optional_float,
     _sha256_json,
     main,
@@ -477,7 +484,117 @@ def test_run_builds_both_stages_and_validates(gold_fixture):
     assert result["facts"]["skipped"] is False
     assert result["dimensions"]["skipped"] is False
     assert result["validation"]["valid"] is True
+    assert result["outbox_id"] == 1
+    assert result["pending_refreshes"] == 1
+    assert (
+        gold_fixture.job().state.pending_refreshes()[0]["payload"]["reason"]
+        == "gold run changed"
+    )
+
+
+def test_run_rerun_is_noop_without_refresh_or_target_churn(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    first = job.run()
+    versions = job.store.versions(FACT_TABLES + DIMENSION_TABLES)
+    with sqlite3.connect(gold_fixture.database) as connection:
+        checkpoints = connection.execute(
+            "SELECT * FROM gold_checkpoints ORDER BY stage"
+        ).fetchall()
+
+    second = job.run()
+
+    assert first["outbox_id"] == 1
+    assert second["facts"]["skipped"] is True
+    assert second["dimensions"]["skipped"] is True
+    assert second["outbox_id"] is None
+    assert second["pending_refreshes"] == 1
+    assert job.store.versions(FACT_TABLES + DIMENSION_TABLES) == versions
+    with sqlite3.connect(gold_fixture.database) as connection:
+        assert (
+            connection.execute(
+                "SELECT * FROM gold_checkpoints ORDER BY stage"
+            ).fetchall()
+            == checkpoints
+        )
+
+
+def test_run_dimension_only_repair_enqueues_one_refresh(gold_fixture):
+    gold_fixture.publish("work-1")
+    job = gold_fixture.job()
+    job.run()
+    cameras = job.store.read_table("gold_dim_camera")
+    job.store.replace_table("gold_dim_camera", cameras)
+
+    result = job.run()
+
+    assert result["facts"]["skipped"] is True
+    assert result["dimensions"]["skipped"] is False
+    assert result["outbox_id"] == 2
     assert result["pending_refreshes"] == 2
+
+
+def test_run_forwards_planning_and_maintenance_options(gold_fixture, monkeypatch):
+    job = gold_fixture.job()
+    facts = MagicMock(return_value={"skipped": True})
+    dimensions = MagicMock(return_value={"skipped": True})
+    monkeypatch.setattr(job, "build_facts", facts)
+    monkeypatch.setattr(job, "build_dimensions", dimensions)
+    monkeypatch.setattr(job, "validate", lambda: {"valid": True})
+
+    job.run(lookback_hours=73, force=True, full_rebuild=True)
+    job.run()
+
+    assert facts.call_args_list == [
+        call(
+            lookback_hours=73,
+            force=True,
+            full_rebuild=True,
+            save_state=False,
+        ),
+        call(
+            lookback_hours=48,
+            force=False,
+            full_rebuild=False,
+            save_state=False,
+        ),
+    ]
+    assert dimensions.call_args_list == [
+        call(full_rebuild=True, force=True, save_state=False),
+        call(full_rebuild=False, force=False, save_state=False),
+    ]
+
+
+def test_run_combines_facts_only_checkpoint_update(gold_fixture, monkeypatch):
+    job = gold_fixture.job()
+    source = SourceCheckpoint(1, {"source": "version"})
+    checkpoint = (source, {"gold_video": 1})
+    monkeypatch.setattr(
+        job,
+        "build_facts",
+        lambda **_kwargs: {
+            "skipped": False,
+            "_checkpoint_updates": {"facts": checkpoint},
+        },
+    )
+    monkeypatch.setattr(
+        job,
+        "build_dimensions",
+        lambda **_kwargs: {"skipped": True},
+    )
+    monkeypatch.setattr(job, "validate", lambda: {"valid": True})
+    monkeypatch.setattr(job, "source_checkpoint", lambda: source)
+    monkeypatch.setattr(job, "operations_source_checkpoint", lambda: source)
+    monkeypatch.setattr(job.store, "versions", lambda _names: {"gold_video": 1})
+    save = MagicMock(return_value=1)
+    monkeypatch.setattr(job.state, "save_checkpoints_and_enqueue", save)
+    monkeypatch.setattr(job.state, "pending_refreshes", lambda: [])
+
+    result = job.run()
+
+    assert result["outbox_id"] == 1
+    save.assert_called_once()
+    assert save.call_args.args[0] == {"facts": checkpoint}
 
 
 def test_refresh_outbox_is_deduplicated_and_locally_acknowledged(gold_fixture):
@@ -505,6 +622,57 @@ def test_cli_help_is_spark_free_and_fabric_placeholder_fails_closed(
     assert "build-facts" in capsys.readouterr().out
     with pytest.raises(UnsupportedGoldBackendError, match="unsupported"):
         FabricGoldStore()
+
+
+def test_fabric_gold_facades_require_explicit_spark_and_forward(
+    monkeypatch,
+):
+    store_impl = MagicMock()
+    store_impl.read_table.return_value = [{"id": 1}]
+    source_impl = MagicMock()
+    source_impl.committed_outputs.return_value = ["output"]
+    state_impl = MagicMock()
+    state_impl.pending_refreshes.return_value = ["refresh"]
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_gold.FabricGoldStoreImpl",
+        lambda *_args, **_kwargs: store_impl,
+    )
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_gold.FabricCommittedSource",
+        lambda *_args, **_kwargs: source_impl,
+    )
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_gold.FabricGoldState",
+        lambda *_args, **_kwargs: state_impl,
+    )
+
+    assert FabricGoldStore(object()).read_table("gold_video") == [{"id": 1}]
+    assert FabricGoldSource(object(), object()).committed_outputs() == ["output"]
+    assert FabricGoldState(object()).pending_refreshes() == ["refresh"]
+
+
+def test_checkpoint_target_matching_fails_closed_and_requires_exact_versions():
+    current = {"gold_video": 4}
+
+    assert _checkpoint_targets_match(None, current) is False
+    assert (
+        _checkpoint_targets_match(
+            {"target_versions_json": "not-json"}, current
+        )
+        is False
+    )
+    assert (
+        _checkpoint_targets_match(
+            {"target_versions_json": json.dumps(current)}, current
+        )
+        is True
+    )
+    assert (
+        _checkpoint_targets_match(
+            {"target_versions_json": json.dumps({"gold_video": 3})}, current
+        )
+        is False
+    )
 
 
 def test_local_store_rejects_cross_partition_rows(gold_fixture):

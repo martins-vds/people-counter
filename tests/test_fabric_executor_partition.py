@@ -644,6 +644,27 @@ class FabricExecutorPartitionTests(unittest.TestCase):
             "INPUT",
         )
 
+    def test_process_video_partition_retains_bounded_exception_cause(self):
+        try:
+            try:
+                raise ImportError("numpy ABI mismatch")
+            except ImportError as cause:
+                raise ImportError("scipy is required") from cause
+        except ImportError as error:
+            processor = MagicMock()
+            processor.run.side_effect = error
+            records = list(
+                process_video_partition(
+                    [{"work_id": "work-a", "source_video": "a.mp4"}],
+                    config_builder=lambda row: row,
+                    processor=processor,
+                )
+            )
+        self.assertEqual(
+            records[0]["error_message"],
+            "scipy is required | caused by: numpy ABI mismatch",
+        )
+
     def test_process_video_partition_constructs_default_processor(self):
         result = RunResult(initialized=True, fps=1.0)
         processor = MagicMock()

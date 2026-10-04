@@ -8,6 +8,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import time
@@ -396,6 +397,7 @@ def _config_from_work(
     work: Mapping[str, Any],
 ) -> RTDetrOsnetConfig | RFDetrBotsortConfig:
     video = _verified_video(work)
+    localized_models = _localized_models_dir(work)
     common: dict[str, Any] = {
         "video": video,
         "device_variant": "cpu",
@@ -406,7 +408,13 @@ def _config_from_work(
         "use_fp16": False,
         "model_format": work.get("model_format", "pytorch"),
         "models_dir": (
-            Path(work["models_dir"]) if work.get("models_dir") is not None else None
+            localized_models
+            if localized_models is not None
+            else (
+                Path(work["models_dir"])
+                if work.get("models_dir") is not None
+                else None
+            )
         ),
         "line": (
             tuple(work["line"]) if work.get("line") is not None else None
@@ -574,7 +582,15 @@ def _optional_positive_float(value: object) -> float | None:
 
 
 def _verified_video(work: Mapping[str, Any]) -> Path:
-    video = Path(_required_text(work, "source_video"))
+    localized = work.get("spark_localized_video_name")
+    if localized is None:
+        video = Path(_required_text(work, "source_video"))
+    else:
+        from pyspark import SparkFiles
+
+        video = Path(
+            SparkFiles.get(_required_text(work, "spark_localized_video_name"))
+        )
     expected = work.get("source_sha256")
     if expected is None:
         return video
@@ -590,6 +606,39 @@ def _verified_video(work: Mapping[str, Any]) -> Path:
             f"source SHA-256 mismatch for {video}: expected {expected}, got {actual}"
         )
     return video
+
+
+def _localized_models_dir(work: Mapping[str, Any]) -> Path | None:
+    value = work.get("spark_localized_models")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("spark_localized_models must be a non-empty mapping")
+    from pyspark import SparkFiles
+
+    identity = _required_text(work, "model_identity")
+    root = Path(SparkFiles.getRootDirectory()) / "people-counter-models" / identity
+    for relative, metadata in value.items():
+        if (
+            not isinstance(relative, str)
+            or relative.startswith("/")
+            or ".." in Path(relative).parts
+            or not isinstance(metadata, Mapping)
+        ):
+            raise ValueError("invalid localized model mapping")
+        source = Path(SparkFiles.get(_required_text(metadata, "localized_name")))
+        expected = _required_text(metadata, "sha256")
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.exists():
+            shutil.copyfile(source, destination)
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        if digest != expected:
+            raise ValueError(
+                f"localized model SHA-256 mismatch for {relative}: "
+                f"expected {expected}, got {digest}"
+            )
+    return root
 
 
 def _java_version() -> str:

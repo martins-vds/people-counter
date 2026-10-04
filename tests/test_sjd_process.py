@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import sqlite3
 import tempfile
@@ -16,9 +17,11 @@ from people_counter.sjd_process import (
     LeaseAdmissionError,
     LocalJsonAttemptAdapter,
     ProcessValidationError,
+    SparkExecutionHarness,
     StagingConflictError,
     UnsupportedAttemptStoreError,
     _model_identity,
+    _package_version,
     _parser,
     _sha256,
     admit_lease,
@@ -90,6 +93,7 @@ class SyntheticHarness:
                         "config_sha256": item.config_sha256,
                         "model_identity": _model_identity(item.payload),
                         "release_digest": item.release_digest,
+                        "package_version": _package_version(),
                         "runtime_key": item.runtime_key,
                         "duration_seconds": item.duration_seconds,
                         "planned_cost_seconds": planned.planned_cost_seconds,
@@ -131,6 +135,25 @@ class SjdProcessTests(unittest.TestCase):
             id_factory=lambda: next(identities),
         )
         self.attempts = LocalJsonAttemptAdapter(self.root / "staging")
+
+    def test_package_version_uses_distribution_metadata_and_fails_closed(self):
+        with patch(
+            "people_counter.sjd_process.importlib.metadata.version",
+            return_value="0.7.1",
+        ) as version:
+            self.assertEqual(_package_version(), "0.7.1")
+        version.assert_called_once_with("people-counter")
+
+        with patch(
+            "people_counter.sjd_process.importlib.metadata.version",
+            side_effect=importlib.metadata.PackageNotFoundError,
+        ):
+            with self.assertRaises(ProcessValidationError) as raised:
+                _package_version()
+        self.assertEqual(
+            str(raised.exception),
+            "people-counter distribution metadata is unavailable",
+        )
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -352,6 +375,7 @@ class SjdProcessTests(unittest.TestCase):
             "config_sha256": "config",
             "model_identity": "model",
             "release_digest": "release",
+            "package_version": _package_version(),
             "runtime_key": "runtime",
             "duration_seconds": 1,
             "planned_cost_seconds": 1,
@@ -396,6 +420,10 @@ class SjdProcessTests(unittest.TestCase):
         self.assertEqual(records[-1]["runtime_loads"], 1)
         self.assertEqual(records[-1]["runtime_cache_hits"], 1)
         self.assertEqual(records[-1]["partition_id"], 0)
+        self.assertEqual(
+            {record["package_version"] for record in records},
+            {_package_version()},
+        )
         bad = {**row, "physical_partition": 1}
         with self.assertRaisesRegex(ProcessValidationError, "partition mismatch"):
             list(execute_sjd_partition([bad]))
@@ -423,6 +451,48 @@ class SjdProcessTests(unittest.TestCase):
             {record["manifest_sha256"] for record in records},
             {envelope.envelope_sha256},
         )
+
+    def test_spark_harness_enriches_rows_by_envelope_work_id(self):
+        class FakeRDD:
+            def __init__(self, values):
+                self.values = values
+                self.result = []
+
+            def mapPartitions(self, function):
+                for value in self.values:
+                    self.result.extend(function(iter([value])))
+                return self
+
+            def collect(self):
+                return self.result
+
+        class FakeContext:
+            @staticmethod
+            def parallelize(values, partitions):
+                self.assertEqual(partitions, 2)
+                return FakeRDD(values)
+
+        batch = self.claim((10,))
+        envelope = self.verified(batch)
+        plan = plan_duration_lpt(
+            envelope.items, LOCAL_TWO_WORKERS, peak_rss_bytes=None
+        )
+        spark = type("FakeSpark", (), {"sparkContext": FakeContext()})()
+        harness = SparkExecutionHarness(
+            spark,
+            verify_settings=False,
+            row_enrichment={"work-0": {"localized_video_name": "video.mp4"}},
+        )
+        with patch(
+            "people_counter.sjd_process.execute_sjd_partition",
+            side_effect=lambda rows: rows,
+        ):
+            records = harness.execute(
+                envelope, plan, LOCAL_TWO_WORKERS, "probe"
+            )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["work_id"], "work-0")
+        self.assertEqual(records[0]["localized_video_name"], "video.mp4")
 
     def test_top_level_bucket_adapter_requires_one_physical_bucket(self):
         self.assertEqual(list(execute_sjd_bucket_partition([])), [])
@@ -476,6 +546,7 @@ class SjdProcessTests(unittest.TestCase):
             self.attempts,
         )
         self.assertEqual(result.record_count, 1)
+        self.assertEqual(result.driver_package_version, _package_version())
         self.assertEqual(harness.calls, 1)
         with self.assertRaisesRegex(ProcessValidationError, "unsupported"):
             run_process_batch(
@@ -629,6 +700,29 @@ class SjdProcessTests(unittest.TestCase):
             envelope, plan, LOCAL_TWO_WORKERS, "probe"
         )[0]
         validate_staged_records([record], envelope, plan)
+        for name in ("work_id", "attempt_id"):
+            with self.subTest(invalid_identity_field=name):
+                with self.assertRaises(ProcessValidationError) as raised:
+                    validate_staged_records(
+                        [{**record, name: None}],
+                        envelope,
+                        plan,
+                    )
+                self.assertEqual(
+                    str(raised.exception),
+                    f"{name} must be a non-empty string",
+                )
+        with self.assertRaises(ProcessValidationError) as raised:
+            validate_staged_records(
+                [{**record, "work_id": "unexpected"}],
+                envelope,
+                plan,
+            )
+        self.assertEqual(
+            str(raised.exception),
+            "unexpected staged identity: "
+            f"('unexpected', {record['attempt_id']!r})",
+        )
 
         required = (
             "stage_id",
@@ -638,6 +732,7 @@ class SjdProcessTests(unittest.TestCase):
             "executor_identity",
             "executor_host",
             "release_digest",
+            "package_version",
             "config_sha256",
             "model_identity",
             "manifest_sha256",
@@ -672,6 +767,14 @@ class SjdProcessTests(unittest.TestCase):
                 malformed = {**record, name: value}
                 with self.assertRaises(ProcessValidationError):
                     validate_staged_records([malformed], envelope, plan)
+        with self.assertRaisesRegex(
+            ProcessValidationError, "package_version mismatch"
+        ):
+            validate_staged_records(
+                [{**record, "package_version": "0.0.0"}],
+                envelope,
+                plan,
+            )
 
         failed = SyntheticHarness({"work-0"}).execute(
             envelope, plan, LOCAL_TWO_WORKERS, "probe"
