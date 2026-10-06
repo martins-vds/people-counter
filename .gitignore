@@ -20,6 +20,8 @@ offline-models/
 local-data/
 .env
 
+.people-counter*
+
 # Temporary Python exports of Fabric notebooks
 /.nbsrc_*.py
 
