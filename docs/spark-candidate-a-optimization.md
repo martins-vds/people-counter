@@ -1,16 +1,56 @@
 # Spark Candidate A Optimization for `people-counter`
 
+> Production migration, stopped-writer recovery, shadow-routing, and isolated
+> benchmark operations are documented in
+> [production-migration-benchmark-runbook.md](production-migration-benchmark-runbook.md).
+> The force/full gold rebuild path is maintenance-only and non-idempotent; it
+> is not a benchmark recovery mechanism.
+
 ## Executive Summary
+
+### Final Candidate A CPU verdict (2026-10-06)
+
+**REJECT the Spark/F64 CPU architecture.** The completed bounded optimizer
+experiments produced a best actual aggregate throughput of `1.5899x` real
+time, against the `416.67x` acceptance threshold. The measured architecture
+is therefore `262.07x` below the gate. With the benchmark's capacity headroom,
+the observed rate implies 315 F64-equivalent allocations, which is neither a
+credible nor an economical route to the target. The six-hour benchmark was
+not run because a sustained test cannot rescue a candidate that misses the
+throughput gate by this magnitude.
+
+Changed-input gold validation and the subsequent unchanged/no-op proof passed.
+Final benchmark recovery and reconciliation reported zero critical and zero
+noncritical findings. These correctness results do not override the capacity
+failure.
+
+The experiments did not apply every optimization listed in this document, and
+this document must not be read as claiming otherwise. Remaining items such as
+copy reduction, Spark-action reduction, additional batching, and selective
+native relational execution are incremental; they cannot plausibly close a
+262-fold measured gap. Stop CPU/Spark inference optimization here. The next
+recommended architecture is accelerator-backed inference—preferably a
+right-sized GPU worker/service tier—while retaining Spark for manifests,
+durable work control, validation, immutable publication, and gold processing.
 
 Candidate A is not a particular computer: it is the design document's **all-Spark executor-partition architecture**. It assigns whole videos to Spark partitions, constructs and reuses an inference runtime inside each partition, disables speculation, and relies on immutable attempt output plus a driver-controlled publication decision.[^1] The repository already contains most of the difficult execution primitives: sequential whole-video processing, typed runtime caching, native-thread controls, lease-aware admission, deterministic largest-cost-first planning, and Delta transaction identities.[^2]
 
 The current production notebook is nevertheless **not ready to be promoted unchanged**. Its physical partitioning, memory cap, dynamic-allocation behavior, task-attempt identity, and default claim size diverge from the stronger benchmark implementation; it also lacks a production Spark Job Definition (SJD) entry point and a completed six-hour capacity result.[^3] The highest-value path is therefore to port the benchmark scheduler's invariants into an importable SJD worker, keep the current stateful tracking semantics, amortize model loading across multiple compatible videos, tune `spark.task.cpus` together with native thread counts, increase detector batch size, and remove avoidable full-frame copies and extra Spark actions.[^4]
 
-The scale gate remains stringent: processing 200,000 source-video hours in 30 days requires 277.78x aggregate real-time speed before allowances and **416.67x** after the document's 20% headroom and 80% useful-utilization assumptions.[^5] No checked-in result currently proves that gate. Production sizing must therefore come from a fixed-allocation benchmark followed by a six-hour sustained run, not from nominal Fabric node counts or a hard-coded executor profile.[^6]
+The scale gate remains stringent: processing 200,000 source-video hours in 30
+days requires 277.78x aggregate real-time speed before allowances and
+**416.67x** after the document's 20% headroom and 80% useful-utilization
+assumptions.[^5] The final CPU optimizer result of `1.5899x` rejects Candidate
+A before the six-hour gate. Any replacement accelerator architecture still
+requires fixed-allocation measurement and a six-hour sustained run before
+production sizing; nominal node counts or a hard-coded executor profile are
+not evidence.[^6]
+
+Fabric's Native Execution Engine (NEE) adds a useful but narrower optimization opportunity. Microsoft now documents native-plan support around Python scalar UDFs, Pandas UDFs, Scala UDFs, and operations over arrays, maps, and structs, with its largest UDF benchmark gains reported for vectorized Pandas UDFs.[^48] This does **not** make OpenCV decode, PyTorch/ONNX inference, ReID, or stateful tracking native. Candidate A should retain whole-video `mapPartitions` for inference while moving eligible control, validation, result-shaping, and gold transformations to Spark SQL/DataFrame expressions first; only transformations that cannot be expressed cleanly with built-ins should enter an isolated Python/Pandas UDF benchmark.[^49]
 
 ## Scope and Assumptions
 
-This is a **technical deep dive** covering the package under `src/people_counter`, its Fabric notebooks and pipeline exports, the attached pipeline design, and current official Spark/Fabric guidance. The analyzed repository revision is `325a7ccdb41136dd449a432f4679c72216091f6f`.
+This is a **technical deep dive** covering the package under `src/people_counter`, its Fabric notebooks and pipeline exports, the attached pipeline design, and current official Spark/Fabric guidance. The original Candidate A analysis used repository revision `325a7ccdb41136dd449a432f4679c72216091f6f`. The UDF/NEE update was researched against committed `HEAD` `eecffc99c3d77440c2f1f9060bce42a602a29653`; recommendations that reference newer SJD and gold modules are explicitly cited to that revision.
 
 The term **Candidate A** is interpreted exactly as the attached document uses it: one bounded multi-video Spark application in which whole videos are processed by executor partitions. It is not interpreted as a workstation, VM SKU, or GPU host.[^1] Recommendations below preserve frame-order-dependent tracking and line-counting semantics unless explicitly labeled as an algorithm or model experiment.
 
@@ -23,6 +63,8 @@ The term **Candidate A** is interpreted exactly as the attached document uses it
 | `src/people_counter/pipelines/rtdetr_osnet.py` | Batched RT-DETR inference plus ordered stateful tracking/ReID | Candidate A's current CPU baseline and primary optimization target.[^9] |
 | `src/people_counter/fabric_executor_partition.py` | Runtime cache, Spark row schema, whole-video partition loop | Correct executor-side abstraction; should be called from a top-level SJD function.[^10] |
 | `src/people_counter/fabric_executor_production.py` | Lease checks, planning, local staging, processing, staging validation | Reusable production foundation, but some notebook callers weaken its scheduler guarantees.[^11] |
+| `src/people_counter/sjd_process.py` | Current Candidate A SJD partition adapter, task identity, explicit bucket execution, and staged-record validation | Confirms that the whole-video `mapPartitions` boundary has since become an importable implementation surface.[^50] |
+| `src/people_counter/sjd_gold.py` | Gold fact, flow, operational, date/time, and validation transformations | Best area for Catalyst-native rewrites and selective UDF benchmarking.[^51] |
 | `notebooks/fabric/15_executor_partition_inference.ipynb` | Capacity-aware Candidate A benchmark | Source of the stronger fixed-allocation, memory-safe, explicit-partition algorithm.[^12] |
 | `notebooks/fabric/17_process_video_executor.ipynb` | Current production executor notebook | Operational canary, not yet a capacity-approved production SJD.[^13] |
 | `src/people_counter/cpu_runtime.py` | Spark-placement-aware native thread budgeting | Essential for preventing PyTorch/OpenCV/BLAS oversubscription.[^14] |
@@ -240,6 +282,167 @@ Required preflight:
 
 Do not plan around Fabric-native GPUs. Current Microsoft guidance says GPU-accelerated pools are unavailable for this Spark surface.[^41]
 
+## Native Execution Engine and UDF Strategy
+
+### What Fabric's UDF support changes
+
+Fabric documents NEE support for:
+
+- Python scalar UDFs created with `udf()`;
+- vectorized Python UDFs created with `@pandas_udf`;
+- Scala Spark SQL UDFs;
+- native-plan operations over arrays, maps, structs, and selected nested combinations.[^48]
+
+NEE must be enabled at the published Environment, notebook, or SJD level with `spark.native.enabled=true`. Runtime 2.0 is the preferred target and currently documents Spark 4.1, Python 3.13, Scala 2.13, and Delta 4.2.[^52] Supported scans and operators are offloaded through Gluten/Velox, while unsupported plan segments fall back automatically to JVM Spark. Execution must therefore be verified using `EXPLAIN`, Spark UI/History Server, the Gluten SQL/DataFrame view, and Fabric Spark Advisor; enabling the configuration alone is not proof of native execution.[^53]
+
+Microsoft reports internal improvements of up to 5.76x for vectorized Python UDFs and up to 1.08x for scalar Python UDFs.[^48] Those numbers are not video-inference benchmarks and do not establish an expected Candidate A speedup. The documented benefit is primarily a more efficient columnar plan and data-transfer path around Python evaluation; arbitrary OpenCV, Torch, ONNX Runtime, SciPy, and tracker code still executes in its existing native/Python libraries rather than being compiled into Velox.[^54]
+
+Fabric does not explicitly document NEE acceleration for `RDD.mapPartitions`, `mapInPandas`, `applyInPandas`, or `foreachPartition`.[^55] Upstream Spark supports iterator-form Pandas UDFs that initialize expensive state once per iterator, but Fabric's article demonstrates only conventional scalar column-preserving Pandas UDFs. Iterator-form NEE coverage should therefore be treated as unverified until the physical plan and runtime evidence prove it.
+
+### Why inference should remain `mapPartitions`
+
+The inference pipeline is not an independent row transform:
+
+1. OpenCV maintains an ordered decoder cursor while sampling frames.
+2. Detector work is batched, but tracker, ReID, coasting, and line-zone updates consume frames in order.
+3. Each video needs fresh mutable tracker and result state.
+4. Expensive detector/ReID runtime objects should be reused across compatible videos.
+5. One video produces a variable number of terminal, telemetry, and crossing records.[^56]
+
+A scalar UDF would hide a whole video behind one opaque row call, provide awkward one-to-many output, and risk repeated evaluation because Spark is free to optimize deterministic UDF calls. A scalar Pandas UDF must preserve total input/output cardinality and would add Arrow and Pandas buffers without reducing the dominant decode, model, or tracking work. Grouped Pandas execution could retain one video's state only by materializing and ordering the entire group, recreating the partition loop with greater memory risk. A Scala UDF would require a full JVM/JNI rewrite of the Python/OpenCV/PyTorch inference stack and would not automatically preserve preprocessing, provider, dtype, or tracker semantics.[^57]
+
+The target remains:
+
+```text
+video descriptors
+  -> explicit, cost-balanced physical partitions
+  -> top-level mapPartitions callable
+  -> one reusable immutable model runtime per partition/worker cache key
+  -> fresh decoder/tracker/result state per video
+  -> typed attempt records
+  -> SQL/DataFrame validation and publication
+```
+
+NEE can still accelerate compatible scans, filters, projections, joins, and aggregations before and after this Python/native inference island.
+
+### Function placement decision matrix
+
+| Function area | Recommended Spark form | Reason |
+|---|---|---|
+| Video metadata, decode, sampling, detector preprocessing, inference, ReID, tracking, and line counting | Keep `mapPartitions` | Ordered state, native resources, model reuse, variable-cardinality output, and task identity are fundamental.[^56] |
+| Executor runtime cache and SJD bucket adapter | Keep `mapPartitions` | Current code validates physical partition identity and emits Spark task-attempt metadata; a UDF would weaken these invariants.[^50] |
+| Simple numeric/time projections, lease-cost columns, scalar validators, sparse line-record selection | SQL/DataFrame built-ins | Catalyst-visible expressions are more optimizable and avoid a language boundary.[^58] |
+| Gold facts, flow, operations, dimensions, PK/FK checks, observability | SQL/DataFrame built-ins | These are relational joins, windows, groups, aggregates, anti-joins, and validation queries.[^51] |
+| URI normalization | Retain the existing Python scalar UDF initially | It contains strict, security-sensitive percent-decoding and traversal behavior; any SQL or Scala replacement needs a conformance corpus.[^59] |
+| IANA timezone validation | Retain the existing Python scalar UDF initially | It deliberately uses Python `ZoneInfo`/tzdata; a JVM port can disagree if timezone databases differ.[^59] |
+| Claim-envelope, cryptographic, membership, duplicate, runtime-affinity, and terminal-cardinality validation | Driver decision, with SQL diagnostics where useful | The authoritative result is batch-wide and fail-closed; independent row UDFs cannot establish set equality or atomic validity.[^60] |
+| Delta publication, committed pointer, cleanup, and replay | Driver-only | UDFs must remain side-effect free and cannot own transaction-level publication. |
+
+There is currently no strong reason to transform inference functions into UDFs. The most promising UDF possibilities are downstream parsing/classification functions where the best correct native expression is either unwieldy or unavailable.
+
+### Candidate UDF experiments
+
+Run the UDF work as a separate downstream Spark SQL benchmark, not as part of the six-hour inference capacity run.
+
+#### 1. Attempt-path parsing
+
+The current gold path extracts exactly one nonempty `batch=` and `attempt=` segment and fails closed on ambiguity.[^61] Compare:
+
+- native `split`/`filter`/`size`/`element_at`;
+- native regular-expression extraction with explicit cardinality checks;
+- Arrow-enabled scalar Python UDF returning `{ok, batch_id, process_attempt_id, error_code}`;
+- Pandas UDF returning the same typed result.
+
+This is the strongest initial UDF candidate because exact segment cardinality is sufficiently branch-heavy to make custom vectorized logic plausible.
+
+#### 2. JSON payload validation and projection
+
+Compare the current Python `json.loads` path with:
+
+- native `from_json` into a fixed schema plus typed projection;
+- Arrow-enabled scalar Python UDF;
+- Pandas UDF;
+- a Scala UDF only if no Python/native option qualifies.[^62]
+
+Malformed JSON and non-object roots must produce visible validation errors. A permissive null result is not acceptable.
+
+#### 3. Effective event timestamp
+
+Compare the current rule—absolute `observed_at_utc` wins, otherwise add finite nonnegative `video_seconds` to capture time—with:
+
+- native timestamp expressions and explicit validity predicates;
+- Arrow-enabled scalar Python UDF;
+- Pandas UTC datetime arithmetic.[^63]
+
+Correctness cases must include offsets, naive timestamps, DST boundaries, Boolean numerics, NaN/Inf, negative values, precision, and overflow.
+
+#### 4. Operational status classification
+
+Keep grouping and aggregation native. Benchmark only the branch-heavy row classifier that selects completion time and maps statuses to succeeded, failed, or deferred outcomes. Compare native `when`/`coalesce` with Python and Pandas UDF variants before native `groupBy`, `count_if`, `sum`, `avg`, and percentile operations.[^64]
+
+#### 5. Committed-pointer qualification
+
+Treat this mainly as a negative control. The expected winner is native joins, equality predicates, anti-joins, and grouped error diagnostics. Compare a scalar or Pandas UDF only after the relevant tables have been joined; do not hide cross-table membership logic inside a UDF.[^65]
+
+### UDF benchmark protocol
+
+Use an isolated benchmark SJD and benchmark-only Delta paths. It must not invoke inference, load models, stage videos, update publication pointers, or write production tables.
+
+Run each transformation against:
+
+1. a 300-500 row adversarial correctness corpus;
+2. a version-pinned replay of benchmark work, attempts, publications, batches, and staged records;
+3. deterministic scale tiers, for example:
+   - S: 1 million control rows / 5 million staged records;
+   - M: 10 million / 50 million;
+   - L: 50 million / 250 million.
+
+For every variant:
+
+1. fix the Environment, executor topology, shuffle partitions, input Delta versions, and output schema;
+2. run with NEE disabled and enabled;
+3. capture `EXPLAIN FORMATTED`, Spark application ID, physical plan, native/fallback node counts, and Advisor alerts;
+4. perform two warm-ups and seven measured repetitions in randomized order;
+5. repeat shortlisted variants in three fresh applications;
+6. force complete evaluation and persist an aggregate output hash;
+7. record wall time, CU-hours, rows/MiB per second, Python time, serialization, RSS, GC, shuffle, spill, skew, retries, and worker restarts.[^66]
+
+Correctness is a prerequisite:
+
+- exact schema, types, nullability, row count, and uniqueness;
+- empty `exceptAll` in both directions against the oracle;
+- identical error category and offending identity;
+- exact UTC timestamps at microsecond precision;
+- identical canonical digests where applicable;
+- deterministic output across runs and fresh applications;
+- no partial output or nonbenchmark access.
+
+Adopt a Python/Pandas UDF only when all of these hold on tier M:
+
+- median end-to-end wall time is at least 15% faster than the best correct no-UDF implementation;
+- the 95% lower confidence bound for speedup is at least 1.10x;
+- CU per million rows improves at least 10%;
+- p95 wall time improves at least 10%;
+- peak RSS is no more than 1.20x baseline;
+- no unexplained native fallback, worker crash, OOM, or task failure;
+- tier L shows no reversal larger than 5%.
+
+If a native expression is within 5% of the UDF, choose the native expression. It has better Catalyst visibility, fewer runtime dependencies, and lower long-term maintenance cost.
+
+### Scala decision
+
+The repository is Python-first and currently has no Scala/SBT/JAR module. Fabric Runtime 2.0 can run Scala 2.13 SJDs and Microsoft documents Scala UDF participation in NEE plans, but the Scala function itself remains JVM code rather than Velox-compiled logic.[^67]
+
+Create a Scala benchmark module only if:
+
+1. a Python/Pandas UDF passes every correctness and operational gate;
+2. that function still consumes at least 20% of the gold stage's CPU time;
+3. no built-in expression is semantically adequate;
+4. a Scala prototype improves full-query wall time by at least 20% and CU cost by at least 15% over the qualifying Python/Pandas UDF;
+5. expected six-month capacity savings justify dual-language build, test, deployment, and on-call complexity.
+
+Do not port the Candidate A inference worker to Scala merely because Scala UDF support exists.
+
 ## Reliable Attempt Publication
 
 Spark may recompute a failed task, so executor work can happen more than once even with speculation disabled. Correctness must come from immutable attempt identity and publication, not from assuming exactly-once execution.
@@ -366,7 +569,21 @@ Additional gates:
 4. Size production from the lower confidence bound of source-video-hours per billed worker-hour.
 5. Revisit dynamic allocation, ONNX/OpenVINO, decode replacement, sampling rate, or model changes only as separately gated experiments.
 
+### Phase 6: Selective NEE/UDF optimization
+
+1. Enable NEE in a cloned benchmark Environment and record the effective runtime.
+2. Rewrite downstream relational work with SQL/DataFrame built-ins before introducing UDFs.
+3. Benchmark path parsing, JSON projection, timestamp derivation, status classification, and pointer qualification.
+4. Inspect physical plans and reject unexplained JVM/native fallback.
+5. Shadow qualifying transformations against current gold output.
+6. Promote only variants that pass the correctness, confidence-bound, CU-cost, RSS, and scale gates.
+7. Keep this result separate from the inference capacity result; rerun the six-hour gate if promotion changes the shared Candidate A Environment.
+
 ## Expected Outcome
+
+This section records the original optimization hypothesis, not the final
+capacity decision. The bounded CPU experiments did not realize enough gain,
+and the final verdict above supersedes CPU promotion recommendations.
 
 The proposed work does not change Candidate A's fundamental algorithm: whole videos remain the stateful unit, sampled frames remain ordered, and runtime reuse remains isolated from per-video tracking state. It changes the deployment boundary, makes logical scheduling match physical Spark partitions, prevents unsafe memory assumptions, reduces model and data-movement overhead, and turns retry behavior into an explicit immutable publication protocol.
 
@@ -379,13 +596,17 @@ The largest near-term gains are likely to come from **multi-video model amortiza
 - Candidate A's definition, throughput target, and whole-video/stateful constraints are explicit in the attached design.
 - The repository already implements executor-side runtime reuse, CPU thread controls, lease-aware planning, and a stronger benchmark partition mapper.
 - The production notebook differs materially from the benchmark in memory capping and physical partition mapping.
-- No accepted six-hour Candidate A result is present in the researched repository state.
+- No six-hour Candidate A CPU result exists because the `1.5899x` bounded
+  result failed the `416.67x` prerequisite by `262.07x`.
+- Scalar/Pandas/Scala UDF support does not make OpenCV, PyTorch/ONNX, ReID, or tracking execute inside Fabric's native engine.
+- Whole-video `mapPartitions` remains the correct inference boundary; SQL/DataFrame built-ins are the preferred boundary for downstream relational work.
 
 **Medium confidence**
 
 - Detector batch sizes 2 or 4, fewer waves, and deferred RGB conversion should improve CPU throughput. Their exact gain depends on the Fabric node, video mix, model artifacts, and memory behavior.
 - A worker-global cache may improve multi-wave runs, but Python-worker reuse is opportunistic and must not become a correctness requirement.
 - Duration-plus-media-feature cost prediction should reduce skew, but it requires production telemetry before coefficients can be trusted.
+- Path parsing and branch-heavy operational classification are plausible UDF candidates, but the best native expression is still expected to win most downstream transformations.
 
 **Tenant/runtime validation required**
 
@@ -394,6 +615,8 @@ The largest near-term gains are likely to come from **multi-video model amortiza
 - native wheel compatibility with Python 3.13;
 - actual capacity quota, cold allocation, pool shape, and SJD activity output schema;
 - the production executor count needed for 416.67x throughput.
+- exact NEE coverage for iterator-form Pandas UDFs, `mapInPandas`, and surrounding mixed native/JVM plan segments;
+- observed native fallback reasons and performance for this project's Delta schemas and complex types.
 
 ## Footnotes
 
@@ -444,3 +667,23 @@ The largest near-term gains are likely to come from **multi-video model amortiza
 [^45]: [notebooks/tracking_quality_analysis.ipynb:4-101](https://github.com/martins-vds/people-counter/blob/325a7ccdb41136dd449a432f4679c72216091f6f/notebooks/tracking_quality_analysis.ipynb#L4-L101)
 [^46]: `research-how-we-can-create-the-whole-pipeline-desc.md:678-702`
 [^47]: [docs/fabric-performance-assessment-2026-09-26.md:487-512](https://github.com/martins-vds/people-counter/blob/325a7ccdb41136dd449a432f4679c72216091f6f/docs/fabric-performance-assessment-2026-09-26.md#L487-L512)
+[^48]: [Microsoft Fabric: Python UDFs, Scala UDFs, and complex types in the native execution engine](https://learn.microsoft.com/en-us/fabric/data-engineering/native-execution-engine-udf-complex-types)
+[^49]: [src/people_counter/sjd_process.py:483-603](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_process.py#L483-L603), [src/people_counter/sjd_gold.py:1241-1692](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_gold.py#L1241-L1692)
+[^50]: [src/people_counter/sjd_process.py:483-786](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_process.py#L483-L786)
+[^51]: [src/people_counter/sjd_gold.py:1241-1692](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_gold.py#L1241-L1692), [src/people_counter/sjd_gold.py:2064-2250](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_gold.py#L2064-L2250)
+[^52]: [Microsoft Fabric Native Execution Engine overview](https://learn.microsoft.com/en-us/fabric/data-engineering/native-execution-engine-overview), [Microsoft Fabric Runtime 2.0](https://learn.microsoft.com/en-us/fabric/data-engineering/runtime-2-0)
+[^53]: [Microsoft Fabric: identify native engine operations](https://learn.microsoft.com/en-us/fabric/data-engineering/native-execution-engine-overview#identify-operations-executed-by-the-engine), [Microsoft Fabric Spark Advisor alerts](https://learn.microsoft.com/en-us/fabric/data-engineering/native-execution-engine-overview#fabric-spark-advisor-alerts)
+[^54]: [Microsoft Fabric UDF performance results](https://learn.microsoft.com/en-us/fabric/data-engineering/native-execution-engine-udf-complex-types#performance-results)
+[^55]: [Apache Spark 4.1 `pandas_udf`](https://spark.apache.org/docs/4.1.0/api/python/reference/pyspark.sql/api/pyspark.sql.functions.pandas_udf.html), [Apache Spark 4.1 `mapInPandas`](https://spark.apache.org/docs/4.1.0/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrame.mapInPandas.html)
+[^56]: [src/people_counter/video.py:37-95](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/video.py#L37-L95), [src/people_counter/pipelines/rtdetr_osnet.py:880-1000](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/pipelines/rtdetr_osnet.py#L880-L1000), [src/people_counter/line_counting.py:74-132](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/line_counting.py#L74-L132)
+[^57]: [Apache Spark 4.1 Python UDF documentation](https://spark.apache.org/docs/4.1.0/api/python/reference/pyspark.sql/api/pyspark.sql.functions.udf.html), [src/people_counter/fabric_executor_partition.py:57-197](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_executor_partition.py#L57-L197)
+[^58]: [src/people_counter/fabric_executor_production.py:108-110](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_executor_production.py#L108-L110), [src/people_counter/fabric_executor_production.py:318-330](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_executor_production.py#L318-L330)
+[^59]: [notebooks/fabric/02_register_backfill.ipynb:150-244](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/notebooks/fabric/02_register_backfill.ipynb#L150-L244)
+[^60]: [src/people_counter/sjd_process.py:189-272](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_process.py#L189-L272), [src/people_counter/fabric_executor_production.py:184-236](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_executor_production.py#L184-L236), [src/people_counter/fabric_executor_production.py:508-542](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_executor_production.py#L508-L542)
+[^61]: [src/people_counter/fabric_candidate_a_gold.py:595-604](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_candidate_a_gold.py#L595-L604)
+[^62]: [src/people_counter/fabric_candidate_a_gold.py:65-104](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_candidate_a_gold.py#L65-L104), [src/people_counter/sjd_gold.py:1884-1925](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_gold.py#L1884-L1925)
+[^63]: [src/people_counter/sjd_gold.py:1351-1372](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_gold.py#L1351-L1372)
+[^64]: [src/people_counter/sjd_gold.py:1401-1504](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/sjd_gold.py#L1401-L1504)
+[^65]: [src/people_counter/fabric_candidate_a_gold.py:105-172](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_candidate_a_gold.py#L105-L172)
+[^66]: [src/people_counter/fabric_benchmark.py:1183-1223](https://github.com/martins-vds/people-counter/blob/eecffc99c3d77440c2f1f9060bce42a602a29653/src/people_counter/fabric_benchmark.py#L1183-L1223), [Apache Spark 4.1 `EXPLAIN`](https://spark.apache.org/docs/4.1.0/sql-ref-syntax-qry-explain.html)
+[^67]: [Microsoft Fabric: create a Spark Job Definition](https://learn.microsoft.com/en-us/fabric/data-engineering/create-spark-job-definition), [Microsoft Fabric: Scala UDF support](https://learn.microsoft.com/en-us/fabric/data-engineering/native-execution-engine-udf-complex-types#scala-udf-support)

@@ -1,0 +1,56 @@
+[
+  {
+    "uniqueIdentifier": "source-view-entity",
+    "payload": {
+      "name": "azure_storage_events_eventstream-stream",
+      "definition": {
+        "type": "View"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "rule-entity-stable-id",
+    "payload": {
+      "definition": {
+        "instance": "{\"steps\":[{\"id\":\"fields-step\",\"name\":\"FieldsDefaultsStep\",\"rows\":[]},{\"id\":\"detect-step\",\"name\":\"EventDetectStep\",\"rows\":[]},{\"id\":\"action-step\",\"name\":\"ActStep\",\"rows\":[{\"kind\":\"FabricItemInvocation\",\"name\":\"FabricItemBinding\",\"arguments\":[{\"name\":\"fabricJobConnectionDocumentId\",\"type\":\"string\",\"value\":\"action-entity-stable-id\"},{\"name\":\"parameters\",\"type\":\"array\",\"values\":[]},{\"name\":\"additionalInformation\",\"type\":\"array\",\"values\":[]},{\"name\":\"workspaceId\",\"type\":\"string\",\"value\":\"c31ee864-230d-4005-8fd5-7c7130ebf774\"},{\"name\":\"itemId\",\"type\":\"string\",\"value\":\"5548a877-38e0-4933-bf2d-0285250637d2\"},{\"name\":\"itemType\",\"type\":\"string\",\"value\":\"Pipeline\"},{\"name\":\"jobType\",\"type\":\"string\",\"value\":\"Pipeline\"}]}]}],\"templateId\":\"EventTrigger\",\"templateVersion\":\"1.3.0\"}",
+        "settings": {
+          "shouldApplyRuleOnUpdate": true,
+          "shouldRun": false
+        },
+        "type": "Rule"
+      },
+      "name": "run_pc_event_intake_on_manifest_renamed"
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "action-entity-stable-id",
+    "payload": {
+      "fabricItem": {
+        "itemId": "5548a877-38e0-4933-bf2d-0285250637d2",
+        "itemType": "Pipeline",
+        "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774"
+      },
+      "jobType": "Pipeline",
+      "name": "Fabric item action"
+    },
+    "type": "fabricItemAction-v1"
+  },
+  {
+    "uniqueIdentifier": "unrelated-kql-source",
+    "payload": {
+      "eventTimeSettings": {},
+      "eventhouseItem": {},
+      "metadata": {},
+      "name": "workspace_monitoring event",
+      "parentContainer": "operations-container",
+      "query": "sanitized",
+      "queryParameters": [],
+      "runSettings": {
+        "isStopped": false
+      }
+    },
+    "type": "kqlSource-v1"
+  }
+]

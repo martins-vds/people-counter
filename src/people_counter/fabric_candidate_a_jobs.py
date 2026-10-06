@@ -10,7 +10,7 @@ import json
 import re
 import sys
 from dataclasses import asdict
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from people_counter.fabric_candidate_a import (
     LAKEHOUSE_ID,
@@ -74,18 +74,44 @@ def _localize_process_inputs(
     spark: Any,
     store: Any,
     batch_id: str,
+    *,
+    route_mode: str | None = None,
+    route_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Distribute immutable OneLake video/model files to executors."""
     from pyspark import SparkFiles
 
     envelope, _ = store.load_claim_envelope_with_digest(batch_id)
+    validation_error: type[Exception] = ValueError
+    if route_mode == "SHADOW_SYNTHETIC":
+        from people_counter.sjd_process import ProcessValidationError
+
+        validation_error = ProcessValidationError
+    if route_mode == "SHADOW_SYNTHETIC" and not isinstance(
+        route_identity, Mapping
+    ):
+        raise validation_error("synthetic route identity is required")
     enrichment: dict[str, dict[str, Any]] = {}
     for item in envelope["items"]:
         payload = item["payload"]
+        if route_mode == "SHADOW_SYNTHETIC":
+            assert route_identity is not None
+            if (
+                item.get("work_id") != route_identity.get("work_id")
+                or payload.get("source_sha256")
+                != route_identity.get("source_sha256")
+                or item.get("config_sha256")
+                != route_identity.get("config_sha256")
+            ):
+                raise validation_error(
+                    "synthetic video/config identity differs"
+                )
         source = str(payload["source_video"])
         mount_prefix = "/lakehouse/default/"
         if not source.startswith(mount_prefix):
-            raise ValueError("Candidate A source_video must use the default Lakehouse")
+            raise validation_error(
+                "Candidate A source_video must use the default Lakehouse"
+            )
         relative = source[len(mount_prefix) :]
         spark.sparkContext.addFile(
             f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
@@ -95,12 +121,16 @@ def _localize_process_inputs(
         localized_source = SparkFiles.get(source_name)
         source_sha = hashlib.sha256(open(localized_source, "rb").read()).hexdigest()
         if source_sha != payload.get("source_sha256"):
-            raise ValueError("localized video digest differs from registered input")
+            raise validation_error(
+                "localized video digest differs from registered input"
+            )
 
         detector = str(payload.get("detector_model", "r18"))
         model_format = str(payload.get("model_format", "pytorch"))
         if payload.get("pipeline", "rtdetr-osnet") != "rtdetr-osnet":
-            raise ValueError("Candidate A v1 localizer supports RT-DETR/OSNet only")
+            raise validation_error(
+                "Candidate A v1 localizer supports RT-DETR/OSNet only"
+            )
         detector_dir = (
             "rtdetr_v2_r18vd" if detector == "r18" else "rtdetr_v2_r50vd"
         )
@@ -119,10 +149,16 @@ def _localize_process_inputs(
             f"rtdetr_osnet/libre_reid_osnet/{reid_file}",
         )
         localized_models: dict[str, dict[str, str]] = {}
+        expected_artifacts = payload.get("model_artifact_sha256", {})
+        if not isinstance(expected_artifacts, Mapping):
+            raise validation_error(
+                "model_artifact_sha256 must be an object"
+            )
         for model_path in model_paths:
+            full_model_path = f"Files/models/{model_path}"
             spark.sparkContext.addFile(
                 f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
-                f"{LAKEHOUSE_ID}/Files/models/{model_path}"
+                f"{LAKEHOUSE_ID}/{full_model_path}"
             )
             name = model_path.rsplit("/", 1)[-1]
             localized = SparkFiles.get(name)
@@ -130,6 +166,31 @@ def _localize_process_inputs(
                 "localized_name": name,
                 "sha256": hashlib.sha256(open(localized, "rb").read()).hexdigest(),
             }
+            expected_digest = expected_artifacts.get(model_path)
+            if (
+                expected_digest is not None
+                and localized_models[model_path]["sha256"] != expected_digest
+            ):
+                raise validation_error(
+                    "localized model digest differs from CPU profile"
+                )
+        if route_mode == "SHADOW_SYNTHETIC":
+            from people_counter.fabric_production_routing import sha256_json
+
+            observed_model = sha256_json(
+                {
+                    "schema": "people-counter-fixed-model-artifacts-v1",
+                    "artifacts": {
+                        f"Files/models/{path}": value["sha256"]
+                        for path, value in localized_models.items()
+                        if not path.endswith(
+                            ("config.json", "preprocessor_config.json")
+                        )
+                    },
+                }
+            )
+            if observed_model != route_identity.get("model_sha256"):
+                raise validation_error("synthetic model identity differs")
         enrichment[str(item["work_id"])] = {
             "spark_localized_video_name": source_name,
             "spark_localized_models": localized_models,
@@ -173,12 +234,19 @@ def _control_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _clear_stale_lock(spark: Any, expected_owner_id: str) -> dict[str, Any]:
+def _clear_stale_lock(
+    spark: Any,
+    expected_owner_id: str,
+    *,
+    config: FabricCandidateAConfig | None = None,
+) -> dict[str, Any]:
     """Manually clear one investigated canary writer token by exact CAS."""
     from delta.tables import DeltaTable
     from pyspark.sql import functions
 
-    table = FabricCandidateAConfig().table("locks")
+    selected = config or FabricCandidateAConfig()
+    selected.require_write_enabled()
+    table = selected.table("locks")
     rows = spark.table(table).select(
         "lock_name", "owner_id", "acquired_at"
     ).limit(2).collect()
@@ -219,12 +287,18 @@ def _clear_stale_lock(spark: Any, expected_owner_id: str) -> dict[str, Any]:
     }
 
 
-def control_main(argv: Sequence[str] | None = None) -> int:
+def control_main(
+    argv: Sequence[str] | None = None,
+    *,
+    config: FabricCandidateAConfig | None = None,
+) -> int:
     """Run bounded control maintenance against the fixed canary tables."""
     arguments = _control_parser().parse_args(argv)
     from people_counter.sjd_control import FabricControlStore
 
-    store = FabricControlStore(_spark(), config=FabricCandidateAConfig())
+    selected = config or FabricCandidateAConfig()
+    selected.require_write_enabled()
+    store = FabricControlStore(_spark(), config=selected)
     if arguments.command == "bootstrap":
         result: object = {"bootstrapped": True}
     elif arguments.command == "register":
@@ -274,7 +348,9 @@ def control_main(argv: Sequence[str] | None = None) -> int:
     elif arguments.command == "recover":
         result = asdict(store.recover(now=arguments.now))
     elif arguments.command == "clear-stale-lock":
-        result = _clear_stale_lock(_spark(), arguments.expected_owner_id)
+        result = _clear_stale_lock(
+            _spark(), arguments.expected_owner_id, config=selected
+        )
     else:
         result = [asdict(item) for item in store.reconcile()]
     print(json.dumps(result, allow_nan=False, default=str, sort_keys=True))
@@ -289,7 +365,13 @@ def _process_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def process_main(argv: Sequence[str] | None = None) -> int:
+def process_main(
+    argv: Sequence[str] | None = None,
+    *,
+    config: FabricCandidateAConfig | None = None,
+    route_mode: str | None = None,
+    route_identity: Mapping[str, Any] | None = None,
+) -> int:
     """Run one claimed batch using only fixed Candidate A Fabric backends."""
     arguments = _process_parser().parse_args(argv)
     from people_counter.sjd_control import FabricControlStore
@@ -301,10 +383,17 @@ def process_main(argv: Sequence[str] | None = None) -> int:
     )
 
     spark = _spark()
-    config = FabricCandidateAConfig()
+    config = config or FabricCandidateAConfig()
+    config.require_write_enabled()
     profile = _fabric_process_profile(spark)
     store = FabricControlStore(spark, config=config)
-    enrichment = _localize_process_inputs(spark, store, arguments.batch_id)
+    enrichment = _localize_process_inputs(
+        spark,
+        store,
+        arguments.batch_id,
+        route_mode=route_mode,
+        route_identity=route_identity,
+    )
     result = run_process_batch(
         store,
         arguments.batch_id,
@@ -316,7 +405,10 @@ def process_main(argv: Sequence[str] | None = None) -> int:
             row_enrichment=enrichment,
         ),
         OneLakeDeltaAttemptAdapter(
-            config.file_path("attempts"), spark
+            config.file_path("attempts"),
+            spark,
+            config=config,
+            route_mode=route_mode,
         ),
         peak_rss_bytes=(
             None
@@ -342,7 +434,11 @@ def _gold_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def gold_main(argv: Sequence[str] | None = None) -> int:
+def gold_main(
+    argv: Sequence[str] | None = None,
+    *,
+    config: FabricCandidateAConfig | None = None,
+) -> int:
     """Build gold through committed pointers and typed Delta tables."""
     arguments = _gold_parser().parse_args(argv)
     from people_counter.fabric_candidate_a_gold import (
@@ -354,11 +450,12 @@ def gold_main(argv: Sequence[str] | None = None) -> int:
     from people_counter.sjd_process import OneLakeDeltaAttemptAdapter
 
     spark = _spark()
-    config = FabricCandidateAConfig()
+    config = config or FabricCandidateAConfig()
+    config.require_write_enabled()
     source = FabricCommittedSource(
         spark,
         OneLakeDeltaAttemptAdapter(
-            config.file_path("attempts"), spark
+            config.file_path("attempts"), spark, config=config
         ),
         config=config,
     )

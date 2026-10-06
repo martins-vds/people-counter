@@ -52,7 +52,11 @@ from people_counter.sjd_gold import (
     _normal_incremental_facts_noop,
     _required_datetime,
 )
-from people_counter.sjd_process import OneLakeDeltaAttemptAdapter
+from people_counter.sjd_process import (
+    OneLakeDeltaAttemptAdapter,
+    ProcessRouteMode,
+    ProcessValidationError,
+)
 
 
 class MemoryFiles:
@@ -80,6 +84,7 @@ class ImmediateWriter:
 
 class MemoryControlStore(FabricControlStoreImpl):
     def __init__(self, files: MemoryFiles) -> None:
+        self.config = FabricCandidateAConfig()
         self.data = {name: [] for name in _SCHEMAS}
         self.writer = ImmediateWriter()
         self.envelopes = OneLakeEnvelopeWriter(
@@ -191,6 +196,60 @@ def test_fixed_config_and_sjd_v2_mappings() -> None:
     with pytest.raises(ValueError, match="fixed Candidate A root"):
         config.abfss_path("Files/production")
 
+    shadow = FabricCandidateAConfig.production_shadow()
+    adapter = OneLakeDeltaAttemptAdapter(
+        shadow.file_path("attempts"),
+        object(),
+        MemoryFiles(),
+        config=shadow,
+        route_mode=ProcessRouteMode.SHADOW_SYNTHETIC,
+    )
+    assert adapter.config is shadow
+    assert adapter.route_mode is ProcessRouteMode.SHADOW_SYNTHETIC
+    default_shadow = OneLakeDeltaAttemptAdapter(
+        shadow.file_path("attempts") + "/",
+        object(),
+        MemoryFiles(),
+        config=shadow,
+    )
+    assert default_shadow.root == shadow.file_path("attempts").rstrip("/")
+    assert default_shadow.route_mode is ProcessRouteMode.PRODUCTION_SHADOW
+    for root, spark in (
+        (None, object()),
+        (shadow.file_path("attempts"), None),
+    ):
+        with pytest.raises(ProcessValidationError, match="unsupported"):
+            OneLakeDeltaAttemptAdapter(
+                root,
+                spark,
+                MemoryFiles(),
+                config=shadow,
+            )
+    with pytest.raises(ProcessValidationError, match="route mode"):
+        OneLakeDeltaAttemptAdapter(
+            shadow.file_path("attempts"),
+            object(),
+            MemoryFiles(),
+            config=shadow,
+            route_mode=ProcessRouteMode.BENCHMARK,
+        )
+    with pytest.raises(ProcessValidationError, match="fixed Candidate A root"):
+        OneLakeDeltaAttemptAdapter(
+            config.file_path("attempts"),
+            object(),
+            MemoryFiles(),
+            config=shadow,
+            route_mode=ProcessRouteMode.SHADOW_SYNTHETIC,
+        )
+    with pytest.raises(ProcessValidationError, match="production"):
+        production = FabricCandidateAConfig.production()
+        OneLakeDeltaAttemptAdapter(
+            production.file_path("attempts"),
+            object(),
+            MemoryFiles(),
+            config=production,
+        )
+
     for job in ("control", "process", "gold"):
         definition = build_sjd_v2_definition(job)
         assert definition["definition"]["format"] == "SparkJobDefinitionV2"
@@ -249,11 +308,63 @@ def test_fabric_committed_source_converts_staged_records_to_gold_document() -> N
                 "output_sha256": _sha256(records),
                 "published_at": 1.0,
             },
+            "batch": {
+                "batch_id": "batch-1",
+                "status": "COMMITTED",
+                "committed_at": 1.0,
+            },
         }
     ]
     outputs = source.committed_outputs()
     assert outputs[0].run["processed_frames"] == 4
     assert outputs[0].line_counts[0]["frame"] == 30
+
+
+def test_fabric_gold_optional_publication_time_uses_only_committed_batch_time() -> None:
+    records = [
+        {
+            "work_id": "work-1",
+            "attempt_id": "attempt-1",
+            "record_type": "video_result",
+            "record_sequence": 0,
+            "status": "SUCCEEDED",
+            "payload_json": json.dumps(
+                {"captured_at_utc": "2026-10-05T00:00:00Z"}
+            ),
+        }
+    ]
+    attempts = type(
+        "Attempts",
+        (),
+        {"read_records": lambda self, batch, process: records},
+    )()
+    source = FabricCommittedSource(None, attempts)
+    pointer = {
+        "work": {"work_id": "work-1", "payload_json": "{}"},
+        "attempt": {"attempt_id": "attempt-1", "batch_id": "batch-1"},
+        "publication": {
+            "publication_sequence": 1,
+            "output_path": (
+                "Files/_benchmark/people-counter/candidate-a/v1/attempts/"
+                "process/batch=batch-1/attempt=process-1"
+            ),
+            "output_sha256": _sha256(records),
+            "published_at": None,
+        },
+        "batch": {
+            "batch_id": "batch-1",
+            "status": "COMMITTED",
+            "committed_at": 1.0,
+        },
+    }
+    source._visible_rows = lambda: [pointer]
+
+    output = source.committed_outputs()[0]
+
+    assert output.published_at == datetime.fromtimestamp(1, timezone.utc)
+    assert output.attempt["batch_committed_at"] == 1.0
+    pointer["batch"]["committed_at"] = None
+    assert source.committed_outputs()[0].published_at is None
 
 
 def test_fabric_gold_timestamp_matches_spark_naive_utc_readback() -> None:
@@ -938,12 +1049,14 @@ def _pointer_rows() -> dict[str, list[dict[str, object]]]:
         "batches": [
             {
                 "batch_id": "batch-1",
+                "status": "COMMITTED",
                 "sealed_at": 9.0,
                 "committed_at": 10.0,
                 "lease_expires_at": 20.0,
             },
             {
                 "batch_id": "batch-0",
+                "status": "COMMITTED",
                 "sealed_at": 8.0,
                 "committed_at": 9.0,
                 "lease_expires_at": 19.0,
@@ -1079,12 +1192,13 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
         "detector_model": "r18",
         "model_format": "pytorch",
     }
-    store = SimpleNamespace(
-        load_claim_envelope_with_digest=lambda _batch: (
-            {"items": [{"work_id": "work-1", "payload": payload}]},
-            "digest",
-        )
-    )
+    requested_batches: list[str] = []
+
+    def load_envelope(batch: str) -> tuple[dict[str, object], str]:
+        requested_batches.append(batch)
+        return {"items": [{"work_id": "work-1", "payload": payload}]}, "digest"
+
+    store = SimpleNamespace(load_claim_envelope_with_digest=load_envelope)
     spark = SimpleNamespace(
         sparkContext=SimpleNamespace(addFile=MagicMock())
     )
@@ -1097,7 +1211,75 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
     assert models["rtdetr_osnet/rtdetr_v2_r18vd/model.safetensors"][
         "sha256"
     ] == _sha256_bytes(b"detector")
+    assert requested_batches == ["batch-1"]
     assert spark.sparkContext.addFile.call_count == 5
+    assert spark.sparkContext.addFile.call_args_list[0].args == (
+        f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
+        f"{LAKEHOUSE_ID}/Files/_canary/people-counter/"
+        "candidate-a/v1/assets/synthetic.mp4",
+    )
+    assert all(
+        value["localized_name"] == path.rsplit("/", 1)[-1]
+        for path, value in models.items()
+    )
+    assert spark.sparkContext.addFile.call_args_list[-1].args == (
+        f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
+        f"{LAKEHOUSE_ID}/Files/models/rtdetr_osnet/"
+        "libre_reid_osnet/osnet_ain_x0_25.pt",
+    )
+
+    from people_counter.fabric_production_routing import sha256_json
+
+    model_sha256 = sha256_json(
+        {
+            "schema": "people-counter-fixed-model-artifacts-v1",
+            "artifacts": {
+                "Files/models/rtdetr_osnet/rtdetr_v2_r18vd/model.safetensors":
+                    _sha256_bytes(b"detector"),
+                "Files/models/rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.pt":
+                    _sha256_bytes(b"reid"),
+            },
+        }
+    )
+    synthetic_item = {
+        "work_id": "work-1",
+        "config_sha256": "c" * 64,
+        "payload": payload,
+    }
+    store.load_claim_envelope_with_digest = lambda _batch: (
+        {"items": [synthetic_item]},
+        "digest",
+    )
+    synthetic_identity = {
+        "work_id": "work-1",
+        "source_sha256": payload["source_sha256"],
+        "config_sha256": "c" * 64,
+        "model_sha256": model_sha256,
+    }
+    assert _localize_process_inputs(
+        spark,
+        store,
+        "batch-1",
+        route_mode="SHADOW_SYNTHETIC",
+        route_identity=synthetic_identity,
+    )["work-1"]["spark_localized_models"] == models
+    with pytest.raises(ProcessValidationError, match="identity is required"):
+        _localize_process_inputs(
+            spark, store, "batch-1", route_mode="SHADOW_SYNTHETIC"
+        )
+    for changed, message in (
+        ({**synthetic_identity, "source_sha256": "a" * 64}, "video/config"),
+        ({**synthetic_identity, "config_sha256": "a" * 64}, "video/config"),
+        ({**synthetic_identity, "model_sha256": "a" * 64}, "model identity"),
+    ):
+        with pytest.raises(ProcessValidationError, match=message):
+            _localize_process_inputs(
+                spark,
+                store,
+                "batch-1",
+                route_mode="SHADOW_SYNTHETIC",
+                route_identity=changed,
+            )
 
     for update, message in (
         ({"source_video": "/production/video.mp4"}, "default Lakehouse"),
@@ -1111,6 +1293,94 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
         )
         with pytest.raises(ValueError, match=message):
             _localize_process_inputs(spark, store, "batch-1")
+
+
+def test_synthetic_localizer_pins_r50_onnx_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    files = {
+        "synthetic.mp4": b"video-r50",
+        "config.json": b"config-r50",
+        "preprocessor_config.json": b"preprocessor-r50",
+        "model.onnx": b"detector-r50",
+        "osnet_ain_x0_25.onnx": b"reid-onnx",
+    }
+    for name, content in files.items():
+        (tmp_path / name).write_bytes(content)
+    monkeypatch.setitem(
+        sys.modules,
+        "pyspark",
+        SimpleNamespace(
+            SparkFiles=SimpleNamespace(
+                get=lambda name: str(tmp_path / name)
+            )
+        ),
+    )
+    payload = {
+        "source_video": (
+            "/lakehouse/default/Files/_shadow/people-counter/"
+            "candidate-a/v1/assets/synthetic.mp4"
+        ),
+        "source_sha256": _sha256_bytes(files["synthetic.mp4"]),
+        "pipeline": "rtdetr-osnet",
+        "detector_model": "r50",
+        "model_format": "onnx",
+    }
+    item = {
+        "work_id": "work-r50",
+        "config_sha256": "c" * 64,
+        "payload": payload,
+    }
+    store = SimpleNamespace(
+        load_claim_envelope_with_digest=lambda batch: (
+            {"items": [item]} if batch == "batch-r50" else {},
+            "digest",
+        )
+    )
+    spark = SimpleNamespace(
+        sparkContext=SimpleNamespace(addFile=MagicMock())
+    )
+    from people_counter.fabric_production_routing import sha256_json
+
+    identity = {
+        "work_id": "work-r50",
+        "source_sha256": payload["source_sha256"],
+        "config_sha256": item["config_sha256"],
+        "model_sha256": sha256_json(
+            {
+                "schema": "people-counter-fixed-model-artifacts-v1",
+                "artifacts": {
+                    "Files/models/rtdetr_osnet/rtdetr_v2_r50vd/model.onnx":
+                        _sha256_bytes(files["model.onnx"]),
+                    "Files/models/rtdetr_osnet/libre_reid_osnet/"
+                    "osnet_ain_x0_25.onnx":
+                        _sha256_bytes(files["osnet_ain_x0_25.onnx"]),
+                },
+            }
+        ),
+    }
+
+    localized = _localize_process_inputs(
+        spark,
+        store,
+        "batch-r50",
+        route_mode="SHADOW_SYNTHETIC",
+        route_identity=identity,
+    )["work-r50"]
+
+    models = localized["spark_localized_models"]
+    assert set(models) == {
+        "rtdetr_osnet/rtdetr_v2_r50vd/config.json",
+        "rtdetr_osnet/rtdetr_v2_r50vd/preprocessor_config.json",
+        "rtdetr_osnet/rtdetr_v2_r50vd/model.onnx",
+        "rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx",
+    }
+    assert localized["spark_localized_video_name"] == "synthetic.mp4"
+    assert spark.sparkContext.addFile.call_count == 5
+    assert spark.sparkContext.addFile.call_args_list[-1].args[0].endswith(
+        "/Files/models/rtdetr_osnet/libre_reid_osnet/"
+        "osnet_ain_x0_25.onnx"
+    )
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -1335,6 +1605,306 @@ def test_recovery_retries_expired_lease_and_reconciliation_resolves_findings() -
         row["resolved_at"] is not None
         for row in store.data["reconciliation_findings"]
     )
+
+
+def test_exact_recovery_requires_expiry_identity_fence_and_no_output() -> None:
+    files = MemoryFiles()
+    store = MemoryControlStore(files)
+    store.register(
+        "work-exact",
+        {"batch_size": 1},
+        runtime_key="cpu",
+        duration_seconds=1,
+        config_sha256="c" * 64,
+        release_digest="release",
+        max_attempts=1,
+    )
+    claim = store.claim(
+        "owner-exact",
+        max_items=1,
+        lease_seconds=10,
+        minimum_speed_x=1,
+        safety_factor=1,
+        margin_seconds=0.1,
+    )
+    assert claim is not None
+    item = claim.items[0]
+    arguments = {
+        "work_id": item.work_id,
+        "batch_id": claim.batch_id,
+        "attempt_id": item.attempt_id,
+        "owner": "owner-exact",
+        "fence": item.fence,
+        "lease_expires_at": claim.lease_expires_at,
+        "envelope_sha256": claim.envelope_sha256,
+        "membership_sha256": store.data["batches"][0]["membership_sha256"],
+        "safe_skew_seconds": 1.0,
+    }
+    with pytest.raises(Exception, match="safe skew"):
+        store.recover_exact(**arguments, now=claim.lease_expires_at)
+    with pytest.raises(Exception, match="fence must be positive"):
+        store.recover_exact(
+            **{**arguments, "fence": 0},
+            now=claim.lease_expires_at + 2,
+        )
+    for name, value in (
+        ("work_id", "wrong-work"),
+        ("batch_id", "wrong-batch"),
+        ("owner", "wrong-owner"),
+        ("fence", item.fence + 1),
+        ("attempt_id", "wrong-attempt"),
+        ("lease_expires_at", claim.lease_expires_at + 1),
+        ("envelope_sha256", "e" * 64),
+        ("membership_sha256", "m" * 64),
+    ):
+        with pytest.raises(Exception):
+            store.recover_exact(
+                **{**arguments, name: value},
+                now=claim.lease_expires_at + 2,
+            )
+
+    row_mismatches = (
+        ("work", "status", "READY"),
+        ("batches", "status", "READY"),
+        ("attempts", "status", "READY"),
+        ("work", "lease_owner", "wrong-owner"),
+        ("work", "lease_attempt_id", "wrong-attempt"),
+        ("attempts", "work_id", "wrong-work"),
+        ("attempts", "batch_id", "wrong-batch"),
+        ("work", "fence", item.fence + 1),
+        ("attempts", "fence", item.fence + 1),
+        ("batch_members", "fence", item.fence + 1),
+        ("batch_members", "payload_sha256", "p" * 64),
+        ("work", "lease_expires_at", claim.lease_expires_at + 1),
+        ("batches", "lease_expires_at", claim.lease_expires_at + 1),
+        ("attempts", "lease_expires_at", claim.lease_expires_at + 1),
+        ("batches", "envelope_sha256", "e" * 64),
+        ("batches", "membership_sha256", "m" * 64),
+        ("work", "attempt_count", 0),
+        ("work", "committed_attempt_id", "committed-attempt"),
+    )
+    for table, field, value in row_mismatches:
+        row = store.data[table][0]
+        original = row[field]
+        row[field] = value
+        with pytest.raises(Exception):
+            store.recover_exact(
+                **arguments, now=claim.lease_expires_at + 2
+            )
+        row[field] = original
+
+    duplicate_member = copy.deepcopy(store.data["batch_members"][0])
+    store.data["batch_members"].append(duplicate_member)
+    with pytest.raises(Exception, match="membership is not singular"):
+        store.recover_exact(**arguments, now=claim.lease_expires_at + 2)
+    store.data["batch_members"].pop()
+    store.data["publications"].append({"work_id": item.work_id})
+    with pytest.raises(Exception):
+        store.recover_exact(**arguments, now=claim.lease_expires_at + 2)
+    store.data["publications"].clear()
+    duplicate_attempt = copy.deepcopy(store.data["attempts"][0])
+    duplicate_attempt["attempt_id"] = "newer-attempt"
+    store.data["attempts"].append(duplicate_attempt)
+    with pytest.raises(Exception):
+        store.recover_exact(**arguments, now=claim.lease_expires_at + 2)
+    store.data["attempts"].pop()
+    duplicate_attempt["fence"] = item.fence + 1
+    store.data["attempts"].append(duplicate_attempt)
+    with pytest.raises(Exception):
+        store.recover_exact(**arguments, now=claim.lease_expires_at + 2)
+    store.data["attempts"].pop()
+
+    from people_counter.sjd_process import verify_envelope
+
+    raw, digest = store.load_claim_envelope_with_digest(claim.batch_id)
+    envelope_path = store.data["batches"][0]["envelope_path"]
+    original_envelope = files.content[envelope_path]
+    changed_envelope = copy.deepcopy(raw)
+    changed_envelope["owner"] = "wrong-envelope-owner"
+    changed_encoded = json.dumps(
+        changed_envelope,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    changed_digest = _sha256_bytes(changed_encoded.encode())
+    files.content[envelope_path] = changed_encoded
+    store.data["batches"][0]["envelope_sha256"] = changed_digest
+    with pytest.raises(Exception, match="immutable envelope differs"):
+        store.recover_exact(
+            **{**arguments, "envelope_sha256": changed_digest},
+            now=claim.lease_expires_at + 2,
+        )
+    files.content[envelope_path] = original_envelope
+    store.data["batches"][0]["envelope_sha256"] = digest
+    verified = verify_envelope(
+        raw, batch_id=claim.batch_id, envelope_sha256=digest
+    )
+    staged = (
+        f"{store.config.file_path('attempts')}/process/"
+        f"batch={claim.batch_id}/attempt={verified.execution_attempt_id}/_SUCCESS"
+    )
+    files.content[staged] = "{}"
+    with pytest.raises(Exception, match="staged or committed"):
+        store.recover_exact(
+            **arguments, now=claim.lease_expires_at + 2
+        )
+    del files.content[staged]
+    delta_log = staged.removesuffix("_SUCCESS") + "_delta_log"
+    files.content[delta_log] = "{}"
+    with pytest.raises(Exception, match="staged or committed"):
+        store.recover_exact(
+            **arguments, now=claim.lease_expires_at + 2
+        )
+    del files.content[delta_log]
+
+    result = store.recover_exact(
+        **{**arguments, "safe_skew_seconds": 0.0},
+        now=claim.lease_expires_at + 2,
+    )
+    assert result["outcome"] == "DEAD"
+    assert result["idempotent"] is False
+    assert store.data["work"][0]["status"] == "DEAD"
+    assert store.data["batches"][0]["status"] == "EXPIRED"
+    assert store.data["attempts"][0]["status"] == "EXPIRED"
+    assert store.data["attempts"][0]["recovery_outcome"] == "DEAD"
+    terminal_mismatches = (
+        ("work", "status", "READY"),
+        ("work", "lease_owner", "owner-exact"),
+        ("work", "lease_attempt_id", item.attempt_id),
+        ("work", "lease_expires_at", claim.lease_expires_at),
+        ("work", "committed_attempt_id", "committed-attempt"),
+        ("batches", "owner", "wrong-owner"),
+        ("work", "fence", item.fence + 1),
+        ("attempts", "fence", item.fence + 1),
+        ("batch_members", "fence", item.fence + 1),
+        ("batch_members", "payload_sha256", "p" * 64),
+        ("batches", "lease_expires_at", claim.lease_expires_at + 1),
+        ("attempts", "lease_expires_at", claim.lease_expires_at + 1),
+        ("batches", "envelope_sha256", "e" * 64),
+        ("batches", "membership_sha256", "m" * 64),
+        ("batches", "status", "LEASED"),
+        ("attempts", "status", "LEASED"),
+        ("attempts", "recovery_outcome", None),
+    )
+    for table, field, value in terminal_mismatches:
+        row = store.data[table][0]
+        original = row[field]
+        row[field] = value
+        with pytest.raises(Exception):
+            store.recover_exact(
+                **arguments, now=claim.lease_expires_at + 3
+            )
+        row[field] = original
+    store.data["publications"].append({"work_id": item.work_id})
+    with pytest.raises(Exception):
+        store.recover_exact(**arguments, now=claim.lease_expires_at + 3)
+    store.data["publications"].clear()
+    duplicate_attempt = copy.deepcopy(store.data["attempts"][0])
+    duplicate_attempt["attempt_id"] = "terminal-extra-attempt"
+    store.data["attempts"].append(duplicate_attempt)
+    with pytest.raises(Exception):
+        store.recover_exact(**arguments, now=claim.lease_expires_at + 3)
+    store.data["attempts"].pop()
+    assert store.recover_exact(
+        **arguments, now=claim.lease_expires_at + 3
+    )["idempotent"] is True
+
+
+def test_exact_recovery_accepts_expiry_boundary_and_default_clock() -> None:
+    store = MemoryControlStore(MemoryFiles())
+    store.register(
+        "work-boundary",
+        {"batch_size": 1},
+        runtime_key="cpu",
+        duration_seconds=1,
+        config_sha256="c" * 64,
+        release_digest="release",
+        max_attempts=1,
+    )
+    claim = store.claim(
+        "owner-boundary",
+        max_items=1,
+        lease_seconds=10,
+        minimum_speed_x=1,
+        safety_factor=1,
+        margin_seconds=0.1,
+    )
+    assert claim is not None
+    item = claim.items[0]
+    store._clock_value = claim.lease_expires_at + 1.0
+
+    result = store.recover_exact(
+        work_id=item.work_id,
+        batch_id=claim.batch_id,
+        attempt_id=item.attempt_id,
+        owner="owner-boundary",
+        fence=item.fence,
+        lease_expires_at=claim.lease_expires_at,
+        envelope_sha256=claim.envelope_sha256,
+        membership_sha256=store.data["batches"][0]["membership_sha256"],
+        safe_skew_seconds=1.0,
+    )
+
+    assert result["outcome"] == "DEAD"
+    assert result["idempotent"] is False
+
+
+@pytest.mark.parametrize(
+    ("table", "field", "value"),
+    (
+        ("work", "status", "READY"),
+        ("work", "lease_owner", "still-owned"),
+        ("batches", "status", "LEASED"),
+        ("attempts", "status", "LEASED"),
+        ("attempts", "recovery_outcome", None),
+    ),
+)
+def test_exact_recovery_rejects_non_atomic_readback(
+    table: str, field: str, value: object
+) -> None:
+    class CorruptingStore(MemoryControlStore):
+        corrupt = False
+
+        def _replace_many(self, **tables: list[dict[str, object]]) -> None:
+            super()._replace_many(**tables)
+            if self.corrupt and {"work", "batches", "attempts"} <= set(tables):
+                self.data[table][0][field] = value
+
+    store = CorruptingStore(MemoryFiles())
+    store.register(
+        "work-readback",
+        {"batch_size": 1},
+        runtime_key="cpu",
+        duration_seconds=1,
+        config_sha256="c" * 64,
+        release_digest="release",
+        max_attempts=1,
+    )
+    claim = store.claim(
+        "owner-readback",
+        max_items=1,
+        lease_seconds=10,
+        minimum_speed_x=1,
+        safety_factor=1,
+        margin_seconds=0.1,
+    )
+    assert claim is not None
+    item = claim.items[0]
+    store.corrupt = True
+    with pytest.raises(Exception, match="readback differs"):
+        store.recover_exact(
+            work_id=item.work_id,
+            batch_id=claim.batch_id,
+            attempt_id=item.attempt_id,
+            owner="owner-readback",
+            fence=item.fence,
+            lease_expires_at=claim.lease_expires_at,
+            envelope_sha256=claim.envelope_sha256,
+            membership_sha256=store.data["batches"][0]["membership_sha256"],
+            now=claim.lease_expires_at + 1,
+            safe_skew_seconds=0,
+        )
 
 
 def test_clear_stale_lock_uses_exact_owner_cas_and_exact_readback(

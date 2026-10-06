@@ -132,9 +132,11 @@ class OneLakeEnvelopeWriter:
         self,
         root: str,
         files: OneLakeFiles | None = None,
+        *,
+        config: FabricCandidateAConfig | None = None,
     ) -> None:
         self.root = root.rstrip("/")
-        expected = FabricCandidateAConfig().file_path("control").rstrip("/")
+        expected = (config or FabricCandidateAConfig()).file_path("control").rstrip("/")
         if self.root != expected:
             raise ValueError(
                 f"claim envelopes require the fixed Candidate A control root {expected!r}"
@@ -196,10 +198,11 @@ class FabricControlStoreImpl:
             raise ValueError("spark_session is required")
         self.spark = spark_session
         self.config = config or FabricCandidateAConfig()
+        self.config.require_write_enabled()
         self._clock = clock
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self.envelopes = OneLakeEnvelopeWriter(
-            self.config.file_path("control"), files
+            self.config.file_path("control"), files, config=self.config
         )
         self.tables = {
             suffix: self.config.table(suffix) for suffix in _SCHEMAS
@@ -803,6 +806,207 @@ class FabricControlStoreImpl:
                     batch["status"] = "EXPIRED"
             self._replace_many(work=work, attempts=attempts, batches=batches)
             return RecoveryReport(retried + dead, retried, dead)
+
+        return self.writer.run(operation)
+
+    def recover_exact(
+        self,
+        *,
+        work_id: str,
+        batch_id: str,
+        attempt_id: str,
+        owner: str,
+        fence: int,
+        lease_expires_at: float,
+        envelope_sha256: str,
+        membership_sha256: str,
+        now: float | None = None,
+        safe_skew_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Recover one expired shadow claim under exact immutable predicates."""
+
+        timestamp = self.now() if now is None else _finite(now, "now")
+        expected_expiry = _finite(lease_expires_at, "lease_expires_at")
+        skew = _finite(safe_skew_seconds, "safe_skew_seconds")
+        if skew < 0 or timestamp < expected_expiry + skew:
+            raise LeaseLostError("exact recovery lease has not expired with safe skew")
+        expected_fence = int(fence)
+        if expected_fence < 1:
+            raise BatchValidationError("exact recovery fence must be positive")
+
+        def operation() -> dict[str, Any]:
+            work_rows = self._rows("work")
+            batch_rows = self._rows("batches")
+            attempt_rows = self._rows("attempts")
+            member_rows = self._rows("batch_members")
+            publication_rows = self._rows("publications")
+            work = _require_one(work_rows, "work_id", work_id)
+            batch = _require_one(batch_rows, "batch_id", batch_id)
+            attempt = _require_one(attempt_rows, "attempt_id", attempt_id)
+            members = [
+                row for row in member_rows if row["batch_id"] == batch_id
+            ]
+            if len(members) != 1:
+                raise BatchValidationError(
+                    "exact recovery batch membership is not singular"
+                )
+            member = members[0]
+            expected_member = (
+                work_id,
+                attempt_id,
+                expected_fence,
+                work["payload_sha256"],
+            )
+            observed_member = (
+                member["work_id"],
+                member["attempt_id"],
+                int(member["fence"]),
+                member["payload_sha256"],
+            )
+            terminal = (
+                work["status"] == "DEAD"
+                and batch["status"] == "EXPIRED"
+                and attempt["status"] == "EXPIRED"
+                and attempt["recovery_outcome"] == "DEAD"
+                and batch["owner"] == owner
+                and int(work["fence"]) == expected_fence
+                and int(attempt["fence"]) == expected_fence
+                and observed_member == expected_member
+                and float(batch["lease_expires_at"]) == expected_expiry
+                and float(attempt["lease_expires_at"]) == expected_expiry
+                and batch["envelope_sha256"] == envelope_sha256
+                and batch["membership_sha256"] == membership_sha256
+                and work["lease_owner"] is None
+                and work["lease_attempt_id"] is None
+                and work["lease_expires_at"] is None
+                and work["committed_attempt_id"] is None
+                and not any(
+                    row["work_id"] == work_id for row in publication_rows
+                )
+                and len(
+                    [
+                        row
+                        for row in attempt_rows
+                        if row["work_id"] == work_id
+                    ]
+                )
+                == 1
+            )
+            if terminal:
+                return {
+                    "attempt_id": attempt_id,
+                    "batch_id": batch_id,
+                    "fence": expected_fence,
+                    "idempotent": True,
+                    "outcome": "DEAD",
+                    "work_id": work_id,
+                }
+            exact = (
+                work["status"] == "LEASED"
+                and batch["status"] == "LEASED"
+                and attempt["status"] == "LEASED"
+                and work["lease_owner"] == owner
+                and work["lease_attempt_id"] == attempt_id
+                and attempt["work_id"] == work_id
+                and attempt["batch_id"] == batch_id
+                and int(work["fence"]) == expected_fence
+                and int(attempt["fence"]) == expected_fence
+                and observed_member == expected_member
+                and float(work["lease_expires_at"]) == expected_expiry
+                and float(batch["lease_expires_at"]) == expected_expiry
+                and float(attempt["lease_expires_at"]) == expected_expiry
+                and batch["envelope_sha256"] == envelope_sha256
+                and batch["membership_sha256"] == membership_sha256
+                and int(work["attempt_count"]) >= int(work["max_attempts"])
+                and work["committed_attempt_id"] is None
+                and not any(
+                    row["work_id"] == work_id for row in publication_rows
+                )
+            )
+            related_attempts = [
+                row for row in attempt_rows if row["work_id"] == work_id
+            ]
+            if (
+                not exact
+                or len(related_attempts) != 1
+                or max(int(row["fence"]) for row in related_attempts)
+                != expected_fence
+            ):
+                raise LeaseLostError("exact recovery identity or fence differs")
+            envelope = self.envelopes.read(
+                str(batch["envelope_path"]), envelope_sha256
+            )
+            if (
+                envelope.get("batch_id") != batch_id
+                or envelope.get("owner") != owner
+                or envelope.get("membership_sha256") != membership_sha256
+                or len(envelope.get("items", [])) != 1
+                or envelope["items"][0].get("attempt_id") != attempt_id
+            ):
+                raise BatchValidationError(
+                    "exact recovery immutable envelope differs"
+                )
+            from people_counter.sjd_process import verify_envelope
+
+            verified = verify_envelope(
+                envelope,
+                batch_id=batch_id,
+                envelope_sha256=envelope_sha256,
+            )
+            attempt_root = (
+                f"{self.config.file_path('attempts')}/process/"
+                f"batch={batch_id}/attempt={verified.execution_attempt_id}"
+            )
+            if self.envelopes.files.exists(
+                f"{attempt_root}/_delta_log"
+            ) or self.envelopes.files.exists(f"{attempt_root}/_SUCCESS"):
+                raise BatchValidationError(
+                    "exact recovery found staged or committed output"
+                )
+            attempt["status"] = "EXPIRED"
+            attempt["recovery_outcome"] = "DEAD"
+            batch["status"] = "EXPIRED"
+            work.update(
+                {
+                    "status": "DEAD",
+                    "available_at": timestamp,
+                    "lease_owner": None,
+                    "lease_attempt_id": None,
+                    "lease_expires_at": None,
+                    "last_error": "lease expired after process validation failure",
+                    "updated_at": timestamp,
+                }
+            )
+            self._replace_many(
+                work=work_rows,
+                batches=batch_rows,
+                attempts=attempt_rows,
+            )
+            readback_work = _require_one(
+                self._rows("work"), "work_id", work_id
+            )
+            readback_batch = _require_one(
+                self._rows("batches"), "batch_id", batch_id
+            )
+            readback_attempt = _require_one(
+                self._rows("attempts"), "attempt_id", attempt_id
+            )
+            if (
+                readback_work["status"] != "DEAD"
+                or readback_work["lease_owner"] is not None
+                or readback_batch["status"] != "EXPIRED"
+                or readback_attempt["status"] != "EXPIRED"
+                or readback_attempt["recovery_outcome"] != "DEAD"
+            ):
+                raise LeaseLostError("exact recovery readback differs")
+            return {
+                "attempt_id": attempt_id,
+                "batch_id": batch_id,
+                "fence": expected_fence,
+                "idempotent": False,
+                "outcome": "DEAD",
+                "work_id": work_id,
+            }
 
         return self.writer.run(operation)
 

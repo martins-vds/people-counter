@@ -139,7 +139,7 @@ _SPARK_FIELDS: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("distinct_people", "long", True),
         ("line_in_count", "long", True),
         ("line_out_count", "long", True),
-        ("completed_at", "timestamp", False),
+        ("completed_at", "timestamp", True),
         ("capture_date", "date", False),
     ),
     "gold_operations_hour": (
@@ -238,7 +238,7 @@ class CommittedOutput:
     work_id: str
     attempt_id: str
     publication_sequence: int
-    published_at: datetime
+    published_at: datetime | None
     work: dict[str, Any]
     attempt: dict[str, Any]
     run: dict[str, Any]
@@ -853,7 +853,7 @@ class LocalGoldJob:
                 published_at = _first_datetime(
                     publication_data,
                     ("published_at", "created_at"),
-                    required=True,
+                    required=False,
                 )
                 committed.append(
                     CommittedOutput(
@@ -905,7 +905,10 @@ class LocalGoldJob:
             for output in outputs:
                 if (
                     output.publication_sequence > prior_sequence
-                    or output.published_at >= cutoff
+                    or (
+                        output.published_at is not None
+                        and output.published_at >= cutoff
+                    )
                 ):
                     flow_dates.update(_output_dates(output))
             prior_completed = _required_datetime(
@@ -1249,9 +1252,18 @@ def _fact_rows_for_date(
     videos: list[dict[str, Any]] = []
     for output in committed:
         metadata = output.work | output.run
-        captured = _required_datetime(metadata.get("captured_at_utc"))
-        camera = str(_required_value(metadata, "camera_id"))
-        location = str(_required_value(metadata, "location_id"))
+        captured = _output_captured_at(output)
+        if captured is None:
+            continue
+        camera_value = metadata.get("camera_id")
+        location_value = metadata.get("location_id")
+        if camera_value is None or location_value is None:
+            # Benchmark outputs predate dimensional camera/location metadata.
+            # Keep them visible to operations facts, but do not invent
+            # dimensions for flow/video facts.
+            continue
+        camera = str(camera_value)
+        location = str(location_value)
         for line in output.line_counts:
             observed = _line_observed_at(line, captured)
             if observed.date().isoformat() != partition_date:
@@ -1310,13 +1322,23 @@ def _fact_rows_for_date(
                     "distinct_people": _optional_int(metadata.get("distinct_people")),
                     "line_in_count": _optional_int(metadata.get("line_in_count")),
                     "line_out_count": _optional_int(metadata.get("line_out_count")),
-                    "completed_at": _iso(
-                        _first_datetime(
-                            metadata | output.attempt,
-                            ("completed_at", "sealed_at", "published_at"),
-                            required=False,
+                    "completed_at": (
+                        None
+                        if (
+                            completed_at := _first_datetime(
+                                metadata | output.attempt,
+                                (
+                                    "completed_at",
+                                    "sealed_at",
+                                    "published_at",
+                                    "batch_committed_at",
+                                ),
+                                required=False,
+                            )
+                            or output.published_at
                         )
-                        or output.published_at
+                        is None
+                        else _iso(completed_at)
                     ),
                     "capture_date": partition_date,
                 }
@@ -1508,7 +1530,51 @@ def _dimension_rows(
     facts: Mapping[str, Sequence[Mapping[str, Any]]],
     refreshed_at: str,
 ) -> dict[str, list[dict[str, Any]]]:
-    metadata = [item.work | item.run | {"work_id": item.work_id} for item in committed]
+    metadata = _dimension_source_rows(committed)
+    fact_dates = _dimension_fact_dates(facts)
+    dates = _date_range(fact_dates, _required_datetime(refreshed_at).date())
+    return _dimension_metadata_rows(metadata, dates, refreshed_at)
+
+
+def _dimension_source_rows(
+    committed: Sequence[CommittedOutput],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in committed:
+        row = item.work | item.run | {"work_id": item.work_id}
+        captured = _output_captured_at(item)
+        if (
+            captured is None
+            or row.get("camera_id") is None
+            or row.get("location_id") is None
+        ):
+            continue
+        rows.append(row | {"captured_at_utc": _iso(captured)})
+    return rows
+
+
+def _dimension_fact_dates(
+    facts: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[str]:
+    values = {
+        str(row[column])
+        for table, column in (
+            ("gold_flow_minute", "flow_date"),
+            ("gold_flow_hour", "flow_date"),
+            ("gold_video", "capture_date"),
+            ("gold_operations_hour", "operation_date"),
+        )
+        for row in facts[table]
+        if row.get(column)
+    }
+    return sorted(values)
+
+
+def _dimension_metadata_rows(
+    metadata: Sequence[Mapping[str, Any]],
+    dates: Sequence[str],
+    refreshed_at: str,
+) -> dict[str, list[dict[str, Any]]]:
     cameras: dict[str, list[dict[str, Any]]] = defaultdict(list)
     locations: dict[str, list[dict[str, Any]]] = defaultdict(list)
     configs: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1611,20 +1677,6 @@ def _dimension_rows(
                 "refreshed_at": refreshed_at,
             }
         )
-    fact_dates = sorted(
-        {
-            str(row[column])
-            for table, column in (
-                ("gold_flow_minute", "flow_date"),
-                ("gold_flow_hour", "flow_date"),
-                ("gold_video", "capture_date"),
-                ("gold_operations_hour", "operation_date"),
-            )
-            for row in facts[table]
-            if row.get(column)
-        }
-    )
-    dates = _date_range(fact_dates, _required_datetime(refreshed_at).date())
     return {
         "gold_dim_date": [_date_dimension_row(value, refreshed_at) for value in dates],
         "gold_dim_time": [
@@ -1966,9 +2018,9 @@ def _split_output_document(
 
 
 def _output_dates(output: CommittedOutput) -> set[str]:
-    captured = _required_datetime(
-        _coalesce(output.run, output.work, names=("captured_at_utc",))
-    )
+    captured = _output_captured_at(output)
+    if captured is None:
+        return set()
     return {
         captured.date().isoformat(),
         *(
@@ -1976,6 +2028,23 @@ def _output_dates(output: CommittedOutput) -> set[str]:
             for line in output.line_counts
         ),
     }
+
+
+def _output_captured_at(output: CommittedOutput) -> datetime | None:
+    """Resolve capture time without fabricating a timestamp.
+
+    Older committed benchmark outputs may omit the optional source capture
+    timestamp.  Their authoritative committed publication time is the only
+    acceptable fallback; when both values are absent the output remains
+    undated and is excluded from date-partitioned facts.
+    """
+
+    value = _coalesce(output.run, output.work, names=("captured_at_utc",))
+    return (
+        output.published_at
+        if value is None
+        else _required_datetime(value)
+    )
 
 
 def _control_dates(

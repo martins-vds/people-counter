@@ -12,6 +12,7 @@ from people_counter.onnx_runtime import (
     OSNetOnnxEmbedder,
     RFDetrOnnxModel,
     RTDetrOnnxModel,
+    _positive_thread_count,
     create_onnx_session,
 )
 
@@ -33,20 +34,67 @@ class FakeSession:
         return self.outputs
 
 
+class FakeSessionOptions:
+    pass
+
+
+class FakeExecutionMode:
+    ORT_SEQUENTIAL = "sequential"
+
+
+class FakeGraphOptimizationLevel:
+    ORT_ENABLE_ALL = "all"
+
+
 class OnnxRuntimeTests(unittest.TestCase):
+    def test_positive_thread_count_defaults_and_validates_environment(self):
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(_positive_thread_count("THREADS", 2), 2)
+        for value in ("0", "-1", "many"):
+            with (
+                self.subTest(value=value),
+                patch.dict("os.environ", {"THREADS": value}, clear=True),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "^THREADS must be a positive integer$",
+                ),
+            ):
+                _positive_thread_count("THREADS", 2)
+        with patch.dict("os.environ", {"THREADS": "4"}, clear=True):
+            self.assertEqual(_positive_thread_count("THREADS", 2), 4)
+        with patch.dict("os.environ", {"THREADS": "1"}, clear=True):
+            self.assertEqual(_positive_thread_count("THREADS", 2), 1)
+
     def test_creates_cpu_session_with_explicit_provider(self):
         runtime = SimpleNamespace(
             get_available_providers=lambda: ["CPUExecutionProvider"],
             InferenceSession=MagicMock(return_value=object()),
+            SessionOptions=FakeSessionOptions,
+            ExecutionMode=FakeExecutionMode,
+            GraphOptimizationLevel=FakeGraphOptimizationLevel,
         )
-        with patch.dict(sys.modules, {"onnxruntime": runtime}):
+        with (
+            patch.dict(sys.modules, {"onnxruntime": runtime}),
+            patch.dict(
+                "os.environ",
+                {
+                    "PC_ONNX_INTRA_OP_THREADS": "3",
+                    "PC_ONNX_INTER_OP_THREADS": "1",
+                },
+                clear=False,
+            ),
+        ):
             result = create_onnx_session(Path("model.onnx"), "cpu")
 
         self.assertIs(result, runtime.InferenceSession.return_value)
-        runtime.InferenceSession.assert_called_once_with(
-            Path("model.onnx"),
-            providers=["CPUExecutionProvider"],
-        )
+        call = runtime.InferenceSession.call_args
+        self.assertEqual(call.args, (Path("model.onnx"),))
+        self.assertEqual(call.kwargs["providers"], ["CPUExecutionProvider"])
+        options = call.kwargs["sess_options"]
+        self.assertEqual(options.intra_op_num_threads, 3)
+        self.assertEqual(options.inter_op_num_threads, 1)
+        self.assertEqual(options.execution_mode, "sequential")
+        self.assertEqual(options.graph_optimization_level, "all")
 
     def test_rejects_unavailable_gpu_provider(self):
         runtime = SimpleNamespace(

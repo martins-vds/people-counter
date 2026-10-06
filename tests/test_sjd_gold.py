@@ -12,6 +12,7 @@ import pytest
 
 from people_counter.sjd_control import SQLiteControlStore
 from people_counter.sjd_gold import (
+    CommittedOutput,
     DIMENSION_TABLES,
     FACT_TABLES,
     FabricGoldStore,
@@ -23,9 +24,14 @@ from people_counter.sjd_gold import (
     LocalJsonGoldStore,
     SourceCheckpoint,
     UnsupportedGoldBackendError,
+    _dimension_rows,
+    _dimension_fact_dates,
+    _dimension_source_rows,
     _load_delta_output_document,
     _checkpoint_targets_match,
+    _fact_rows_for_date,
     _optional_float,
+    _output_dates,
     _sha256_json,
     main,
 )
@@ -37,6 +43,241 @@ NOW = datetime(2026, 10, 2, 17, 0, tzinfo=timezone.utc)
 def test_zero_metric_is_valid_and_preserved():
     assert _optional_float(0) == 0.0
     assert _optional_float("0") == 0.0
+
+
+def test_missing_capture_time_uses_only_committed_publication_or_stays_undated():
+    published = datetime(2026, 10, 6, 3, 16, tzinfo=timezone.utc)
+    output = CommittedOutput(
+        "work",
+        "attempt",
+        1,
+        published,
+        {
+            "camera_id": "camera",
+            "location_id": "location",
+            "config_sha256": "a" * 64,
+            "duration_seconds": 7.0,
+        },
+        {},
+        {
+            "processing_seconds": 8.0,
+            "line_in_count": 0,
+            "line_out_count": 0,
+        },
+        (),
+    )
+
+    assert _output_dates(output) == {"2026-10-06"}
+    facts = _fact_rows_for_date(
+        [output], {}, "2026-10-06", "2026-10-06T04:00:00Z"
+    )
+    assert facts["gold_video"][0]["captured_at_utc"] == "2026-10-06T03:16:00Z"
+
+    captured = CommittedOutput(
+        output.work_id,
+        output.attempt_id,
+        output.publication_sequence,
+        published,
+        output.work,
+        output.attempt,
+        {"captured_at_utc": "2026-10-05T01:02:03Z"},
+        output.line_counts,
+    )
+    assert _output_dates(captured) == {"2026-10-05"}
+    captured_in_work = CommittedOutput(
+        captured.work_id,
+        captured.attempt_id,
+        captured.publication_sequence,
+        captured.published_at,
+        captured.work | {"captured_at_utc": "2026-10-04T01:02:03Z"},
+        captured.attempt,
+        {},
+        captured.line_counts,
+    )
+    assert _output_dates(captured_in_work) == {"2026-10-04"}
+    invalid = CommittedOutput(
+        captured.work_id,
+        captured.attempt_id,
+        captured.publication_sequence,
+        captured.published_at,
+        captured.work,
+        captured.attempt,
+        {"captured_at_utc": "2026-10-05T01:02:03"},
+        captured.line_counts,
+    )
+    with pytest.raises(GoldSourceError, match="invalid UTC timestamp"):
+        _output_dates(invalid)
+
+    undated = CommittedOutput(
+        output.work_id,
+        output.attempt_id,
+        output.publication_sequence,
+        None,
+        output.work,
+        output.attempt,
+        output.run,
+        output.line_counts,
+    )
+    assert _output_dates(undated) == set()
+    assert (
+        _fact_rows_for_date(
+            [undated], {}, "2026-10-06", "2026-10-06T04:00:00Z"
+        )["gold_video"]
+        == []
+    )
+    assert (
+        _fact_rows_for_date(
+            [undated, output], {}, "2026-10-06", "2026-10-06T04:00:00Z"
+        )["gold_video"][0]["work_id"]
+        == "work"
+    )
+    missing_dimensions = CommittedOutput(
+        output.work_id,
+        output.attempt_id,
+        output.publication_sequence,
+        output.published_at,
+        {
+            "config_sha256": "a" * 64,
+            "duration_seconds": 7.0,
+        },
+        output.attempt,
+        output.run,
+        output.line_counts,
+    )
+    assert (
+        _fact_rows_for_date(
+            [missing_dimensions], {}, "2026-10-06", "2026-10-06T04:00:00Z"
+        )["gold_video"]
+        == []
+    )
+    dimensions = _dimension_rows(
+        [missing_dimensions, output],
+        {name: [] for name in FACT_TABLES},
+        "2026-10-06T04:00:00Z",
+    )
+    source_rows = _dimension_source_rows([missing_dimensions, output])
+    assert [row["work_id"] for row in source_rows] == ["work"]
+    assert source_rows[0]["captured_at_utc"] == "2026-10-06T03:16:00Z"
+    assert _dimension_fact_dates(
+        {
+            name: (
+                [{"capture_date": "2026-10-06"}]
+                if name == "gold_video"
+                else []
+            )
+            for name in FACT_TABLES
+        }
+    ) == ["2026-10-06"]
+    assert [row["work_id"] for row in dimensions["gold_dim_video"]] == ["work"]
+    assert (
+        dimensions["gold_dim_video"][0]["captured_at_utc"]
+        == "2026-10-06T03:16:00Z"
+    )
+    missing_camera = CommittedOutput(
+        output.work_id,
+        output.attempt_id,
+        output.publication_sequence,
+        output.published_at,
+        output.work | {"camera_id": None},
+        output.attempt,
+        output.run,
+        output.line_counts,
+    )
+    missing_location = CommittedOutput(
+        output.work_id,
+        output.attempt_id,
+        output.publication_sequence,
+        output.published_at,
+        output.work | {"location_id": None},
+        output.attempt,
+        output.run,
+        output.line_counts,
+    )
+    undated_with_dimensions = CommittedOutput(
+        output.work_id,
+        output.attempt_id,
+        output.publication_sequence,
+        None,
+        output.work,
+        output.attempt,
+        output.run,
+        output.line_counts,
+    )
+    assert all(
+        _dimension_rows([candidate], {name: [] for name in FACT_TABLES}, published.isoformat())[
+            "gold_dim_video"
+        ]
+        == []
+        for candidate in (
+            missing_camera,
+            missing_location,
+            undated_with_dimensions,
+        )
+    )
+
+
+def test_dimension_source_helpers_cover_optional_benchmark_metadata():
+    published = datetime(2026, 10, 6, 3, 16, tzinfo=timezone.utc)
+
+    def output(work):
+        return CommittedOutput(
+            "work",
+            "attempt",
+            1,
+            published,
+            work,
+            {},
+            {},
+            (),
+        )
+
+    valid = output({"camera_id": "camera", "location_id": "location"})
+    missing_camera = output({"location_id": "location"})
+    missing_location = output({"camera_id": "camera"})
+    undated = CommittedOutput(
+        "undated",
+        "attempt-undated",
+        2,
+        None,
+        {"camera_id": "camera", "location_id": "location"},
+        {},
+        {},
+        (),
+    )
+    assert _dimension_source_rows(
+        [missing_camera, valid, missing_location, undated]
+    ) == [
+        {
+            "camera_id": "camera",
+            "location_id": "location",
+            "work_id": "work",
+            "captured_at_utc": "2026-10-06T03:16:00Z",
+        }
+    ]
+    assert _dimension_fact_dates(
+        {
+            "gold_flow_minute": [{"flow_date": "2026-10-05"}],
+            "gold_flow_hour": [{"flow_date": None}],
+            "gold_video": [{"capture_date": "2026-10-06"}],
+            "gold_operations_hour": [{"operation_date": "2026-10-05"}],
+        }
+    ) == ["2026-10-05", "2026-10-06"]
+
+
+def test_dimension_fact_dates_reads_each_fact_table_column():
+    assert _dimension_fact_dates(
+        {
+            "gold_flow_minute": [{"flow_date": "2026-10-01"}],
+            "gold_flow_hour": [{"flow_date": "2026-10-02"}],
+            "gold_video": [{"capture_date": "2026-10-03"}],
+            "gold_operations_hour": [{"operation_date": "2026-10-04"}],
+        }
+    ) == [
+        "2026-10-01",
+        "2026-10-02",
+        "2026-10-03",
+        "2026-10-04",
+    ]
 
 
 def test_delta_output_decoder_uses_active_session_and_verifies_records():

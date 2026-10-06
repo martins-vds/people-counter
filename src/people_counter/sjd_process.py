@@ -17,6 +17,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -67,6 +68,16 @@ class StagingConflictError(ProcessValidationError):
 
 class UnsupportedAttemptStoreError(ProcessValidationError):
     """The requested attempt store is not implemented by this local SJD."""
+
+
+class ProcessRouteMode(str, Enum):
+    """Typed execution intent selecting one immutable staging boundary."""
+
+    CANARY = "CANARY"
+    BENCHMARK = "BENCHMARK"
+    PRODUCTION_SHADOW = "PRODUCTION_SHADOW"
+    SHADOW_SYNTHETIC = "SHADOW_SYNTHETIC"
+    PRODUCTION = "PRODUCTION"
 
 
 @dataclass(frozen=True)
@@ -987,6 +998,9 @@ class OneLakeDeltaAttemptAdapter:
         root: str | None = None,
         spark_session: Any | None = None,
         files: Any | None = None,
+        *,
+        config: Any | None = None,
+        route_mode: ProcessRouteMode | str | None = None,
     ) -> None:
         if root is None or spark_session is None:
             raise UnsupportedAttemptStoreError(
@@ -999,11 +1013,32 @@ class OneLakeDeltaAttemptAdapter:
         from people_counter.fabric_candidate_a import FabricCandidateAConfig
 
         self.root = root.rstrip("/")
-        self.config = FabricCandidateAConfig()
+        self.config = config or FabricCandidateAConfig()
+        try:
+            namespace_mode = ProcessRouteMode(self.config.mode.value)
+            selected_mode = (
+                namespace_mode
+                if route_mode is None
+                else ProcessRouteMode(route_mode)
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ProcessValidationError("process route mode is invalid") from error
+        allowed = {namespace_mode}
+        if namespace_mode is ProcessRouteMode.PRODUCTION_SHADOW:
+            allowed.add(ProcessRouteMode.SHADOW_SYNTHETIC)
+        if selected_mode not in allowed:
+            raise ProcessValidationError(
+                "process route mode does not match the fixed namespace"
+            )
+        if selected_mode is ProcessRouteMode.PRODUCTION:
+            raise ProcessValidationError(
+                "direct production attempt staging is disabled"
+            )
+        self.route_mode = selected_mode
         expected = self.config.file_path("attempts").rstrip("/")
         if self.root != expected:
             raise ProcessValidationError(
-                f"OneLake attempts require the fixed Candidate A root {expected!r}"
+                "OneLake attempts require the route-mode fixed Candidate A root"
             )
         self.spark_session = spark_session
         self.files = files or NotebookUtilsOneLakeFiles()

@@ -19,6 +19,7 @@ from people_counter.sjd_gold import (
     _jsonable_row,
     _jsonable_spark_row,
     _records_output_document,
+    _optional_datetime,
     _required_datetime,
     _spark_row,
     _spark_schema,
@@ -66,7 +67,7 @@ class FabricCommittedSource:
                     for row in rows
                 ]
             )
-            for name in ("work", "attempt", "publication")
+            for name in ("work", "attempt", "publication", "batch")
         }
         return SourceCheckpoint(sequence, versions)
 
@@ -76,6 +77,7 @@ class FabricCommittedSource:
             work = pointer["work"]
             attempt = pointer["attempt"]
             publication = pointer["publication"]
+            batch = pointer["batch"]
             path = str(publication["output_path"])
             process_attempt = _path_value(path, "attempt")
             batch_id = _path_value(path, "batch")
@@ -104,7 +106,12 @@ class FabricCommittedSource:
             payload = json.loads(str(work["payload_json"]))
             if not isinstance(payload, dict):
                 raise GoldSourceError("committed work payload must be an object")
-            published_at = _required_datetime(publication["published_at"])
+            published_at = _optional_datetime(
+                publication.get("published_at")
+            ) or _optional_datetime(batch.get("committed_at"))
+            enriched_attempt = dict(attempt) | {
+                "batch_committed_at": batch.get("committed_at")
+            }
             result.append(
                 CommittedOutput(
                     str(work["work_id"]),
@@ -112,7 +119,7 @@ class FabricCommittedSource:
                     int(publication["publication_sequence"]),
                     published_at,
                     dict(work) | payload,
-                    dict(attempt),
+                    enriched_attempt,
                     run,
                     tuple(line_counts),
                 )
@@ -123,6 +130,9 @@ class FabricCommittedSource:
         work = self._rows("work")
         attempts = {
             row["attempt_id"]: row for row in self._rows("attempts")
+        }
+        batches = {
+            row["batch_id"]: row for row in self._rows("batches")
         }
         publications = {
             (row["work_id"], row["attempt_id"]): row
@@ -135,9 +145,15 @@ class FabricCommittedSource:
                 continue
             attempt = attempts.get(attempt_id)
             publication = publications.get((row["work_id"], attempt_id))
+            batch = (
+                None
+                if attempt is None
+                else batches.get(attempt.get("batch_id"))
+            )
             if (
                 attempt is None
                 or publication is None
+                or batch is None
                 or attempt["work_id"] != row["work_id"]
                 or attempt["status"] != "SUCCEEDED"
                 or row["status"] != "SUCCEEDED"
@@ -145,6 +161,8 @@ class FabricCommittedSource:
                 != publication["publication_sequence"]
                 or publication["output_path"] != attempt["output_path"]
                 or publication["output_sha256"] != attempt["output_sha256"]
+                or publication["batch_id"] != batch["batch_id"]
+                or batch["status"] != "COMMITTED"
             ):
                 raise GoldSourceError(
                     f"invalid committed pointer for {row['work_id']}"
@@ -154,6 +172,7 @@ class FabricCommittedSource:
                     "work": row,
                     "attempt": attempt,
                     "publication": publication,
+                    "batch": batch,
                 }
             )
         return sorted(

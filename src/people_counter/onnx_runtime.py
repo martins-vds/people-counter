@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -18,7 +19,24 @@ IMAGENET_MEAN = np.asarray((0.485, 0.456, 0.406), dtype=np.float32)
 IMAGENET_STD = np.asarray((0.229, 0.224, 0.225), dtype=np.float32)
 
 
+def _positive_thread_count(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be a positive integer") from error
+    if value < 1:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return value
+
+
 def create_onnx_session(model_path: Path, device_variant: str) -> Any:
+    if device_variant not in {"cpu", "gpu"}:
+        raise RuntimeError(
+            f"unsupported ONNX Runtime device variant {device_variant!r}"
+        )
     try:
         import onnxruntime
     except ImportError as exc:
@@ -39,8 +57,23 @@ def create_onnx_session(model_path: Path, device_variant: str) -> Any:
             f"ONNX Runtime provider {provider} is unavailable; "
             f"available providers: {', '.join(available_providers)}"
         )
+    options = onnxruntime.SessionOptions()
+    if device_variant == "cpu":
+        options.intra_op_num_threads = _positive_thread_count(
+            "PC_ONNX_INTRA_OP_THREADS",
+            _positive_thread_count("OMP_NUM_THREADS", 1),
+        )
+        options.inter_op_num_threads = _positive_thread_count(
+            "PC_ONNX_INTER_OP_THREADS",
+            1,
+        )
+        options.execution_mode = onnxruntime.ExecutionMode.ORT_SEQUENTIAL
+        options.graph_optimization_level = (
+            onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
     return onnxruntime.InferenceSession(
         model_path,
+        sess_options=options,
         providers=[provider],
     )
 
