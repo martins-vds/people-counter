@@ -72,6 +72,7 @@ Run or deploy the notebooks in this order:
 | [`14_reset_test_data.ipynb`](./14_reset_test_data.ipynb) | Deletes Development/Test rows while preserving Delta schemas, committed views, and the registration-lock seed | Manually, after the section 12.2 stop gate; never in Production |
 | [`15_executor_partition_inference.ipynb`](./15_executor_partition_inference.ipynb) | Runs experimental capacity-aware whole-video inference in one Spark application | Once per executor benchmark configuration |
 | [`16_executor_partition_benchmark_control.ipynb`](./16_executor_partition_benchmark_control.ipynb) | Prepares benchmark input and evaluates notebook-15 evidence | Before and after each notebook-15 pipeline activity |
+| [`18_sjd_getting_started_demo.ipynb`](./18_sjd_getting_started_demo.ipynb) ([tutorial](./18_sjd_getting_started_demo_tutorial.md)) | Demonstrates stable SJD registration, claiming, processing, gold publication, Direct Lake framing, and report verification with three reviewed videos | Operator-led getting-started demo; register inputs before the audience arrives |
 
 Notebook `14_reset_test_data` is a destructive test utility, not part of the
 normal deployment sequence. Do not deploy it to a Production workspace or

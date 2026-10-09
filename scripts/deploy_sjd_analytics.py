@@ -5,6 +5,7 @@ import base64
 import copy
 import hashlib
 import json
+import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,11 +56,16 @@ FORECAST_PAGE_ORDINAL = 5
 FORECAST_BASELINE_PROFILE = "pytorch-r18-b1-1fps-1t"
 FORECAST_BASELINE_CAPACITY = 64
 FORECAST_BASELINE_THROUGHPUT = 1.5899
-FORECAST_CAPACITIES = (64, 128, 256, 512, 1024)
+FORECAST_CAPACITIES = (64, 128, 256, 512, 1024, 2048, 4096, 8192)
 FORECAST_VIDEO_HOURS = 200_000
+FORECAST_MIN_VIDEO_HOURS = 1_000
+FORECAST_MAX_VIDEO_HOURS = 1_000_000
+FORECAST_VIDEO_HOURS_INCREMENT = 1_000
 FORECAST_TARGET_DAYS = 30
 FORECAST_USEFUL_UTILIZATION = 0.80
 FORECAST_HEADROOM = 0.20
+FORECAST_WORKLOAD_TABLE = "Forecast Workload"
+FORECAST_CAPACITY_TABLE = "Forecast Capacity"
 
 
 class ReportingDeploymentError(RuntimeError):
@@ -224,14 +230,453 @@ def _textbox(
     }
 
 
-def _forecast_page() -> dict[str, Any]:
-    bare_target = FORECAST_VIDEO_HOURS / (FORECAST_TARGET_DAYS * 24)
-    planning_target = (
-        bare_target
-        * (1 + FORECAST_HEADROOM)
-        / FORECAST_USEFUL_UTILIZATION
+def _lineage_tag(seed: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"people-counter:{seed}"))
+
+
+def _pbi_id(seed: str) -> str:
+    return hashlib.sha256(
+        f"people-counter:{seed}".encode("utf-8")
+    ).hexdigest()[:32]
+
+
+def _forecast_workload_tmdl() -> str:
+    return f"""table '{FORECAST_WORKLOAD_TABLE}'
+\tlineageTag: {_lineage_tag("forecast-workload-table")}
+
+\tmeasure 'Selected Video Hours' = SELECTEDVALUE('{FORECAST_WORKLOAD_TABLE}'[Video Hours], {FORECAST_VIDEO_HOURS})
+\t\tformatString: #,0
+\t\tlineageTag: {_lineage_tag("selected-video-hours")}
+
+\tmeasure 'Bare Throughput Target' = DIVIDE([Selected Video Hours], {FORECAST_TARGET_DAYS} * 24)
+\t\tformatString: 0.00
+\t\tlineageTag: {_lineage_tag("bare-throughput-target")}
+
+\tmeasure 'Planning Throughput Target' = DIVIDE([Bare Throughput Target] * {1 + FORECAST_HEADROOM:.2f}, {FORECAST_USEFUL_UTILIZATION:.2f})
+\t\tformatString: 0.00
+\t\tlineageTag: {_lineage_tag("planning-throughput-target")}
+
+\tcolumn 'Video Hours'
+\t\tformatString: #,0
+\t\tlineageTag: {_lineage_tag("forecast-video-hours")}
+\t\tsummarizeBy: none
+\t\tsourceColumn: [Value]
+
+\t\textendedProperty ParameterMetadata =
+\t\t\t{{
+\t\t\t  "version": 0
+\t\t\t}}
+
+\t\tannotation SummarizationSetBy = User
+
+\tpartition '{FORECAST_WORKLOAD_TABLE}' = calculated
+\t\tmode: import
+\t\tsource = GENERATESERIES({FORECAST_MIN_VIDEO_HOURS}, {FORECAST_MAX_VIDEO_HOURS}, {FORECAST_VIDEO_HOURS_INCREMENT})
+
+\tannotation PBI_Id = {_pbi_id("forecast-workload-table")}
+"""
+
+
+def _forecast_capacity_tmdl() -> str:
+    capacity_rows = ",\n".join(
+        f'\t\t\t\t{{"F{capacity}", {capacity}}}'
+        for capacity in FORECAST_CAPACITIES
     )
-    row_y = 390.0
+    return f"""table '{FORECAST_CAPACITY_TABLE}'
+\tlineageTag: {_lineage_tag("forecast-capacity-table")}
+
+\tmeasure 'Estimated Throughput' = {FORECAST_BASELINE_THROUGHPUT:.4f} * DIVIDE(SELECTEDVALUE('{FORECAST_CAPACITY_TABLE}'[Capacity Units]), {FORECAST_BASELINE_CAPACITY})
+\t\tformatString: 0.00
+\t\tlineageTag: {_lineage_tag("estimated-throughput")}
+
+\tmeasure 'Estimated Completion Days' = DIVIDE([Selected Video Hours], [Estimated Throughput] * 24)
+\t\tformatString: #,0.0
+\t\tlineageTag: {_lineage_tag("estimated-completion-days")}
+
+\tcolumn 'Capacity SKU'
+\t\tdataType: string
+\t\tlineageTag: {_lineage_tag("capacity-sku")}
+\t\tsummarizeBy: none
+\t\tisNameInferred
+\t\tisDataTypeInferred
+\t\tsourceColumn: [Capacity SKU]
+\t\tsortByColumn: 'Capacity Units'
+
+\t\tannotation SummarizationSetBy = Automatic
+
+\tcolumn 'Capacity Units'
+\t\tdataType: int64
+\t\tformatString: 0
+\t\tlineageTag: {_lineage_tag("capacity-units")}
+\t\tsummarizeBy: none
+\t\tisNameInferred
+\t\tisDataTypeInferred
+\t\tsourceColumn: [Capacity Units]
+
+\t\tannotation SummarizationSetBy = Automatic
+
+\tpartition '{FORECAST_CAPACITY_TABLE}' = calculated
+\t\tmode: import
+\t\tsource =
+\t\t\tDATATABLE(
+\t\t\t\t"Capacity SKU", STRING,
+\t\t\t\t"Capacity Units", INTEGER,
+\t\t\t\t{{
+{capacity_rows}
+\t\t\t\t}}
+\t\t\t)
+
+\tannotation PBI_Id = {_pbi_id("forecast-capacity-table")}
+"""
+
+
+def _forecast_model_parts() -> dict[str, str]:
+    return {
+        (
+            f"definition/tables/{FORECAST_WORKLOAD_TABLE}.tmdl"
+        ): _forecast_workload_tmdl(),
+        (
+            f"definition/tables/{FORECAST_CAPACITY_TABLE}.tmdl"
+        ): _forecast_capacity_tmdl(),
+    }
+
+
+def _visual(
+    seed: str,
+    single_visual: Mapping[str, Any],
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    z: int,
+    filters: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    name = _visual_name(f"forecast:{seed}")
+    position = {
+        "height": height,
+        "tabOrder": z,
+        "width": width,
+        "x": x,
+        "y": y,
+        "z": z,
+    }
+    config = {
+        "layouts": [{"id": 0, "position": position}],
+        "name": name,
+        "singleVisual": dict(single_visual),
+    }
+    return {
+        "config": json.dumps(
+            config,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        "filters": json.dumps(
+            list(filters),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        "height": height,
+        "width": width,
+        "x": x,
+        "y": y,
+        "z": z,
+    }
+
+
+def _measure_card(
+    seed: str,
+    table: str,
+    measure: str,
+    title: str,
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    z: int,
+) -> dict[str, Any]:
+    query_ref = f"{table}.{measure}"
+    return _visual(
+        seed,
+        {
+            "drillFilterOtherVisuals": True,
+            "hasDefaultSort": True,
+            "projections": {"Data": [{"queryRef": query_ref}]},
+            "prototypeQuery": {
+                "From": [{"Entity": table, "Name": "f", "Type": 0}],
+                "OrderBy": [
+                    {
+                        "Direction": 2,
+                        "Expression": {
+                            "Measure": {
+                                "Expression": {
+                                    "SourceRef": {"Source": "f"}
+                                },
+                                "Property": measure,
+                            }
+                        },
+                    }
+                ],
+                "Select": [
+                    {
+                        "Measure": {
+                            "Expression": {"SourceRef": {"Source": "f"}},
+                            "Property": measure,
+                        },
+                        "Name": query_ref,
+                        "NativeReferenceName": measure,
+                    }
+                ],
+                "Version": 2,
+            },
+            "vcObjects": {
+                "title": [
+                    {
+                        "properties": {
+                            "show": {"expr": {"Literal": {"Value": "true"}}},
+                            "text": {
+                                "expr": {
+                                    "Literal": {"Value": repr(title)}
+                                }
+                            },
+                        }
+                    }
+                ]
+            },
+            "visualType": "cardVisual",
+        },
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        z=z,
+    )
+
+
+def _workload_slicer() -> dict[str, Any]:
+    table = FORECAST_WORKLOAD_TABLE
+    column = "Video Hours"
+    query_ref = f"{table}.{column}"
+    selection_filter = {
+        "Version": 2,
+        "From": [{"Entity": table, "Name": "f", "Type": 0}],
+        "Where": [
+            {
+                "Condition": {
+                    "In": {
+                        "Expressions": [
+                            {
+                                "Column": {
+                                    "Expression": {
+                                        "SourceRef": {"Source": "f"}
+                                    },
+                                    "Property": column,
+                                }
+                            }
+                        ],
+                        "Values": [
+                            [
+                                {
+                                    "Literal": {
+                                        "Value": f"{FORECAST_VIDEO_HOURS}L"
+                                    }
+                                }
+                            ]
+                        ],
+                    }
+                }
+            }
+        ],
+    }
+    return _visual(
+        "workload-slicer",
+        {
+            "drillFilterOtherVisuals": True,
+            "objects": {
+                "data": [
+                    {
+                        "properties": {
+                            "mode": {
+                                "expr": {
+                                    "Literal": {"Value": "'Dropdown'"}
+                                }
+                            },
+                            "numericStart": {
+                                "expr": {
+                                    "Literal": {
+                                        "Value": f"{FORECAST_VIDEO_HOURS}D"
+                                    }
+                                }
+                            },
+                        }
+                    }
+                ],
+                "general": [
+                    {
+                        "properties": {
+                            "filter": {"filter": selection_filter}
+                        }
+                    }
+                ],
+                "selection": [
+                    {
+                        "properties": {
+                            "strictSingleSelect": {
+                                "expr": {
+                                    "Literal": {"Value": "true"}
+                                }
+                            }
+                        }
+                    }
+                ],
+                "slider": [
+                    {
+                        "properties": {
+                            "show": {
+                                "expr": {
+                                    "Literal": {"Value": "true"}
+                                }
+                            }
+                        }
+                    }
+                ],
+            },
+            "projections": {
+                "Values": [{"active": True, "queryRef": query_ref}]
+            },
+            "prototypeQuery": {
+                "From": [{"Entity": table, "Name": "f", "Type": 0}],
+                "OrderBy": [
+                    {
+                        "Direction": 1,
+                        "Expression": {
+                            "Column": {
+                                "Expression": {
+                                    "SourceRef": {"Source": "f"}
+                                },
+                                "Property": column,
+                            }
+                        },
+                    }
+                ],
+                "Select": [
+                    {
+                        "Column": {
+                            "Expression": {"SourceRef": {"Source": "f"}},
+                            "Property": column,
+                        },
+                        "Name": query_ref,
+                        "NativeReferenceName": column,
+                    }
+                ],
+                "Version": 2,
+            },
+            "vcObjects": {
+                "title": [
+                    {
+                        "properties": {
+                            "show": {"expr": {"Literal": {"Value": "true"}}},
+                            "text": {
+                                "expr": {
+                                    "Literal": {
+                                        "Value": "'Video hours to process'"
+                                    }
+                                }
+                            },
+                        }
+                    }
+                ]
+            },
+            "visualType": "slicer",
+        },
+        x=60.0,
+        y=220.0,
+        width=470.0,
+        height=180.0,
+        z=2,
+    )
+
+
+def _capacity_table() -> dict[str, Any]:
+    table = FORECAST_CAPACITY_TABLE
+    sku = "Capacity SKU"
+    throughput = "Estimated Throughput"
+    completion = "Estimated Completion Days"
+    return _visual(
+        "capacity-table",
+        {
+            "drillFilterOtherVisuals": True,
+            "projections": {
+                "Values": [
+                    {"queryRef": f"{table}.{sku}"},
+                    {"queryRef": f"{table}.{throughput}"},
+                    {"queryRef": f"{table}.{completion}"},
+                ]
+            },
+            "prototypeQuery": {
+                "From": [{"Entity": table, "Name": "f", "Type": 0}],
+                "Select": [
+                    {
+                        "Column": {
+                            "Expression": {"SourceRef": {"Source": "f"}},
+                            "Property": sku,
+                        },
+                        "Name": f"{table}.{sku}",
+                        "NativeReferenceName": sku,
+                    },
+                    {
+                        "Measure": {
+                            "Expression": {"SourceRef": {"Source": "f"}},
+                            "Property": throughput,
+                        },
+                        "Name": f"{table}.{throughput}",
+                        "NativeReferenceName": throughput,
+                    },
+                    {
+                        "Measure": {
+                            "Expression": {"SourceRef": {"Source": "f"}},
+                            "Property": completion,
+                        },
+                        "Name": f"{table}.{completion}",
+                        "NativeReferenceName": completion,
+                    },
+                ],
+                "Version": 2,
+            },
+            "vcObjects": {
+                "title": [
+                    {
+                        "properties": {
+                            "show": {"expr": {"Literal": {"Value": "true"}}},
+                            "text": {
+                                "expr": {
+                                    "Literal": {
+                                        "Value": (
+                                            "'Capacity forecast for selected "
+                                            "workload'"
+                                        )
+                                    }
+                                }
+                            },
+                        }
+                    }
+                ]
+            },
+            "visualType": "tableEx",
+        },
+        x=60.0,
+        y=420.0,
+        width=1800.0,
+        height=330.0,
+        z=6,
+    )
+
+
+def _forecast_page() -> dict[str, Any]:
     visuals = [
         _textbox(
             "title",
@@ -254,77 +699,57 @@ def _forecast_page() -> dict[str, Any]:
                     f"Baseline: {FORECAST_BASELINE_PROFILE} at "
                     f"{FORECAST_BASELINE_THROUGHPUT:.4f}x aggregate real time"
                 ),
+                (
+                    f"Default workload: {FORECAST_VIDEO_HOURS:,} video-hours; "
+                    "adjust it with the selector below."
+                ),
             ),
             x=60.0,
-            y=125.0,
+            y=115.0,
             width=1800.0,
-            height=105.0,
+            height=95.0,
             z=1,
-            font_size="16px",
+            font_size="15px",
         ),
-        _textbox(
-            "target",
-            (
-                (
-                    f"Workload: {FORECAST_VIDEO_HOURS:,} video-hours in "
-                    f"{FORECAST_TARGET_DAYS} days"
-                ),
-                (
-                    f"Bare target: {bare_target:.2f} video-hours/wall-hour  |  "
-                    f"Planning target: {planning_target:.2f}x "
-                    f"({FORECAST_HEADROOM:.0%} headroom, "
-                    f"{FORECAST_USEFUL_UTILIZATION:.0%} useful utilization)"
-                ),
-            ),
-            x=60.0,
-            y=240.0,
-            width=1800.0,
-            height=105.0,
-            z=2,
-            font_size="16px",
-            font_weight="bold",
-        ),
-        _textbox(
-            "table-header",
-            (
-                "Capacity     Estimated throughput     Video-hours/wall-hour"
-                "     Estimated days for 200,000 video-hours",
-            ),
-            x=60.0,
-            y=350.0,
-            width=1800.0,
-            height=50.0,
+        _workload_slicer(),
+        _measure_card(
+            "selected-workload",
+            FORECAST_WORKLOAD_TABLE,
+            "Selected Video Hours",
+            "Selected video-hours",
+            x=560.0,
+            y=220.0,
+            width=400.0,
+            height=180.0,
             z=3,
-            font_size="16px",
-            font_family="Consolas",
-            font_weight="bold",
         ),
+        _measure_card(
+            "bare-target",
+            FORECAST_WORKLOAD_TABLE,
+            "Bare Throughput Target",
+            f"Bare target for {FORECAST_TARGET_DAYS} days (x)",
+            x=990.0,
+            y=220.0,
+            width=400.0,
+            height=180.0,
+            z=4,
+        ),
+        _measure_card(
+            "planning-target",
+            FORECAST_WORKLOAD_TABLE,
+            "Planning Throughput Target",
+            (
+                f"Planning target ({FORECAST_HEADROOM:.0%} headroom, "
+                f"{FORECAST_USEFUL_UTILIZATION:.0%} utilization)"
+            ),
+            x=1420.0,
+            y=220.0,
+            width=440.0,
+            height=180.0,
+            z=5,
+        ),
+        _capacity_table(),
     ]
-    for index, capacity in enumerate(FORECAST_CAPACITIES):
-        throughput = (
-            FORECAST_BASELINE_THROUGHPUT
-            * capacity
-            / FORECAST_BASELINE_CAPACITY
-        )
-        completion_days = FORECAST_VIDEO_HOURS / throughput / 24
-        visuals.append(
-            _textbox(
-                f"capacity-{capacity}",
-                (
-                    f"F{capacity:<8}"
-                    f"{throughput:>10.2f}x"
-                    f"{throughput:>25.2f}"
-                    f"{completion_days:>38,.1f} days",
-                ),
-                x=60.0,
-                y=row_y + index * 62.0,
-                width=1800.0,
-                height=55.0,
-                z=4 + index,
-                font_size="16px",
-                font_family="Consolas",
-            )
-        )
     visuals.extend(
         [
             _textbox(
@@ -338,10 +763,10 @@ def _forecast_page() -> dict[str, Any]:
                     ),
                 ),
                 x=60.0,
-                y=715.0,
+                y=770.0,
                 width=1800.0,
-                height=105.0,
-                z=9,
+                height=95.0,
+                z=7,
                 font_size="16px",
                 color="#C50F1F",
                 font_weight="bold",
@@ -361,10 +786,10 @@ def _forecast_page() -> dict[str, Any]:
                     ),
                 ),
                 x=60.0,
-                y=840.0,
+                y=875.0,
                 width=1800.0,
-                height=150.0,
-                z=10,
+                height=145.0,
+                z=8,
                 font_size="14px",
             ),
         ]
@@ -506,17 +931,46 @@ def rewrite_model_definition(
         raise ReportingDeploymentError(
             f"semantic model is missing expected physical bindings: {missing!r}"
         )
+    model_matches = [
+        part for part in parts if part["path"] == "definition/model.tmdl"
+    ]
+    if len(model_matches) != 1:
+        raise ReportingDeploymentError(
+            "definition must contain one definition/model.tmdl part"
+        )
+    model_text = _decoded_part(model_matches[0]).decode("utf-8")
+    forecast_parts = _forecast_model_parts()
+    existing_paths = {str(part["path"]) for part in parts}
+    conflicts = sorted(existing_paths.intersection(forecast_parts))
+    if conflicts:
+        raise ReportingDeploymentError(
+            f"semantic model already contains Forecast artifacts: {conflicts!r}"
+        )
+    for table in (FORECAST_WORKLOAD_TABLE, FORECAST_CAPACITY_TABLE):
+        model_text += f"\nref table '{table}'\n"
+    _replace_part(model_matches[0], model_text.encode("utf-8"))
+    definition = result.get("definition")
+    if not isinstance(definition, dict) or not isinstance(
+        definition.get("parts"),
+        list,
+    ):
+        raise ReportingDeploymentError("Fabric definition envelope is invalid")
+    for path, content in forecast_parts.items():
+        definition["parts"].append(
+            {
+                "path": path,
+                "payload": base64.b64encode(content.encode("utf-8")).decode(
+                    "ascii"
+                ),
+                "payloadType": "InlineBase64",
+            }
+        )
     _set_platform_name(parts, target_name)
     validate_model_definition(result)
     return result
 
 
-def validate_model_definition(value: Mapping[str, Any]) -> None:
-    text = "\n".join(
-        _decoded_part(part).decode("utf-8")
-        for part in _parts(value)
-        if str(part["path"]).endswith(".tmdl")
-    )
+def _validate_stable_bindings(text: str) -> None:
     for legacy, stable in TABLE_BINDINGS.items():
         if (
             f"[dbo].[{legacy}]" in text
@@ -527,6 +981,71 @@ def validate_model_definition(value: Mapping[str, Any]) -> None:
             raise ReportingDeploymentError(
                 f"semantic model binding validation failed for {legacy}"
             )
+
+
+def _validate_forecast_model_parts(
+    parts: Sequence[Mapping[str, Any]],
+) -> None:
+    expected_paths = _forecast_model_parts()
+    observed = {
+        str(part["path"]): _decoded_part(part).decode("utf-8")
+        for part in parts
+        if str(part["path"]) in expected_paths
+    }
+    if set(observed) != set(expected_paths):
+        raise ReportingDeploymentError(
+            "semantic model Forecast tables are missing"
+        )
+    model = next(
+        (
+            _decoded_part(part).decode("utf-8")
+            for part in parts
+            if part["path"] == "definition/model.tmdl"
+        ),
+        "",
+    )
+    required_markers = {
+        "workload default": (
+            f"SELECTEDVALUE('{FORECAST_WORKLOAD_TABLE}'[Video Hours], "
+            f"{FORECAST_VIDEO_HOURS})"
+        ),
+        "workload range": (
+            f"GENERATESERIES({FORECAST_MIN_VIDEO_HOURS}, "
+            f"{FORECAST_MAX_VIDEO_HOURS}, "
+            f"{FORECAST_VIDEO_HOURS_INCREMENT})"
+        ),
+        "baseline throughput": f"{FORECAST_BASELINE_THROUGHPUT:.4f}",
+        "completion measure": "'Estimated Completion Days'",
+    }
+    forecast_text = "\n".join(observed.values())
+    for label, marker in required_markers.items():
+        if marker not in forecast_text:
+            raise ReportingDeploymentError(
+                f"semantic model Forecast {label} is invalid"
+            )
+    if any(
+        f'{{"F{capacity}", {capacity}}}' not in forecast_text
+        for capacity in FORECAST_CAPACITIES
+    ):
+        raise ReportingDeploymentError(
+            "semantic model Forecast capacity rows are invalid"
+        )
+    for table in (FORECAST_WORKLOAD_TABLE, FORECAST_CAPACITY_TABLE):
+        if f"ref table '{table}'" not in model:
+            raise ReportingDeploymentError(
+                f"semantic model Forecast ref is missing for {table}"
+            )
+
+
+def validate_model_definition(value: Mapping[str, Any]) -> None:
+    parts = _parts(value)
+    text = "\n".join(
+        _decoded_part(part).decode("utf-8")
+        for part in parts
+        if str(part["path"]).endswith(".tmdl")
+    )
+    _validate_stable_bindings(text)
+    _validate_forecast_model_parts(parts)
 
 
 def rewrite_report_definition(

@@ -8,9 +8,12 @@ import pytest
 
 from scripts.deploy_sjd_analytics import (
     FORECAST_CAPACITIES,
+    FORECAST_CAPACITY_TABLE,
     FORECAST_PAGE_DISPLAY_NAME,
     FORECAST_PAGE_NAME,
     FORECAST_PAGE_ORDINAL,
+    FORECAST_VIDEO_HOURS,
+    FORECAST_WORKLOAD_TABLE,
     ReportingDeploymentError,
     SOURCE_MODEL,
     TABLE_BINDINGS,
@@ -62,7 +65,16 @@ def _model() -> dict[str, object]:
         )
         for legacy in TABLE_BINDINGS
     ]
-    parts.append(_part(".platform", _platform("SemanticModel", "legacy")))
+    parts.extend(
+        [
+            _part(
+                "definition/model.tmdl",
+                "\n".join(f"ref table {legacy}" for legacy in TABLE_BINDINGS)
+                + "\n",
+            ),
+            _part(".platform", _platform("SemanticModel", "legacy")),
+        ]
+    )
     return {"definition": {"format": "TMDL", "parts": parts}}
 
 
@@ -135,6 +147,32 @@ def test_rewrite_model_changes_only_physical_bindings_and_platform_name() -> Non
         assert f"entityName: {legacy}" not in text
     platform = json.loads(_decoded(result, ".platform"))
     assert platform["metadata"]["displayName"] == TARGET_MODEL_NAME
+    model = _decoded(result, "definition/model.tmdl")
+    assert f"ref table '{FORECAST_WORKLOAD_TABLE}'" in model
+    assert f"ref table '{FORECAST_CAPACITY_TABLE}'" in model
+    workload = _decoded(
+        result,
+        f"definition/tables/{FORECAST_WORKLOAD_TABLE}.tmdl",
+    )
+    assert (
+        f"SELECTEDVALUE('{FORECAST_WORKLOAD_TABLE}'[Video Hours], "
+        f"{FORECAST_VIDEO_HOURS})"
+    ) in workload
+    assert (
+        hashlib.sha256(workload.encode()).hexdigest()
+        == "a9f9c97f8c4572a04529209322c2d1102ebb2cf00b307c29875bfddcef78cbc6"
+    )
+    capacity = _decoded(
+        result,
+        f"definition/tables/{FORECAST_CAPACITY_TABLE}.tmdl",
+    )
+    for value in FORECAST_CAPACITIES:
+        assert f'{{"F{value}", {value}}}' in capacity
+    assert "'Estimated Completion Days'" in capacity
+    assert (
+        hashlib.sha256(capacity.encode()).hexdigest()
+        == "039fe1d910f040adb86a5590da22e237d988bae8dd029b3a4293fd26f1f31140"
+    )
     assert source == _model()
 
 
@@ -166,6 +204,22 @@ def test_validate_model_requires_both_stable_binding_markers(marker: str) -> Non
     part["payload"] = base64.b64encode(text.replace(target, "").encode()).decode()
 
     with pytest.raises(ReportingDeploymentError, match=legacy):
+        validate_model_definition(result)
+
+
+def test_validate_model_requires_forecast_tables() -> None:
+    result = rewrite_model_definition(_model())
+    result["definition"]["parts"] = [
+        part
+        for part in result["definition"]["parts"]
+        if part["path"]
+        != f"definition/tables/{FORECAST_CAPACITY_TABLE}.tmdl"
+    ]
+
+    with pytest.raises(
+        ReportingDeploymentError,
+        match="^semantic model Forecast tables are missing$",
+    ):
         validate_model_definition(result)
 
 
@@ -209,19 +263,24 @@ def test_rewrite_report_binds_target_model_and_preserves_source() -> None:
     ).hexdigest()
     assert (
         forecast_digest
-        == "fbb05b33d9179097a680e81b34d85171416291fda1e5cc21d9c4dc303ae6c5c3"
+        == "5ff2c137ddbae5c15b4e6dc4578d20669125b4225b021fb76d0135d740b699b2"
     )
-    assert len(forecast["visualContainers"]) == len(FORECAST_CAPACITIES) + 6
+    assert len(forecast["visualContainers"]) == 9
     rendered_config = "\n".join(
         visual["config"] for visual in forecast["visualContainers"]
     )
-    for capacity in FORECAST_CAPACITIES:
-        assert f"F{capacity}" in rendered_config
     assert "DIRECTIONAL ESTIMATE ONLY" in rendered_config
     assert "200,000 video-hours" in rendered_config
     assert "1.5899x aggregate real time" in rendered_config
     assert "ONNX batch-one: 1.3036x vs PyTorch 0.8142x" in rendered_config
     assert "nonlinear scaling between SKUs" in rendered_config
+    assert f"{FORECAST_WORKLOAD_TABLE}.Video Hours" in rendered_config
+    assert f"{FORECAST_CAPACITY_TABLE}.Estimated Throughput" in rendered_config
+    assert (
+        f"{FORECAST_CAPACITY_TABLE}.Estimated Completion Days"
+        in rendered_config
+    )
+    assert f'"Value":"{FORECAST_VIDEO_HOURS}L"' in rendered_config
     assert source == _report()
 
 
