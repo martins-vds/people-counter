@@ -11,9 +11,12 @@ import re
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from people_counter.fabric_canary_tool import encode_part
+
+if TYPE_CHECKING:
+    from people_counter.fabric_capability_probe import ConsumerProbeProfile
 
 
 WORKSPACE_ID = "c31ee864-230d-4005-8fd5-7c7130ebf774"
@@ -363,6 +366,62 @@ def validate_environment_library_policy(metadata: Mapping[str, Any]) -> None:
         raise ValueError("Candidate A requires a published Environment")
     if inline not in (None, [], ()):
         raise ValueError("Candidate A forbids inline or session libraries")
+
+
+def default_candidate_a_consumer_profile(
+    *,
+    models_dir: str = "Files/models",
+    detector_model: str = "r18",
+    reference_video_relative_path: str,
+    planned_concurrent_tasks: int = 4,
+) -> ConsumerProbeProfile:
+    """Build the real-consumer direct-mount probe profile for Candidate A.
+
+    Every model artifact path below is a real, fixed, immutable,
+    non-sensitive production model file from the committed
+    :mod:`people_counter.model_artifacts` layout -- never a synthetic
+    throwaway -- so a passing probe is evidence about the pipeline's actual
+    model hierarchy. ``reference_video_relative_path`` must be supplied by
+    the caller: unlike the model layout, no fixed reference/canary video
+    path is itself a build-time constant of this project, and the probe
+    must never substitute a live customer video (that would be data-plane
+    work, which direct-mount capability probes are forbidden from doing).
+    """
+    from people_counter.fabric_capability_probe import (
+        ConsumerArtifact,
+        ConsumerProbeProfile,
+    )
+    from people_counter.model_artifacts import (
+        OSNET_FILENAME,
+        OSNET_MODEL_DIR,
+        OSNET_ONNX_FILENAME,
+        RTDETR_MODEL_DIRS,
+        RTDETR_PIPELINE_DIR,
+        RTDETR_REQUIRED_FILES,
+    )
+
+    pipeline_dir = f"{models_dir.rstrip('/')}/{RTDETR_PIPELINE_DIR}"
+    detector_dir = f"{pipeline_dir}/{RTDETR_MODEL_DIRS[detector_model]}"
+    osnet_dir = f"{pipeline_dir}/{OSNET_MODEL_DIR}"
+    safetensors_path = f"{detector_dir}/model.safetensors"
+    reid_path = f"{osnet_dir}/{OSNET_FILENAME}"
+    reid_onnx_path = f"{osnet_dir}/{OSNET_ONNX_FILENAME}"
+
+    hash_targets = tuple(
+        ConsumerArtifact(relative_path=f"{detector_dir}/{filename}")
+        for filename in RTDETR_REQUIRED_FILES
+    ) + (ConsumerArtifact(relative_path=reid_path),)
+
+    return ConsumerProbeProfile(
+        hash_targets=hash_targets,
+        video=ConsumerArtifact(relative_path=reference_video_relative_path),
+        safetensors_or_pytorch_model=ConsumerArtifact(
+            relative_path=safetensors_path
+        ),
+        onnx_model=ConsumerArtifact(relative_path=reid_onnx_path),
+        concurrent_read_target=ConsumerArtifact(relative_path=safetensors_path),
+        planned_concurrent_tasks=planned_concurrent_tasks,
+    )
 
 
 def thin_main_source(job: str) -> bytes:

@@ -573,6 +573,7 @@ class FabricExecutorPartitionTests(unittest.TestCase):
         self.assertEqual(
             json.loads(records[0]["payload_json"]),
             {
+                "distinct_people": 1,
                 "effective_sample_fps": 2.0,
                 "ended_early": False,
                 "line_in_count": 1,

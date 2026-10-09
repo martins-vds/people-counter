@@ -8,7 +8,6 @@ import json
 import math
 import os
 import platform
-import shutil
 import socket
 import subprocess
 import time
@@ -22,6 +21,11 @@ from people_counter.fabric_executor_partition import (
     ExecutorPartitionRecord,
     SdkRuntimeProcessor,
     process_video_partition,
+)
+from people_counter.fabric_input_resolver import (
+    link_or_stream_copy,
+    resolve_direct_mounted_path,
+    stream_sha256,
 )
 from people_counter.models import RunResult
 
@@ -294,14 +298,14 @@ def create_local_spark_session(
 ) -> Any:
     try:
         from pyspark.sql import SparkSession
-        import delta  # noqa: F401
+        from delta import configure_spark_with_delta_pip
     except ImportError as error:
         raise OptionalLocalSparkDependencyError(
             "Spark/Delta execution requires optional dependencies; install "
             "'people-counter[local-spark]' or select the direct harness/JSON backend"
         ) from error
 
-    return (
+    builder = (
         SparkSession.builder.master(master)
         .appName(app_name)
         .config(
@@ -314,8 +318,8 @@ def create_local_spark_session(
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         )
         .config("spark.peopleCounter.correlationId", correlation_id)
-        .getOrCreate()
     )
+    return configure_spark_with_delta_pip(builder).getOrCreate()
 
 
 def runtime_identity(spark_session: Any) -> dict[str, str]:
@@ -582,25 +586,37 @@ def _optional_positive_float(value: object) -> float | None:
 
 
 def _verified_video(work: Mapping[str, Any]) -> Path:
-    localized = work.get("spark_localized_video_name")
-    if localized is None:
-        video = Path(_required_text(work, "source_video"))
-    else:
-        from pyspark import SparkFiles
+    """Resolve one batch item's video, never reading the whole file to hash it.
 
-        video = Path(
-            SparkFiles.get(_required_text(work, "spark_localized_video_name"))
+    When :func:`people_counter.fabric_input_resolver.select_input_backend`
+    chose ``FABRIC_DIRECT`` for this batch (a proven mounted Lakehouse
+    path), the registered Lakehouse-relative identity is resolved straight
+    onto the proven mount with no distribution step at all; otherwise the
+    existing ``SparkFiles`` broadcast name (now content-addressed -- see
+    :func:`people_counter.fabric_candidate_a_jobs._localize_process_inputs`)
+    is used, matching every prior fallback behavior.
+    """
+    if work.get("resolver_backend") == "FABRIC_DIRECT":
+        video = resolve_direct_mounted_path(
+            _required_text(work, "lakehouse_mount_root"),
+            _required_text(work, "lakehouse_relative_video_path"),
         )
+    else:
+        localized = work.get("spark_localized_video_name")
+        if localized is None:
+            video = Path(_required_text(work, "source_video"))
+        else:
+            from pyspark import SparkFiles
+
+            video = Path(
+                SparkFiles.get(_required_text(work, "spark_localized_video_name"))
+            )
     expected = work.get("source_sha256")
     if expected is None:
         return video
     if not isinstance(expected, str) or len(expected) != 64:
         raise ValueError("source_sha256 must be a SHA-256 digest")
-    digest = hashlib.sha256()
-    with video.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    actual = digest.hexdigest()
+    actual, _ = stream_sha256(video)
     if actual != expected:
         raise ValueError(
             f"source SHA-256 mismatch for {video}: expected {expected}, got {actual}"
@@ -609,6 +625,25 @@ def _verified_video(work: Mapping[str, Any]) -> Path:
 
 
 def _localized_models_dir(work: Mapping[str, Any]) -> Path | None:
+    """Resolve the model-tree root, never a blind whole-file ``shutil.copyfile``.
+
+    ``FABRIC_DIRECT`` resolves the already-mounted ``Files/models``
+    hierarchy directly -- no copy at all, since the tree already exists in
+    the right shape on the proven mount. Every other backend preserves the
+    prior hierarchy-reconstructing behavior, but materializes each file via
+    :func:`~people_counter.fabric_input_resolver.link_or_stream_copy`
+    (hardlink-first, streaming-copy fallback) instead of
+    ``shutil.copyfile``, and verifies each file with an incremental hash
+    instead of a whole-file ``read_bytes()``.
+    """
+    if work.get("resolver_backend") == "FABRIC_DIRECT":
+        root_text = work.get("lakehouse_relative_models_root")
+        if root_text is None:
+            return None
+        return resolve_direct_mounted_path(
+            _required_text(work, "lakehouse_mount_root"),
+            _required_text(work, "lakehouse_relative_models_root"),
+        )
     value = work.get("spark_localized_models")
     if value is None:
         return None
@@ -629,14 +664,13 @@ def _localized_models_dir(work: Mapping[str, Any]) -> Path | None:
         source = Path(SparkFiles.get(_required_text(metadata, "localized_name")))
         expected = _required_text(metadata, "sha256")
         destination = root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
         if not destination.exists():
-            shutil.copyfile(source, destination)
-        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
-        if digest != expected:
+            link_or_stream_copy(source, destination)
+        actual, _ = stream_sha256(destination)
+        if actual != expected:
             raise ValueError(
                 f"localized model SHA-256 mismatch for {relative}: "
-                f"expected {expected}, got {digest}"
+                f"expected {expected}, got {actual}"
             )
     return root
 

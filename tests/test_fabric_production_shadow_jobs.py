@@ -278,7 +278,19 @@ def test_only_fixed_sjd_names_are_accepted(job: str) -> None:
         build_sjd_v2_definition(job)
 
 
-def test_nonzero_job_result_records_failed_stage() -> None:
+def test_nonzero_job_result_records_failed_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "people_counter.fabric_production_shadow_jobs.observed_provenance",
+        lambda: {
+            "package_version": PACKAGE_VERSION,
+            "fabric": None,
+            "spark": None,
+            "python": "3.12",
+            "java": None,
+        },
+    )
     diagnostics, writer = _diagnostics("reconcile")
     assert run_shadow_entry(
         "reconcile", lambda argv: 1, diagnostics=diagnostics

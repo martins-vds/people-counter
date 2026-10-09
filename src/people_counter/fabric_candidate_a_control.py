@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
+import random
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import PurePosixPath
@@ -93,6 +95,8 @@ _KEYS = {
     "reconciliation_findings": ("finding_id",),
 }
 
+_LOG = logging.getLogger(__name__)
+
 
 class OneLakeFiles(Protocol):
     def exists(self, path: str) -> bool: ...
@@ -134,6 +138,7 @@ class OneLakeEnvelopeWriter:
         files: OneLakeFiles | None = None,
         *,
         config: FabricCandidateAConfig | None = None,
+        verify_timeout_seconds: float = 15.0,
     ) -> None:
         self.root = root.rstrip("/")
         expected = (config or FabricCandidateAConfig()).file_path("control").rstrip("/")
@@ -142,6 +147,39 @@ class OneLakeEnvelopeWriter:
                 f"claim envelopes require the fixed Candidate A control root {expected!r}"
             )
         self.files = files or NotebookUtilsOneLakeFiles()
+        if not math.isfinite(verify_timeout_seconds) or verify_timeout_seconds < 0:
+            raise ValueError(
+                "verify_timeout_seconds must be finite and non-negative"
+            )
+        self._verify_timeout_seconds = verify_timeout_seconds
+
+    def _verify_readback(self, path: str, content: str) -> str:
+        """Read back ``path``, tolerating transient OneLake read-after-write lag.
+
+        Live Fabric testing proved the stored bytes are correct (content hash
+        matched the content-addressed path) even though an immediate
+        ``notebookutils.fs.head`` read returned stale/short content. Bound
+        retries absorb that propagation lag while still surfacing genuine
+        corruption or conflicts after ``verify_timeout_seconds`` elapses.
+        """
+        deadline = time.monotonic() + self._verify_timeout_seconds
+        observed = self.files.read_text(path)
+        attempts = 1
+        while observed != content and time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(random.uniform(0.1, 0.4), remaining))
+            observed = self.files.read_text(path)
+            attempts += 1
+        if observed == content and attempts > 1:
+            _LOG.warning(
+                "claim envelope readback required %d attempt(s) at %s "
+                "(OneLake read-after-write lag)",
+                attempts,
+                path,
+            )
+        return observed
 
     def write(self, batch_id: str, envelope: Mapping[str, Any]) -> tuple[str, str]:
         _safe_segment(batch_id)
@@ -154,11 +192,11 @@ class OneLakeEnvelopeWriter:
         try:
             self.files.create_text(path, content)
         except FileExistsError:
-            if self.files.read_text(path) != content:
+            if self._verify_readback(path, content) != content:
                 raise ImmutableConflictError(
                     f"claim envelope conflicts at {path}"
                 )
-        if self.files.read_text(path) != content:
+        if self._verify_readback(path, content) != content:
             raise BatchValidationError(
                 f"claim envelope readback differs at {path}"
             )

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "people-counter"
-version = "0.9.11"
+version = "0.9.49"
 description = "A permissively licensed CPU/GPU distinct person counter"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -46,6 +46,11 @@ pc-production-shadow-reconcile-sjd = "people_counter.fabric_production_shadow_re
 pc-benchmark-control-sjd = "people_counter.fabric_benchmark_jobs:control_main"
 pc-benchmark-process-sjd = "people_counter.fabric_benchmark_jobs:process_main"
 pc-benchmark-gold-sjd = "people_counter.fabric_benchmark_jobs:gold_main"
+pc-production-control-sjd = "people_counter.fabric_sjd_jobs:control_main"
+pc-production-process-sjd = "people_counter.fabric_sjd_jobs:process_main"
+pc-production-reconciliation-sjd = "people_counter.fabric_sjd_jobs:reconciliation_main"
+pc-production-gold-sjd = "people_counter.fabric_sjd_jobs:gold_main"
+pc-production-schema-cutover = "people_counter.fabric_sjd_cutover_jobs:main"
 prepare-manifests = "people_counter.manifest_publisher:prepare_main"
 publish-manifests = "people_counter.manifest_publisher:publish_main"
 
@@ -54,20 +59,31 @@ where = ["src"]
 include = ["people_counter*"]
 
 [tool.setuptools.package-data]
-people_counter = ["py.typed"]
+people_counter = ["py.typed", "data/*.json"]
 
 [tool.mutmut]
-source_paths = ["src/people_counter/", "scripts/download_models.py"]
+source_paths = [
+    "src/people_counter/",
+    "scripts/deploy_sjd_analytics.py",
+    "scripts/download_models.py",
+]
 pytest_add_cli_args = ["-o", "pythonpath=src"]
 pytest_add_cli_args_test_selection = ["tests/"]
-also_copy = ["notebooks/fabric/", "fabric/", "samples/"]
+also_copy = [
+    "notebooks/fabric/",
+    "fabric/",
+    "samples/",
+    "scripts/",
+    "src/people_counter/data/candidate_a_release_identity.json",
+]
+on_dependency_change = "rerun"
 
 [project.optional-dependencies]
 cpu = [
     "libreyolo==1.5.0",
     "rfdetr==1.10.1",
     "supervision==0.30.3",
-    "trackers",
+    "trackers==2.6.0",
     "torch",
     "torchvision",
 ]
@@ -75,7 +91,7 @@ gpu = [
     "libreyolo==1.5.0",
     "rfdetr==1.10.1",
     "supervision==0.30.3",
-    "trackers",
+    "trackers==2.6.0",
     "torch",
     "torchvision",
 ]
@@ -123,7 +139,6 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-trackers = { git = "https://github.com/roboflow/trackers", rev = "3fb83d1618f29b7fdd4617757b6894e4ec71146d" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "gpu" },

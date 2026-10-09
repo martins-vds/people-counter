@@ -15,6 +15,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from people_counter.fabric_spark_event_ingest import (
+    compute_task_overlap,
+    parse_spark_event_log_lines,
+    require_complete_event_evidence,
+)
+
 
 WORKSPACE_ID = "c31ee864-230d-4005-8fd5-7c7130ebf774"
 LAKEHOUSE_ID = "883cff91-eaa8-40be-870f-6e9716303cb2"
@@ -179,20 +185,37 @@ class ConcurrentWorkObservation:
 
 @dataclass(frozen=True)
 class ConcurrentPilotMeasurement:
-    """Measured five-work aggregate; never extrapolates missing workers."""
+    """Measured N-work aggregate; never extrapolates missing workers.
+
+    ``required_concurrent_work`` defaults to the historical fixed
+    five-executor baseline (``REQUIRED_CONCURRENT_WORK``) for backward
+    compatibility with the already-recorded 1.5899x pilot, but new pilots
+    MUST pass the actual slot count returned by live executor discovery
+    (see ``fabric_executor_inventory.plan_task_width``) instead of assuming
+    a hard-coded worker count.
+    """
 
     observations: tuple[ConcurrentWorkObservation, ...]
     wall_seconds: float
     physical_source_diversity: int
+    required_concurrent_work: int = REQUIRED_CONCURRENT_WORK
 
     def __post_init__(self) -> None:
         _require_finite_positive("wall_seconds", self.wall_seconds)
-        if len(self.observations) != REQUIRED_CONCURRENT_WORK:
+        if (
+            type(self.required_concurrent_work) is not int
+            or self.required_concurrent_work < 1
+        ):
             raise BenchmarkValidationError(
-                "pilot requires exactly five completed concurrent work items"
+                "required_concurrent_work must be a positive integer"
+            )
+        if len(self.observations) != self.required_concurrent_work:
+            raise BenchmarkValidationError(
+                f"pilot requires exactly {self.required_concurrent_work} "
+                "completed concurrent work items"
             )
         work_ids = {item.work_id for item in self.observations}
-        if len(work_ids) != REQUIRED_CONCURRENT_WORK:
+        if len(work_ids) != self.required_concurrent_work:
             raise BenchmarkValidationError(
                 "pilot work IDs must be unique"
             )
@@ -1659,6 +1682,97 @@ def calculate_cost(usage: CostUsage, rates: CostRates) -> CostReport:
     )
 
 
+_EVENT_LOG_NOT_EXPOSED_REASON = (
+    "Fabric platform did not expose a Spark application event log for this run"
+)
+
+
+def build_event_log_section(
+    event_log_lines: Sequence[str] | None,
+    *,
+    expected_executor_ids: Sequence[str] | None = None,
+    expected_task_cpus: int | None = None,
+    expected_task_count: int | None = None,
+) -> dict[str, object]:
+    """Summarize Spark event-log telemetry for a benchmark report.
+
+    When ``event_log_lines`` is ``None`` (the platform did not expose an
+    event log, or none was captured for this run), this returns an
+    explicit ``capability_null`` section with a recorded reason rather
+    than silently omitting event-log telemetry from the report. When
+    lines are provided, they are parsed with
+    :func:`people_counter.fabric_spark_event_ingest.parse_spark_event_log_lines`;
+    malformed lines propagate ``SparkEventLogError`` and fail the report
+    build closed, matching every other required-field check in this
+    module. Overlap (max concurrency / observed parallelism) is only
+    computed when every observed non-speculative task carries both a
+    launch and finish timestamp; otherwise an explicit
+    ``overlap_capability_reason`` is recorded instead of guessing.
+    """
+    if event_log_lines is None:
+        return {
+            "status": "capability_null",
+            "reason": _EVENT_LOG_NOT_EXPOSED_REASON,
+            "executor_count": 0,
+            "task_count": 0,
+            "unrecognized_event_types": [],
+            "max_concurrent_tasks": None,
+            "observed_parallelism": None,
+            "overlap_capability_reason": None,
+        }
+    summary = parse_spark_event_log_lines(event_log_lines)
+    non_speculative = [task for task in summary.tasks if not task.speculative]
+    overlap_capability_reason: str | None = None
+    max_concurrent_tasks: int | None = None
+    observed_parallelism: float | None = None
+    if not non_speculative:
+        overlap_capability_reason = "no non-speculative task-end events observed"
+    elif any(
+        task.launch_time_ms is None or task.finish_time_ms is None
+        for task in non_speculative
+    ):
+        overlap_capability_reason = (
+            "platform event log did not expose required task launch/finish timestamps"
+        )
+    else:
+        if any(
+            value is not None
+            for value in (
+                expected_executor_ids,
+                expected_task_cpus,
+                expected_task_count,
+            )
+        ):
+            if (
+                expected_executor_ids is None
+                or expected_task_cpus is None
+                or expected_task_count is None
+            ):
+                raise BenchmarkValidationError(
+                    "complete event-log expectations are required"
+                )
+            overlap = require_complete_event_evidence(
+                summary,
+                expected_executor_ids=expected_executor_ids,
+                expected_task_cpus=expected_task_cpus,
+                expected_task_count=expected_task_count,
+            )
+        else:
+            overlap = compute_task_overlap(summary.tasks)
+        max_concurrent_tasks = overlap.max_concurrent_tasks
+        observed_parallelism = overlap.observed_parallelism
+    return {
+        "status": "ingested",
+        "reason": None,
+        "executor_count": len(summary.executors),
+        "task_count": len(summary.tasks),
+        "unrecognized_event_types": list(summary.unrecognized_event_types),
+        "max_concurrent_tasks": max_concurrent_tasks,
+        "observed_parallelism": observed_parallelism,
+        "overlap_capability_reason": overlap_capability_reason,
+    }
+
+
 @dataclass(frozen=True)
 class BenchmarkReport:
     schema_version: str
@@ -1671,13 +1785,16 @@ class BenchmarkReport:
     reliability: Mapping[str, object]
     cost: Mapping[str, object]
     gates: tuple[GateResult, ...]
+    event_log: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        if self.schema_version != "pc-ca-benchmark-report-v1":
+        if self.schema_version != "pc-ca-benchmark-report-v2":
             raise BenchmarkValidationError("unsupported report schema")
         expected = "PASS" if all(gate.passed for gate in self.gates) else "FAIL"
         if self.status != expected:
             raise BenchmarkValidationError("report status disagrees with gates")
+        if self.event_log.get("status") not in ("capability_null", "ingested"):
+            raise BenchmarkValidationError("report event_log status is invalid")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1691,6 +1808,7 @@ class BenchmarkReport:
             "reliability": dict(self.reliability),
             "cost": dict(self.cost),
             "gates": [gate.to_dict() for gate in self.gates],
+            "event_log": dict(self.event_log),
         }
 
     def to_json(self) -> str:
@@ -1708,6 +1826,10 @@ def build_benchmark_report(
     *,
     expected_definition_sha256: str,
     prior_application_id: str,
+    event_log_lines: Sequence[str] | None = None,
+    event_log_executor_ids: Sequence[str] | None = None,
+    event_log_task_cpus: int | None = None,
+    event_log_task_count: int | None = None,
 ) -> BenchmarkReport:
     validate_measurement_run(
         run,
@@ -1717,6 +1839,18 @@ def build_benchmark_report(
         prior_application_id=prior_application_id,
     )
     stats, _ = calculate_statistics(manifest, run, measurement, attempts)
+    event_log = build_event_log_section(
+        event_log_lines,
+        expected_executor_ids=event_log_executor_ids,
+        expected_task_cpus=event_log_task_cpus,
+        expected_task_count=event_log_task_count,
+    )
+    event_log_gate = GateResult(
+        "event-log-completeness",
+        event_log["status"] == "ingested",
+        event_log["status"],
+        "complete ingested Spark event evidence",
+    )
     gates = (
         GateResult(
             "throughput-lcb",
@@ -1725,10 +1859,11 @@ def build_benchmark_report(
             f">= {THROUGHPUT_TARGET_X}",
         ),
         *evaluate_reliability_gates(reliability),
+        event_log_gate,
     )
     cost = calculate_cost(usage, rates)
     return BenchmarkReport(
-        schema_version="pc-ca-benchmark-report-v1",
+        schema_version="pc-ca-benchmark-report-v2",
         status="PASS" if all(gate.passed for gate in gates) else "FAIL",
         manifest_sha256=manifest.sha256,
         measurement_run_sha256=run.identity_sha256,
@@ -1752,4 +1887,5 @@ def build_benchmark_report(
         },
         cost=cost.to_dict(),
         gates=gates,
+        event_log=event_log,
     )

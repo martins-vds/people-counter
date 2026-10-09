@@ -15,6 +15,7 @@ from people_counter.local_spark import (
     _localized_models_dir,
     _process_partition,
     _require_primitive_tree,
+    _verified_video,
     read_claimed_manifest,
     validate_delta_staging,
 )
@@ -98,19 +99,125 @@ class LocalSparkTests(unittest.TestCase):
             "sys.modules",
             {"pyspark": SimpleNamespace(SparkFiles=spark_files)},
         ):
-            for value in (
-                {},
-                {"/absolute": {}},
-                {"../escape": {}},
-                {"safe": "not-a-mapping"},
+            for value, expected_message in (
+                ({}, "spark_localized_models must be a non-empty mapping"),
+                ({"/absolute": {}}, "invalid localized model mapping"),
+                ({"../escape": {}}, "invalid localized model mapping"),
+                (
+                    {"safe": "not-a-mapping"},
+                    "invalid localized model mapping",
+                ),
             ):
-                with self.subTest(value=value), self.assertRaises(ValueError):
-                    _localized_models_dir(
-                        {
-                            "model_identity": "identity-1",
-                            "spark_localized_models": value,
-                        }
-                    )
+                with self.subTest(value=value):
+                    with self.assertRaises(ValueError) as exc_info:
+                        _localized_models_dir(
+                            {
+                                "model_identity": "identity-1",
+                                "spark_localized_models": value,
+                            }
+                        )
+                    self.assertEqual(str(exc_info.exception), expected_message)
+
+    def test_localized_models_direct_backend_resolves_mount_without_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            mount_root = Path(temporary) / "lakehouse"
+            models_root = mount_root / "Files" / "models" / "identity-1"
+            models_root.mkdir(parents=True)
+            (models_root / "config.json").write_bytes(b"config")
+            work = {
+                "resolver_backend": "FABRIC_DIRECT",
+                "lakehouse_mount_root": str(mount_root),
+                "lakehouse_relative_models_root": "Files/models/identity-1",
+            }
+            resolved = _localized_models_dir(work)
+            self.assertEqual(resolved, models_root)
+            # No copy or hierarchy reconstruction occurs: the file is read
+            # directly from the proven mount, byte-identical.
+            self.assertEqual((resolved / "config.json").read_bytes(), b"config")
+
+    def test_localized_models_direct_backend_returns_none_without_models_root(self):
+        work = {
+            "resolver_backend": "FABRIC_DIRECT",
+            "lakehouse_mount_root": "/lakehouse/default",
+        }
+        self.assertIsNone(_localized_models_dir(work))
+
+    def test_verified_video_direct_backend_resolves_mount_and_hashes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            mount_root = Path(temporary) / "lakehouse"
+            video_dir = mount_root / "Files" / "videos"
+            video_dir.mkdir(parents=True)
+            video_path = video_dir / "sample.mp4"
+            video_path.write_bytes(b"video-bytes")
+            work = {
+                "resolver_backend": "FABRIC_DIRECT",
+                "lakehouse_mount_root": str(mount_root),
+                "lakehouse_relative_video_path": "Files/videos/sample.mp4",
+                "source_sha256": hashlib.sha256(b"video-bytes").hexdigest(),
+            }
+            resolved = _verified_video(work)
+            self.assertEqual(resolved, video_path)
+
+    def test_verified_video_direct_backend_rejects_hash_mismatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            mount_root = Path(temporary) / "lakehouse"
+            video_dir = mount_root / "Files" / "videos"
+            video_dir.mkdir(parents=True)
+            (video_dir / "sample.mp4").write_bytes(b"video-bytes")
+            work = {
+                "resolver_backend": "FABRIC_DIRECT",
+                "lakehouse_mount_root": str(mount_root),
+                "lakehouse_relative_video_path": "Files/videos/sample.mp4",
+                "source_sha256": "0" * 64,
+            }
+            with self.assertRaisesRegex(ValueError, "source SHA-256 mismatch"):
+                _verified_video(work)
+
+    def test_verified_video_skips_verification_without_source_sha256(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            video_path = Path(temporary) / "sample.mp4"
+            video_path.write_bytes(b"unverified-bytes")
+            self.assertEqual(
+                _verified_video({"source_video": str(video_path)}), video_path
+            )
+
+    def test_verified_video_rejects_malformed_source_sha256(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            video_path = Path(temporary) / "sample.mp4"
+            video_path.write_bytes(b"bytes")
+            with self.assertRaises(ValueError) as exc_info:
+                _verified_video(
+                    {
+                        "source_video": str(video_path),
+                        "source_sha256": "not-a-digest",
+                    }
+                )
+            self.assertEqual(
+                str(exc_info.exception),
+                "source_sha256 must be a SHA-256 digest",
+            )
+
+    def test_verified_video_fallback_backend_resolves_via_spark_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            staged_path = Path(temporary) / "deadbeef"
+            staged_path.write_bytes(b"video-bytes")
+            requested_names = []
+
+            def get(name):
+                requested_names.append(name)
+                return str(staged_path)
+
+            spark_files = SimpleNamespace(get=get)
+            work = {
+                "spark_localized_video_name": "deadbeef",
+                "source_sha256": hashlib.sha256(b"video-bytes").hexdigest(),
+            }
+            with patch.dict(
+                "sys.modules",
+                {"pyspark": SimpleNamespace(SparkFiles=spark_files)},
+            ):
+                self.assertEqual(_verified_video(work), staged_path)
+                self.assertEqual(requested_names, ["deadbeef"])
 
     def test_manifest_is_hash_verified_and_primitive_only(self):
         with tempfile.TemporaryDirectory() as temporary:

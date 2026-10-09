@@ -1905,18 +1905,6 @@ wheels = [
 ]
 
 [[package]]
-name = "jsonargparse"
-version = "4.52.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyyaml" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f1/1b/86ab3c48f74609de566e6c6fea5493a7bea4c7de485e5a56fa1239c698b5/jsonargparse-4.52.0.tar.gz", hash = "sha256:103168510fab9d45a980fe7560dcbf20d1cce38320a43904583d23869af3bee1", size = 164776, upload-time = "2026-09-01T05:53:07.575Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/70/e9114d52e9e72daaaeec30ecafe1018a4fbe6288ec35e16822529676b671/jsonargparse-4.52.0-py3-none-any.whl", hash = "sha256:1878b16b6be90c3e838aac569784a110fe1eb1806c28e56175cdc7f2e563d78c", size = 174766, upload-time = "2026-09-01T05:53:04.257Z" },
-]
-
-[[package]]
 name = "jsonpointer"
 version = "3.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3992,7 +3980,7 @@ wheels = [
 
 [[package]]
 name = "people-counter"
-version = "0.9.11"
+version = "0.9.49"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
@@ -4080,8 +4068,8 @@ requires-dist = [
     { name = "torch", marker = "extra == 'gpu'", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "people-counter", extra = "gpu" } },
     { name = "torchvision", marker = "extra == 'cpu'", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "people-counter", extra = "cpu" } },
     { name = "torchvision", marker = "extra == 'gpu'", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "people-counter", extra = "gpu" } },
-    { name = "trackers", marker = "extra == 'cpu'", git = "https://github.com/roboflow/trackers?rev=3fb83d1618f29b7fdd4617757b6894e4ec71146d" },
-    { name = "trackers", marker = "extra == 'gpu'", git = "https://github.com/roboflow/trackers?rev=3fb83d1618f29b7fdd4617757b6894e4ec71146d" },
+    { name = "trackers", marker = "extra == 'cpu'", specifier = "==2.6.0" },
+    { name = "trackers", marker = "extra == 'gpu'", specifier = "==2.6.0" },
     { name = "transformers", specifier = ">=5.1.0,<6" },
 ]
 provides-extras = ["cpu", "gpu", "experiments", "export", "publisher", "local-spark"]
@@ -6464,9 +6452,8 @@ wheels = [
 [[package]]
 name = "trackers"
 version = "2.6.0"
-source = { git = "https://github.com/roboflow/trackers?rev=3fb83d1618f29b7fdd4617757b6894e4ec71146d#3fb83d1618f29b7fdd4617757b6894e4ec71146d" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "jsonargparse" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-14-people-counter-cpu') or (python_full_version < '3.11' and extra == 'extra-14-people-counter-gpu') or (extra == 'extra-14-people-counter-cpu' and extra == 'extra-14-people-counter-gpu')" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and extra == 'extra-14-people-counter-cpu') or (python_full_version >= '3.11' and extra == 'extra-14-people-counter-gpu') or (extra == 'extra-14-people-counter-cpu' and extra == 'extra-14-people-counter-gpu')" },
     { name = "opencv-python" },
@@ -6477,6 +6464,10 @@ dependencies = [
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-14-people-counter-cpu') or (python_full_version == '3.11.*' and extra == 'extra-14-people-counter-gpu') or (extra == 'extra-14-people-counter-cpu' and extra == 'extra-14-people-counter-gpu')" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-14-people-counter-cpu') or (python_full_version >= '3.12' and extra == 'extra-14-people-counter-gpu') or (extra == 'extra-14-people-counter-cpu' and extra == 'extra-14-people-counter-gpu')" },
     { name = "supervision" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/33/68/18336fa578845de98d3bb20b08e007b066c33fcbb08ece3398ec8b438b1c/trackers-2.6.0.tar.gz", hash = "sha256:1d33d3ce0b684478e4adb3f32f138a5d15a71694202ee484a98a90a75c4afaa0", size = 185208, upload-time = "2026-08-06T17:39:18.08Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/11/f53ad8cea391fed47e367ed94dca375608daa83afc196c1ddb2b3faa9f24/trackers-2.6.0-py3-none-any.whl", hash = "sha256:4d5dfec12ba146c8df6b82d699ecb44a56fe50fed375ba42c635a95b81987277", size = 220772, upload-time = "2026-08-06T17:39:16.332Z" },
 ]
 
 [[package]]

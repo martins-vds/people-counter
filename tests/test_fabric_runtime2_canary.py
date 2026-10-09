@@ -185,6 +185,7 @@ class ArgumentAndRuntimeTests(unittest.TestCase):
         self.assertNotIn("pyspark", sys.modules)
 
     def test_executor_probe_source_is_localized_without_changing_identity(self) -> None:
+        sys.modules.pop("pyspark", None)
         row = _probe_row(
             arguments(),
             0,

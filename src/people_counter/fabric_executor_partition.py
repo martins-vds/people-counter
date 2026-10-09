@@ -184,6 +184,7 @@ def process_video_partition(
             "total_sampled_frames": result.total_sampled_frames,
             "source_frames_read": result.source_frames_read,
             "effective_sample_fps": result.effective_sample_fps,
+            "distinct_people": len(result.telemetry),
             "line_in_count": result.line_in_count,
             "line_out_count": result.line_out_count,
             "ended_early": result.ended_early,

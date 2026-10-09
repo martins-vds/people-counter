@@ -15,8 +15,10 @@ from people_counter.api import (
 from people_counter.config import RFDetrBotsortConfig, RTDetrOsnetConfig
 from people_counter.cpu_runtime import (
     ThreadBudget,
+    calculate_placement_safe_thread_budget,
     calculate_thread_budget,
     configure_cpu_runtime,
+    configure_placement_safe_cpu_runtime,
 )
 from people_counter.fabric_control import ControlLockError, ControlWriter
 from people_counter.fabric_events import (
@@ -41,8 +43,10 @@ __all__ = [
     "TelemetryRecord",
     "ThreadBudget",
     "WorkerEventClient",
+    "calculate_placement_safe_thread_budget",
     "calculate_thread_budget",
     "configure_cpu_runtime",
+    "configure_placement_safe_cpu_runtime",
     "fabric_control",
     "fabric_events",
     "line_count_records",

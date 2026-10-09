@@ -16,12 +16,15 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from people_counter.cpu_runtime import configure_cpu_runtime
+from people_counter.cpu_runtime import (
+    configure_placement_safe_cpu_runtime,
+    verify_effective_thread_settings,
+)
 from people_counter.fabric_executor_partition import (
     ExecutorRuntimeCache,
     SdkRuntimeProcessor,
@@ -36,11 +39,15 @@ from people_counter.sjd_control import (
     ProcessControlStore,
 )
 
+if TYPE_CHECKING:
+    from people_counter.fabric_executor_inventory import ExecutorRecord
+
 
 Mode = Literal["probe", "sdk"]
 TERMINAL_TYPES = frozenset({"video_result", "error"})
 RECORD_TYPES = frozenset({"video_result", "error", "telemetry", "line_count"})
 DETECTOR_BATCH_SIZES = frozenset({1, 2, 4})
+REVIEWED_TASK_CPU_WIDTHS = frozenset({1, 2, 4})
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 
@@ -94,10 +101,27 @@ class ExecutionProfile:
     minimum_speed_x: float
     lease_safety_factor: float
     lease_margin_seconds: float
+    planned_task_count: int | None = None
+    peak_rss_bytes: int | None = None
+    rss_headroom_fraction: float = 0.20
+
+    def __post_init__(self) -> None:
+        if self.planned_task_count is None:
+            # Backward-compatible default for profiles constructed before
+            # real per-executor slot planning existed: one physical task per
+            # discovered executor, matching the prior (now-corrected) literal
+            # executor-count assumption.
+            object.__setattr__(self, "planned_task_count", self.executor_instances)
+        if self.planned_task_count < 1:
+            raise ProcessValidationError("planned_task_count must be positive")
+        if not 0.0 <= self.rss_headroom_fraction < 1.0:
+            raise ProcessValidationError(
+                "rss_headroom_fraction must be within [0, 1)"
+            )
 
     @property
     def physical_partitions(self) -> tuple[int, ...]:
-        return tuple(range(self.executor_instances))
+        return tuple(range(self.planned_task_count))
 
     @property
     def spark_settings(self) -> dict[str, str]:
@@ -124,6 +148,7 @@ LOCAL_TWO_WORKERS = ExecutionProfile(
     minimum_speed_x=1.0,
     lease_safety_factor=1.25,
     lease_margin_seconds=30.0,
+    planned_task_count=2,
 )
 
 
@@ -160,6 +185,94 @@ def resolve_profile(
     ):
         raise ProcessValidationError("local profile no longer describes two fixed 1-core workers")
     return profile
+
+
+def build_profile_from_inventory(
+    name: str,
+    executors: Sequence[ExecutorRecord],
+    *,
+    task_cpus: int,
+    expected_executor_cores: int,
+    executor_memory_bytes: int,
+    memory_reserve_bytes: int,
+    heartbeat_seconds: float,
+    minimum_speed_x: float,
+    lease_safety_factor: float,
+    lease_margin_seconds: float,
+    fixed_allocation: bool = True,
+    peak_rss_bytes: int | None = None,
+    operator_cap: int | None = None,
+    rss_headroom_fraction: float = 0.20,
+) -> ExecutionProfile:
+    """Build a reviewed ``ExecutionProfile`` from live-discovered executors.
+
+    Replaces the hard-coded five (or two) one-core-partition assumption with
+    real active-executor discovery: ``executor_instances`` is the measured
+    count of stable executors and ``executor_cores``/``task_cpus`` must
+    exactly match the reviewed, benchmarked configuration or planning fails
+    closed via ``assert_matches_reviewed_profile``. Speculation remains
+    disabled; ``fixed_allocation`` records whether the live pool itself uses
+    fixed or dynamic allocation (Candidate A's live pool is dynamic; the
+    benchmark's is fixed) -- it does not change executor discovery.
+
+    ``task_cpus`` must be one of the explicitly reviewed widths
+    (:data:`REVIEWED_TASK_CPU_WIDTHS`: 1, 2, or 4). The physical task count
+    is no longer the bare executor count: it is the sum of each executor's
+    own placement-safe slot count (``min(floor(cores/task_cpus),
+    floor(usable_memory/peak_rss))``) via
+    :func:`people_counter.fabric_executor_inventory.plan_task_width`, which
+    fails closed if any executor's cores-based ceiling would exceed its own
+    measured-safe memory concurrency. Omitting ``peak_rss_bytes`` disables
+    memory validation entirely and should only be used by callers that have
+    separately resolved a memory-safe ``task_cpus`` (for example via
+    :func:`people_counter.fabric_executor_inventory.conservative_task_cpus_for_unmeasured_rss`
+    when RSS could not be measured).
+    """
+    from people_counter.fabric_executor_inventory import (
+        ExecutorInventoryError,
+        assert_matches_reviewed_profile,
+        plan_task_width,
+    )
+
+    if not executors:
+        raise ProcessValidationError("executors must not be empty")
+    if task_cpus not in REVIEWED_TASK_CPU_WIDTHS:
+        raise ProcessValidationError(
+            "task_cpus must be one of the reviewed widths "
+            f"{sorted(REVIEWED_TASK_CPU_WIDTHS)!r}, got {task_cpus!r}"
+        )
+    try:
+        assert_matches_reviewed_profile(
+            executors,
+            expected_executor_cores=expected_executor_cores,
+            expected_task_cpus=task_cpus,
+        )
+        placement = plan_task_width(
+            executors,
+            task_cpus=task_cpus,
+            operator_cap=operator_cap,
+            peak_rss_bytes=peak_rss_bytes,
+            headroom=rss_headroom_fraction,
+        )
+    except ExecutorInventoryError as error:
+        raise ProcessValidationError(str(error)) from error
+    return ExecutionProfile(
+        name=name,
+        executor_instances=len(executors),
+        executor_cores=expected_executor_cores,
+        executor_memory_bytes=executor_memory_bytes,
+        task_cpus=task_cpus,
+        fixed_allocation=fixed_allocation,
+        speculation=False,
+        memory_reserve_bytes=memory_reserve_bytes,
+        heartbeat_seconds=heartbeat_seconds,
+        minimum_speed_x=minimum_speed_x,
+        lease_safety_factor=lease_safety_factor,
+        lease_margin_seconds=lease_margin_seconds,
+        planned_task_count=placement.planned_task_count,
+        peak_rss_bytes=peak_rss_bytes,
+        rss_headroom_fraction=rss_headroom_fraction,
+    )
 
 
 @dataclass(frozen=True)
@@ -302,7 +415,7 @@ def conservative_concurrency(
 ) -> ConcurrencyDecision:
     """Bound concurrency by items, placement, CPU, and measured peak RSS."""
     count = _positive_int(item_count, "item_count")
-    profile_limit = profile.executor_instances
+    profile_limit = profile.planned_task_count
     cpu_limit = (
         profile.executor_instances
         * profile.executor_cores
@@ -371,8 +484,15 @@ def plan_duration_lpt(
     profile: ExecutionProfile,
     *,
     peak_rss_bytes: int | None,
+    minimum_videos_per_group: int | None = None,
 ) -> ExecutionPlan:
-    """Plan deterministic duration LPT buckets with explicit Spark partitions."""
+    """Plan deterministic duration LPT buckets with explicit Spark partitions.
+
+    When ``minimum_videos_per_group`` is provided, fails closed via
+    :func:`people_counter.fabric_executor_inventory.assert_minimum_videos_per_group`
+    if the claimed workload could have amortized model-load cost across at
+    least that many videos per bucket but one or more buckets fell short.
+    """
     if not items:
         raise ProcessValidationError("cannot plan an empty claim")
     decision = conservative_concurrency(
@@ -392,6 +512,20 @@ def plan_duration_lpt(
         target = min(range(decision.concurrency), key=lambda index: (costs[index], index))
         buckets[target].append(item)
         costs[target] += item.duration_seconds
+    if minimum_videos_per_group is not None:
+        from people_counter.fabric_executor_inventory import (
+            ExecutorInventoryError,
+            assert_minimum_videos_per_group,
+        )
+
+        try:
+            assert_minimum_videos_per_group(
+                [len(bucket) for bucket in buckets],
+                total_items=len(items),
+                minimum_videos_per_group=minimum_videos_per_group,
+            )
+        except ExecutorInventoryError as error:
+            raise ProcessValidationError(str(error)) from error
     planned_buckets: list[BucketPlan] = []
     planned_by_wave: dict[int, list[PlannedItem]] = {}
     for bucket_id, bucket in enumerate(buckets):
@@ -486,6 +620,68 @@ class _CountingSdkProcessor:
         return self._cache.hits
 
 
+def _native_thread_budget_concurrency(
+    executor_cores: int,
+    task_cpus: int,
+    planned_concurrency: int,
+) -> int:
+    """Keep one immutable worker budget safe for every scheduler slot."""
+    scheduler_slots = max(1, executor_cores // task_cpus)
+    return max(planned_concurrency, scheduler_slots)
+
+
+def warm_executor_for_work(work: Mapping[str, Any]) -> None:
+    """Load the exact SDK runtime and complete representative inference.
+
+    This function is top-level so Spark can serialize it into the RSS probe.
+    It uses the same work-to-config resolver and public runtime path as the
+    real executor, applies the same native thread limits, and rejects a
+    nominal warm-up that decoded or inferred zero frames.
+    """
+    from people_counter.api import load_runtime, run_with_runtime
+
+    row = dict(work)
+    row.setdefault("model_identity", _model_identity(row))
+    executor_cores = _positive_int(row.get("executor_cores"), "executor_cores")
+    task_cpus = _positive_int(row.get("task_cpus"), "task_cpus")
+    planned_concurrency = _positive_int(
+        row.get("planned_concurrency"), "planned_concurrency"
+    )
+    budget = configure_placement_safe_cpu_runtime(
+        [executor_cores],
+        task_cpus,
+        _native_thread_budget_concurrency(
+            executor_cores,
+            task_cpus,
+            planned_concurrency,
+        ),
+        apply_native_limits=True,
+    )
+    verify_effective_thread_settings(budget)
+    config = _config_from_work(row)
+    runtime = load_runtime(config)
+    result = run_with_runtime(config, runtime)
+    if result.processed_frames < 1:
+        raise ProcessValidationError(
+            "executor RSS warm-up completed without representative inference"
+        )
+
+
+def warm_executor_for_works(works: Sequence[Mapping[str, Any]]) -> None:
+    """Warm every distinct runtime required by one claimed workload.
+
+    The caller de-duplicates exact model/runtime identities before invoking
+    this function. Running the complete sequence inside every RSS-probe task
+    ensures the measured high-water mark includes detector, embedder, decode,
+    and inference state for mixed detector/model-format workloads rather than
+    measuring only whichever item happened to appear first in the envelope.
+    """
+    if not works:
+        raise ProcessValidationError("executor RSS warm-up work must not be empty")
+    for work in works:
+        warm_executor_for_work(work)
+
+
 def sparse_line_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Keep crossing changes and the final cumulative line-count record."""
     return select_production_line_counts(records)
@@ -510,16 +706,52 @@ def execute_sjd_partition(
         )
     profile_cores = _positive_int(materialized[0].get("executor_cores"), "executor_cores")
     task_cpus = _positive_int(materialized[0].get("task_cpus"), "task_cpus")
-    if task_cpus != 1 or profile_cores != 1:
-        raise ProcessValidationError("executor callable requires the fixed one-core profile")
+    if task_cpus not in REVIEWED_TASK_CPU_WIDTHS:
+        raise ProcessValidationError(
+            "executor callable requires a reviewed task_cpus width "
+            f"{sorted(REVIEWED_TASK_CPU_WIDTHS)!r}, got {task_cpus!r}"
+        )
+    if task_cpus > profile_cores:
+        raise ProcessValidationError(
+            f"task_cpus={task_cpus} cannot exceed executor_cores={profile_cores}"
+        )
+    observed_package_version = _package_version()
+    expected_package_version = materialized[0].get(
+        "_expected_release_package_version"
+    )
+    expected_manifest_sha256 = materialized[0].get(
+        "_expected_release_manifest_sha256"
+    )
+    if expected_package_version is not None:
+        if observed_package_version != expected_package_version:
+            raise ProcessValidationError(
+                "executor installed package version differs from detached "
+                "release evidence"
+            )
+        for row in materialized:
+            if row.get("release_digest") != expected_manifest_sha256:
+                raise ProcessValidationError(
+                    "executor work release digest differs from detached "
+                    "release manifest"
+                )
+    planned_concurrency = _positive_int(
+        materialized[0].get("planned_concurrency"), "planned_concurrency"
+    )
     mode = materialized[0].get("mode")
     if mode not in {"probe", "sdk"}:
         raise ProcessValidationError(f"unsupported processor mode: {mode!r}")
-    budget = configure_cpu_runtime(
-        profile_cores,
-        1,
+    budget = configure_placement_safe_cpu_runtime(
+        [profile_cores],
+        task_cpus,
+        _native_thread_budget_concurrency(
+            profile_cores,
+            task_cpus,
+            planned_concurrency,
+        ),
         apply_native_limits=mode == "sdk",
     )
+    if mode == "sdk":
+        verify_effective_thread_settings(budget)
     if mode == "sdk":
         processor: Any = _CountingSdkProcessor()
     else:
@@ -797,6 +1029,635 @@ class SparkExecutionHarness:
         return list(rdd.mapPartitions(execute_sjd_bucket_partition).collect())
 
 
+@dataclass(frozen=True)
+class PartitionStagingReceipt:
+    """Bounded summary of one staged physical partition's output rows.
+
+    Carries only identity/count/hash metadata (never the rows themselves)
+    so it is safe to transfer across the Spark executor-to-driver boundary
+    via ``collect`` even when the underlying output is high-cardinality.
+
+    ``task_attempt_id``/``attempt_number`` identify exactly which Spark task
+    attempt produced this receipt. Because staging paths are qualified by
+    both values (see :func:`_partition_staging_path`), two different
+    attempts of the *same* physical partition (a genuine retry, a zombie
+    task, or -- were it ever enabled -- a speculative duplicate) never
+    collide in storage: each writes its own immutable file, and the driver
+    is responsible for selecting exactly one winning receipt per partition
+    (see :class:`StreamingSparkExecutionHarness`).
+    """
+
+    physical_partition: int
+    task_attempt_id: int
+    attempt_number: int
+    record_count: int
+    work_ids: tuple[str, ...]
+    content_sha256: str
+    content_size_bytes: int = 0
+
+
+def _partition_staging_path(
+    staging_root: Path,
+    physical_partition: int,
+    task_attempt_id: int,
+    attempt_number: int,
+) -> Path:
+    return (
+        Path(staging_root)
+        / f"partition-{physical_partition:04d}"
+        / f"task-attempt-{task_attempt_id}"
+        / f"attempt-{attempt_number}"
+        / "records.jsonl"
+    )
+
+
+def _partition_staging_name(
+    staging_root: str,
+    physical_partition: int,
+    task_attempt_id: int,
+    attempt_number: int,
+) -> str:
+    return (
+        f"{staging_root.rstrip('/')}/partition-{physical_partition:04d}/"
+        f"task-attempt-{task_attempt_id}/attempt-{attempt_number}/records.json"
+    )
+
+
+def _partition_receipt(
+    physical_partition: int,
+    task_attempt_id: int,
+    attempt_number: int,
+    ordered: Sequence[Mapping[str, Any]],
+    content: str,
+) -> PartitionStagingReceipt:
+    return PartitionStagingReceipt(
+        physical_partition=physical_partition,
+        task_attempt_id=task_attempt_id,
+        attempt_number=attempt_number,
+        record_count=len(ordered),
+        work_ids=tuple(sorted({str(record["work_id"]) for record in ordered})),
+        content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        content_size_bytes=len(content.encode("utf-8")),
+    )
+
+
+def stage_partition_records(
+    staging_root: Path,
+    physical_partition: int,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    task_attempt_id: int,
+    attempt_number: int,
+) -> PartitionStagingReceipt:
+    """Write one task attempt's output rows to immutable, attempt-qualified staging.
+
+    Staging paths are qualified by ``physical_partition``, ``task_attempt_id``,
+    and ``attempt_number`` (``stage/partition-NNNN/task-attempt-ID/attempt-N/``),
+    so two distinct attempts of the same physical partition are never
+    written to the same location: each attempt's output is immutable once
+    written, and selecting exactly one winning attempt per partition is the
+    driver's responsibility, not a storage-layer conflict. The *same*
+    attempt re-running (an idempotent re-invocation with no actual Spark
+    retry) and reproducing byte-identical content is accepted as-is; the
+    same attempt identity reproducing *different* content is a genuine
+    nondeterminism bug and fails closed.
+    """
+    root = Path(staging_root)
+    ordered = _ordered_records(records)
+    content = _canonical(ordered)
+    receipt = _partition_receipt(
+        physical_partition,
+        task_attempt_id,
+        attempt_number,
+        ordered,
+        content,
+    )
+    destination = _partition_staging_path(
+        root, physical_partition, task_attempt_id, attempt_number
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        existing = destination.read_text(encoding="utf-8")
+        if existing != content:
+            raise StagingConflictError(
+                f"partition {physical_partition} attempt "
+                f"(task_attempt_id={task_attempt_id}, attempt_number="
+                f"{attempt_number}) staging already exists with different "
+                f"content at {destination}"
+            )
+    else:
+        temporary = destination.with_name(
+            f"{destination.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+        )
+        with temporary.open("x", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    return receipt
+
+
+def read_staged_partition_records(
+    staging_root: Path,
+    receipt: PartitionStagingReceipt,
+) -> list[dict[str, Any]]:
+    """Read back one attempt's staged rows and verify them against its receipt."""
+    destination = _partition_staging_path(
+        Path(staging_root),
+        receipt.physical_partition,
+        receipt.task_attempt_id,
+        receipt.attempt_number,
+    )
+    if not destination.is_file():
+        raise StagingConflictError(
+            f"partition {receipt.physical_partition} attempt "
+            f"(task_attempt_id={receipt.task_attempt_id}, attempt_number="
+            f"{receipt.attempt_number}) staging is missing at {destination}"
+        )
+    content = destination.read_text(encoding="utf-8")
+    if (
+        receipt.content_size_bytes > 0
+        and len(content.encode("utf-8")) != receipt.content_size_bytes
+    ):
+        raise StagingConflictError(
+            f"partition {receipt.physical_partition} staged byte count does not "
+            "match its receipt"
+        )
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if digest != receipt.content_sha256:
+        raise StagingConflictError(
+            f"partition {receipt.physical_partition} staged content does not "
+            "match its receipt"
+        )
+    records = _ordered_records(json.loads(content))
+    if len(records) != receipt.record_count:
+        raise StagingConflictError(
+            f"partition {receipt.physical_partition} record count drift versus receipt"
+        )
+    return records
+
+
+def select_one_receipt_per_partition(
+    receipts: Sequence[PartitionStagingReceipt],
+) -> list[PartitionStagingReceipt]:
+    """Deterministically select exactly one winning receipt per partition.
+
+    With speculation disabled, more than one receipt for the same physical
+    partition should never occur in ordinary operation, but correctness
+    must not depend on that: a zombie retried task, a late-arriving
+    duplicate, or (were it ever re-enabled) a speculative execution can
+    still surface more than one staged attempt for the same partition. Every
+    such receipt was independently staged by a real, successfully completed
+    task attempt. Duplicate receipts are accepted only when their immutable
+    output identity is byte-equivalent. The latest successful attempt then
+    wins, preventing an earlier zombie from overriding a completed retry.
+    Rejected attempts remain staged for audit but are never read or merged.
+    """
+    by_partition: dict[int, list[PartitionStagingReceipt]] = {}
+    for receipt in receipts:
+        by_partition.setdefault(receipt.physical_partition, []).append(receipt)
+    selected: list[PartitionStagingReceipt] = []
+    for physical_partition in sorted(by_partition):
+        candidates = by_partition[physical_partition]
+        content_identities = {
+            (
+                receipt.record_count,
+                receipt.work_ids,
+                receipt.content_sha256,
+                receipt.content_size_bytes,
+            )
+            for receipt in candidates
+        }
+        if len(content_identities) != 1:
+            raise StagingConflictError(
+                "successful attempts produced conflicting output for "
+                f"physical partition {physical_partition}"
+            )
+        winner = max(
+            candidates,
+            key=lambda receipt: (receipt.attempt_number, receipt.task_attempt_id),
+        )
+        selected.append(winner)
+    return selected
+
+
+def execute_sjd_bucket_partition_streaming(
+    staging_root: str,
+    *,
+    staging_backend: str = "local",
+) -> Callable[[Iterable[Mapping[str, Any] | None]], Iterable[dict[str, Any]]]:
+    """Return a ``mapPartitions`` callable that stages rows and yields a receipt.
+
+    Avoids returning every output row through Spark's RDD-to-driver collect
+    path: each executor runs the same bucket processing as
+    :func:`execute_sjd_bucket_partition`, writes its result rows directly to
+    immutable, attempt-scoped staging, and yields only a single bounded
+    :class:`PartitionStagingReceipt`. The driver reads the staged rows back
+    from immutable storage only after collecting the bounded receipts (see
+    :class:`StreamingSparkExecutionHarness`), never materializing the full
+    high-cardinality row set through the Spark collect boundary.
+    """
+
+    def _run(
+        containers: Iterable[Mapping[str, Any] | None],
+    ) -> Iterable[dict[str, Any]]:
+        values = list(containers)
+        if not values or values[0] is None:
+            return []
+        if len(values) != 1 or not isinstance(values[0].get("rows"), list):
+            raise ProcessValidationError(
+                "each physical Spark partition must contain exactly one bucket"
+            )
+        rows = values[0]["rows"]
+        if not rows:
+            return []
+        physical_partition = rows[0]["physical_partition"]
+        identity = _task_identity(rows[0])
+        result_rows = execute_sjd_partition(rows)
+        if staging_backend == "local":
+            receipt = stage_partition_records(
+                Path(staging_root),
+                physical_partition,
+                result_rows,
+                task_attempt_id=identity.task_attempt_id,
+                attempt_number=identity.attempt_number,
+            )
+        else:
+            raise ProcessValidationError(
+                f"unsupported streaming staging backend: {staging_backend!r}"
+            )
+        failure_attempt = rows[0].get(
+            "_failure_after_stage_before_receipt_attempt_number"
+        )
+        if failure_attempt == identity.attempt_number:
+            raise RuntimeError(
+                "injected failure after partition staging and before receipt"
+            )
+        return [asdict(receipt)]
+
+    return _run
+
+
+_DELTA_STAGE_COLUMNS = (
+    "row_kind",
+    "physical_partition",
+    "task_attempt_id",
+    "attempt_number",
+    "record_ordinal",
+    "record_json",
+    "record_count",
+    "work_ids_json",
+    "content_sha256",
+    "content_size_bytes",
+)
+_DELTA_STAGE_SCHEMA = (
+    "row_kind string, physical_partition long, task_attempt_id long, "
+    "attempt_number long, record_ordinal long, record_json string, "
+    "record_count long, work_ids_json string, content_sha256 string, "
+    "content_size_bytes long"
+)
+
+
+def execute_sjd_bucket_partition_delta(
+    containers: Iterable[Mapping[str, Any] | None],
+) -> Iterable[dict[str, Any]]:
+    """Emit records and one bounded receipt for Spark's transactional writer."""
+    values = list(containers)
+    if not values or values[0] is None:
+        return []
+    if len(values) != 1 or not isinstance(values[0].get("rows"), list):
+        raise ProcessValidationError(
+            "each physical Spark partition must contain exactly one bucket"
+        )
+    rows = values[0]["rows"]
+    if not rows:
+        return []
+    physical_partition = int(rows[0]["physical_partition"])
+    identity = _task_identity(rows[0])
+    ordered = _ordered_records(execute_sjd_partition(rows))
+    content = _canonical(ordered)
+    receipt = _partition_receipt(
+        physical_partition,
+        identity.task_attempt_id,
+        identity.attempt_number,
+        ordered,
+        content,
+    )
+    emitted = [
+        {
+            "row_kind": "record",
+            "physical_partition": physical_partition,
+            "task_attempt_id": identity.task_attempt_id,
+            "attempt_number": identity.attempt_number,
+            "record_ordinal": ordinal,
+            "record_json": _canonical(record),
+            "record_count": None,
+            "work_ids_json": None,
+            "content_sha256": None,
+            "content_size_bytes": None,
+        }
+        for ordinal, record in enumerate(ordered)
+    ]
+    emitted.append(
+        {
+            "row_kind": "receipt",
+            "physical_partition": physical_partition,
+            "task_attempt_id": identity.task_attempt_id,
+            "attempt_number": identity.attempt_number,
+            "record_ordinal": None,
+            "record_json": None,
+            "record_count": receipt.record_count,
+            "work_ids_json": _canonical(list(receipt.work_ids)),
+            "content_sha256": receipt.content_sha256,
+            "content_size_bytes": receipt.content_size_bytes,
+        }
+    )
+    return emitted
+
+
+def _delta_stage_missing(error: BaseException) -> bool:
+    getter = getattr(error, "getErrorClass", None)
+    error_class = getter() if callable(getter) else None
+    missing_classes = {"DELTA_TABLE_NOT_FOUND", "PATH_NOT_FOUND"}
+    return error_class in missing_classes or any(
+        f"[{missing_class}]" in str(error)
+        for missing_class in missing_classes
+    )
+
+
+def _read_delta_stage(spark: Any, staging_root: str) -> Any | None:
+    try:
+        frame = spark.read.format("delta").load(staging_root)
+    except Exception as error:
+        if _delta_stage_missing(error):
+            return None
+        raise StagingConflictError(
+            f"Delta staging read failed at {staging_root}"
+        ) from error
+    if tuple(frame.columns) != _DELTA_STAGE_COLUMNS:
+        raise StagingConflictError(
+            f"Delta staging schema differs at {staging_root}"
+        )
+    return frame
+
+
+def _stage_delta_once(spark: Any, staging_root: str, rdd: Any) -> Any:
+    frame = _read_delta_stage(spark, staging_root)
+    if frame is not None:
+        return frame
+    pending = spark.createDataFrame(rdd, schema=_DELTA_STAGE_SCHEMA)
+    try:
+        (
+            pending.write.format("delta")
+            .mode("errorifexists")
+            .save(staging_root)
+        )
+    except Exception as error:
+        frame = _read_delta_stage(spark, staging_root)
+        if frame is None:
+            raise StagingConflictError(
+                f"create-only Delta staging failed at {staging_root}"
+            ) from error
+        return frame
+    frame = _read_delta_stage(spark, staging_root)
+    if frame is None:
+        raise StagingConflictError(
+            f"create-only Delta staging has no readback at {staging_root}"
+        )
+    return frame
+
+
+def _delta_receipts(frame: Any, maximum_receipts: int) -> list[PartitionStagingReceipt]:
+    rows = (
+        frame.where("row_kind = 'receipt'")
+        .select(
+            "physical_partition",
+            "task_attempt_id",
+            "attempt_number",
+            "record_count",
+            "work_ids_json",
+            "content_sha256",
+            "content_size_bytes",
+        )
+        .limit(maximum_receipts + 1)
+        .collect()
+    )
+    if len(rows) > maximum_receipts:
+        raise StagingConflictError("Delta staging contains excess receipt metadata")
+    receipts: list[PartitionStagingReceipt] = []
+    for raw in rows:
+        row = raw.asDict(recursive=True) if hasattr(raw, "asDict") else dict(raw)
+        work_ids = json.loads(str(row["work_ids_json"]))
+        if not isinstance(work_ids, list) or any(
+            not isinstance(value, str) for value in work_ids
+        ):
+            raise StagingConflictError("Delta receipt work IDs are invalid")
+        receipts.append(
+            PartitionStagingReceipt(
+                physical_partition=int(row["physical_partition"]),
+                task_attempt_id=int(row["task_attempt_id"]),
+                attempt_number=int(row["attempt_number"]),
+                record_count=int(row["record_count"]),
+                work_ids=tuple(work_ids),
+                content_sha256=str(row["content_sha256"]),
+                content_size_bytes=int(row["content_size_bytes"]),
+            )
+        )
+    return receipts
+
+
+def _read_selected_delta_records(
+    frame: Any,
+    receipts: Sequence[PartitionStagingReceipt],
+) -> list[dict[str, Any]]:
+    identities = " OR ".join(
+        "("
+        f"physical_partition = {receipt.physical_partition} AND "
+        f"task_attempt_id = {receipt.task_attempt_id} AND "
+        f"attempt_number = {receipt.attempt_number}"
+        ")"
+        for receipt in receipts
+    )
+    selected = (
+        frame.where(f"row_kind = 'record' AND ({identities})")
+        .select(
+            "physical_partition",
+            "task_attempt_id",
+            "attempt_number",
+            "record_ordinal",
+            "record_json",
+        )
+        .orderBy("physical_partition", "record_ordinal")
+    )
+    grouped: dict[tuple[int, int, int], list[tuple[int, dict[str, Any]]]] = {}
+    for raw in selected.toLocalIterator():
+        row = raw.asDict(recursive=True) if hasattr(raw, "asDict") else dict(raw)
+        value = json.loads(str(row["record_json"]))
+        if not isinstance(value, dict):
+            raise StagingConflictError("Delta staged record is not an object")
+        identity = (
+            int(row["physical_partition"]),
+            int(row["task_attempt_id"]),
+            int(row["attempt_number"]),
+        )
+        grouped.setdefault(identity, []).append((int(row["record_ordinal"]), value))
+    records: list[dict[str, Any]] = []
+    for receipt in receipts:
+        identity = (
+            receipt.physical_partition,
+            receipt.task_attempt_id,
+            receipt.attempt_number,
+        )
+        values = grouped.get(identity, [])
+        if [ordinal for ordinal, _ in values] != list(range(receipt.record_count)):
+            raise StagingConflictError(
+                f"partition {receipt.physical_partition} Delta record ordinals differ"
+            )
+        ordered = [value for _, value in values]
+        content = _canonical(ordered)
+        if (
+            len(content.encode("utf-8")) != receipt.content_size_bytes
+            or hashlib.sha256(content.encode("utf-8")).hexdigest()
+            != receipt.content_sha256
+        ):
+            raise StagingConflictError(
+                f"partition {receipt.physical_partition} Delta content differs"
+            )
+        records.extend(ordered)
+    return records
+
+
+class StreamingSparkExecutionHarness:
+    """Spark mapPartitions harness that never collects full-cardinality rows.
+
+    Drop-in alternative to :class:`SparkExecutionHarness` with the identical
+    ``execute`` contract (returns ``list[dict[str, Any]]``), but internally
+    each executor streams its bucket's output rows directly to immutable,
+    attempt-scoped staging and the Spark ``collect`` only transfers bounded
+    per-partition receipts. The full record set is reconstructed by reading
+    the already-staged files directly from storage, which removes the
+    per-row Spark network/serialization path entirely.
+    """
+
+    def __init__(
+        self,
+        spark_session: Any,
+        staging_root: Path,
+        *,
+        verify_settings: bool = True,
+        row_enrichment: Mapping[str, Mapping[str, Any]] | None = None,
+        staging_backend: str = "local",
+        after_stage_hook: Callable[[], None] | None = None,
+    ) -> None:
+        self.spark_session = spark_session
+        if staging_backend not in {"local", "spark_delta"}:
+            raise ProcessValidationError(
+                f"unsupported streaming staging backend: {staging_backend!r}"
+            )
+        self.staging_root = str(staging_root)
+        self.staging_backend = staging_backend
+        self.verify_settings = verify_settings
+        self.after_stage_hook = after_stage_hook
+        self.row_enrichment = {
+            str(key): dict(value)
+            for key, value in (row_enrichment or {}).items()
+        }
+
+    def execute(
+        self,
+        envelope: VerifiedEnvelope,
+        plan: ExecutionPlan,
+        profile: ExecutionProfile,
+        mode: Mode,
+    ) -> list[dict[str, Any]]:
+        if self.verify_settings:
+            _verify_live_spark_settings(self.spark_session, profile)
+        by_partition = {
+            bucket.physical_partition: [
+                {
+                    **_executor_row(
+                        item,
+                        envelope,
+                        profile,
+                        mode,
+                        plan.concurrency,
+                    ),
+                    **self.row_enrichment.get(item.item.work_id, {}),
+                }
+                for item in bucket.items
+            ]
+            for bucket in plan.buckets
+        }
+        ordered: list[dict[str, Any] | None] = [
+            None for _ in profile.physical_partitions
+        ]
+        for partition, rows in by_partition.items():
+            ordered[partition] = {"rows": rows}
+        rdd = self.spark_session.sparkContext.parallelize(
+            ordered, len(profile.physical_partitions)
+        )
+        expected = {
+            bucket.physical_partition: tuple(
+                sorted(item.item.work_id for item in bucket.items)
+            )
+            for bucket in plan.buckets
+            if bucket.items
+        }
+        if self.staging_backend == "spark_delta":
+            frame = _stage_delta_once(
+                self.spark_session,
+                self.staging_root,
+                rdd.mapPartitions(execute_sjd_bucket_partition_delta),
+            )
+            if self.after_stage_hook is not None:
+                self.after_stage_hook()
+            receipts = _delta_receipts(frame, len(expected))
+        else:
+            receipt_rows = rdd.mapPartitions(
+                execute_sjd_bucket_partition_streaming(self.staging_root)
+            ).collect()
+            receipts = [
+                PartitionStagingReceipt(
+                    physical_partition=row["physical_partition"],
+                    task_attempt_id=row["task_attempt_id"],
+                    attempt_number=row["attempt_number"],
+                    record_count=row["record_count"],
+                    work_ids=tuple(row["work_ids"]),
+                    content_sha256=row["content_sha256"],
+                    content_size_bytes=row["content_size_bytes"],
+                )
+                for row in receipt_rows
+            ]
+        expected_partitions = set(expected)
+        observed_partitions = {receipt.physical_partition for receipt in receipts}
+        if observed_partitions != expected_partitions:
+            raise StagingConflictError(
+                "streaming harness did not receive a receipt for every planned "
+                f"bucket: expected {sorted(expected_partitions)!r}, observed "
+                f"{sorted(observed_partitions)!r}"
+            )
+        # More than one receipt can land here for the same partition (a
+        # retried task whose earlier zombie attempt's receipt still arrives,
+        # or -- were it ever re-enabled -- a speculative duplicate); select
+        # exactly one winning attempt per partition and never read/merge the
+        # rejected duplicates' staged content.
+        selected = select_one_receipt_per_partition(receipts)
+        for receipt in selected:
+            if receipt.work_ids != expected[receipt.physical_partition]:
+                raise StagingConflictError(
+                    f"partition {receipt.physical_partition} receipt work IDs "
+                    "do not match its planned bucket"
+                )
+        if self.staging_backend == "spark_delta":
+            return _read_selected_delta_records(frame, selected)
+        records: list[dict[str, Any]] = []
+        for receipt in sorted(selected, key=lambda item: item.physical_partition):
+            records.extend(
+                read_staged_partition_records(Path(self.staging_root), receipt)
+            )
+        return records
+
+
 def _verify_live_spark_settings(spark: Any, profile: ExecutionProfile) -> None:
     conflicts: dict[str, tuple[str, str]] = {}
     for key, expected in profile.spark_settings.items():
@@ -1030,15 +1891,23 @@ class OneLakeDeltaAttemptAdapter:
             raise ProcessValidationError(
                 "process route mode does not match the fixed namespace"
             )
-        if selected_mode is ProcessRouteMode.PRODUCTION:
+        if (
+            selected_mode is ProcessRouteMode.PRODUCTION
+            and not bool(getattr(self.config, "stable_production", False))
+        ):
             raise ProcessValidationError(
                 "direct production attempt staging is disabled"
             )
         self.route_mode = selected_mode
         expected = self.config.file_path("attempts").rstrip("/")
         if self.root != expected:
+            root_label = (
+                "stable production root"
+                if bool(getattr(self.config, "stable_production", False))
+                else "fixed Candidate A root"
+            )
             raise ProcessValidationError(
-                "OneLake attempts require the route-mode fixed Candidate A root"
+                f"OneLake attempts require the route-mode {root_label}"
             )
         self.spark_session = spark_session
         self.files = files or NotebookUtilsOneLakeFiles()
@@ -1105,7 +1974,7 @@ class OneLakeDeltaAttemptAdapter:
         (
             frame.write.format("delta")
             .mode("errorifexists")
-            .option("txnAppId", f"people-counter-candidate-a:{process_attempt_id}")
+            .option("txnAppId", f"people-counter-sjd:{process_attempt_id}")
             .option("txnVersion", "0")
             .save(spark_path)
         )
@@ -1525,6 +2394,117 @@ class ProcessResult:
 CrashHook = Callable[[str], None]
 
 
+def _load_process_context(
+    store: ProcessControlStore,
+    batch_id: str,
+    release_evidence: Any | None,
+) -> tuple[VerifiedEnvelope, LiveBatch]:
+    envelope_data, authoritative_digest = store.load_claim_envelope_with_digest(
+        batch_id
+    )
+    envelope = verify_envelope(
+        envelope_data,
+        batch_id=batch_id,
+        envelope_sha256=authoritative_digest,
+    )
+    if release_evidence is not None:
+        from people_counter.fabric_release_provenance import (
+            validate_installed_package_version,
+        )
+
+        validate_installed_package_version(
+            expected_version=release_evidence.manifest.package_version
+        )
+        mismatched = sorted(
+            item.work_id
+            for item in envelope.items
+            if item.release_digest != release_evidence.manifest_sha256
+        )
+        if mismatched:
+            raise ProcessValidationError(
+                "claim release digest differs from detached manifest for "
+                f"{mismatched!r}"
+            )
+    return envelope, ProcessControl(store).live_batch(envelope)
+
+
+def _committed_plan(
+    records: Sequence[Mapping[str, Any]],
+    envelope: VerifiedEnvelope,
+) -> ExecutionPlan:
+    if not records:
+        raise StagingConflictError("committed batch has no staged records")
+    decision_fields: set[tuple[int, int | None, bool]] = set()
+    for record in records:
+        _validate_staged_record_schema(record)
+        decision_fields.add(
+            (
+                record["planned_concurrency"],
+                record["peak_rss_bytes"],
+                record["duration_only_fallback"],
+            )
+        )
+    if len(decision_fields) != 1:
+        raise StagingConflictError(
+            "committed staging has inconsistent concurrency evidence"
+        )
+    concurrency, peak_rss_bytes, duration_only_fallback = decision_fields.pop()
+    if duration_only_fallback != (peak_rss_bytes is None):
+        raise StagingConflictError(
+            "committed staging has inconsistent RSS fallback evidence"
+        )
+    executor_memory_bytes = (
+        GIB if peak_rss_bytes is None else peak_rss_bytes * concurrency
+    )
+    profile = replace(
+        LOCAL_TWO_WORKERS,
+        name="committed-staging",
+        executor_instances=1,
+        executor_cores=concurrency,
+        executor_memory_bytes=executor_memory_bytes,
+        memory_reserve_bytes=0,
+        planned_task_count=concurrency,
+    )
+    return plan_duration_lpt(
+        envelope.items,
+        profile,
+        peak_rss_bytes=peak_rss_bytes,
+    )
+
+
+def _resume_committed_process_batch(
+    store: ProcessControlStore,
+    envelope: VerifiedEnvelope,
+    attempts: AttemptAdapter,
+) -> ProcessResult:
+    complete = attempts.load_complete(
+        envelope.batch_id, envelope.execution_attempt_id
+    )
+    if complete is None:
+        raise StagingConflictError("committed batch is missing complete staging")
+    records, marker = complete
+    plan = _committed_plan(records, envelope)
+    validate_staged_records(records, envelope, plan)
+    _verify_marker(marker, records, envelope)
+    sequences = store.commit_batch(envelope.batch_id)
+    return _process_result(envelope, attempts, records, sequences, True)
+
+
+def resume_committed_process_batch(
+    store: ProcessControlStore,
+    batch_id: str,
+    attempts: AttemptAdapter,
+    *,
+    release_evidence: Any | None = None,
+) -> ProcessResult | None:
+    """Return a verified committed result without probing a new Spark application."""
+    envelope, live = _load_process_context(store, batch_id, release_evidence)
+    if live.status == "COMMITTED":
+        return _resume_committed_process_batch(store, envelope, attempts)
+    ProcessControl(store).assert_fence(envelope)
+    return None
+
+
 def run_process_batch(
     store: ProcessControlStore,
     batch_id: str,
@@ -1536,34 +2516,20 @@ def run_process_batch(
     peak_rss_bytes: int | None = None,
     clock: Callable[[], float] | None = None,
     crash_hook: CrashHook | None = None,
+    release_evidence: Any | None = None,
 ) -> ProcessResult:
     """Execute, validate, seal, publish, and only then settle one claimed batch."""
     if mode not in {"probe", "sdk"}:
         raise ProcessValidationError(f"unsupported processor mode: {mode!r}")
-    envelope_data, authoritative_digest = store.load_claim_envelope_with_digest(
-        batch_id
-    )
-    envelope = verify_envelope(
-        envelope_data,
-        batch_id=batch_id,
-        envelope_sha256=authoritative_digest,
-    )
+    envelope, live = _load_process_context(store, batch_id, release_evidence)
+    if live.status == "COMMITTED":
+        return _resume_committed_process_batch(store, envelope, attempts)
+    if live.status not in {"LEASED", "SEALED"}:
+        raise LeaseLostError(f"batch {batch_id} is not processable: {live.status}")
     control = ProcessControl(store)
-    live = control.live_batch(envelope)
     plan = plan_duration_lpt(
         envelope.items, profile, peak_rss_bytes=peak_rss_bytes
     )
-    if live.status == "COMMITTED":
-        complete = attempts.load_complete(batch_id, envelope.execution_attempt_id)
-        if complete is None:
-            raise StagingConflictError("committed batch is missing complete staging")
-        records, marker = complete
-        validate_staged_records(records, envelope, plan)
-        _verify_marker(marker, records, envelope)
-        sequences = store.commit_batch(batch_id)
-        return _process_result(envelope, attempts, records, sequences, True)
-    if live.status not in {"LEASED", "SEALED"}:
-        raise LeaseLostError(f"batch {batch_id} is not processable: {live.status}")
     admit_lease(
         plan,
         profile,
