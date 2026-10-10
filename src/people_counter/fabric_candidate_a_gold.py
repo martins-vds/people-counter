@@ -205,6 +205,8 @@ class FabricCommittedSource:
             attempts.append(
                 dict(row)
                 | {
+                    "dispatcher_id": batch.get("owner"),
+                    "batch_runtime_key": batch.get("runtime_key"),
                     "batch_sealed_at": batch.get("sealed_at"),
                     "batch_completed_at": batch.get("committed_at"),
                     "batch_expired_at": batch.get("lease_expires_at"),

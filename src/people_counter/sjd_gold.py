@@ -32,6 +32,11 @@ FACT_TABLES = (
     "gold_video",
     "gold_operations_hour",
 )
+OPERATIONAL_TABLES = (
+    "gold_work_operations",
+    "gold_attempt_operations",
+)
+FACT_TARGET_TABLES = FACT_TABLES + OPERATIONAL_TABLES
 DIMENSION_TABLES = (
     "gold_dim_date",
     "gold_dim_time",
@@ -155,6 +160,79 @@ _SPARK_FIELDS: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("p95_processing_seconds", "double", True),
         ("refreshed_at", "timestamp", False),
         ("operation_date", "date", False),
+    ),
+    "gold_work_operations": (
+        ("work_id", "string", False),
+        ("asset_id", "string", True),
+        ("asset_version", "string", True),
+        ("source_uri", "string", True),
+        ("manifest_uri", "string", True),
+        ("source_etag", "string", True),
+        ("expected_size_bytes", "long", True),
+        ("expected_sha256", "string", True),
+        ("camera_id", "string", True),
+        ("location_id", "string", True),
+        ("captured_at_utc", "timestamp", True),
+        ("camera_timezone", "string", True),
+        ("duration_seconds", "double", True),
+        ("priority", "long", True),
+        ("status", "string", False),
+        ("received_at", "timestamp", True),
+        ("queued_at", "timestamp", True),
+        ("not_before_at", "timestamp", True),
+        ("attempt_count", "long", False),
+        ("max_attempts", "long", False),
+        ("lease_owner_attempt_id", "string", True),
+        ("lease_dispatcher_id", "string", True),
+        ("lease_acquired_at", "timestamp", True),
+        ("lease_expires_at", "timestamp", True),
+        ("last_heartbeat_at", "timestamp", True),
+        ("committed_attempt_id", "string", True),
+        ("completed_at", "timestamp", True),
+        ("last_error_category", "string", True),
+        ("last_error_type", "string", True),
+        ("last_error_message", "string", True),
+        ("config_json", "string", True),
+        ("config_sha256", "string", True),
+        ("capture_date", "date", True),
+        ("last_replay_id", "string", True),
+        ("replay_generation", "long", False),
+        ("queue_entered_at", "timestamp", True),
+    ),
+    "gold_attempt_operations": (
+        ("attempt_id", "string", False),
+        ("work_id", "string", False),
+        ("dispatcher_id", "string", True),
+        ("pipeline_run_id", "string", True),
+        ("activity_run_id", "string", True),
+        ("fabric_job_instance_id", "string", True),
+        ("sdk_version", "string", True),
+        ("bundle_manifest_sha256", "string", True),
+        ("config_sha256", "string", True),
+        ("status", "string", False),
+        ("claimed_at", "timestamp", True),
+        ("staging_started_at", "timestamp", True),
+        ("inference_started_at", "timestamp", True),
+        ("writing_started_at", "timestamp", True),
+        ("completed_at", "timestamp", True),
+        ("last_heartbeat_at", "timestamp", True),
+        ("input_sha256", "string", True),
+        ("source_size_bytes", "long", True),
+        ("source_duration_seconds", "double", True),
+        ("source_fps", "double", True),
+        ("total_source_frames", "long", True),
+        ("processed_frames", "long", True),
+        ("effective_sample_fps", "double", True),
+        ("processing_seconds", "double", True),
+        ("distinct_people", "long", True),
+        ("line_in_count", "long", True),
+        ("line_out_count", "long", True),
+        ("retryable", "boolean", True),
+        ("error_category", "string", True),
+        ("error_type", "string", True),
+        ("error_message", "string", True),
+        ("capture_date", "date", True),
+        ("worker_execution_id", "string", True),
     ),
     "gold_dim_date": (
         ("date_key", "date", False),
@@ -961,7 +1039,7 @@ class LocalGoldJob:
         source = self._fact_source(flow_source, operations_source)
         previous = self.state.checkpoint("facts")
         automatic = dates is None
-        current_versions = self.store.versions(FACT_TABLES)
+        current_versions = self.store.versions(FACT_TARGET_TABLES)
         targets_current = _checkpoint_targets_match(
             previous, current_versions
         )
@@ -1011,7 +1089,12 @@ class LocalGoldJob:
                     partition_date,
                     rows[table],
                 )
-        target_versions = self.store.versions(FACT_TABLES)
+        operational = _operational_rows(control, committed, now)
+        for table in OPERATIONAL_TABLES:
+            totals[table] = self.store.replace_table(
+                table, operational[table]
+            )
+        target_versions = self.store.versions(FACT_TARGET_TABLES)
         checkpoints = {
             f"facts:partition:{partition_date}": (source, target_versions)
             for partition_date in selected
@@ -1066,7 +1149,7 @@ class LocalGoldJob:
         save_state: bool = True,
     ) -> dict[str, Any]:
         source = self.source_checkpoint()
-        fact_versions = self.store.versions(FACT_TABLES)
+        fact_versions = self.store.versions(FACT_TARGET_TABLES)
         dimension_source = SourceCheckpoint(
             source.publication_sequence,
             source.versions
@@ -1124,7 +1207,7 @@ class LocalGoldJob:
     def validate(self) -> dict[str, Any]:
         tables = {
             name: self.store.read_table(name)
-            for name in FACT_TABLES + DIMENSION_TABLES
+            for name in FACT_TARGET_TABLES + DIMENSION_TABLES
         }
         rules = _validate_tables(tables)
         return {
@@ -1166,7 +1249,7 @@ class LocalGoldJob:
                 checkpoint_updates,
                 "gold run changed",
                 refresh_source,
-                self.store.versions(FACT_TABLES + DIMENSION_TABLES),
+                self.store.versions(FACT_TARGET_TABLES + DIMENSION_TABLES),
             )
         return {
             "facts": facts,
@@ -1190,6 +1273,8 @@ class LocalGoldJob:
                     for row in connection.execute(
                         """
                         SELECT a.*,
+                               b.owner AS dispatcher_id,
+                               b.runtime_key AS batch_runtime_key,
                                b.sealed_at AS batch_sealed_at,
                                b.committed_at AS batch_completed_at,
                                b.lease_expires_at AS batch_expired_at,
@@ -1525,6 +1610,283 @@ def _operations_rows(
     return rows
 
 
+def _operational_rows(
+    control: Mapping[str, Sequence[Mapping[str, Any]]],
+    committed: Sequence[CommittedOutput],
+    refreshed_at: str,
+) -> dict[str, list[dict[str, Any]]]:
+    work_rows = [dict(row) for row in control.get("work", ())]
+    attempts = [dict(row) for row in control.get("attempts", ())]
+    attempts_by_id = {
+        str(row["attempt_id"]): row
+        for row in attempts
+        if row.get("attempt_id") is not None
+    }
+    work_by_id = {
+        str(row["work_id"]): _merge_payload(row)
+        for row in work_rows
+        if row.get("work_id") is not None
+    }
+    committed_by_attempt = {item.attempt_id: item for item in committed}
+    refreshed = _required_datetime(refreshed_at)
+    projected_work = [
+        _operational_work_row(
+            row,
+            attempts_by_id.get(str(row.get("lease_attempt_id") or "")),
+            refreshed,
+        )
+        for row in work_rows
+    ]
+    projected_attempts = [
+        _operational_attempt_row(
+            row,
+            work_by_id.get(str(row.get("work_id") or ""), {}),
+            committed_by_attempt.get(str(row.get("attempt_id") or "")),
+        )
+        for row in attempts
+    ]
+    return {
+        "gold_work_operations": sorted(
+            projected_work, key=lambda row: row["work_id"]
+        ),
+        "gold_attempt_operations": sorted(
+            projected_attempts, key=lambda row: row["attempt_id"]
+        ),
+    }
+
+
+def _operational_work_row(
+    work: Mapping[str, Any],
+    lease_attempt: Mapping[str, Any] | None,
+    refreshed_at: datetime,
+) -> dict[str, Any]:
+    merged = _merge_payload(work)
+    created = _optional_datetime(work.get("created_at"))
+    updated = _optional_datetime(work.get("updated_at"))
+    available = _optional_datetime(work.get("available_at"))
+    lease_expires = _optional_datetime(work.get("lease_expires_at"))
+    captured = _optional_datetime(merged.get("captured_at_utc"))
+    status = str(work.get("status") or "")
+    if status == "READY":
+        status = (
+            "RETRY_WAIT"
+            if available is not None
+            and available > refreshed_at
+            and int(work.get("attempt_count") or 0) > 0
+            else "QUEUED"
+        )
+    elif status == "DEAD":
+        status = "DEAD_LETTERED"
+    completed = updated if status in {"SUCCEEDED", "DEAD_LETTERED"} else None
+    error = _optional_text(work.get("last_error"))
+    config = merged.get("config_json")
+    return {
+        "work_id": str(_required_value(work, "work_id")),
+        "asset_id": _optional_text(merged.get("asset_id")),
+        "asset_version": _optional_text(merged.get("asset_version")),
+        "source_uri": _optional_text(
+            merged.get("source_uri", merged.get("source_video"))
+        ),
+        "manifest_uri": _optional_text(merged.get("manifest_uri")),
+        "source_etag": _optional_text(merged.get("source_etag")),
+        "expected_size_bytes": _projection_int(
+            merged.get("expected_size_bytes"), "expected_size_bytes"
+        ),
+        "expected_sha256": _optional_text(merged.get("expected_sha256")),
+        "camera_id": _optional_text(merged.get("camera_id")),
+        "location_id": _optional_text(merged.get("location_id")),
+        "captured_at_utc": _optional_iso(captured),
+        "camera_timezone": _optional_text(merged.get("camera_timezone")),
+        "duration_seconds": _optional_float(
+            merged.get("duration_seconds", work.get("duration_seconds"))
+        ),
+        "priority": _projection_int(merged.get("priority"), "priority"),
+        "status": status,
+        "received_at": _optional_iso(created),
+        "queued_at": _optional_iso(created),
+        "not_before_at": _optional_iso(available),
+        "attempt_count": int(work.get("attempt_count") or 0),
+        "max_attempts": int(work.get("max_attempts") or 0),
+        "lease_owner_attempt_id": _optional_text(
+            work.get("lease_attempt_id")
+        ),
+        "lease_dispatcher_id": _optional_text(work.get("lease_owner")),
+        "lease_acquired_at": _optional_iso(
+            _optional_datetime(
+                lease_attempt.get("created_at")
+                if lease_attempt is not None
+                else None
+            )
+        ),
+        "lease_expires_at": _optional_iso(lease_expires),
+        "last_heartbeat_at": None,
+        "committed_attempt_id": _optional_text(
+            work.get("committed_attempt_id")
+        ),
+        "completed_at": _optional_iso(completed),
+        "last_error_category": "PROCESSING" if error is not None else None,
+        "last_error_type": (
+            "DeadLettered" if status == "DEAD_LETTERED" else None
+        ),
+        "last_error_message": error,
+        "config_json": (
+            _config_json(config) if config is not None else None
+        ),
+        "config_sha256": _optional_text(work.get("config_sha256")),
+        "capture_date": captured.date().isoformat() if captured else None,
+        "last_replay_id": _optional_text(work.get("last_replay_id")),
+        "replay_generation": int(work.get("replay_generation") or 0),
+        "queue_entered_at": _optional_iso(created),
+    }
+
+
+def _operational_attempt_row(
+    attempt: Mapping[str, Any],
+    work: Mapping[str, Any],
+    committed: CommittedOutput | None,
+) -> dict[str, Any]:
+    record = _attempt_terminal_record(attempt)
+    run = dict(committed.run) if committed is not None else record
+    metadata = dict(work) | record | run
+    claimed = _optional_datetime(attempt.get("created_at"))
+    sealed = _optional_datetime(attempt.get("sealed_at"))
+    completed = _first_datetime(
+        attempt,
+        (
+            "published_at",
+            "batch_completed_at",
+            "completed_at",
+            "sealed_at",
+            "work_updated_at",
+        ),
+        required=False,
+    )
+    captured = _optional_datetime(metadata.get("captured_at_utc"))
+    error_message = _optional_text(
+        metadata.get("error_message", attempt.get("recovery_outcome"))
+    )
+    return {
+        "attempt_id": str(_required_value(attempt, "attempt_id")),
+        "work_id": str(_required_value(attempt, "work_id")),
+        "dispatcher_id": _optional_text(
+            attempt.get("dispatcher_id", attempt.get("batch_owner"))
+        ),
+        "pipeline_run_id": _optional_text(metadata.get("pipeline_run_id")),
+        "activity_run_id": _optional_text(metadata.get("activity_run_id")),
+        "fabric_job_instance_id": _optional_text(
+            metadata.get(
+                "fabric_job_instance_id",
+                metadata.get("process_attempt_id"),
+            )
+        ),
+        "sdk_version": _optional_text(
+            metadata.get("sdk_version", metadata.get("package_version"))
+        ),
+        "bundle_manifest_sha256": _optional_text(
+            metadata.get(
+                "bundle_manifest_sha256",
+                metadata.get("manifest_sha256"),
+            )
+        ),
+        "config_sha256": _optional_text(
+            metadata.get("config_sha256", work.get("config_sha256"))
+        ),
+        "status": str(attempt.get("status") or ""),
+        "claimed_at": _optional_iso(claimed),
+        "staging_started_at": _optional_iso(claimed),
+        "inference_started_at": _optional_iso(claimed),
+        "writing_started_at": _optional_iso(sealed),
+        "completed_at": _optional_iso(completed),
+        "last_heartbeat_at": _optional_iso(sealed),
+        "input_sha256": _optional_text(
+            metadata.get("input_sha256", metadata.get("input_payload_sha256"))
+        ),
+        "source_size_bytes": _projection_int(
+            metadata.get(
+                "source_size_bytes", metadata.get("expected_size_bytes")
+            ),
+            "source_size_bytes",
+        ),
+        "source_duration_seconds": _optional_float(
+            metadata.get(
+                "source_duration_seconds", metadata.get("duration_seconds")
+            )
+        ),
+        "source_fps": _optional_float(metadata.get("source_fps")),
+        "total_source_frames": _projection_int(
+            metadata.get("total_source_frames"), "total_source_frames"
+        ),
+        "processed_frames": _projection_int(
+            metadata.get("processed_frames"), "processed_frames"
+        ),
+        "effective_sample_fps": _optional_float(
+            metadata.get(
+                "effective_sample_fps", metadata.get("sample_fps")
+            )
+        ),
+        "processing_seconds": _optional_float(
+            metadata.get("processing_seconds")
+        ),
+        "distinct_people": _projection_int(
+            metadata.get("distinct_people"), "distinct_people"
+        ),
+        "line_in_count": _projection_int(
+            metadata.get("line_in_count"), "line_in_count"
+        ),
+        "line_out_count": _projection_int(
+            metadata.get("line_out_count"), "line_out_count"
+        ),
+        "retryable": _optional_boolean(metadata.get("retryable")),
+        "error_category": _optional_text(metadata.get("error_category")),
+        "error_type": _optional_text(metadata.get("error_type")),
+        "error_message": error_message,
+        "capture_date": captured.date().isoformat() if captured else None,
+        "worker_execution_id": _optional_text(
+            metadata.get(
+                "worker_execution_id", metadata.get("executor_identity")
+            )
+        ),
+    }
+
+
+def _attempt_terminal_record(
+    attempt: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = attempt.get("records_json")
+    if raw in (None, ""):
+        return {}
+    try:
+        records = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError as error:
+        raise GoldSourceError("attempt.records_json is invalid") from error
+    if not isinstance(records, list) or not all(
+        isinstance(row, dict) for row in records
+    ):
+        raise GoldSourceError("attempt.records_json must be a JSON row list")
+    terminals = [
+        row
+        for row in records
+        if row.get("record_type") in {"video_result", "error"}
+    ]
+    if len(terminals) > 1:
+        raise GoldSourceError("attempt.records_json has multiple terminal rows")
+    if not terminals:
+        return {}
+    terminal = terminals[0]
+    raw_payload = terminal.get("payload_json", "{}")
+    try:
+        payload = json.loads(str(raw_payload))
+    except json.JSONDecodeError as error:
+        raise GoldSourceError(
+            "attempt terminal payload_json is invalid"
+        ) from error
+    if not isinstance(payload, dict):
+        raise GoldSourceError(
+            "attempt terminal payload_json must be a JSON object"
+        )
+    return payload | dict(terminal)
+
+
 def _dimension_rows(
     committed: Sequence[CommittedOutput],
     facts: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -1700,6 +2062,8 @@ def _dimension_metadata_rows(
 
 def _validate_tables(tables: Mapping[str, Sequence[Mapping[str, Any]]]) -> int:
     primary_keys = {
+        "gold_work_operations": "work_id",
+        "gold_attempt_operations": "attempt_id",
         "gold_dim_date": "date_key",
         "gold_dim_time": "time_key",
         "gold_dim_camera": "camera_id",
@@ -1711,6 +2075,19 @@ def _validate_tables(tables: Mapping[str, Sequence[Mapping[str, Any]]]) -> int:
         values = [row.get(key) for row in tables[table]]
         if any(value is None for value in values) or len(values) != len(set(values)):
             raise GoldValidationError(f"{table}.{key} must be non-null and unique")
+    work_ids = {
+        row.get("work_id") for row in tables["gold_work_operations"]
+    }
+    orphan_attempts = {
+        row.get("work_id")
+        for row in tables["gold_attempt_operations"]
+        if row.get("work_id") not in work_ids
+    }
+    if orphan_attempts:
+        raise GoldValidationError(
+            "gold_attempt_operations.work_id has unresolved "
+            f"gold_work_operations keys: {sorted(orphan_attempts, key=str)[:10]}"
+        )
     relationships = (
         ("gold_flow_minute", "flow_date", "gold_dim_date", "date_key"),
         ("gold_flow_hour", "flow_date", "gold_dim_date", "date_key"),
@@ -1741,7 +2118,7 @@ def _validate_tables(tables: Mapping[str, Sequence[Mapping[str, Any]]]) -> int:
                 f"{fact_table}.{fact_key} has unresolved {dimension_table} keys: "
                 f"{sorted(missing, key=str)[:10]}"
             )
-    return len(primary_keys) + len(relationships)
+    return len(primary_keys) + len(relationships) + 1
 
 
 def _load_output_document(
@@ -2296,6 +2673,35 @@ def _optional_float(value: Any) -> float | None:
         raise GoldSourceError(
             f"metric must be finite and non-negative, not {value!r}"
         )
+    return result
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    result = str(value)
+    return result if result else None
+
+
+def _optional_iso(value: datetime | None) -> str | None:
+    return None if value is None else _iso(value)
+
+
+def _optional_boolean(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise GoldSourceError(f"metric must be boolean, not {value!r}")
+    return value
+
+
+def _projection_int(value: Any, field: str) -> int | None:
+    if value is None:
+        return None
+    try:
+        result = _optional_int(value)
+    except GoldSourceError as error:
+        raise GoldSourceError(f"{field} is invalid") from error
     return result
 
 

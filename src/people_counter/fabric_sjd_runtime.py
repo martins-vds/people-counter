@@ -1454,7 +1454,11 @@ def dispatcher_main(
 def _refresh_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pc-production-refresh-sjd")
     parser.add_argument("--workspace-id", required=True)
-    parser.add_argument("--semantic-model-id", required=True)
+    parser.add_argument(
+        "--semantic-model-id",
+        action="append",
+        required=True,
+    )
     parser.add_argument("--poll-seconds", type=float, default=15.0)
     parser.add_argument("--timeout-seconds", type=float, default=7200.0)
     return parser
@@ -1584,13 +1588,17 @@ def refresh_main(
         token = str(notebookutils.credentials.getToken("pbi"))
         if not token:
             raise RuntimeError("NotebookUtils returned an empty Power BI token")
-        refresh = _refresh_semantic_model(
-            arguments.workspace_id,
-            arguments.semantic_model_id,
-            token=token,
-            poll_seconds=arguments.poll_seconds,
-            timeout_seconds=arguments.timeout_seconds,
-        )
+        refreshes = [
+            _refresh_semantic_model(
+                arguments.workspace_id,
+                semantic_model_id,
+                token=token,
+                poll_seconds=arguments.poll_seconds,
+                timeout_seconds=arguments.timeout_seconds,
+            )
+            | {"semantic_model_id": semantic_model_id}
+            for semantic_model_id in arguments.semantic_model_id
+        ]
         acknowledged = []
         for item in pending:
             outbox_id = int(item["outbox_id"])
@@ -1608,7 +1616,11 @@ def refresh_main(
             json.dumps(
                 {
                     "acknowledged_outbox_ids": acknowledged,
-                    "refresh": refresh,
+                    **(
+                        {"refresh": refreshes[0]}
+                        if len(refreshes) == 1
+                        else {"refreshes": refreshes}
+                    ),
                     "status": "REFRESHED",
                 },
                 allow_nan=False,

@@ -8489,6 +8489,84 @@ views are absent. After retirement, all five stable schedule roles completed
 without a failed run, the schedules were left enabled, and the exact
 manifest-renamed Activator rule remained enabled against `pc-event-intake`.
 
+### 13.7 Stable SJD operational reporting
+
+Use `pc_sjd_operations_report` for queue, attempt-history, failure,
+reconciliation, and backfill operations after the SJD cutover. Its managed
+semantic model is `pc_sjd_operations_model`. The report preserves the
+reviewed `Attempt History`, `Operations`, and `Backfill` pages from
+`pc_operations_report`, but every physical Direct Lake entity is now in the
+stable SJD namespace:
+
+| Logical report table | Stable physical entity |
+|---|---|
+| `people_counter_video_work` | `people_counter_sjd_gold_work_operations` |
+| `people_counter_video_attempts` | `people_counter_sjd_gold_attempt_operations` |
+| `people_counter_gold_operations_hour` | `people_counter_sjd_gold_operations_hour` |
+| `people_counter_reconciliation_findings` | `people_counter_sjd_reconciliation_findings` |
+
+The Gold SJD rebuilds the work and attempt projections from the stable
+control plane and committed outputs. It converts epoch lifecycle values to
+typed UTC timestamps, expands registration/output metadata needed by the
+report, maps stable `READY`/`DEAD` states to the report's
+`QUEUED`/`RETRY_WAIT`/`DEAD_LETTERED` vocabulary, validates unique work and
+attempt keys, and rejects orphan attempts. It does not recreate any retired
+legacy table.
+
+The legacy-only `people_counter_event_receipts` and
+`people_counter_replay_requests` model surfaces were not used by the three
+report pages and have no stable event-receipt equivalent, so the managed SJD
+model removes them. Reconciliation remains live through
+`people_counter_sjd_reconciliation_findings`; the report's open-error
+measure continues to count unresolved `ERROR` findings.
+
+Deploy or update the managed artifacts with:
+
+```bash
+uv run python -m scripts.deploy_sjd_operational_report \
+  --output <deployment-evidence.json>
+```
+
+The deployment clones the reviewed source definitions, rewrites only the
+approved physical bindings and report dataset reference, removes the two
+unused legacy-only surfaces, validates all three pages, reads both targets
+back, and records source and target definition hashes.
+
+The stable refresh SJD must receive both managed semantic model IDs before it
+acknowledges the durable refresh outbox:
+
+```text
+--workspace-id <workspace-id> \
+--semantic-model-id <pc_sjd_analytics_model-id> \
+--semantic-model-id <pc_sjd_operations_model-id>
+```
+
+If either semantic refresh fails, the outbox remains unacknowledged and the
+next scheduled run retries both models. Keep `pc_operations_report` only as a
+disabled rollback artifact through the approved rollback window; do not use
+it for post-cutover operational decisions.
+
+The operational-report cutover completed on 2026-10-10 with immutable release
+`0.9.56`:
+
+- detached manifest SHA-256:
+  `de8c7918daef607405095fac997402bf390dd8780a911d745eb813f2ff682845`;
+- post-publish receipt SHA-256:
+  `eb4b69c694b8e51a684f0e164f4ff7a91dd5dbba3017c446d8f41eacc2ad20af`;
+- Environment target version:
+  `e4d3e67f-eeb7-4f57-831e-6f2a9783e1be`;
+- `pc_sjd_operations_model`:
+  `098c8182-4159-4e26-8c5f-8e1fbb400bd0`;
+- `pc_sjd_operations_report`:
+  `ed94e725-492a-4494-b696-962405e9d17d`.
+
+The release readback verified all four stable physical bindings and all three
+report pages. The Gold build and exact Gold validator completed successfully.
+The Power BI enhanced refresh and subsequent Direct Lake framing both
+completed. A post-refresh DAX readback returned 13 work rows, 17 attempt rows,
+zero completed video hours for the current sample, and no open reconciliation
+errors.
+
 ## 14. Official references
 
 - [Fabric event delivery guarantees](https://learn.microsoft.com/fabric/real-time-hub/fabric-event-delivery-guarantees)

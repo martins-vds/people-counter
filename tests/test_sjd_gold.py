@@ -15,6 +15,7 @@ from people_counter.sjd_gold import (
     CommittedOutput,
     DIMENSION_TABLES,
     FACT_TABLES,
+    OPERATIONAL_TABLES,
     FabricGoldStore,
     FabricGoldSource,
     FabricGoldState,
@@ -31,6 +32,7 @@ from people_counter.sjd_gold import (
     _checkpoint_targets_match,
     _fact_rows_for_date,
     _optional_float,
+    _operational_rows,
     _output_dates,
     _sha256_json,
     main,
@@ -578,6 +580,8 @@ def test_planning_and_fact_build_cover_cross_midnight_dates(gold_fixture):
         "gold_flow_hour": 2,
         "gold_video": 1,
         "gold_operations_hour": 1,
+        "gold_work_operations": 1,
+        "gold_attempt_operations": 1,
     }
     minute = job.store.read_table("gold_flow_minute")
     assert [(row["flow_date"], row["entries"], row["exits"]) for row in minute] == [
@@ -589,6 +593,299 @@ def test_planning_and_fact_build_cover_cross_midnight_dates(gold_fixture):
     assert operations[0]["queued"] == 1
     assert operations[0]["started"] == 1
     assert operations[0]["succeeded"] == 1
+    work = job.store.read_table("gold_work_operations")[0]
+    assert work["status"] == "SUCCEEDED"
+    assert work["queue_entered_at"] == "2026-10-02T17:00:00Z"
+    attempt = job.store.read_table("gold_attempt_operations")[0]
+    assert attempt["status"] == "SUCCEEDED"
+    assert attempt["processing_seconds"] == 30.0
+    assert attempt["distinct_people"] == 3
+    assert attempt["line_in_count"] == 4
+    assert attempt["line_out_count"] == 1
+
+
+def test_operational_rows_map_stable_queue_and_dead_letter_states() -> None:
+    control = {
+        "work": [
+            {
+                "work_id": "retry",
+                "payload_json": json.dumps(
+                    {
+                        "source_video": "abfss://video.mp4",
+                        "captured_at_utc": "2026-10-02T16:00:00Z",
+                    }
+                ),
+                "status": "READY",
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "available_at": NOW.timestamp() + 60,
+                "created_at": NOW.timestamp() - 120,
+                "updated_at": NOW.timestamp(),
+                "replay_generation": 0,
+            },
+            {
+                "work_id": "dead",
+                "payload_json": "{}",
+                "status": "DEAD",
+                "attempt_count": 3,
+                "max_attempts": 3,
+                "available_at": NOW.timestamp(),
+                "created_at": NOW.timestamp() - 300,
+                "updated_at": NOW.timestamp(),
+                "last_error": "processing failed",
+                "replay_generation": 0,
+            },
+        ],
+        "attempts": [],
+    }
+
+    result = _operational_rows(control, [], NOW.isoformat())
+
+    assert tuple(result) == OPERATIONAL_TABLES
+    dead, retry = result["gold_work_operations"]
+    assert dead["work_id"] == "dead"
+    assert dead["status"] == "DEAD_LETTERED"
+    assert dead["last_error_category"] == "PROCESSING"
+    assert dead["last_error_type"] == "DeadLettered"
+    assert dead["completed_at"] == "2026-10-02T17:00:00Z"
+    assert retry["work_id"] == "retry"
+    assert retry["status"] == "RETRY_WAIT"
+    assert retry["source_uri"] == "abfss://video.mp4"
+    assert retry["capture_date"] == "2026-10-02"
+    assert _operational_rows({}, [], NOW.isoformat()) == {
+        "gold_work_operations": [],
+        "gold_attempt_operations": [],
+    }
+
+
+def test_operational_rows_project_the_complete_report_contract() -> None:
+    created = NOW.timestamp() - 300
+    sealed = NOW.timestamp() - 60
+    published = NOW.timestamp() - 30
+    payload = {
+        "asset_id": "asset-1",
+        "asset_version": "v2",
+        "source_uri": "abfss://video.mp4",
+        "manifest_uri": "abfss://manifest.json",
+        "source_etag": "etag-1",
+        "expected_size_bytes": 1234,
+        "expected_sha256": "a" * 64,
+        "camera_id": "camera-1",
+        "location_id": "lobby",
+        "captured_at_utc": "2026-10-02T16:00:00Z",
+        "camera_timezone": "UTC",
+        "duration_seconds": 120.0,
+        "priority": 7,
+        "config_json": {"pipeline": "rtdetr"},
+        "source_fps": 30.0,
+        "total_source_frames": 3600,
+    }
+    terminal_payload = {
+        "pipeline_run_id": "pipeline-1",
+        "activity_run_id": "activity-1",
+        "fabric_job_instance_id": "job-1",
+        "sdk_version": "0.9.56",
+        "bundle_manifest_sha256": "b" * 64,
+        "config_sha256": "config-1",
+        "input_sha256": "c" * 64,
+        "source_size_bytes": 1234,
+        "source_duration_seconds": 120.0,
+        "source_fps": 30.0,
+        "total_source_frames": 3600,
+        "processed_frames": 120,
+        "effective_sample_fps": 1.0,
+        "processing_seconds": 40.0,
+        "distinct_people": 5,
+        "line_in_count": 4,
+        "line_out_count": 2,
+        "retryable": True,
+        "error_category": "TRANSIENT",
+        "error_type": "TimeoutError",
+        "error_message": "worker timed out",
+        "captured_at_utc": "2026-10-02T16:00:00Z",
+        "worker_execution_id": "executor-1",
+    }
+    control = {
+        "work": [
+            {
+                "work_id": "work-1",
+                "payload_json": json.dumps(payload),
+                "status": "LEASED",
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "available_at": created,
+                "lease_owner": "dispatcher-1",
+                "lease_attempt_id": "attempt-1",
+                "lease_expires_at": NOW.timestamp() + 600,
+                "committed_attempt_id": None,
+                "config_sha256": "config-1",
+                "created_at": created,
+                "updated_at": NOW.timestamp(),
+                "last_replay_id": "replay-1",
+                "replay_generation": 2,
+            }
+        ],
+        "attempts": [
+            {
+                "attempt_id": "attempt-1",
+                "work_id": "work-1",
+                "dispatcher_id": "dispatcher-1",
+                "status": "FAILED",
+                "created_at": created,
+                "sealed_at": sealed,
+                "published_at": published,
+                "records_json": json.dumps(
+                    [
+                        {
+                            "record_type": "error",
+                            "payload_json": json.dumps(terminal_payload),
+                        }
+                    ]
+                ),
+            }
+        ],
+    }
+
+    result = _operational_rows(control, [], NOW.isoformat())
+
+    assert result["gold_work_operations"] == [
+        {
+            "work_id": "work-1",
+            "asset_id": "asset-1",
+            "asset_version": "v2",
+            "source_uri": "abfss://video.mp4",
+            "manifest_uri": "abfss://manifest.json",
+            "source_etag": "etag-1",
+            "expected_size_bytes": 1234,
+            "expected_sha256": "a" * 64,
+            "camera_id": "camera-1",
+            "location_id": "lobby",
+            "captured_at_utc": "2026-10-02T16:00:00Z",
+            "camera_timezone": "UTC",
+            "duration_seconds": 120.0,
+            "priority": 7,
+            "status": "LEASED",
+            "received_at": "2026-10-02T16:55:00Z",
+            "queued_at": "2026-10-02T16:55:00Z",
+            "not_before_at": "2026-10-02T16:55:00Z",
+            "attempt_count": 1,
+            "max_attempts": 3,
+            "lease_owner_attempt_id": "attempt-1",
+            "lease_dispatcher_id": "dispatcher-1",
+            "lease_acquired_at": "2026-10-02T16:55:00Z",
+            "lease_expires_at": "2026-10-02T17:10:00Z",
+            "last_heartbeat_at": None,
+            "committed_attempt_id": None,
+            "completed_at": None,
+            "last_error_category": None,
+            "last_error_type": None,
+            "last_error_message": None,
+            "config_json": '{"pipeline":"rtdetr"}',
+            "config_sha256": "config-1",
+            "capture_date": "2026-10-02",
+            "last_replay_id": "replay-1",
+            "replay_generation": 2,
+            "queue_entered_at": "2026-10-02T16:55:00Z",
+        }
+    ]
+    assert result["gold_attempt_operations"] == [
+        {
+            "attempt_id": "attempt-1",
+            "work_id": "work-1",
+            "dispatcher_id": "dispatcher-1",
+            "pipeline_run_id": "pipeline-1",
+            "activity_run_id": "activity-1",
+            "fabric_job_instance_id": "job-1",
+            "sdk_version": "0.9.56",
+            "bundle_manifest_sha256": "b" * 64,
+            "config_sha256": "config-1",
+            "status": "FAILED",
+            "claimed_at": "2026-10-02T16:55:00Z",
+            "staging_started_at": "2026-10-02T16:55:00Z",
+            "inference_started_at": "2026-10-02T16:55:00Z",
+            "writing_started_at": "2026-10-02T16:59:00Z",
+            "completed_at": "2026-10-02T16:59:30Z",
+            "last_heartbeat_at": "2026-10-02T16:59:00Z",
+            "input_sha256": "c" * 64,
+            "source_size_bytes": 1234,
+            "source_duration_seconds": 120.0,
+            "source_fps": 30.0,
+            "total_source_frames": 3600,
+            "processed_frames": 120,
+            "effective_sample_fps": 1.0,
+            "processing_seconds": 40.0,
+            "distinct_people": 5,
+            "line_in_count": 4,
+            "line_out_count": 2,
+            "retryable": True,
+            "error_category": "TRANSIENT",
+            "error_type": "TimeoutError",
+            "error_message": "worker timed out",
+            "capture_date": "2026-10-02",
+            "worker_execution_id": "executor-1",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("records_json", "message"),
+    [
+        ("{", "records_json is invalid"),
+        ("{}", "must be a JSON row list"),
+        (
+            json.dumps(
+                [
+                    {"record_type": "error", "payload_json": "{}"},
+                    {"record_type": "video_result", "payload_json": "{}"},
+                ]
+            ),
+            "multiple terminal rows",
+        ),
+        (
+            json.dumps(
+                [{"record_type": "error", "payload_json": "{"}]
+            ),
+            "terminal payload_json is invalid",
+        ),
+        (
+            json.dumps(
+                [{"record_type": "error", "payload_json": "[]"}]
+            ),
+            "terminal payload_json must be a JSON object",
+        ),
+    ],
+)
+def test_operational_attempt_projection_rejects_invalid_record_contract(
+    records_json: str,
+    message: str,
+) -> None:
+    control = {
+        "work": [
+            {
+                "work_id": "work",
+                "payload_json": "{}",
+                "status": "READY",
+                "attempt_count": 1,
+                "max_attempts": 3,
+                "available_at": NOW.timestamp(),
+                "created_at": NOW.timestamp(),
+                "updated_at": NOW.timestamp(),
+                "replay_generation": 0,
+            }
+        ],
+        "attempts": [
+            {
+                "attempt_id": "attempt",
+                "work_id": "work",
+                "status": "FAILED",
+                "created_at": NOW.timestamp(),
+                "records_json": records_json,
+            }
+        ],
+    }
+
+    with pytest.raises(GoldSourceError, match=message):
+        _operational_rows(control, [], NOW.isoformat())
 
 
 def test_sdk_relative_line_timestamp_is_derived_from_capture_time(gold_fixture):
@@ -666,7 +963,7 @@ def test_dimensions_and_referential_validation(gold_fixture):
     assert job.store.read_table("gold_dim_camera")[0]["camera_id"] == "camera-a"
     assert job.store.read_table("gold_dim_video")[0]["work_id"] == "work-1"
     assert job.store.read_table("gold_dim_model_config")[0]["pipeline"] == "rtdetr"
-    assert job.validate()["rules_checked"] == 22
+    assert job.validate()["rules_checked"] == 25
 
 
 def test_validation_rejects_an_unresolved_fact_key(gold_fixture):

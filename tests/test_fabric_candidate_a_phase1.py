@@ -60,6 +60,7 @@ from people_counter.fabric_candidate_a_jobs import (
 from people_counter.fabric_capability_probe import CapabilityStatus
 from people_counter.sjd_gold import (
     FACT_TABLES,
+    FACT_TARGET_TABLES,
     GoldSourceError,
     SourceCheckpoint,
     _normal_incremental_facts_noop,
@@ -1221,7 +1222,7 @@ def test_normal_fabric_gold_rerun_accepts_checkpoint_and_is_a_noop() -> None:
     flow = SourceCheckpoint(1, {"publication": "same"})
     operations = SourceCheckpoint(1, {"control": "same"})
     combined = FabricGoldJob._fact_source(flow, operations)
-    target_versions = {name: 7 for name in FACT_TABLES}
+    target_versions = {name: 7 for name in FACT_TARGET_TABLES}
     checkpoint = {
         "stage": "facts",
         "source_key": combined.key,
@@ -1250,7 +1251,7 @@ def test_normal_fabric_gold_rerun_accepts_checkpoint_and_is_a_noop() -> None:
 
     class UnchangedStore:
         def versions(self, names):
-            assert tuple(names) == FACT_TABLES
+            assert tuple(names) == FACT_TARGET_TABLES
             return dict(target_versions)
 
     job = FabricGoldJob(
@@ -3888,10 +3889,123 @@ def test_refresh_main_acknowledges_only_after_completed_refresh(
         "acknowledged_outbox_ids": [4, 5],
         "refresh": {
             "request_id": "refresh-1",
+            "semantic_model_id": "model-1",
             "status": "Completed",
         },
         "status": "REFRESHED",
     }
+
+
+def test_refresh_main_refreshes_every_model_before_acknowledging(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = MagicMock()
+    state.pending_refreshes.return_value = [
+        {"outbox_id": 4, "dedupe_key": "dedupe-4"},
+    ]
+    state.acknowledge_refresh.return_value = True
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_gold.FabricGoldState",
+        lambda *_args, **_kwargs: state,
+    )
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs._spark",
+        lambda: object(),
+    )
+    refreshed: list[str] = []
+
+    def refresh(_workspace_id, model_id, **_kwargs):
+        refreshed.append(model_id)
+        return {"request_id": f"refresh-{model_id}", "status": "Completed"}
+
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs._refresh_semantic_model",
+        refresh,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "notebookutils",
+        SimpleNamespace(
+            credentials=SimpleNamespace(getToken=lambda _audience: "token")
+        ),
+    )
+
+    assert refresh_main(
+        [
+            "--workspace-id",
+            "workspace-1",
+            "--semantic-model-id",
+            "analytics",
+            "--semantic-model-id",
+            "operations",
+        ],
+        config=FabricCandidateAConfig.benchmark(),
+    ) == 0
+
+    assert refreshed == ["analytics", "operations"]
+    state.acknowledge_refresh.assert_called_once()
+    assert json.loads(capsys.readouterr().out)["refreshes"] == [
+        {
+            "request_id": "refresh-analytics",
+            "semantic_model_id": "analytics",
+            "status": "Completed",
+        },
+        {
+            "request_id": "refresh-operations",
+            "semantic_model_id": "operations",
+            "status": "Completed",
+        },
+    ]
+
+
+def test_refresh_main_keeps_outbox_pending_when_any_model_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = MagicMock()
+    state.pending_refreshes.return_value = [
+        {"outbox_id": 4, "dedupe_key": "dedupe-4"},
+    ]
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_gold.FabricGoldState",
+        lambda *_args, **_kwargs: state,
+    )
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs._spark",
+        lambda: object(),
+    )
+
+    def refresh(_workspace_id, model_id, **_kwargs):
+        if model_id == "operations":
+            raise RuntimeError("operations refresh failed")
+        return {"request_id": "refresh-analytics", "status": "Completed"}
+
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs._refresh_semantic_model",
+        refresh,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "notebookutils",
+        SimpleNamespace(
+            credentials=SimpleNamespace(getToken=lambda _audience: "token")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="operations refresh failed"):
+        refresh_main(
+            [
+                "--workspace-id",
+                "workspace-1",
+                "--semantic-model-id",
+                "analytics",
+                "--semantic-model-id",
+                "operations",
+            ],
+            config=FabricCandidateAConfig.benchmark(),
+        )
+
+    state.acknowledge_refresh.assert_not_called()
 
 
 def test_write_control_diagnostic_swallows_its_own_failures(

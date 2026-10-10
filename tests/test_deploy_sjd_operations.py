@@ -129,6 +129,7 @@ def test_deploy_operations_reconciles_all_stable_jobs_and_schedules() -> None:
         release_manifest_sha256="a" * 64,
         release_receipt_sha256="b" * 64,
         semantic_model_id="model-1",
+        additional_semantic_model_ids=("model-2",),
         enable_schedules=False,
         now=datetime(2026, 10, 9, 20, 0, tzinfo=timezone.utc),
     )
@@ -154,7 +155,8 @@ def test_deploy_operations_reconciles_all_stable_jobs_and_schedules() -> None:
         "commandLineArguments"
     ]
     assert refresh == (
-        "--workspace-id workspace-1 --semantic-model-id model-1"
+        "--workspace-id workspace-1 --semantic-model-id model-1 "
+        "--semantic-model-id model-2"
     )
     assert result["enabled"] is False
 

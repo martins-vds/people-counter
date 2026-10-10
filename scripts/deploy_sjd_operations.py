@@ -370,6 +370,7 @@ def deploy_operations(
     release_manifest_sha256: str,
     release_receipt_sha256: str,
     semantic_model_id: str,
+    additional_semantic_model_ids: Sequence[str] = (),
     enable_schedules: bool,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -419,6 +420,11 @@ def deploy_operations(
                     "--semantic-model-id",
                     semantic_model_id,
                 ]
+                + [
+                    value
+                    for model_id in additional_semantic_model_ids
+                    for value in ("--semantic-model-id", model_id)
+                ]
             ),
         ),
     }
@@ -463,6 +469,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--semantic-model-id",
         default=ANALYTICS_MODEL_ID,
     )
+    parser.add_argument(
+        "--additional-semantic-model-id",
+        action="append",
+        default=[],
+    )
     parser.add_argument("--release-manifest-sha256", required=True)
     parser.add_argument("--release-receipt-sha256", required=True)
     parser.add_argument("--enable-schedules", action="store_true")
@@ -472,6 +483,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         release_manifest_sha256=arguments.release_manifest_sha256,
         release_receipt_sha256=arguments.release_receipt_sha256,
         semantic_model_id=arguments.semantic_model_id,
+        additional_semantic_model_ids=(
+            arguments.additional_semantic_model_id
+        ),
         enable_schedules=arguments.enable_schedules,
     )
     print(json.dumps(result, allow_nan=False, indent=2, sort_keys=True))
