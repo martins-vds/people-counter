@@ -4,7 +4,7 @@
     "properties": {
         "activities": [
             {
-                "name": "01_register_event",
+                "name": "ValidateManifest",
                 "type": "TridentNotebook",
                 "dependsOn": [],
                 "policy": {
@@ -62,71 +62,9 @@
                             },
                             "type": "string"
                         },
-                        "PIPELINE_RUN_ID": {
-                            "value": {
-                                "value": "@pipeline().RunId",
-                                "type": "Expression"
-                            },
-                            "type": "string"
-                        },
-                        "DATABASE": {
-                            "value": "",
-                            "type": "string"
-                        },
-                        "TABLE_PREFIX": {
-                            "value": "people_counter",
-                            "type": "string"
-                        },
-                        "PROCESSING_ENGINE": {
-                            "value": {
-                                "value": "@pipeline().parameters.PROCESSING_ENGINE",
-                                "type": "Expression"
-                            },
-                            "type": "string"
-                        },
                         "MAX_ATTEMPTS": {
-                            "value": "4",
+                            "value": "3",
                             "type": "int"
-                        },
-                        "PRIORITY": {
-                            "value": "100",
-                            "type": "int"
-                        },
-                        "PIPELINE": {
-                            "value": "rtdetr-osnet",
-                            "type": "string"
-                        },
-                        "DEVICE_VARIANT": {
-                            "value": "cpu",
-                            "type": "string"
-                        },
-                        "DEVICE": {
-                            "value": "cpu",
-                            "type": "string"
-                        },
-                        "BATCH_SIZE": {
-                            "value": "1",
-                            "type": "int"
-                        },
-                        "SAMPLE_FPS": {
-                            "value": "3.0",
-                            "type": "float"
-                        },
-                        "DETECTION_THRESHOLD": {
-                            "value": "0.6",
-                            "type": "float"
-                        },
-                        "USE_FP16": {
-                            "value": false,
-                            "type": "bool"
-                        },
-                        "DETECTOR_MODEL": {
-                            "value": "r18",
-                            "type": "string"
-                        },
-                        "CAMERA_MOTION_COMPENSATION": {
-                            "value": "",
-                            "type": "string"
                         },
                         "SOURCE_STORAGE_ACCOUNT": {
                             "value": "peoplecountingfootage",
@@ -139,7 +77,52 @@
                         "SOURCE_SHORTCUT_ABFS_ROOT": {
                             "value": "abfss://c31ee864-230d-4005-8fd5-7c7130ebf774@onelake.dfs.fabric.microsoft.com/883cff91-eaa8-40be-870f-6e9716303cb2/Files/videos",
                             "type": "string"
+                        },
+                        "PROFILE_ID": {
+                            "value": "onnx-r18-b1-1fps-1t",
+                            "type": "string"
+                        },
+                        "PROFILE_SHA256": {
+                            "value": "2b816ded6660744bb8dc96e26cd284c0bd78105b905b322b01b6b8acaec96c37",
+                            "type": "string"
+                        },
+                        "RELEASE_MANIFEST_SHA256": {
+                            "value": "58c779f12ac490c19fb6f1bfb01e91b24adc94f2c4dd279d8392d2b7243524cc",
+                            "type": "string"
+                        },
+                        "MODEL_ARTIFACT_SHA256_JSON": {
+                            "value": "{\"rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx\":\"da73234e40324fe032847368dccc2aab7297407ac98f2463ff9395b09434b64a\",\"rtdetr_osnet/rtdetr_v2_r18vd/config.json\":\"ed051ec77cb41c5d9d5e3af21a979b1e890599dfd68434d7636ff82ded4c1527\",\"rtdetr_osnet/rtdetr_v2_r18vd/model.onnx\":\"425192fda18c29867123479a7a047cec0797d24a6a68ebbcad1faaa702c00ef3\",\"rtdetr_osnet/rtdetr_v2_r18vd/preprocessor_config.json\":\"cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1\"}",
+                            "type": "string"
                         }
+                    }
+                }
+            },
+            {
+                "name": "RegisterStableWork",
+                "type": "FabricSparkJobDefinition",
+                "dependsOn": [
+                    {
+                        "activity": "ValidateManifest",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.01:00:00",
+                    "retry": 3,
+                    "retryIntervalInSeconds": 60,
+                    "secureOutput": false,
+                    "secureInput": false,
+                    "exponentialRetry": true,
+                    "maxRetryIntervalInSeconds": 900
+                },
+                "typeProperties": {
+                    "sparkJobDefinitionId": "6df10e00-517c-409a-8dd6-40ae9bc62003",
+                    "workspaceId": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+                    "commandLineArguments": {
+                        "value": "@json(activity('ValidateManifest').output.result.exitValue).command_line_arguments",
+                        "type": "Expression"
                     }
                 }
             }
@@ -162,10 +145,6 @@
             },
             "MANIFEST_URI": {
                 "type": "string"
-            },
-            "PROCESSING_ENGINE": {
-                "type": "string",
-                "defaultValue": "EXECUTOR_PARTITION"
             }
         },
         "lastModifiedByObjectId": "0d2a8f4a-0926-4957-afec-7ee6d24e1d61",

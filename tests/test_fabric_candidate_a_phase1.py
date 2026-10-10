@@ -50,9 +50,12 @@ from people_counter.fabric_candidate_a_jobs import (
     _fabric_process_profile,
     _localize_process_inputs,
     _probe_and_persist_consumer_decision,
+    _refresh_semantic_model,
     _write_control_diagnostic,
     control_main,
+    dispatcher_main,
     process_main,
+    refresh_main,
 )
 from people_counter.fabric_capability_probe import CapabilityStatus
 from people_counter.sjd_gold import (
@@ -669,6 +672,145 @@ class MemoryControlStore(FabricControlStoreImpl):
         self.data[suffix] = copy.deepcopy(rows)
 
 
+def test_control_registration_is_idempotent_and_rejects_immutable_conflicts() -> None:
+    store = MemoryControlStore(MemoryFiles())
+    arguments = {
+        "runtime_key": "runtime-a",
+        "duration_seconds": 42.5,
+        "config_sha256": "config-a",
+        "release_digest": "release-a",
+        "max_attempts": 3,
+    }
+
+    registered = store.register("work-a", {"camera_id": "camera-a"}, **arguments)
+    replayed = store.register("work-a", {"camera_id": "camera-a"}, **arguments)
+
+    assert replayed == registered
+    assert replayed.status == "READY"
+    assert len(store.data["work"]) == 1
+    with pytest.raises(
+        ImmutableConflictError,
+        match="registered with different content",
+    ):
+        store.register("work-a", {"camera_id": "camera-b"}, **arguments)
+    assert len(store.data["work"]) == 1
+
+
+def test_fabric_bulk_registration_is_atomic_and_exactly_idempotent() -> None:
+    store = MemoryControlStore(MemoryFiles())
+
+    def request(work_id: str, camera_id: str) -> dict[str, object]:
+        return {
+            "work_id": work_id,
+            "payload": {"camera_id": camera_id},
+            "runtime_key": "runtime-a",
+            "duration_seconds": 42.5,
+            "config_sha256": "config-a",
+            "release_digest": "a" * 64,
+            "max_attempts": 3,
+            "available_at": 25.0,
+        }
+
+    partition = [
+        request("work-a", "camera-a"),
+        request("work-a", "camera-a"),
+        request("work-b", "camera-b"),
+    ]
+    first = store.register_many(partition)
+    second = store.register_many(partition)
+
+    assert first == second
+    assert [item.work_id for item in first] == ["work-a", "work-b"]
+    assert len(store.data["work"]) == 2
+    assert all(row["available_at"] == 25.0 for row in store.data["work"])
+    assert all("updated_at" in row for row in store.data["work"])
+    with pytest.raises(
+        ImmutableConflictError,
+        match="duplicated with different content",
+    ):
+        store.register_many(
+            [
+                request("work-c", "camera-c"),
+                request("work-c", "different-camera"),
+            ]
+        )
+    assert {row["work_id"] for row in store.data["work"]} == {
+        "work-a",
+        "work-b",
+    }
+
+
+def test_fabric_quarantine_terminalizes_only_exact_ready_release_work() -> None:
+    store = MemoryControlStore(MemoryFiles())
+    digest = "a" * 64
+    store.register(
+        "obsolete-work",
+        {"camera_id": "camera-a"},
+        runtime_key="runtime-a",
+        duration_seconds=42.5,
+        config_sha256="config-a",
+        release_digest=digest,
+    )
+
+    first = store.quarantine(
+        {"obsolete-work": digest},
+        operator="release-manager",
+        reason="release evidence is no longer executable",
+    )
+    second = store.quarantine(
+        {"obsolete-work": digest},
+        operator="release-manager",
+        reason="release evidence is no longer executable",
+    )
+
+    assert first == second
+    assert first.work_ids == ("obsolete-work",)
+    assert store.data["work"][0]["status"] == "DEAD"
+    with pytest.raises(ImmutableConflictError, match="release digest differs"):
+        store.quarantine(
+            {"obsolete-work": "b" * 64},
+            operator="release-manager",
+            reason="release evidence is no longer executable",
+        )
+
+
+def test_fabric_claim_respects_atomic_active_batch_limit() -> None:
+    store = MemoryControlStore(MemoryFiles())
+    arguments = {
+        "runtime_key": "runtime-a",
+        "duration_seconds": 10.0,
+        "config_sha256": "config-a",
+        "release_digest": "release-a",
+    }
+    store.register("work-a", {"camera_id": "a"}, **arguments)
+    store.register("work-b", {"camera_id": "b"}, **arguments)
+
+    first = store.claim(
+        "dispatcher-a",
+        max_items=1,
+        maximum_active_batches=1,
+        lease_seconds=100.0,
+        minimum_speed_x=1.0,
+        safety_factor=1.0,
+        margin_seconds=1.0,
+    )
+    blocked = store.claim(
+        "dispatcher-b",
+        max_items=1,
+        maximum_active_batches=1,
+        lease_seconds=100.0,
+        minimum_speed_x=1.0,
+        safety_factor=1.0,
+        margin_seconds=1.0,
+    )
+
+    assert first is not None
+    assert blocked is None
+    assert next(
+        row for row in store.data["work"] if row["work_id"] == "work-b"
+    )["status"] == "READY"
+
+
 class FakeFrame:
     def __init__(self, spark, rows) -> None:
         self.spark = spark
@@ -1146,7 +1288,7 @@ def test_stale_lock_clear_requires_an_exact_expected_owner() -> None:
             "--work-id",
             "work-1",
             "--max-items",
-            "1",
+            "10000",
             "--lease-seconds",
             "60",
         ]
@@ -1168,6 +1310,30 @@ def test_stale_lock_clear_requires_an_exact_expected_owner() -> None:
         ]
     )
     assert replay.additional_attempts == 1
+    quarantine = parser.parse_args(
+        [
+            "quarantine",
+            "--work-evidence",
+            "work-1=" + "a" * 64,
+            "--operator",
+            "operator",
+            "--reason",
+            "reason",
+        ]
+    )
+    assert quarantine.work_evidence == ["work-1=" + "a" * 64]
+    bulk = parser.parse_args(
+        [
+            "bulk-register",
+            "--partition-path",
+            "Files/people-counter/sjd/v1/intake/backfill/run/partition.json",
+            "--partition-sha256",
+            "a" * 64,
+            "--max-items",
+            "1000",
+        ]
+    )
+    assert bulk.max_items == 1000
 
 
 def test_control_parser_rejects_missing_required_and_non_numeric_values() -> None:
@@ -3225,8 +3391,10 @@ def test_control_main_dispatches_all_safe_commands(
 
     store = MagicMock()
     store.register.return_value = Result("work-1")
+    store.register_many.return_value = (SimpleNamespace(work_id="bulk-work"),)
     store.claim.return_value = None
     store.replay.return_value = Result("replay-1")
+    store.quarantine.return_value = Result(["work-1"])
     store.recover.return_value = Result(1)
     store.reconcile.return_value = []
     store_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
@@ -3253,6 +3421,33 @@ def test_control_main_dispatches_all_safe_commands(
         _fake_clear_stale_lock,
     )
     shared_config = FabricCandidateAConfig.benchmark()
+    partition_path = shared_config.file_path(
+        "intake/backfill/run-1/partition.json"
+    )
+    partition_content = json.dumps(
+        {
+            "items": [
+                {
+                    "work_id": "bulk-work",
+                    "payload": {"asset": "safe"},
+                    "runtime_key": "cpu",
+                    "duration_seconds": 1,
+                    "config_sha256": "c" * 64,
+                    "release_digest": "d" * 64,
+                    "max_attempts": 3,
+                    "available_at": None,
+                }
+            ]
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    files = MemoryFiles()
+    files.content[partition_path] = partition_content
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_control.NotebookUtilsOneLakeFiles",
+        lambda: files,
+    )
     commands = (
         ["bootstrap"],
         [
@@ -3269,6 +3464,15 @@ def test_control_main_dispatches_all_safe_commands(
             "c" * 64,
             "--release-digest",
             "release",
+        ],
+        [
+            "bulk-register",
+            "--partition-path",
+            partition_path,
+            "--partition-sha256",
+            hashlib.sha256(partition_content.encode()).hexdigest(),
+            "--max-items",
+            "1",
         ],
         [
             "claim",
@@ -3290,6 +3494,15 @@ def test_control_main_dispatches_all_safe_commands(
             "--reason",
             "test",
         ],
+        [
+            "quarantine",
+            "--work-evidence",
+            "work-1=" + "a" * 64,
+            "--operator",
+            "operator",
+            "--reason",
+            "obsolete release",
+        ],
         ["recover"],
         ["clear-stale-lock", "--expected-owner-id", "owner"],
         ["reconcile"],
@@ -3297,8 +3510,17 @@ def test_control_main_dispatches_all_safe_commands(
     expected_outputs = [
         {"bootstrapped": True},
         {"value": "work-1"},
+        {
+            "partition_path": partition_path,
+            "partition_sha256": hashlib.sha256(
+                partition_content.encode()
+            ).hexdigest(),
+            "item_count": 1,
+            "work_ids_sha256": hashlib.sha256(b"bulk-work").hexdigest(),
+        },
         None,
         {"value": "replay-1"},
+        {"value": ["work-1"]},
         {"value": 1},
         {"cleared_owner_id": "owner", "acquired_at": "never"},
         [],
@@ -3308,6 +3530,19 @@ def test_control_main_dispatches_all_safe_commands(
         printed = json.loads(capsys.readouterr().out)
         assert printed == expected
     assert store.claim.call_args.kwargs["allowed_work_ids"] == ["work-1"]
+    registered_request = store.register_many.call_args.args[0]
+    assert registered_request == [
+        {
+            "work_id": "bulk-work",
+            "payload": {"asset": "safe"},
+            "runtime_key": "cpu",
+            "duration_seconds": 1.0,
+            "config_sha256": "c" * 64,
+            "release_digest": "d" * 64,
+            "max_attempts": 3,
+            "available_at": None,
+        }
+    ]
 
     # Every dispatch call must build the control store from the exact
     # resource/config pair control_main resolved, not a mutated/default one.
@@ -3387,9 +3622,276 @@ def test_control_main_persists_diagnostic_traceback_and_still_raises(
     raw = written["content"]
     key_positions = [
         raw.index(f'"{key}"')
-        for key in ("captured_at", "command", "error_message", "error_type", "traceback")
+        for key in (
+            "captured_at",
+            "command",
+            "error_message",
+            "error_type",
+            "traceback",
+        )
     ]
     assert key_positions == sorted(key_positions)
+
+
+def test_dispatcher_main_claims_one_bounded_batch_and_processes_it(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    claimed = SimpleNamespace(
+        batch_id="batch-1",
+        items=(object(), object()),
+    )
+    store = MagicMock()
+    store.claim.return_value = claimed
+    shared_config = FabricCandidateAConfig.benchmark()
+    monkeypatch.setattr(
+        "people_counter.sjd_control.FabricControlStore",
+        lambda *_args, **_kwargs: store,
+    )
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs._spark",
+        lambda: object(),
+    )
+    process_calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def _process(
+        arguments: list[str],
+        **kwargs: object,
+    ) -> int:
+        process_calls.append((arguments, kwargs))
+        return 0
+
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs.process_main",
+        _process,
+    )
+
+    assert dispatcher_main(
+        [
+            "--owner",
+            "dispatcher-1",
+            "--max-items",
+            "8",
+            "--maximum-active-batches",
+            "2",
+            "--lease-seconds",
+            "7200",
+            "--release-manifest-path",
+            "Files/releases/manifest.json",
+            "--release-manifest-sha256",
+            "a" * 64,
+            "--release-receipt-path",
+            "Files/releases/receipt.json",
+            "--release-receipt-sha256",
+            "b" * 64,
+        ],
+        config=shared_config,
+        route_mode="PRODUCTION",
+    ) == 0
+
+    assert store.claim.call_args.args == ("dispatcher-1",)
+    assert store.claim.call_args.kwargs["max_items"] == 8
+    assert store.claim.call_args.kwargs["maximum_active_batches"] == 2
+    assert process_calls == [
+        (
+            [
+                "--batch-id",
+                "batch-1",
+                "--mode",
+                "sdk",
+                "--release-manifest-path",
+                "Files/releases/manifest.json",
+                "--release-manifest-sha256",
+                "a" * 64,
+                "--release-receipt-path",
+                "Files/releases/receipt.json",
+                "--release-receipt-sha256",
+                "b" * 64,
+            ],
+            {"config": shared_config, "route_mode": "PRODUCTION"},
+        )
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "batch_id": "batch-1",
+        "item_count": 2,
+        "owner": "dispatcher-1",
+        "status": "PROCESSED",
+    }
+
+
+def test_dispatcher_main_is_a_successful_noop_when_capacity_is_full(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = MagicMock()
+    store.claim.return_value = None
+    monkeypatch.setattr(
+        "people_counter.sjd_control.FabricControlStore",
+        lambda *_args, **_kwargs: store,
+    )
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs._spark",
+        lambda: object(),
+    )
+    process = MagicMock()
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs.process_main",
+        process,
+    )
+
+    assert dispatcher_main(
+        [
+            "--owner",
+            "dispatcher-idle",
+            "--release-manifest-path",
+            "Files/releases/manifest.json",
+            "--release-manifest-sha256",
+            "a" * 64,
+            "--release-receipt-path",
+            "Files/releases/receipt.json",
+            "--release-receipt-sha256",
+            "b" * 64,
+        ],
+        config=FabricCandidateAConfig.benchmark(),
+    ) == 0
+
+    process.assert_not_called()
+    assert json.loads(capsys.readouterr().out) == {
+        "maximum_active_batches": 1,
+        "owner": "dispatcher-idle",
+        "status": "IDLE",
+    }
+
+
+def test_refresh_semantic_model_polls_to_completed() -> None:
+    requests: list[tuple[str, str, str, object]] = []
+    responses = iter(
+        [
+            ({}, {"Location": "https://refresh/status/1"}),
+            ({"status": "InProgress"}, {}),
+            (
+                {
+                    "requestId": "refresh-1",
+                    "status": "Completed",
+                },
+                {},
+            ),
+        ]
+    )
+
+    def request_json(
+        method: str,
+        url: str,
+        token: str,
+        payload: object = None,
+    ) -> tuple[dict[str, object], dict[str, str]]:
+        requests.append((method, url, token, payload))
+        return next(responses)
+
+    sleeps: list[float] = []
+    result = _refresh_semantic_model(
+        "workspace-1",
+        "model-1",
+        token="token-1",
+        poll_seconds=5.0,
+        timeout_seconds=30.0,
+        request_json=request_json,
+        clock=lambda: 0.0,
+        sleep=sleeps.append,
+    )
+
+    assert result == {
+        "location": "https://refresh/status/1",
+        "request_id": "refresh-1",
+        "status": "Completed",
+    }
+    assert requests[0] == (
+        "POST",
+        (
+            "https://api.powerbi.com/v1.0/myorg/groups/workspace-1/"
+            "datasets/model-1/refreshes"
+        ),
+        "token-1",
+        {
+            "applyRefreshPolicy": False,
+            "commitMode": "transactional",
+            "retryCount": 2,
+            "type": "Full",
+        },
+    )
+    assert [request[:2] for request in requests[1:]] == [
+        ("GET", "https://refresh/status/1"),
+        ("GET", "https://refresh/status/1"),
+    ]
+    assert sleeps == [5.0]
+
+
+def test_refresh_main_acknowledges_only_after_completed_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state = MagicMock()
+    state.pending_refreshes.return_value = [
+        {"outbox_id": 4, "dedupe_key": "dedupe-4"},
+        {"outbox_id": 5, "dedupe_key": "dedupe-5"},
+    ]
+    state.acknowledge_refresh.return_value = True
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_gold.FabricGoldState",
+        lambda *_args, **_kwargs: state,
+    )
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs._spark",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "people_counter.fabric_candidate_a_jobs._refresh_semantic_model",
+        lambda *_args, **_kwargs: {
+            "request_id": "refresh-1",
+            "status": "Completed",
+        },
+    )
+    credentials = SimpleNamespace(getToken=lambda audience: "token")
+    monkeypatch.setitem(
+        sys.modules,
+        "notebookutils",
+        SimpleNamespace(credentials=credentials),
+    )
+
+    assert refresh_main(
+        [
+            "--workspace-id",
+            "workspace-1",
+            "--semantic-model-id",
+            "model-1",
+        ],
+        config=FabricCandidateAConfig.benchmark(),
+    ) == 0
+
+    assert state.acknowledge_refresh.call_args_list == [
+        (
+            (4,),
+            {
+                "actor": "pc-production-refresh-sjd",
+                "expected_dedupe_key": "dedupe-4",
+            },
+        ),
+        (
+            (5,),
+            {
+                "actor": "pc-production-refresh-sjd",
+                "expected_dedupe_key": "dedupe-5",
+            },
+        ),
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "acknowledged_outbox_ids": [4, 5],
+        "refresh": {
+            "request_id": "refresh-1",
+            "status": "Completed",
+        },
+        "status": "REFRESHED",
+    }
 
 
 def test_write_control_diagnostic_swallows_its_own_failures(

@@ -116,6 +116,14 @@ class ReplayRequest:
 
 
 @dataclass(frozen=True)
+class QuarantineReport:
+    work_ids: tuple[str, ...]
+    operator: str
+    reason: str
+    quarantined_at: float
+
+
+@dataclass(frozen=True)
 class ControlBatchState:
     status: str
     lease_expires_at: float
@@ -137,12 +145,18 @@ class ControlStore(Protocol):
         available_at: float | None = None,
     ) -> RegisteredWork: ...
 
+    def register_many(
+        self,
+        requests: Sequence[Mapping[str, Any]],
+    ) -> tuple[RegisteredWork, ...]: ...
+
     def claim(
         self,
         owner: str,
         *,
         max_items: int,
         lease_seconds: float,
+        maximum_active_batches: int | None = None,
         minimum_speed_x: float | None = None,
         safety_factor: float | None = None,
         margin_seconds: float | None = None,
@@ -164,6 +178,14 @@ class ControlStore(Protocol):
         reason: str,
         additional_attempts: int = 1,
     ) -> ReplayRequest: ...
+
+    def quarantine(
+        self,
+        expected_release_digests: Mapping[str, str],
+        *,
+        operator: str,
+        reason: str,
+    ) -> QuarantineReport: ...
 
 
 class ProcessControlStore(Protocol):
@@ -541,19 +563,94 @@ class SQLiteControlStore:
 
     def register_manifest(self, path: Path) -> tuple[RegisteredWork, ...]:
         """Register all immutable requests in a JSON or JSONL manifest."""
-        return tuple(
-            self.register(
-                request["work_id"],
-                request["payload"],
-                runtime_key=request["runtime_key"],
-                duration_seconds=request["duration_seconds"],
-                config_sha256=request["config_sha256"],
-                release_digest=request["release_digest"],
-                max_attempts=request["max_attempts"],
-                available_at=request["available_at"],
-            )
-            for request in read_registration_manifest(path)
-        )
+        return self.register_many(read_registration_manifest(path))
+
+    def register_many(
+        self,
+        requests: Sequence[Mapping[str, Any]],
+    ) -> tuple[RegisteredWork, ...]:
+        """Atomically register one bounded, prevalidated partition."""
+        normalized = normalize_registration_requests(requests)
+        now = self._now()
+        with self._transaction() as connection:
+            registered: list[RegisteredWork] = []
+            seen: dict[str, tuple[object, ...]] = {}
+            for request in normalized:
+                identity = request["work_id"]
+                payload_json = _canonical_json(request["payload"])
+                payload_sha256 = _sha256_text(payload_json)
+                immutable = (
+                    payload_sha256,
+                    request["runtime_key"],
+                    request["duration_seconds"],
+                    request["config_sha256"],
+                    request["release_digest"],
+                    request["max_attempts"],
+                )
+                previous = seen.get(identity)
+                if previous is not None:
+                    if previous != immutable:
+                        raise ImmutableConflictError(
+                            f"work_id {identity!r} is duplicated with different content"
+                        )
+                    continue
+                seen[identity] = immutable
+                row = connection.execute(
+                    "SELECT * FROM work WHERE work_id = ?", (identity,)
+                ).fetchone()
+                if row is not None:
+                    existing = (
+                        row["payload_sha256"],
+                        row["runtime_key"],
+                        float(row["duration_seconds"]),
+                        row["config_sha256"],
+                        row["release_digest"],
+                        int(row["original_max_attempts"]),
+                    )
+                    if existing != immutable:
+                        raise ImmutableConflictError(
+                            f"work_id {identity!r} has different immutable content"
+                        )
+                    registered.append(self._registered(row))
+                    continue
+                ready_at = (
+                    now
+                    if request["available_at"] is None
+                    else request["available_at"]
+                )
+                connection.execute(
+                    """
+                    INSERT INTO work (
+                        work_id, payload_json, payload_sha256, runtime_key,
+                        duration_seconds, config_sha256, release_digest, status,
+                        max_attempts, original_max_attempts, available_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        identity,
+                        payload_json,
+                        payload_sha256,
+                        request["runtime_key"],
+                        request["duration_seconds"],
+                        request["config_sha256"],
+                        request["release_digest"],
+                        request["max_attempts"],
+                        request["max_attempts"],
+                        ready_at,
+                        now,
+                        now,
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM work WHERE work_id = ?", (identity,)
+                ).fetchone()
+                if row is None:
+                    raise ControlError(
+                        f"registration readback missing work_id {identity!r}"
+                    )
+                registered.append(self._registered(row))
+        return tuple(registered)
 
     def get_work(self, work_id: str) -> RegisteredWork:
         with self._connect() as connection:
@@ -571,6 +668,7 @@ class SQLiteControlStore:
         *,
         max_items: int,
         lease_seconds: float,
+        maximum_active_batches: int | None = None,
         minimum_speed_x: float | None = None,
         safety_factor: float | None = None,
         margin_seconds: float | None = None,
@@ -588,6 +686,16 @@ class SQLiteControlStore:
             or minimum_items > max_items
         ):
             raise ValueError("minimum_items must be between 1 and max_items")
+        if (
+            maximum_active_batches is not None
+            and (
+                type(maximum_active_batches) is not int
+                or not 1 <= maximum_active_batches <= 100
+            )
+        ):
+            raise ValueError(
+                "maximum_active_batches must be between 1 and 100"
+            )
         lease = _positive_finite(lease_seconds, "lease_seconds")
         speed, factor, margin, profile_workers, profile_name = (
             _claim_admission_settings(
@@ -603,6 +711,15 @@ class SQLiteControlStore:
         scope = _allowed_work_scope(allowed_work_ids)
         now = self._now()
         with self._transaction() as connection:
+            if maximum_active_batches is not None:
+                active = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM batches
+                    WHERE status IN ('LEASED', 'SEALED')
+                    """
+                ).fetchone()[0]
+                if int(active) >= maximum_active_batches:
+                    return None
             scope_join = ""
             if scope is not None:
                 if not scope:
@@ -1397,6 +1514,73 @@ class SQLiteControlStore:
                 now,
             )
 
+    def quarantine(
+            self,
+            expected_release_digests: Mapping[str, str],
+            *,
+            operator: str,
+            reason: str,
+    ) -> QuarantineReport:
+            """Terminalize exact READY work whose immutable release is obsolete."""
+            if not isinstance(expected_release_digests, Mapping) or not expected_release_digests:
+                raise ValueError("expected_release_digests must be a non-empty mapping")
+            expected = {
+                _required_text(work_id, "work_id"): _validated_sha256(
+                    digest, f"release digest for {work_id}"
+                )
+                for work_id, digest in expected_release_digests.items()
+            }
+            actor = _required_text(operator, "operator")
+            explanation = _required_text(reason, "reason")
+            now = self._now()
+            with self._transaction() as connection:
+                rows = connection.execute(
+                    f"SELECT * FROM work WHERE work_id IN ({','.join('?' for _ in expected)})",
+                    tuple(expected),
+                ).fetchall()
+                observed = {str(row["work_id"]): row for row in rows}
+                if set(observed) != set(expected):
+                    raise KeyError(sorted(set(expected) - set(observed)))
+                for work_id, digest in expected.items():
+                    row = observed[work_id]
+                    marker = _canonical_json(
+                        {
+                            "operation": "quarantine",
+                            "operator": actor,
+                            "reason": explanation,
+                            "release_digest": digest,
+                        }
+                    )
+                    if row["release_digest"] != digest:
+                        raise ImmutableConflictError(
+                            f"work {work_id} release digest differs"
+                        )
+                    if row["status"] == "DEAD" and row["last_error"] == marker:
+                        continue
+                    if row["status"] != "READY" or row["committed_attempt_id"] is not None:
+                        raise ControlError(
+                            f"work {work_id} is not quarantine-eligible; "
+                            f"status={row['status']}"
+                        )
+                    connection.execute(
+                        """
+                        UPDATE work SET status = 'DEAD', available_at = ?,
+                            last_error = ?, updated_at = ?
+                        WHERE work_id = ? AND status = 'READY'
+                            AND release_digest = ? AND committed_attempt_id IS NULL
+                        """,
+                        (now, marker, now, work_id, digest),
+                    )
+                readback = connection.execute(
+                    f"SELECT work_id, status FROM work WHERE work_id IN ({','.join('?' for _ in expected)})",
+                    tuple(expected),
+                ).fetchall()
+                if {str(row["work_id"]): row["status"] for row in readback} != {
+                    work_id: "DEAD" for work_id in expected
+                }:
+                    raise ControlError("quarantine exact readback failed")
+            return QuarantineReport(tuple(sorted(expected)), actor, explanation, now)
+
     def reconcile(
         self, *, now: float | None = None
     ) -> list[ReconciliationFinding]:
@@ -2185,13 +2369,12 @@ def _json_print(value: Any) -> None:
     print(_canonical_json(value))
 
 
-def read_registration_manifest(path: Path) -> list[dict[str, Any]]:
-    """Read a nonempty JSON array/object or JSONL registration manifest."""
-    resolved = Path(path).expanduser().resolve()
-    try:
-        text = resolved.read_text(encoding="utf-8")
-    except OSError as error:
-        raise ValueError(f"cannot read registration manifest {resolved}") from error
+def parse_registration_manifest(
+    text: str,
+    *,
+    source: str = "registration manifest",
+) -> list[dict[str, Any]]:
+    """Parse and validate a nonempty JSON array/object or JSONL manifest."""
     try:
         decoded: Any = json.loads(text)
     except json.JSONDecodeError:
@@ -2203,14 +2386,27 @@ def read_registration_manifest(path: Path) -> list[dict[str, Any]]:
                 decoded.append(json.loads(line))
             except json.JSONDecodeError as error:
                 raise ValueError(
-                    f"invalid JSONL at {resolved}:{line_number}"
+                    f"invalid JSONL at {source}:{line_number}"
                 ) from error
     if isinstance(decoded, Mapping):
         decoded = decoded.get("items", [decoded])
     if not isinstance(decoded, list) or not decoded:
         raise ValueError("registration manifest must contain at least one item")
+    return normalize_registration_requests(decoded)
+
+
+def normalize_registration_requests(
+    values: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate registration items into one canonical in-memory shape."""
+    if not isinstance(values, Sequence) or isinstance(
+        values, (str, bytes, bytearray)
+    ):
+        raise ValueError("registration requests must be a sequence")
+    if not values:
+        raise ValueError("registration manifest must contain at least one item")
     requests: list[dict[str, Any]] = []
-    for index, raw in enumerate(decoded):
+    for index, raw in enumerate(values):
         if not isinstance(raw, Mapping):
             raise ValueError(f"registration item {index} must be an object")
         payload = raw.get("payload")
@@ -2245,6 +2441,16 @@ def read_registration_manifest(path: Path) -> list[dict[str, Any]]:
             }
         )
     return requests
+
+
+def read_registration_manifest(path: Path) -> list[dict[str, Any]]:
+    """Read a nonempty JSON array/object or JSONL registration manifest."""
+    resolved = Path(path).expanduser().resolve()
+    try:
+        text = resolved.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ValueError(f"cannot read registration manifest {resolved}") from error
+    return parse_registration_manifest(text, source=str(resolved))
 
 
 def _parser() -> argparse.ArgumentParser:

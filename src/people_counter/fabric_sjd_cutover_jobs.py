@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -16,6 +17,10 @@ from people_counter.fabric_sjd_cutover import (
     CA_PREFIX,
     CA_SHADOW_ONLY_TABLES,
     CUTOVER_ID,
+    LEGACY_COMMITTED_VIEWS,
+    LEGACY_TABLE_ALLOWLIST,
+    STOPPED_STATES,
+    WRITER_ITEM_IDS,
     SourceTableState,
     StoppedWriterGate,
     TRANSFERABLE_SUFFIXES,
@@ -23,13 +28,18 @@ from people_counter.fabric_sjd_cutover import (
     append_journal_once,
     archive_and_delete_synthetic_work,
     archive_ca_tables,
+    archive_legacy_tables,
     canonical_bytes,
     complete_synthetic_cleanup,
     create_stable_tables,
     retire_archived_ca_tables,
+    retire_archived_legacy_tables,
+    legacy_retirement_bundle_path,
     retirement_manifest_sources,
     sha256,
     snapshot_ca_tables,
+    snapshot_legacy_tables,
+    snapshot_legacy_views,
     synthetic_work_inventory,
     validate_retirement_archives,
     validate_stopped_writer_gate,
@@ -216,21 +226,88 @@ def config_table_suffixes() -> frozenset[str]:
     return TABLE_SUFFIXES
 
 
+def _writer_states(values: Sequence[str]) -> tuple[WriterState, ...]:
+    states: dict[str, str] = {}
+    for value in values:
+        try:
+            item_id, state = value.split("=", 1)
+        except ValueError as error:
+            raise ValueError("writer state must be item_id=state") from error
+        if item_id not in WRITER_ITEM_IDS:
+            raise ValueError(f"writer state item is outside allowlist: {item_id}")
+        if item_id in states:
+            raise ValueError(f"duplicate writer state for {item_id}")
+        if state not in STOPPED_STATES:
+            raise ValueError(f"writer is not stopped: {item_id}={state}")
+        states[item_id] = state
+    if set(states) != set(WRITER_ITEM_IDS):
+        raise ValueError("writer states do not match the exact allowlist")
+    return tuple(WriterState(item_id, states[item_id]) for item_id in sorted(states))
+
+
+def capture_legacy_gate(
+    spark: Any,
+    *,
+    gate_id: str,
+    writer_states: Sequence[str],
+    captured_at: float | None = None,
+) -> dict[str, Any]:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", gate_id) is None:
+        raise ValueError("gate ID is not canonical")
+    writers = _writer_states(writer_states)
+    sources = snapshot_legacy_tables(spark, LEGACY_TABLE_ALLOWLIST)
+    routing_table = f"{CA_PREFIX}routing_allowlist"
+    routing_to_ca = (
+        int(spark.table(routing_table).count())
+        if spark.catalog.tableExists(routing_table)
+        else 0
+    )
+    timestamp = time.time() if captured_at is None else captured_at
+    unsigned = {
+        "captured_at": timestamp,
+        "routing_to_ca": routing_to_ca,
+        "source_tables": [asdict(item) for item in sources],
+        "writer_states": [asdict(item) for item in writers],
+    }
+    gate = StoppedWriterGate(
+        captured_at=timestamp,
+        writer_states=writers,
+        source_tables=sources,
+        routing_to_ca=routing_to_ca,
+        evidence_sha256=sha256(unsigned),
+    )
+    validate_stopped_writer_gate(gate, sources, now=timestamp)
+    return {
+        "schema": "people-counter-legacy-stopped-writer-gate-v1",
+        **unsigned,
+        "evidence_sha256": gate.evidence_sha256,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pc-production-schema-cutover")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("inventory", "bootstrap", "synthetic-inventory"):
         command = commands.add_parser(name)
         command.add_argument("--evidence-id", required=True)
+    capture_legacy = commands.add_parser("capture-legacy-gate")
+    capture_legacy.add_argument("--gate-id", required=True)
+    capture_legacy.add_argument("--writer-state", action="append", required=True)
     archive = commands.add_parser("archive")
     archive.add_argument("--bundle-id", required=True)
     archive.add_argument("--gate-path", required=True)
+    archive_legacy = commands.add_parser("archive-legacy")
+    archive_legacy.add_argument("--bundle-id", required=True)
+    archive_legacy.add_argument("--gate-path", required=True)
     cleanup = commands.add_parser("cleanup-synthetic")
     cleanup.add_argument("--cleanup-id", required=True)
     cleanup.add_argument("--work-evidence", action="append", required=True)
     retire = commands.add_parser("retire")
     retire.add_argument("--bundle-id", required=True)
     retire.add_argument("--gate-path", required=True)
+    retire_legacy = commands.add_parser("retire-legacy")
+    retire_legacy.add_argument("--bundle-id", required=True)
+    retire_legacy.add_argument("--gate-path", required=True)
     return parser
 
 
@@ -306,50 +383,88 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.cleanup_id,
             _work_evidence(arguments.work_evidence),
         )
-    elif arguments.command == "archive":
+    elif arguments.command == "capture-legacy-gate":
+        result = capture_legacy_gate(
+            spark,
+            gate_id=arguments.gate_id,
+            writer_states=arguments.writer_state,
+        )
+        _write_immutable_json(
+            f"{EVIDENCE_ROOT}/gates/{arguments.gate_id}.json",
+            result,
+        )
+    elif arguments.command in {"archive", "archive-legacy"}:
         import notebookutils
 
-        gate = _stopped_gate_path(arguments.gate_path)
-        before = snapshot_ca_tables(spark, CA_TABLE_ALLOWLIST)
-        validate_stopped_writer_gate(gate, before)
-        manifest_path = (
-            f"{retirement_bundle_path(arguments.bundle_id)}/manifest.json"
+        legacy = arguments.command == "archive-legacy"
+        table_names = LEGACY_TABLE_ALLOWLIST if legacy else CA_TABLE_ALLOWLIST
+        snapshot = snapshot_legacy_tables if legacy else snapshot_ca_tables
+        bundle_path = (
+            legacy_retirement_bundle_path
+            if legacy
+            else retirement_bundle_path
         )
+        gate = _stopped_gate_path(arguments.gate_path)
+        before = snapshot(spark, table_names)
+        validate_stopped_writer_gate(gate, before)
+        manifest_path = f"{bundle_path(arguments.bundle_id)}/manifest.json"
         if notebookutils.fs.exists(manifest_path):
             result = _read_immutable_json(manifest_path)
             validate_retirement_archives(spark, result, before)
         else:
-            result = archive_ca_tables(
-                spark,
-                bundle_id=arguments.bundle_id,
-                table_names=CA_TABLE_ALLOWLIST,
-                path_exists=notebookutils.fs.exists,
-            )
-        after = snapshot_ca_tables(spark, CA_TABLE_ALLOWLIST)
+            if legacy:
+                result = archive_legacy_tables(
+                    spark,
+                    bundle_id=arguments.bundle_id,
+                    table_names=table_names,
+                    view_names=LEGACY_COMMITTED_VIEWS,
+                    path_exists=notebookutils.fs.exists,
+                )
+            else:
+                result = archive_ca_tables(
+                    spark,
+                    bundle_id=arguments.bundle_id,
+                    table_names=table_names,
+                    path_exists=notebookutils.fs.exists,
+                )
+        after = snapshot(spark, table_names)
         validate_stopped_writer_gate(gate, after)
         _write_immutable_json(manifest_path, result)
     else:
         import notebookutils
 
-        gate = _stopped_gate_path(arguments.gate_path)
-        manifest_path = (
-            f"{retirement_bundle_path(arguments.bundle_id)}/manifest.json"
+        legacy = arguments.command == "retire-legacy"
+        table_names = LEGACY_TABLE_ALLOWLIST if legacy else CA_TABLE_ALLOWLIST
+        snapshot = snapshot_legacy_tables if legacy else snapshot_ca_tables
+        bundle_path = (
+            legacy_retirement_bundle_path
+            if legacy
+            else retirement_bundle_path
         )
+        gate = _stopped_gate_path(arguments.gate_path)
+        manifest_path = f"{bundle_path(arguments.bundle_id)}/manifest.json"
         if notebookutils.fs.exists(manifest_path):
             manifest = _read_immutable_json(manifest_path)
         else:
-            manifest = archive_ca_tables(
-                spark,
-                bundle_id=arguments.bundle_id,
-                table_names=CA_TABLE_ALLOWLIST,
-                path_exists=notebookutils.fs.exists,
-            )
+            if legacy:
+                manifest = archive_legacy_tables(
+                    spark,
+                    bundle_id=arguments.bundle_id,
+                    table_names=table_names,
+                    view_names=LEGACY_COMMITTED_VIEWS,
+                    path_exists=notebookutils.fs.exists,
+                )
+            else:
+                manifest = archive_ca_tables(
+                    spark,
+                    bundle_id=arguments.bundle_id,
+                    table_names=table_names,
+                    path_exists=notebookutils.fs.exists,
+                )
         if manifest.get("bundle_id") != arguments.bundle_id:
             raise ValueError("retirement manifest bundle differs")
         _write_immutable_json(manifest_path, manifest)
-        result_path = (
-            f"{retirement_bundle_path(arguments.bundle_id)}/retirement.json"
-        )
+        result_path = f"{bundle_path(arguments.bundle_id)}/retirement.json"
         if notebookutils.fs.exists(result_path):
             result = _read_immutable_json(result_path)
             unsigned_result = {
@@ -364,11 +479,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise ValueError("retirement result evidence differs")
             validate_stopped_writer_gate(gate, gate.source_tables)
-            current = snapshot_ca_tables(spark, CA_TABLE_ALLOWLIST)
+            current = snapshot(spark, table_names)
             if any(state.exists for state in current) or result.get(
                 "post_retirement"
             ) != [asdict(state) for state in current]:
                 raise ValueError("retirement result does not match current catalog")
+            if legacy:
+                current_views = snapshot_legacy_views(
+                    spark,
+                    LEGACY_COMMITTED_VIEWS,
+                )
+                if any(view.exists for view in current_views) or result.get(
+                    "post_retirement_views"
+                ) != [asdict(view) for view in current_views]:
+                    raise ValueError(
+                        "retirement result does not match current views"
+                    )
             rollback = validate_retirement_archives(
                 spark,
                 manifest,
@@ -377,13 +503,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result.get("rollback") != rollback:
                 raise ValueError("retirement rollback proof differs")
         else:
-            result = retire_archived_ca_tables(
-                spark,
-                gate=gate,
-                manifest=manifest,
-                table_names=CA_TABLE_ALLOWLIST,
-                path_exists=notebookutils.fs.exists,
-            )
+            if legacy:
+                result = retire_archived_legacy_tables(
+                    spark,
+                    gate=gate,
+                    manifest=manifest,
+                    table_names=table_names,
+                    view_names=LEGACY_COMMITTED_VIEWS,
+                    path_exists=notebookutils.fs.exists,
+                )
+            else:
+                result = retire_archived_ca_tables(
+                    spark,
+                    gate=gate,
+                    manifest=manifest,
+                    table_names=table_names,
+                    path_exists=notebookutils.fs.exists,
+                )
             _write_immutable_json(result_path, result)
         retired_at = datetime.fromisoformat(str(result["retired_at"]))
         if retired_at.tzinfo is None:

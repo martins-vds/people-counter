@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -15,11 +16,11 @@ def _manifest() -> dict[str, object]:
         "schema": "people-counter-candidate-a-detached-release-v1",
         "release_identity_sha256": provenance.RELEASE_IDENTITY_SHA256,
         "package_version": identity.package_version,
-        "wheel_filename": "people_counter-0.9.49-py3-none-any.whl",
+        "wheel_filename": "people_counter-0.9.55-py3-none-any.whl",
         "wheel_sha256": "1" * 64,
         "cpu_lock_filename": "requirements-cpu.lock",
         "cpu_lock_sha256": "2" * 64,
-        "cpu_bundle_filename": "people-counter-0.9.49-cpu.zip",
+        "cpu_bundle_filename": "people-counter-0.9.55-cpu.zip",
         "cpu_bundle_sha256": "3" * 64,
         "build_input_sha256": identity.build_input_sha256,
         "workspace_id": identity.workspace_id,
@@ -78,11 +79,15 @@ def test_embedded_identity_contains_no_final_artifact_hashes() -> None:
             / "candidate_a_release_identity.json"
         ).read_text(encoding="utf-8")
     )
-    assert raw["package_version"] == "0.9.49"
+    assert raw["package_version"] == "0.9.55"
     assert "wheel_sha256" not in raw
     assert "cpu_bundle_sha256" not in raw
     assert "environment_target_version" not in raw
-    assert provenance.RELEASE_IDENTITY.release_evidence_root.endswith("/0.9.49")
+    assert provenance.RELEASE_IDENTITY.release_evidence_root.endswith("/0.9.55")
+    assert all(
+        str(uuid.UUID(item_id)) == item_id
+        for item_id in provenance.RELEASE_IDENTITY.sjd_ids.values()
+    )
 
 
 def test_detached_manifest_and_receipt_bind_exact_independent_bytes(
@@ -98,7 +103,7 @@ def test_detached_manifest_and_receipt_bind_exact_independent_bytes(
         receipt_path,
         expected_manifest_sha256=manifest_sha256,
         expected_receipt_sha256=receipt_sha256,
-        observed_package_version="0.9.49",
+        observed_package_version="0.9.55",
     )
 
     assert evidence.manifest.wheel_sha256 == "1" * 64

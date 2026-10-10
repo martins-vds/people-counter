@@ -19,6 +19,12 @@ def process_main(argv: Sequence[str] | None = None) -> int:
     return run(argv, config=FabricSjdConfig(), route_mode="PRODUCTION")
 
 
+def dispatcher_main(argv: Sequence[str] | None = None) -> int:
+    from people_counter.fabric_sjd_runtime import dispatcher_main as run
+
+    return run(argv, config=FabricSjdConfig(), route_mode="PRODUCTION")
+
+
 def reconciliation_main(argv: Sequence[str] | None = None) -> int:
     arguments = ["reconcile"] if argv is None else list(argv)
     if arguments != ["reconcile"]:
@@ -28,5 +34,11 @@ def reconciliation_main(argv: Sequence[str] | None = None) -> int:
 
 def gold_main(argv: Sequence[str] | None = None) -> int:
     from people_counter.fabric_sjd_runtime import gold_main as run
+
+    return run(argv, config=FabricSjdConfig())
+
+
+def refresh_main(argv: Sequence[str] | None = None) -> int:
+    from people_counter.fabric_sjd_runtime import refresh_main as run
 
     return run(argv, config=FabricSjdConfig())

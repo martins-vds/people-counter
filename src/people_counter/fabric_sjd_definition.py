@@ -11,7 +11,9 @@ from people_counter.fabric_sjd import ENVIRONMENT_ID, LAKEHOUSE_ID
 
 ENTRY_POINTS: Mapping[str, str] = {
     "control": "people_counter.fabric_sjd_jobs:control_main",
+    "dispatcher": "people_counter.fabric_sjd_jobs:dispatcher_main",
     "process": "people_counter.fabric_sjd_jobs:process_main",
+    "refresh": "people_counter.fabric_sjd_jobs:refresh_main",
     "reconciliation": "people_counter.fabric_sjd_jobs:reconciliation_main",
     "gold": "people_counter.fabric_sjd_jobs:gold_main",
     "cutover": "people_counter.fabric_sjd_cutover_jobs:main",

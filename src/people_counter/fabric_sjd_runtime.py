@@ -7,12 +7,15 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 import re
 import sys
 import tempfile
 import time
 import traceback
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -1042,6 +1045,10 @@ def _control_parser() -> argparse.ArgumentParser:
     register.add_argument("--config-sha256", required=True)
     register.add_argument("--release-digest", required=True)
     register.add_argument("--max-attempts", type=int, default=3)
+    bulk_register = commands.add_parser("bulk-register")
+    bulk_register.add_argument("--partition-path", required=True)
+    bulk_register.add_argument("--partition-sha256", required=True)
+    bulk_register.add_argument("--max-items", required=True, type=int)
     claim = commands.add_parser("claim")
     claim.add_argument("--owner", required=True)
     claim.add_argument("--work-id", action="append")
@@ -1056,6 +1063,10 @@ def _control_parser() -> argparse.ArgumentParser:
     replay.add_argument("--operator", required=True)
     replay.add_argument("--reason", required=True)
     replay.add_argument("--additional-attempts", type=int, default=1)
+    quarantine = commands.add_parser("quarantine")
+    quarantine.add_argument("--work-evidence", action="append", required=True)
+    quarantine.add_argument("--operator", required=True)
+    quarantine.add_argument("--reason", required=True)
     recover = commands.add_parser("recover")
     recover.add_argument("--now", type=float)
     clear_lock = commands.add_parser("clear-stale-lock")
@@ -1216,6 +1227,51 @@ def _control_dispatch(
                 max_attempts=arguments.max_attempts,
             )
         )
+    elif arguments.command == "bulk-register":
+        from people_counter.fabric_candidate_a_control import (
+            NotebookUtilsOneLakeFiles,
+        )
+        from people_counter.sjd_control import parse_registration_manifest
+
+        if not 1 <= arguments.max_items <= 10_000:
+            raise ValueError("--max-items must be between 1 and 10000")
+        expected_prefix = selected.file_path("intake/backfill") + "/"
+        partition_path = selected.validate_files_path(arguments.partition_path)
+        if not partition_path.startswith(expected_prefix):
+            raise ValueError(
+                "--partition-path must be under the stable backfill intake root"
+            )
+        partition_sha256 = arguments.partition_sha256
+        if re.fullmatch(r"[0-9a-f]{64}", partition_sha256) is None:
+            raise ValueError(
+                "--partition-sha256 must be 64 lowercase hexadecimal characters"
+            )
+        content = NotebookUtilsOneLakeFiles().read_text(partition_path)
+        actual_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if actual_sha256 != partition_sha256:
+            raise ValueError(
+                "backfill partition digest mismatch: "
+                f"expected {partition_sha256}, got {actual_sha256}"
+            )
+        requests = parse_registration_manifest(
+            content,
+            source=partition_path,
+        )
+        if len(requests) > arguments.max_items:
+            raise ValueError(
+                "backfill partition contains "
+                f"{len(requests)} items; maximum is {arguments.max_items}"
+            )
+        registered = store.register_many(requests)
+        identities = "\n".join(item.work_id for item in registered)
+        result = {
+            "partition_path": partition_path,
+            "partition_sha256": partition_sha256,
+            "item_count": len(registered),
+            "work_ids_sha256": hashlib.sha256(
+                identities.encode("utf-8")
+            ).hexdigest(),
+        }
     elif arguments.command == "claim":
         claimed = store.claim(
             arguments.owner,
@@ -1235,6 +1291,22 @@ def _control_dispatch(
                 operator=arguments.operator,
                 reason=arguments.reason,
                 additional_attempts=arguments.additional_attempts,
+            )
+        )
+    elif arguments.command == "quarantine":
+        evidence: dict[str, str] = {}
+        for value in arguments.work_evidence:
+            work_id, separator, digest = value.partition("=")
+            if not separator or work_id in evidence:
+                raise ValueError(
+                    "--work-evidence must contain unique WORK_ID=SHA256 values"
+                )
+            evidence[work_id] = digest
+        result = asdict(
+            store.quarantine(
+                evidence,
+                operator=arguments.operator,
+                reason=arguments.reason,
             )
         )
     elif arguments.command == "recover":
@@ -1270,6 +1342,288 @@ def _process_parser() -> argparse.ArgumentParser:
         action="store_true",
     )
     return parser
+
+
+def _dispatcher_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="pc-production-dispatcher-sjd")
+    parser.add_argument("--owner")
+    parser.add_argument("--max-items", type=int, default=64)
+    parser.add_argument("--maximum-active-batches", type=int, default=1)
+    parser.add_argument("--lease-seconds", type=float, default=14_400.0)
+    parser.add_argument("--minimum-speed-x", type=float, default=1.0)
+    parser.add_argument("--safety-factor", type=float, default=1.25)
+    parser.add_argument("--margin-seconds", type=float, default=60.0)
+    parser.add_argument("--minimum-items", type=int, default=1)
+    parser.add_argument("--mode", choices=("probe", "sdk"), default="sdk")
+    parser.add_argument("--peak-rss-mib", type=int)
+    parser.add_argument("--release-manifest-path", required=True)
+    parser.add_argument("--release-manifest-sha256", required=True)
+    parser.add_argument("--release-receipt-path", required=True)
+    parser.add_argument("--release-receipt-sha256", required=True)
+    return parser
+
+
+def dispatcher_main(
+    argv: Sequence[str] | None = None,
+    *,
+    config: FabricCandidateAConfig | None = None,
+    route_mode: str | None = None,
+) -> int:
+    """Atomically claim at most one bounded batch and process it."""
+    arguments = _dispatcher_parser().parse_args(argv)
+    from people_counter.sjd_control import FabricControlStore
+
+    selected = config or FabricCandidateAConfig()
+    selected.require_write_enabled()
+    owner = arguments.owner or f"pc-production-dispatcher-{uuid.uuid4().hex}"
+    store = FabricControlStore(_spark(), config=selected)
+    try:
+        claimed = store.claim(
+            owner,
+            max_items=arguments.max_items,
+            maximum_active_batches=arguments.maximum_active_batches,
+            lease_seconds=arguments.lease_seconds,
+            minimum_speed_x=arguments.minimum_speed_x,
+            safety_factor=arguments.safety_factor,
+            margin_seconds=arguments.margin_seconds,
+            minimum_items=arguments.minimum_items,
+        )
+        if claimed is None:
+            print(
+                json.dumps(
+                    {
+                        "maximum_active_batches": (
+                            arguments.maximum_active_batches
+                        ),
+                        "owner": owner,
+                        "status": "IDLE",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        process_arguments = [
+            "--batch-id",
+            claimed.batch_id,
+            "--mode",
+            arguments.mode,
+            "--release-manifest-path",
+            arguments.release_manifest_path,
+            "--release-manifest-sha256",
+            arguments.release_manifest_sha256,
+            "--release-receipt-path",
+            arguments.release_receipt_path,
+            "--release-receipt-sha256",
+            arguments.release_receipt_sha256,
+        ]
+        if arguments.peak_rss_mib is not None:
+            process_arguments.extend(
+                ["--peak-rss-mib", str(arguments.peak_rss_mib)]
+            )
+        result = process_main(
+            process_arguments,
+            config=selected,
+            route_mode=route_mode,
+        )
+        if result != 0:
+            raise RuntimeError(
+                f"stable process returned unexpected exit code {result}"
+            )
+        print(
+            json.dumps(
+                {
+                    "batch_id": claimed.batch_id,
+                    "item_count": len(claimed.items),
+                    "owner": owner,
+                    "status": "PROCESSED",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    except Exception as error:
+        _write_control_diagnostic(
+            selected,
+            "dispatch",
+            error,
+            prefix="dispatcher",
+        )
+        raise
+
+
+def _refresh_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="pc-production-refresh-sjd")
+    parser.add_argument("--workspace-id", required=True)
+    parser.add_argument("--semantic-model-id", required=True)
+    parser.add_argument("--poll-seconds", type=float, default=15.0)
+    parser.add_argument("--timeout-seconds", type=float, default=7200.0)
+    return parser
+
+
+def _power_bi_json(
+    method: str,
+    url: str,
+    token: str,
+    payload: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], Mapping[str, str]]:
+    body = (
+        None
+        if payload is None
+        else json.dumps(
+            payload,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            content = response.read()
+            parsed = json.loads(content) if content else {}
+            if not isinstance(parsed, dict):
+                raise RuntimeError(
+                    f"{method} {url} returned non-object JSON"
+                )
+            return parsed, dict(response.headers)
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"{method} {url} returned {error.code}: {detail}"
+        ) from error
+
+
+def _refresh_semantic_model(
+    workspace_id: str,
+    semantic_model_id: str,
+    *,
+    token: str,
+    poll_seconds: float,
+    timeout_seconds: float,
+    request_json: Any = _power_bi_json,
+    clock: Any = time.monotonic,
+    sleep: Any = time.sleep,
+) -> dict[str, Any]:
+    if not math.isfinite(poll_seconds) or poll_seconds <= 0:
+        raise ValueError("poll_seconds must be finite and positive")
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be finite and positive")
+    base = (
+        "https://api.powerbi.com/v1.0/myorg/groups/"
+        f"{workspace_id}/datasets/{semantic_model_id}/refreshes"
+    )
+    _, headers = request_json(
+        "POST",
+        base,
+        token,
+        {
+            "applyRefreshPolicy": False,
+            "commitMode": "transactional",
+            "retryCount": 2,
+            "type": "Full",
+        },
+    )
+    location = headers.get("Location") or headers.get("location")
+    if not isinstance(location, str) or not location:
+        raise RuntimeError("Power BI refresh response omitted Location")
+    deadline = clock() + timeout_seconds
+    while True:
+        status, _ = request_json("GET", location, token)
+        state = str(status.get("status", ""))
+        if state == "Completed":
+            return {
+                "location": location,
+                "request_id": status.get("requestId"),
+                "status": state,
+            }
+        if state in {"Failed", "Cancelled", "Disabled"}:
+            raise RuntimeError(
+                "Power BI semantic refresh failed: "
+                + json.dumps(status, allow_nan=False, sort_keys=True)
+            )
+        if state not in {"", "Unknown", "NotStarted", "InProgress"}:
+            raise RuntimeError(
+                f"Power BI semantic refresh returned unknown status {state!r}"
+            )
+        if clock() >= deadline:
+            raise TimeoutError(
+                f"Power BI semantic refresh exceeded {timeout_seconds} seconds"
+            )
+        sleep(poll_seconds)
+
+
+def refresh_main(
+    argv: Sequence[str] | None = None,
+    *,
+    config: FabricCandidateAConfig | None = None,
+) -> int:
+    """Refresh the stable semantic model and acknowledge its durable outbox."""
+    arguments = _refresh_parser().parse_args(argv)
+    from people_counter.fabric_candidate_a_gold import FabricGoldState
+    import notebookutils
+
+    selected = config or FabricCandidateAConfig()
+    selected.require_write_enabled()
+    state = FabricGoldState(_spark(), config=selected)
+    pending = state.pending_refreshes()
+    if not pending:
+        print(json.dumps({"status": "IDLE"}, sort_keys=True))
+        return 0
+    try:
+        token = str(notebookutils.credentials.getToken("pbi"))
+        if not token:
+            raise RuntimeError("NotebookUtils returned an empty Power BI token")
+        refresh = _refresh_semantic_model(
+            arguments.workspace_id,
+            arguments.semantic_model_id,
+            token=token,
+            poll_seconds=arguments.poll_seconds,
+            timeout_seconds=arguments.timeout_seconds,
+        )
+        acknowledged = []
+        for item in pending:
+            outbox_id = int(item["outbox_id"])
+            dedupe_key = str(item["dedupe_key"])
+            if not state.acknowledge_refresh(
+                outbox_id,
+                actor="pc-production-refresh-sjd",
+                expected_dedupe_key=dedupe_key,
+            ):
+                raise RuntimeError(
+                    f"semantic refresh outbox {outbox_id} was not acknowledged"
+                )
+            acknowledged.append(outbox_id)
+        print(
+            json.dumps(
+                {
+                    "acknowledged_outbox_ids": acknowledged,
+                    "refresh": refresh,
+                    "status": "REFRESHED",
+                },
+                allow_nan=False,
+                sort_keys=True,
+            )
+        )
+        return 0
+    except Exception as error:
+        _write_control_diagnostic(
+            selected,
+            "refresh",
+            error,
+            prefix="refresh",
+        )
+        raise
 
 
 def _configure_after_stage_failure(harness: Any, enabled: bool) -> None:

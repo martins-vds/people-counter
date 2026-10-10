@@ -1,4 +1,5 @@
 import ast
+import base64
 import hashlib
 import io
 import json
@@ -6,6 +7,7 @@ import math
 import re
 import sys
 import tempfile
+import types
 import unittest
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -37,6 +39,9 @@ EXECUTOR_DISPATCHER_PIPELINE = (
     NOTEBOOKS / "exports" / "pc-dispatcher-executor-00.json"
 )
 EVENT_INTAKE_PIPELINE = NOTEBOOKS / "exports" / "pc-event-intake.json"
+EVENT_INTAKE_NOTEBOOK = NOTEBOOKS / "01_register_event.ipynb"
+BACKFILL_PIPELINE = NOTEBOOKS / "exports" / "pc-backfill-register.json"
+BACKFILL_NOTEBOOK = NOTEBOOKS / "02_register_backfill.ipynb"
 
 
 def cell_source(path, cell_id):
@@ -84,6 +89,53 @@ class WorkerLeaseError(RuntimeError):
 
 
 class FabricNotebookTests(unittest.TestCase):
+    def execute_event_intake(self, manifest, **overrides):
+        parameters = {
+            "EVENT_SOURCE": "/subscriptions/test/resourceGroups/test",
+            "EVENT_ID": "event-a",
+            "EVENT_TYPE": "Microsoft.Storage.BlobRenamed",
+            "EVENT_TIME": "2026-09-23T12:00:00Z",
+            "SUBJECT": "/blobServices/default/containers/videos/blobs/incoming/video.json",
+            "MANIFEST_URI": (
+                "https://peoplecountingfootage.dfs.core.windows.net/"
+                "videos/incoming/video.json"
+            ),
+            "SOURCE_STORAGE_ACCOUNT": "peoplecountingfootage",
+            "SOURCE_CONTAINER": "videos",
+            "SOURCE_SHORTCUT_ABFS_ROOT": (
+                "abfss://workspace@onelake.dfs.fabric.microsoft.com/"
+                "lakehouse/Files/videos"
+            ),
+            "PROFILE_ID": "onnx-r18-b1-1fps-1t",
+            "PROFILE_SHA256": "2" * 64,
+            "RELEASE_MANIFEST_SHA256": "d" * 64,
+            "MODEL_ARTIFACT_SHA256_JSON": json.dumps(
+                {
+                    "rtdetr_osnet/rtdetr_v2_r18vd/config.json": "a" * 64,
+                    "rtdetr_osnet/rtdetr_v2_r18vd/preprocessor_config.json": "b" * 64,
+                    "rtdetr_osnet/rtdetr_v2_r18vd/model.onnx": "c" * 64,
+                    "rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx": "e" * 64,
+                },
+                sort_keys=True,
+            ),
+            "MAX_ATTEMPTS": 3,
+        }
+        parameters.update(overrides)
+        fs = MagicMock()
+        fs.exists.return_value = True
+        fs.head.return_value = json.dumps(manifest)
+        notebookutils = types.SimpleNamespace(fs=fs)
+        with patch.dict(sys.modules, {"notebookutils": notebookutils}):
+            exec(
+                compile(
+                    cell_source(EVENT_INTAKE_NOTEBOOK, "event-register"),
+                    str(EVENT_INTAKE_NOTEBOOK),
+                    "exec",
+                ),
+                parameters,
+            )
+        return parameters["outcome"], fs
+
     def worker_run_namespace(self):
         client = MagicMock()
         staged, temporary = MagicMock(), MagicMock()
@@ -224,19 +276,11 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertEqual(configuration["executorCores"]["defaultValue"], 4)
         self.assertEqual(configuration["executorMemory"]["defaultValue"], "28g")
 
-    def test_processing_engine_schema_registration_and_claim_contract(self):
+    def test_processing_engine_schema_and_claim_contract(self):
         bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
         bootstrap_evolution = cell_source(BOOTSTRAP, "bootstrap-schema-evolution")
         bootstrap_backfill = cell_source(BOOTSTRAP, "bootstrap-control-backfill")
-        event_source = code_source(NOTEBOOKS / "01_register_event.ipynb")
-        event_parameters = cell_source(
-            NOTEBOOKS / "01_register_event.ipynb",
-            "event-parameters",
-        )
-        event_intake = json.loads(
-            EVENT_INTAKE_PIPELINE.read_text(encoding="utf-8")
-        )
-        backfill_source = code_source(NOTEBOOKS / "02_register_backfill.ipynb")
+        backfill_source = code_source(BACKFILL_NOTEBOOK)
         claim_source = cell_source(NOTEBOOKS / "03_claim_work.ipynb", "claim-work")
 
         self.assertIn("processing_engine STRING", bootstrap_create)
@@ -249,41 +293,9 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn("missing evolved columns after refresh", bootstrap_evolution)
         self.assertIn('set={"processing_engine": F.lit("NOTEBOOK_04")}', bootstrap_backfill)
         self.assertIn("unsupported processing_engine values", bootstrap_backfill)
-        self.assertIn('PROCESSING_ENGINE = ""', event_parameters)
-        self.assertIn(
-            "configured_processing_engine = normalize_processing_engine(",
-            event_source,
-        )
-        self.assertIn("PROCESSING_ENGINE,\n    default=None,", event_source)
-        self.assertIn(
-            "manifest processing_engine conflicts with configured PROCESSING_ENGINE",
-            event_source,
-        )
-        self.assertIn(
-            '"processing_engine": configured_processing_engine',
-            event_source,
-        )
-        self.assertEqual(
-            event_intake["properties"]["parameters"]["PROCESSING_ENGINE"],
-            {"type": "string", "defaultValue": "EXECUTOR_PARTITION"},
-        )
-        intake_parameters = event_intake["properties"]["activities"][0][
-            "typeProperties"
-        ]["parameters"]
-        self.assertEqual(
-            intake_parameters["PROCESSING_ENGINE"],
-            {
-                "value": {
-                    "value": "@pipeline().parameters.PROCESSING_ENGINE",
-                    "type": "Expression",
-                },
-                "type": "string",
-            },
-        )
-        self.assertIn("spark_session.catalog.refreshTable(work_table)", event_source)
-        self.assertIn('"processing_engine",', backfill_source)
-        self.assertIn("normalize_processing_engine", backfill_source)
-        self.assertIn("spark_session.catalog.refreshTable(work_table)", backfill_source)
+        self.assertNotIn("processing_engine", backfill_source)
+        self.assertNotIn("ControlWriter", backfill_source)
+        self.assertNotIn("DeltaTable", backfill_source)
         self.assertIn(
             'processing_engine = normalize_processing_engine(PROCESSING_ENGINE)',
             claim_source,
@@ -308,6 +320,181 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn('"processing_engine": processing_engine', claim_source)
         self.assertIn('"NO_CAPACITY"', claim_source)
         self.assertIn('"NO_ELIGIBLE_WORK"', claim_source)
+
+    def test_event_intake_uses_stable_control_sjd_contract(self):
+        source = code_source(EVENT_INTAKE_NOTEBOOK)
+        parameters = cell_source(EVENT_INTAKE_NOTEBOOK, "event-parameters")
+        pipeline = json.loads(EVENT_INTAKE_PIPELINE.read_text(encoding="utf-8"))
+
+        self.assertNotIn("ControlWriter", source)
+        self.assertNotIn("DeltaTable", source)
+        self.assertNotIn("SparkSession", source)
+        self.assertNotIn("saveAsTable", source)
+        self.assertNotIn("processing_engine", source)
+        self.assertNotIn("DATABASE", parameters)
+        self.assertNotIn("TABLE_PREFIX", parameters)
+        self.assertNotIn("PROCESSING_ENGINE", parameters)
+        self.assertIn('"duration_seconds",', source)
+        self.assertIn(
+            '"/lakehouse/default/Files/videos/{source_relative_path(value, name)}"',
+            source,
+        )
+        payload_block = source.split("stable_payload = {", 1)[1].split(
+            "command_line_arguments =",
+            1,
+        )[0]
+        for delivery_field in (
+            "EVENT_ID",
+            "EVENT_SOURCE",
+            "EVENT_TIME",
+            "SUBJECT",
+            "PIPELINE_RUN_ID",
+        ):
+            self.assertNotIn(delivery_field, payload_block)
+
+        validate, register = pipeline["properties"]["activities"]
+        self.assertEqual(validate["name"], "ValidateManifest")
+        self.assertEqual(validate["type"], "TridentNotebook")
+        self.assertEqual(register["name"], "RegisterStableWork")
+        self.assertEqual(register["type"], "FabricSparkJobDefinition")
+        self.assertEqual(
+            register["dependsOn"],
+            [
+                {
+                    "activity": "ValidateManifest",
+                    "dependencyConditions": ["Succeeded"],
+                }
+            ],
+        )
+        self.assertEqual(
+            register["typeProperties"]["sparkJobDefinitionId"],
+            "6df10e00-517c-409a-8dd6-40ae9bc62003",
+        )
+        self.assertEqual(
+            register["typeProperties"]["workspaceId"],
+            "c31ee864-230d-4005-8fd5-7c7130ebf774",
+        )
+        self.assertEqual(
+            register["typeProperties"]["commandLineArguments"],
+            {
+                "value": (
+                    "@json(activity('ValidateManifest').output.result.exitValue)"
+                    ".command_line_arguments"
+                ),
+                "type": "Expression",
+            },
+        )
+        self.assertNotIn("PROCESSING_ENGINE", pipeline["properties"]["parameters"])
+        intake_parameters = validate["typeProperties"]["parameters"]
+        self.assertEqual(
+            intake_parameters["PROFILE_ID"],
+            {"value": "onnx-r18-b1-1fps-1t", "type": "string"},
+        )
+        self.assertEqual(
+            intake_parameters["PROFILE_SHA256"]["value"],
+            "2b816ded6660744bb8dc96e26cd284c0bd78105b905b322b01b6b8acaec96c37",
+        )
+        self.assertEqual(
+            intake_parameters["RELEASE_MANIFEST_SHA256"]["value"],
+            "58c779f12ac490c19fb6f1bfb01e91b24adc94f2c4dd279d8392d2b7243524cc",
+        )
+        self.assertEqual(
+            len(json.loads(intake_parameters["MODEL_ARTIFACT_SHA256_JSON"]["value"])),
+            4,
+        )
+
+    def test_event_intake_replay_has_stable_registration_identity(self):
+        manifest = {
+            "schema_version": 1,
+            "asset_id": "asset-a",
+            "asset_version": "version-a",
+            "video_uri": (
+                "https://peoplecountingfootage.dfs.core.windows.net/"
+                "videos/incoming/video.mp4"
+            ),
+            "source_etag": "etag-a",
+            "expected_size_bytes": 123,
+            "expected_sha256": "1" * 64,
+            "camera_id": "camera-a",
+            "location_id": "location-a",
+            "captured_at_utc": "2026-09-23T10:00:00Z",
+            "camera_timezone": "UTC",
+            "duration_seconds": 42.5,
+            "counting_line": [1, 2, 3, 4],
+        }
+        first, first_fs = self.execute_event_intake(manifest)
+        replay, replay_fs = self.execute_event_intake(
+            manifest,
+            EVENT_ID="event-b",
+            EVENT_TIME="2026-09-23T12:05:00Z",
+        )
+
+        self.assertEqual(first, replay)
+        self.assertEqual(first["status"], "VALIDATED")
+        self.assertEqual(
+            first["work_id"],
+            hashlib.sha256(
+                (
+                    "abfss://videos@peoplecountingfootage.dfs.core.windows.net/"
+                    "incoming/video.mp4\nversion-a"
+                ).encode()
+            ).hexdigest(),
+        )
+        arguments = first["command_line_arguments"]
+        self.assertTrue(arguments.startswith(f"register --work-id {first['work_id']} "))
+        self.assertIn("--runtime-key " + "2" * 64, arguments)
+        self.assertIn("--duration-seconds 42.5", arguments)
+        self.assertIn("--config-sha256 " + "2" * 64, arguments)
+        self.assertIn("--release-digest " + "d" * 64, arguments)
+        self.assertTrue(arguments.endswith("--max-attempts 3"))
+        encoded_payload = arguments.split("--payload-base64 ", 1)[1].split(" ", 1)[0]
+        payload = json.loads(base64.urlsafe_b64decode(encoded_payload))
+        self.assertEqual(
+            payload["source_video"],
+            "/lakehouse/default/Files/videos/incoming/video.mp4",
+        )
+        self.assertEqual(payload["source_sha256"], "1" * 64)
+        self.assertEqual(payload["runtime_key"], "2" * 64)
+        self.assertNotIn("event_id", payload)
+        self.assertNotIn("event_time", payload)
+        self.assertNotIn("pipeline_run_id", payload)
+        expected_shortcut = (
+            "abfss://workspace@onelake.dfs.fabric.microsoft.com/"
+            "lakehouse/Files/videos/incoming/video.json"
+        )
+        first_fs.exists.assert_called_once_with(expected_shortcut)
+        replay_fs.head.assert_called_once_with(expected_shortcut, 1024 * 1024)
+
+    def test_event_intake_requires_positive_duration(self):
+        manifest = {
+            "schema_version": 1,
+            "asset_id": "asset-a",
+            "asset_version": "version-a",
+            "video_uri": (
+                "https://peoplecountingfootage.dfs.core.windows.net/"
+                "videos/incoming/video.mp4"
+            ),
+            "source_etag": "etag-a",
+            "expected_size_bytes": 123,
+            "expected_sha256": "1" * 64,
+            "camera_id": "camera-a",
+            "location_id": "location-a",
+            "captured_at_utc": "2026-09-23T10:00:00Z",
+            "camera_timezone": "UTC",
+            "counting_line": [1, 2, 3, 4],
+        }
+        with self.assertRaisesRegex(
+            ValueError,
+            "Manifest is missing required fields: .*duration_seconds",
+        ):
+            self.execute_event_intake(manifest)
+
+        manifest["duration_seconds"] = 0
+        with self.assertRaisesRegex(
+            ValueError,
+            "duration_seconds must be a positive finite number",
+        ):
+            self.execute_event_intake(manifest)
 
     def test_executor_production_staging_and_operational_surfaces(self):
         bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
@@ -335,7 +522,16 @@ class FabricNotebookTests(unittest.TestCase):
             'groupBy("processing_engine", "status")',
             observability,
         )
-        self.assertIn('"executor_attempt_results",', reset)
+        for suffix in (
+            "executor_attempt_results",
+            "executor_benchmark_events",
+            "executor_inference_runs",
+            "executor_partition_input",
+            "executor_partition_plans",
+            "executor_partition_records",
+            "executor_resource_snapshots",
+        ):
+            self.assertIn(f'"{suffix}",', reset)
 
     def test_executor_worker_uses_two_stage_driver_owned_protocol(self):
         notebook = json.loads(EXECUTOR_WORKER.read_text(encoding="utf-8"))
@@ -2015,31 +2211,50 @@ class FabricNotebookTests(unittest.TestCase):
         self.assertIn('F.col("status").isin(active_states)', source)
         self.assertIn('"attempt_count": "greatest(t.attempt_count - 1, 0)"', source)
 
-    def test_registration_persists_runtime_compatibility_hash(self):
-        bootstrap_create = cell_source(BOOTSTRAP, "bootstrap-tables")
-        bootstrap_evolution = cell_source(BOOTSTRAP, "bootstrap-schema-evolution")
-        event_source = code_source(NOTEBOOKS / "01_register_event.ipynb")
-        backfill_source = code_source(NOTEBOOKS / "02_register_backfill.ipynb")
+    def test_backfill_uses_bounded_stable_control_sjd_contract(self):
+        source = code_source(BACKFILL_NOTEBOOK)
+        parameters = cell_source(BACKFILL_NOTEBOOK, "backfill-parameters")
+        pipeline = json.loads(BACKFILL_PIPELINE.read_text(encoding="utf-8"))
 
-        self.assertIn("runtime_sha256 STRING", bootstrap_create)
-        self.assertIn('"runtime_sha256": "STRING"', bootstrap_evolution)
-        self.assertIn('"runtime_sha256": runtime_sha256', event_source)
-        self.assertIn('F.lit(runtime_sha256).alias("runtime_sha256")', backfill_source)
-        self.assertIn(
-            'if field == "runtime_sha256" and actual is None:',
-            event_source,
+        for legacy_surface in (
+            "ControlWriter",
+            "DeltaTable",
+            "saveAsTable",
+            "DATABASE",
+            "TABLE_PREFIX",
+            "PRIORITY",
+            "PROCESSING_ENGINE",
+        ):
+            self.assertNotIn(legacy_surface, source)
+            self.assertNotIn(legacy_surface, parameters)
+        self.assertIn('STABLE_BACKFILL_ROOT = "Files/people-counter/sjd/v1/intake/backfill"', source)
+        self.assertIn('F.count(F.lit(1)).alias("item_count")', source)
+        self.assertIn('F.sum(F.length("content"))', source)
+        self.assertIn('"release_digest": release_digest', source)
+        self.assertIn('"available_at": None', source)
+        self.assertIn("bulk-register --partition-path", source)
+
+        prepare, register = pipeline["properties"]["activities"]
+        self.assertEqual(prepare["name"], "PrepareBackfillPartition")
+        self.assertEqual(prepare["type"], "TridentNotebook")
+        self.assertEqual(register["name"], "RegisterStableBackfill")
+        self.assertEqual(register["type"], "FabricSparkJobDefinition")
+        self.assertEqual(
+            register["typeProperties"]["sparkJobDefinitionId"],
+            "6df10e00-517c-409a-8dd6-40ae9bc62003",
         )
-        self.assertIn('condition="t.runtime_sha256 IS NULL"', event_source)
-        self.assertIn(
-            'check = F.col("t.runtime_sha256").isNull() | check',
-            backfill_source,
+        self.assertEqual(
+            register["typeProperties"]["commandLineArguments"]["value"],
+            "@json(activity('PrepareBackfillPartition').output.result.exitValue).command_line_arguments",
         )
-        self.assertIn("persisted_same_immutable", backfill_source)
-        runtime_block = event_source.split("runtime_value = {", 1)[1].split(
-            "runtime_encoded =",
-            1,
-        )[0]
-        self.assertNotIn('"line"', runtime_block)
+        self.assertEqual(
+            set(pipeline["properties"]["parameters"]),
+            {"MANIFEST_GLOB"},
+        )
+        self.assertNotIn(
+            "DATABASE",
+            prepare["typeProperties"]["parameters"],
+        )
 
     def test_worker_reuses_one_runtime_for_multiple_items(self):
         namespace = self.worker_run_namespace()
@@ -2252,7 +2467,7 @@ class FabricNotebookTests(unittest.TestCase):
 
     def test_other_control_writers_use_the_same_mutation_authority(self):
         for name in (
-            "00_bootstrap_lakehouse", "01_register_event", "02_register_backfill",
+            "00_bootstrap_lakehouse",
             "03_claim_work", "05_watchdog_recovery", "06_reconcile_publication",
             "09_maintain_delta", "10_replay_work", "14_reset_test_data",
         ):
@@ -2265,6 +2480,10 @@ class FabricNotebookTests(unittest.TestCase):
                 self.assertNotIn("from delta.tables import", source)
                 if "DeltaTable.forName" in source:
                     self.assertLess(source.index("DeltaTable = writer.tables"), source.index("DeltaTable.forName"))
+        for stable_intake in (EVENT_INTAKE_NOTEBOOK, BACKFILL_NOTEBOOK):
+            source = code_source(stable_intake)
+            self.assertNotIn("ControlWriter", source)
+            self.assertNotIn("DeltaTable", source)
 
     def test_claim_and_watchdog_drain_events_before_candidate_reads(self):
         for name, candidate in (

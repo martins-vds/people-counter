@@ -7,18 +7,23 @@ import subprocess
 import sys
 from dataclasses import asdict
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from people_counter.fabric_sjd_cutover import (
     CA_SHADOW_ONLY_TABLES,
+    LEGACY_COMMITTED_VIEWS,
+    LEGACY_TABLE_ALLOWLIST,
     WRITER_ITEM_IDS,
     CutoverError,
     SourceTableState,
+    SourceViewState,
     StoppedWriterGate,
     WriterState,
+    archive_legacy_tables,
     classify_ca_table,
+    classify_legacy_table,
     classify_work_payload,
     complete_synthetic_cleanup,
     create_stable_tables,
@@ -30,6 +35,8 @@ from people_counter.fabric_sjd_cutover import (
     _history_json,
     migrate_durable_rows,
     retire_archived_ca_tables,
+    retire_archived_legacy_tables,
+    legacy_retirement_bundle_path,
     retirement_bundle_path,
     sha256,
     stable_table_schemas,
@@ -134,6 +141,18 @@ def test_ca_table_classification_is_fixed() -> None:
     assert classify_ca_table("people_counter_ca_locks") == "EVIDENCE_ONLY"
     with pytest.raises(CutoverError, match="outside Candidate A"):
         classify_ca_table("people_counter_sjd_work")
+
+
+def test_legacy_table_classification_is_fixed() -> None:
+    assert (
+        classify_legacy_table("people_counter_executor_partition_records")
+        == "EXECUTOR_BENCHMARK"
+    )
+    assert classify_legacy_table("people_counter_gold_video") == "REPORTING"
+    assert classify_legacy_table("people_counter_control_writer") == "CONTROL"
+    assert classify_legacy_table("people_counter_video_work") == "PROCESSING"
+    with pytest.raises(CutoverError, match="outside legacy allowlist"):
+        classify_legacy_table("people_counter_sjd_work")
 
 
 @pytest.mark.parametrize(
@@ -304,6 +323,37 @@ def test_work_evidence_and_fabric_gate_path_are_exact() -> None:
     decode.assert_called_once()
 
 
+@pytest.mark.parametrize("command", ["archive-legacy", "retire-legacy"])
+def test_parser_exposes_explicit_legacy_retirement_commands(
+    command: str,
+) -> None:
+    arguments = cutover_jobs._parser().parse_args(
+        [
+            command,
+            "--bundle-id",
+            "v20261010T000000Z-012345abcdef",
+            "--gate-path",
+            f"{cutover_jobs.EVIDENCE_ROOT}/gates/gate.json",
+        ]
+    )
+    assert arguments.command == command
+    assert arguments.bundle_id == "v20261010T000000Z-012345abcdef"
+    assert arguments.gate_path.endswith("/gates/gate.json")
+    for missing in ("--bundle-id", "--gate-path"):
+        values = [
+            command,
+            "--bundle-id",
+            "v20261010T000000Z-012345abcdef",
+            "--gate-path",
+            f"{cutover_jobs.EVIDENCE_ROOT}/gates/gate.json",
+        ]
+        position = values.index(missing)
+        del values[position : position + 2]
+        with pytest.raises(SystemExit):
+            cutover_jobs._parser().parse_args(values)
+    assert cutover_jobs._parser().prog == "pc-production-schema-cutover"
+
+
 def test_frame_content_sha256_hashes_sorted_canonical_rows() -> None:
     expression = MagicMock()
     functions = SimpleNamespace(
@@ -342,6 +392,24 @@ def test_retirement_bundle_path_is_versioned_and_fixed() -> None:
     assert value.endswith("/v20261008T000000Z-012345abcdef")
     with pytest.raises(CutoverError, match="canonical"):
         retirement_bundle_path("latest")
+
+
+def test_legacy_retirement_allowlists_cover_every_live_writer_and_table() -> None:
+    from people_counter.fabric_production_migration_live import LEGACY_TABLES
+
+    assert len(LEGACY_TABLE_ALLOWLIST) == 30
+    assert len(set(LEGACY_TABLE_ALLOWLIST)) == 30
+    assert set(LEGACY_TABLES) == set(LEGACY_TABLE_ALLOWLIST)
+    assert {
+        "5618506e-aed9-43cd-8943-d92322ef4d4a",
+        "9169409b-82dc-4a3e-afad-611220b9930a",
+        "ff9203a8-655b-4fd0-aed5-a46f1ed0ad3c",
+    } <= WRITER_ITEM_IDS
+    assert len(WRITER_ITEM_IDS) == 12
+    assert len(LEGACY_COMMITTED_VIEWS) == 3
+    assert legacy_retirement_bundle_path(
+        "v20261010T000000Z-012345abcdef"
+    ).endswith("/legacy/v20261010T000000Z-012345abcdef")
 
 
 def test_real_local_delta_additive_schema_has_exact_readback() -> None:
@@ -948,6 +1016,156 @@ def test_archive_ca_tables_reuses_matching_partial_archive() -> None:
     assert not source.write.method_calls
 
 
+def test_archive_legacy_tables_captures_exact_view_definitions() -> None:
+    schema_json = '{"type":"struct","fields":[]}'
+    schema_digest = __import__("hashlib").sha256(schema_json.encode()).hexdigest()
+    states = tuple(
+        SourceTableState(
+            name,
+            name == "people_counter_video_work",
+            3 if name == "people_counter_video_work" else None,
+            2 if name == "people_counter_video_work" else 0,
+            schema_digest if name == "people_counter_video_work" else None,
+        )
+        for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    )
+    views = tuple(
+        SourceViewState(
+            name,
+            name == "people_counter_runs_committed",
+            (
+                "CREATE VIEW people_counter_runs_committed AS SELECT 1"
+                if name == "people_counter_runs_committed"
+                else None
+            ),
+            (
+                __import__("hashlib").sha256(
+                    b"CREATE VIEW people_counter_runs_committed AS SELECT 1"
+                ).hexdigest()
+                if name == "people_counter_runs_committed"
+                else None
+            ),
+        )
+        for name in sorted(LEGACY_COMMITTED_VIEWS)
+    )
+    writer = MagicMock()
+    writer.format.return_value.mode.return_value.save.return_value = None
+    source = SimpleNamespace(write=writer)
+    archived = SimpleNamespace(
+        count=lambda: 2,
+        schema=SimpleNamespace(json=lambda: schema_json),
+    )
+    spark = SimpleNamespace(
+        table=MagicMock(return_value=source),
+        read=SimpleNamespace(
+            format=lambda _value: SimpleNamespace(load=lambda _path: archived)
+        ),
+        sql=MagicMock(
+            return_value=_Rows(
+                [
+                    _Row(
+                        version=3,
+                        operation="WRITE",
+                        timestamp=datetime(2026, 10, 10, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ),
+    )
+    with patch(
+        "people_counter.fabric_sjd_cutover.snapshot_legacy_tables",
+        return_value=states,
+    ), patch(
+        "people_counter.fabric_sjd_cutover.snapshot_legacy_views",
+        return_value=views,
+    ), patch(
+        "people_counter.fabric_sjd_cutover.frame_content_sha256",
+        return_value="c" * 64,
+    ):
+        result = archive_legacy_tables(
+            spark,
+            bundle_id="v20261010T000000Z-012345abcdef",
+            table_names=LEGACY_TABLE_ALLOWLIST,
+            view_names=LEGACY_COMMITTED_VIEWS,
+        )
+
+    assert result["schema"] == "people-counter-legacy-retirement-v1"
+    assert result["views"] == [asdict(view) for view in views]
+    writer.format.return_value.mode.return_value.save.assert_called_once_with(
+        "Files/people-counter/sjd/v1/retirements/legacy/"
+        "v20261010T000000Z-012345abcdef/tables/"
+        "people_counter_video_work"
+    )
+
+
+def test_archive_legacy_tables_refuses_partial_allowlists() -> None:
+    with pytest.raises(CutoverError, match="table allowlist differs"):
+        archive_legacy_tables(
+            SimpleNamespace(),
+            bundle_id="v20261010T000000Z-012345abcdef",
+            table_names=LEGACY_TABLE_ALLOWLIST[:-1],
+        )
+    with pytest.raises(CutoverError, match="view allowlist differs"):
+        archive_legacy_tables(
+            SimpleNamespace(),
+            bundle_id="v20261010T000000Z-012345abcdef",
+            table_names=LEGACY_TABLE_ALLOWLIST,
+            view_names=LEGACY_COMMITTED_VIEWS[:-1],
+        )
+
+
+def test_archive_legacy_tables_wires_exact_archive_contract() -> None:
+    spark = object()
+    path_exists = object()
+    states = tuple(
+        SourceTableState(name, False, None, 0, None)
+        for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    )
+    views = tuple(
+        SourceViewState(name, False, None, None)
+        for name in sorted(LEGACY_COMMITTED_VIEWS)
+    )
+    expected = {"manifest_sha256": "a" * 64}
+    with patch(
+        "people_counter.fabric_sjd_cutover.snapshot_legacy_tables",
+        return_value=states,
+    ) as snapshot_tables, patch(
+        "people_counter.fabric_sjd_cutover.snapshot_legacy_views",
+        side_effect=(views, views),
+    ) as snapshot_views, patch(
+        "people_counter.fabric_sjd_cutover._archive_tables",
+        return_value=expected,
+    ) as archive:
+        observed = archive_legacy_tables(
+            spark,
+            bundle_id="v20261010T000000Z-012345abcdef",
+            table_names=LEGACY_TABLE_ALLOWLIST,
+            view_names=LEGACY_COMMITTED_VIEWS,
+            path_exists=path_exists,
+        )
+
+    assert observed is expected
+    snapshot_tables.assert_called_once_with(spark, LEGACY_TABLE_ALLOWLIST)
+    assert snapshot_views.call_args_list == [
+        call(spark, LEGACY_COMMITTED_VIEWS),
+        call(spark, LEGACY_COMMITTED_VIEWS),
+    ]
+    archive.assert_called_once_with(
+        spark,
+        bundle_id="v20261010T000000Z-012345abcdef",
+        table_names=LEGACY_TABLE_ALLOWLIST,
+        root=(
+            "Files/people-counter/sjd/v1/retirements/legacy/"
+            "v20261010T000000Z-012345abcdef"
+        ),
+        states=states,
+        classification=classify_legacy_table,
+        manifest_schema="people-counter-legacy-retirement-v1",
+        views=views,
+        path_exists=path_exists,
+    )
+
+
 def test_validate_retirement_archives_proves_exact_rollback_copy() -> None:
     schema_json = '{"type":"struct","fields":[]}'
     schema_digest = __import__("hashlib").sha256(schema_json.encode()).hexdigest()
@@ -1013,6 +1231,99 @@ def test_validate_retirement_archives_proves_exact_rollback_copy() -> None:
     )
     with pytest.raises(CutoverError, match="path is invalid"):
         validate_retirement_archives(spark, wrong_path, states)
+
+
+def test_validate_legacy_archives_includes_view_restore_sql() -> None:
+    state = SourceTableState(
+        "people_counter_video_work", False, None, 0, None
+    )
+    views = [
+        SourceViewState(name, False, None, None)
+        for name in LEGACY_COMMITTED_VIEWS
+    ]
+    views[0] = SourceViewState(
+        views[0].name,
+        True,
+        f"CREATE VIEW {views[0].name} AS SELECT 1",
+        __import__("hashlib").sha256(
+            f"CREATE VIEW {views[0].name} AS SELECT 1".encode()
+        ).hexdigest(),
+    )
+    manifest = {
+        "bundle_id": "v20261010T000000Z-012345abcdef",
+        "schema": "people-counter-legacy-retirement-v1",
+        "tables": [
+            {
+                **asdict(state),
+                "archive_path": None,
+                "content_sha256": None,
+            }
+        ],
+        "views": [asdict(view) for view in views],
+    }
+    manifest["manifest_sha256"] = sha256(manifest)
+
+    proof = validate_retirement_archives(
+        SimpleNamespace(),
+        manifest,
+        (state,),
+    )
+
+    assert proof["schema"] == "people-counter-legacy-rollback-proof-v1"
+    assert proof["views"] == [
+        {
+            "create_sql": views[0].create_sql,
+            "definition_sha256": views[0].definition_sha256,
+            "name": views[0].name,
+        }
+    ]
+    assert proof["rollback_proof_sha256"]
+
+
+def test_validate_legacy_archives_refuses_ambiguous_view_evidence() -> None:
+    state = SourceTableState(
+        "people_counter_video_work", False, None, 0, None
+    )
+    views = [
+        asdict(SourceViewState(name, False, None, None))
+        for name in LEGACY_COMMITTED_VIEWS
+    ]
+    base = {
+        "bundle_id": "v20261010T000000Z-012345abcdef",
+        "schema": "people-counter-legacy-retirement-v1",
+        "tables": [
+            {
+                **asdict(state),
+                "archive_path": None,
+                "content_sha256": None,
+            }
+        ],
+        "views": views,
+    }
+    cases: list[tuple[dict[str, object], str]] = []
+    duplicate = json.loads(json.dumps(base))
+    duplicate["views"].append(dict(duplicate["views"][0]))
+    cases.append((duplicate, "view allowlist differs"))
+    partial = json.loads(json.dumps(base))
+    partial["views"][0]["create_sql"] = "CREATE VIEW partial AS SELECT 1"
+    cases.append((partial, "missing legacy view"))
+    malformed = json.loads(json.dumps(base))
+    malformed["views"][0] = {
+        "name": LEGACY_COMMITTED_VIEWS[0],
+        "exists": True,
+        "create_sql": "SELECT 1",
+        "definition_sha256": "a" * 64,
+    }
+    cases.append((malformed, "definition evidence differs"))
+
+    for manifest, message in cases:
+        manifest["manifest_sha256"] = sha256(manifest)
+        with pytest.raises(CutoverError, match=message):
+            validate_retirement_archives(
+                SimpleNamespace(),
+                manifest,
+                (state,),
+            )
 
 
 def test_validate_retirement_archives_refuses_changed_source() -> None:
@@ -1151,6 +1462,212 @@ def test_retire_archived_ca_tables_resumes_after_prior_drop() -> None:
 
     spark.sql.assert_not_called()
     assert result["dropped_tables"] == [source.name]
+
+
+def test_retire_archived_legacy_tables_drops_views_before_exact_tables() -> None:
+    before = tuple(
+        SourceTableState(
+            name,
+            name == "people_counter_video_work",
+            3 if name == "people_counter_video_work" else None,
+            2 if name == "people_counter_video_work" else 0,
+            "a" * 64 if name == "people_counter_video_work" else None,
+        )
+        for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    )
+    after = tuple(
+        SourceTableState(state.name, False, None, 0, None)
+        for state in before
+    )
+    before_views = tuple(
+        SourceViewState(
+            name,
+            name == "people_counter_runs_committed",
+            (
+                f"CREATE VIEW {name} AS SELECT 1"
+                if name == "people_counter_runs_committed"
+                else None
+            ),
+            (
+                "c" * 64
+                if name == "people_counter_runs_committed"
+                else None
+            ),
+        )
+        for name in sorted(LEGACY_COMMITTED_VIEWS)
+    )
+    after_views = tuple(
+        SourceViewState(view.name, False, None, None)
+        for view in before_views
+    )
+    table_exists = MagicMock(return_value=False)
+    path_exists = MagicMock(return_value=False)
+    spark = SimpleNamespace(
+        sql=MagicMock(),
+        catalog=SimpleNamespace(tableExists=table_exists),
+    )
+    rollback = {
+        "rollback_proof_sha256": "b" * 64,
+        "schema": "people-counter-legacy-rollback-proof-v1",
+        "tables": [],
+        "views": [],
+    }
+    snapshots = [before, *([before] * len(before)), after]
+    with patch(
+        "people_counter.fabric_sjd_cutover.snapshot_legacy_tables",
+        side_effect=snapshots,
+    ) as snapshot_tables, patch(
+        "people_counter.fabric_sjd_cutover.snapshot_legacy_views",
+        side_effect=(before_views, after_views),
+    ) as snapshot_views, patch(
+        "people_counter.fabric_sjd_cutover.validate_stopped_writer_gate"
+    ) as validate_gate, patch(
+        "people_counter.fabric_sjd_cutover.validate_retirement_archives",
+        return_value=rollback,
+    ) as validate_archives:
+        gate = _gate(sources=before)
+        manifest = {
+            "bundle_id": "v20261010T000000Z-012345abcdef",
+            "tables": [asdict(state) for state in before],
+            "views": [asdict(view) for view in before_views],
+        }
+        result = retire_archived_legacy_tables(
+            spark,
+            gate=gate,
+            manifest=manifest,
+            table_names=LEGACY_TABLE_ALLOWLIST,
+            view_names=LEGACY_COMMITTED_VIEWS,
+            path_exists=path_exists,
+        )
+
+    assert spark.sql.call_args_list == [
+        call("DROP VIEW `people_counter_runs_committed`"),
+        call("DROP TABLE `people_counter_video_work`"),
+    ]
+    assert result["dropped_tables"] == ["people_counter_video_work"]
+    assert result["dropped_views"] == ["people_counter_runs_committed"]
+    assert result["post_retirement_views"] == [
+        asdict(view) for view in after_views
+    ]
+    assert set(result) == {
+        "bundle_id",
+        "dropped_tables",
+        "dropped_views",
+        "post_retirement",
+        "post_retirement_views",
+        "retired_at",
+        "retirement_result_sha256",
+        "rollback",
+        "schema",
+        "zero_routing_proof_sha256",
+        "zero_writer_proof_sha256",
+    }
+    assert result["bundle_id"] == manifest["bundle_id"]
+    assert result["rollback"] is rollback
+    assert result["schema"] == "people-counter-legacy-retirement-result-v1"
+    assert result["zero_writer_proof_sha256"] == gate.evidence_sha256
+    assert len(result["zero_routing_proof_sha256"]) == 64
+    assert len(result["retirement_result_sha256"]) == 64
+    assert snapshot_tables.call_count == len(before) + 2
+    assert all(
+        item == call(spark, tuple(sorted(LEGACY_TABLE_ALLOWLIST)))
+        for item in snapshot_tables.call_args_list
+    )
+    assert snapshot_views.call_args_list == [
+        call(spark, tuple(sorted(LEGACY_COMMITTED_VIEWS))),
+        call(spark, tuple(sorted(LEGACY_COMMITTED_VIEWS))),
+    ]
+    validate_gate.assert_called_once_with(gate, gate.source_tables)
+    validate_archives.assert_called_once_with(spark, manifest, before)
+    assert table_exists.call_args_list == [
+        *(call(name) for name in sorted(LEGACY_COMMITTED_VIEWS)),
+        *(call(name) for name in sorted(LEGACY_TABLE_ALLOWLIST)),
+    ]
+    assert path_exists.call_args_list == [
+        call(f"Tables/dbo/{name}") for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("tables", "views", "message"),
+    [
+        (
+            (*LEGACY_TABLE_ALLOWLIST, LEGACY_TABLE_ALLOWLIST[0]),
+            LEGACY_COMMITTED_VIEWS,
+            "table allowlist contains duplicates",
+        ),
+        (
+            LEGACY_TABLE_ALLOWLIST,
+            (*LEGACY_COMMITTED_VIEWS, LEGACY_COMMITTED_VIEWS[0]),
+            "view allowlist contains duplicates",
+        ),
+        (
+            LEGACY_TABLE_ALLOWLIST[:-1],
+            LEGACY_COMMITTED_VIEWS,
+            "table allowlist differs",
+        ),
+        (
+            LEGACY_TABLE_ALLOWLIST,
+            LEGACY_COMMITTED_VIEWS[:-1],
+            "view allowlist differs",
+        ),
+    ],
+)
+def test_retire_archived_legacy_tables_refuses_unsafe_allowlists(
+    tables: tuple[str, ...],
+    views: tuple[str, ...],
+    message: str,
+) -> None:
+    with pytest.raises(CutoverError, match=message):
+        retire_archived_legacy_tables(
+            SimpleNamespace(),
+            gate=_gate(),
+            manifest={},
+            table_names=tables,
+            view_names=views,
+            path_exists=lambda _path: False,
+        )
+
+
+def test_retire_archived_legacy_tables_refuses_changed_view_definition() -> None:
+    sources = tuple(
+        SourceTableState(name, False, None, 0, None)
+        for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    )
+    expected_views = tuple(
+        SourceViewState(name, False, None, None)
+        for name in sorted(LEGACY_COMMITTED_VIEWS)
+    )
+    changed_views = (
+        SourceViewState(
+            expected_views[0].name,
+            True,
+            f"CREATE VIEW {expected_views[0].name} AS SELECT 1",
+            "a" * 64,
+        ),
+        *expected_views[1:],
+    )
+    with patch(
+        "people_counter.fabric_sjd_cutover.snapshot_legacy_tables",
+        return_value=sources,
+    ), patch(
+        "people_counter.fabric_sjd_cutover.snapshot_legacy_views",
+        return_value=changed_views,
+    ), patch(
+        "people_counter.fabric_sjd_cutover.validate_stopped_writer_gate"
+    ):
+        with pytest.raises(CutoverError, match="view definitions changed"):
+            retire_archived_legacy_tables(
+                SimpleNamespace(),
+                gate=_gate(sources=sources),
+                manifest={
+                    "tables": [asdict(state) for state in sources],
+                    "views": [asdict(view) for view in expected_views],
+                },
+                table_names=LEGACY_TABLE_ALLOWLIST,
+                view_names=LEGACY_COMMITTED_VIEWS,
+                path_exists=lambda _path: False,
+            )
 
 
 @pytest.mark.parametrize(
@@ -1415,3 +1932,325 @@ def test_cutover_jobs_write_inventory_bootstrap_and_dispatch(
         cutover_jobs, "bootstrap", return_value={"command": "bootstrap"}
     ):
         assert cutover_jobs.main(["bootstrap", "--evidence-id", "run-2"]) == 0
+
+
+def test_capture_legacy_gate_uses_exact_terminal_writers_and_live_tables() -> None:
+    states = tuple(
+        SourceTableState(name, False, None, 0, None)
+        for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    )
+    values = [
+        f"{item_id}=Completed" for item_id in sorted(WRITER_ITEM_IDS)
+    ]
+    spark = SimpleNamespace(
+        catalog=SimpleNamespace(tableExists=lambda name: name.endswith("routing_allowlist")),
+        table=lambda _name: SimpleNamespace(count=lambda: 0),
+    )
+
+    with patch.object(
+        cutover_jobs,
+        "snapshot_legacy_tables",
+        return_value=states,
+    ) as snapshot:
+        result = cutover_jobs.capture_legacy_gate(
+            spark,
+            gate_id="legacy-20261010",
+            writer_states=values,
+            captured_at=100.0,
+        )
+
+    snapshot.assert_called_once_with(spark, LEGACY_TABLE_ALLOWLIST)
+    assert result["schema"] == "people-counter-legacy-stopped-writer-gate-v1"
+    assert result["captured_at"] == 100.0
+    assert result["routing_to_ca"] == 0
+    assert result["source_tables"] == [asdict(item) for item in states]
+    assert result["writer_states"] == [
+        {"item_id": item_id, "state": "Completed"}
+        for item_id in sorted(WRITER_ITEM_IDS)
+    ]
+    unsigned = {
+        key: result[key]
+        for key in (
+            "captured_at",
+            "routing_to_ca",
+            "source_tables",
+            "writer_states",
+        )
+    }
+    assert result["evidence_sha256"] == sha256(unsigned)
+
+
+def test_capture_legacy_gate_records_absent_routing_and_current_time() -> None:
+    states = tuple(
+        SourceTableState(name, False, None, 0, None)
+        for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    )
+    values = [
+        f"{item_id}=Completed" for item_id in sorted(WRITER_ITEM_IDS)
+    ]
+    spark = SimpleNamespace(
+        catalog=SimpleNamespace(tableExists=MagicMock(return_value=False)),
+        table=MagicMock(),
+    )
+
+    with patch.object(
+        cutover_jobs,
+        "snapshot_legacy_tables",
+        return_value=states,
+    ), patch.object(cutover_jobs.time, "time", return_value=123.0):
+        result = cutover_jobs.capture_legacy_gate(
+            spark,
+            gate_id="Legacy-20261010",
+            writer_states=values,
+        )
+
+    spark.catalog.tableExists.assert_called_once_with(
+        "people_counter_ca_routing_allowlist"
+    )
+    spark.table.assert_not_called()
+    assert result["captured_at"] == 123.0
+    assert result["routing_to_ca"] == 0
+
+
+def test_capture_legacy_gate_refuses_candidate_a_routing() -> None:
+    states = tuple(
+        SourceTableState(name, False, None, 0, None)
+        for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    )
+    values = [
+        f"{item_id}=Completed" for item_id in sorted(WRITER_ITEM_IDS)
+    ]
+    routing = SimpleNamespace(count=MagicMock(return_value=1))
+    spark = SimpleNamespace(
+        catalog=SimpleNamespace(tableExists=MagicMock(return_value=True)),
+        table=MagicMock(return_value=routing),
+    )
+
+    with patch.object(
+        cutover_jobs,
+        "snapshot_legacy_tables",
+        return_value=states,
+    ), pytest.raises(CutoverError, match="routing to Candidate A is not zero"):
+        cutover_jobs.capture_legacy_gate(
+            spark,
+            gate_id="legacy-20261010",
+            writer_states=values,
+            captured_at=100.0,
+        )
+
+    spark.table.assert_called_once_with("people_counter_ca_routing_allowlist")
+    routing.count.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("values", "match"),
+    [
+        (["bad"], "item_id=state"),
+        (["unknown=Completed"], "outside allowlist"),
+        (
+            [
+                *[
+                    f"{item_id}=Completed"
+                    for item_id in sorted(WRITER_ITEM_IDS)
+                ],
+                f"{sorted(WRITER_ITEM_IDS)[0]}=Completed",
+            ],
+            "duplicate writer state",
+        ),
+        (
+            [
+                f"{item_id}={'Running' if index == 0 else 'Completed'}"
+                for index, item_id in enumerate(sorted(WRITER_ITEM_IDS))
+            ],
+            "writer is not stopped",
+        ),
+        (
+            [
+                f"{item_id}=Completed"
+                for item_id in sorted(WRITER_ITEM_IDS)[1:]
+            ],
+            "exact allowlist",
+        ),
+    ],
+)
+def test_writer_states_fail_closed(values: list[str], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        cutover_jobs._writer_states(values)
+
+
+def test_cutover_jobs_dispatches_legacy_gate_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "notebookutils",
+        SimpleNamespace(fs=SimpleNamespace()),
+    )
+    spark = object()
+    values = [
+        f"{item_id}=Completed" for item_id in sorted(WRITER_ITEM_IDS)
+    ]
+    result = {"schema": "people-counter-legacy-stopped-writer-gate-v1"}
+
+    with patch.object(cutover_jobs, "_spark", return_value=spark), patch.object(
+        cutover_jobs,
+        "capture_legacy_gate",
+        return_value=result,
+    ) as capture, patch.object(
+        cutover_jobs,
+        "_write_immutable_json",
+        return_value="a" * 64,
+    ) as write:
+        assert (
+            cutover_jobs.main(
+                [
+                    "capture-legacy-gate",
+                    "--gate-id",
+                    "legacy-20261010",
+                    *sum(
+                        (["--writer-state", value] for value in values),
+                        [],
+                    ),
+                ]
+            )
+            == 0
+        )
+
+    capture.assert_called_once_with(
+        spark,
+        gate_id="legacy-20261010",
+        writer_states=values,
+    )
+    write.assert_called_once_with(
+        f"{cutover_jobs.EVIDENCE_ROOT}/gates/legacy-20261010.json",
+        result,
+    )
+
+
+def test_cutover_jobs_dispatch_exact_legacy_archive_and_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fs = SimpleNamespace(exists=MagicMock(return_value=False))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=fs))
+    spark = object()
+    states = tuple(
+        SourceTableState(name, False, None, 0, None)
+        for name in sorted(LEGACY_TABLE_ALLOWLIST)
+    )
+    gate = _gate(sources=states)
+    bundle_id = "v20261010T000000Z-012345abcdef"
+    gate_path = f"{cutover_jobs.EVIDENCE_ROOT}/gates/gate.json"
+    manifest = {
+        "bundle_id": bundle_id,
+        "manifest_sha256": "a" * 64,
+        "schema": "people-counter-legacy-retirement-v1",
+        "tables": [asdict(state) for state in states],
+        "views": [
+            asdict(SourceViewState(name, False, None, None))
+            for name in LEGACY_COMMITTED_VIEWS
+        ],
+    }
+    result = {
+        "bundle_id": bundle_id,
+        "retired_at": "2026-10-10T00:00:00+00:00",
+        "retirement_result_sha256": "b" * 64,
+        "rollback": {"rollback_proof_sha256": "c" * 64},
+        "zero_routing_proof_sha256": "d" * 64,
+        "zero_writer_proof_sha256": gate.evidence_sha256,
+    }
+
+    with patch.object(cutover_jobs, "_spark", return_value=spark), patch.object(
+        cutover_jobs, "_stopped_gate_path", return_value=gate
+    ), patch.object(
+        cutover_jobs,
+        "snapshot_legacy_tables",
+        side_effect=(states, states),
+    ) as snapshot, patch.object(
+        cutover_jobs, "validate_stopped_writer_gate"
+    ) as validate, patch.object(
+        cutover_jobs, "archive_legacy_tables", return_value=manifest
+    ) as archive, patch.object(
+        cutover_jobs, "_write_immutable_json", return_value="a" * 64
+    ) as write:
+        assert (
+            cutover_jobs.main(
+                [
+                    "archive-legacy",
+                    "--bundle-id",
+                    bundle_id,
+                    "--gate-path",
+                    gate_path,
+                ]
+            )
+            == 0
+        )
+
+    assert snapshot.call_args_list == [
+        call(spark, LEGACY_TABLE_ALLOWLIST),
+        call(spark, LEGACY_TABLE_ALLOWLIST),
+    ]
+    assert validate.call_args_list == [call(gate, states), call(gate, states)]
+    archive.assert_called_once_with(
+        spark,
+        bundle_id=bundle_id,
+        table_names=LEGACY_TABLE_ALLOWLIST,
+        view_names=LEGACY_COMMITTED_VIEWS,
+        path_exists=fs.exists,
+    )
+    write.assert_called_once_with(
+        f"{legacy_retirement_bundle_path(bundle_id)}/manifest.json",
+        manifest,
+    )
+
+    with patch.object(cutover_jobs, "_spark", return_value=spark), patch.object(
+        cutover_jobs, "_stopped_gate_path", return_value=gate
+    ), patch.object(
+        cutover_jobs, "archive_legacy_tables", return_value=manifest
+    ) as archive, patch.object(
+        cutover_jobs,
+        "retire_archived_legacy_tables",
+        return_value=result,
+    ) as retire, patch.object(
+        cutover_jobs, "_write_immutable_json", return_value="a" * 64
+    ) as write, patch.object(
+        cutover_jobs, "append_journal_once"
+    ) as append:
+        assert (
+            cutover_jobs.main(
+                [
+                    "retire-legacy",
+                    "--bundle-id",
+                    bundle_id,
+                    "--gate-path",
+                    gate_path,
+                ]
+            )
+            == 0
+        )
+
+    archive.assert_called_once_with(
+        spark,
+        bundle_id=bundle_id,
+        table_names=LEGACY_TABLE_ALLOWLIST,
+        view_names=LEGACY_COMMITTED_VIEWS,
+        path_exists=fs.exists,
+    )
+    retire.assert_called_once_with(
+        spark,
+        gate=gate,
+        manifest=manifest,
+        table_names=LEGACY_TABLE_ALLOWLIST,
+        view_names=LEGACY_COMMITTED_VIEWS,
+        path_exists=fs.exists,
+    )
+    assert write.call_args_list == [
+        call(
+            f"{legacy_retirement_bundle_path(bundle_id)}/manifest.json",
+            manifest,
+        ),
+        call(
+            f"{legacy_retirement_bundle_path(bundle_id)}/retirement.json",
+            result,
+        ),
+    ]
+    append.assert_called_once()

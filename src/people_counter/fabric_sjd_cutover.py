@@ -20,6 +20,7 @@ CA_PREFIX = "people_counter_ca_"
 RETIREMENT_ROOT = (
     "Files/people-counter/sjd/v1/retirements/candidate-a"
 )
+LEGACY_RETIREMENT_ROOT = "Files/people-counter/sjd/v1/retirements/legacy"
 WRITER_ITEM_IDS = frozenset(
     {
         "5548a877-38e0-4933-bf2d-0285250637d2",
@@ -31,9 +32,49 @@ WRITER_ITEM_IDS = frozenset(
         "f6153ed1-ef84-4270-98ae-c17398dadb61",
         "09d2e5d0-c90a-4a22-885b-b29688983d70",
         "bc5209e3-177c-4729-b647-eb48fd33ec95",
+        "5618506e-aed9-43cd-8943-d92322ef4d4a",
+        "9169409b-82dc-4a3e-afad-611220b9930a",
+        "ff9203a8-655b-4fd0-aed5-a46f1ed0ad3c",
     }
 )
 STOPPED_STATES = frozenset({"Completed", "Cancelled", "Canceled", "Failed"})
+LEGACY_TABLE_ALLOWLIST = (
+    "people_counter_control_writer",
+    "people_counter_dispatcher_leases",
+    "people_counter_event_receipts",
+    "people_counter_executor_attempt_results",
+    "people_counter_executor_benchmark_events",
+    "people_counter_executor_inference_runs",
+    "people_counter_executor_partition_input",
+    "people_counter_executor_partition_plans",
+    "people_counter_executor_partition_records",
+    "people_counter_executor_resource_snapshots",
+    "people_counter_gold_dim_camera",
+    "people_counter_gold_dim_date",
+    "people_counter_gold_dim_location",
+    "people_counter_gold_dim_model_config",
+    "people_counter_gold_dim_time",
+    "people_counter_gold_dim_video",
+    "people_counter_gold_flow_hour",
+    "people_counter_gold_flow_minute",
+    "people_counter_gold_operations_hour",
+    "people_counter_gold_video",
+    "people_counter_line_count_attempts",
+    "people_counter_processing_benchmarks",
+    "people_counter_reconciliation_findings",
+    "people_counter_registration_leases",
+    "people_counter_replay_requests",
+    "people_counter_telemetry_attempts",
+    "people_counter_video_attempts",
+    "people_counter_video_work",
+    "people_counter_worker_event_receipts",
+    "people_counter_worker_events",
+)
+LEGACY_COMMITTED_VIEWS = (
+    "people_counter_line_counts_committed",
+    "people_counter_runs_committed",
+    "people_counter_telemetry_committed",
+)
 CA_SHADOW_ONLY_TABLES = frozenset(
     {
         "people_counter_ca_routing_allowlist",
@@ -160,6 +201,14 @@ class SourceTableState:
 
 
 @dataclass(frozen=True)
+class SourceViewState:
+    name: str
+    exists: bool
+    create_sql: str | None
+    definition_sha256: str | None
+
+
+@dataclass(frozen=True)
 class StoppedWriterGate:
     captured_at: float
     writer_states: tuple[WriterState, ...]
@@ -236,6 +285,22 @@ def classify_ca_table(name: str) -> str:
     if suffix in TRANSFERABLE_SUFFIXES:
         return "TRANSFERABLE_DURABLE_SCHEMA"
     return "EVIDENCE_ONLY"
+
+
+def classify_legacy_table(name: str) -> str:
+    if name not in LEGACY_TABLE_ALLOWLIST:
+        raise CutoverError(f"table is outside legacy allowlist: {name!r}")
+    if name.startswith("people_counter_executor_"):
+        return "EXECUTOR_BENCHMARK"
+    if name.startswith("people_counter_gold_"):
+        return "REPORTING"
+    if name in {
+        "people_counter_control_writer",
+        "people_counter_dispatcher_leases",
+        "people_counter_registration_leases",
+    }:
+        return "CONTROL"
+    return "PROCESSING"
 
 
 def classify_work_payload(payload_json: str) -> str:
@@ -392,6 +457,46 @@ def snapshot_ca_tables(spark: Any, names: Sequence[str]) -> tuple[SourceTableSta
     return tuple(source_table_state(spark, name) for name in sorted(names))
 
 
+def snapshot_legacy_tables(
+    spark: Any,
+    names: Sequence[str],
+) -> tuple[SourceTableState, ...]:
+    if len(set(names)) != len(names):
+        raise CutoverError("legacy snapshot table allowlist contains duplicates")
+    for name in names:
+        classify_legacy_table(name)
+    return tuple(source_table_state(spark, name) for name in sorted(names))
+
+
+def source_view_state(spark: Any, name: str) -> SourceViewState:
+    if name not in LEGACY_COMMITTED_VIEWS:
+        raise CutoverError(f"view is outside legacy allowlist: {name!r}")
+    if not spark.catalog.tableExists(name):
+        return SourceViewState(name, False, None, None)
+    rows = spark.sql(f"SHOW CREATE TABLE `{name}`").collect()
+    if len(rows) != 1:
+        raise CutoverError(f"view definition is unavailable for {name}")
+    row = rows[0]
+    create_sql = str(row[0]).strip()
+    if re.match(r"(?is)^CREATE\s+(OR\s+REPLACE\s+)?VIEW\s", create_sql) is None:
+        raise CutoverError(f"legacy object is not a view: {name}")
+    return SourceViewState(
+        name,
+        True,
+        create_sql,
+        hashlib.sha256(create_sql.encode("utf-8")).hexdigest(),
+    )
+
+
+def snapshot_legacy_views(
+    spark: Any,
+    names: Sequence[str] = LEGACY_COMMITTED_VIEWS,
+) -> tuple[SourceViewState, ...]:
+    if len(set(names)) != len(names):
+        raise CutoverError("legacy view allowlist contains duplicates")
+    return tuple(source_view_state(spark, name) for name in sorted(names))
+
+
 def append_journal_once(
     spark: Any,
     *,
@@ -473,6 +578,12 @@ def retirement_bundle_path(bundle_id: str) -> str:
     return f"{RETIREMENT_ROOT}/{bundle_id}"
 
 
+def legacy_retirement_bundle_path(bundle_id: str) -> str:
+    if re.fullmatch(r"v[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", bundle_id) is None:
+        raise CutoverError("retirement bundle ID is not canonical")
+    return f"{LEGACY_RETIREMENT_ROOT}/{bundle_id}"
+
+
 def _history_json_default(value: object) -> str:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
@@ -489,19 +600,23 @@ def _history_json(row: Any) -> dict[str, Any]:
     )
 
 
-def archive_ca_tables(
+def _archive_tables(
     spark: Any,
     *,
     bundle_id: str,
     table_names: Sequence[str],
+    root: str,
+    states: Sequence[SourceTableState],
+    classification: Any,
+    manifest_schema: str,
+    views: Sequence[SourceViewState] = (),
     path_exists: Any | None = None,
 ) -> dict[str, Any]:
-    """Create immutable Delta copies and return a hashable retirement manifest."""
-    root = retirement_bundle_path(bundle_id)
-    states = snapshot_ca_tables(spark, table_names)
+    if {state.name for state in states} != set(table_names):
+        raise CutoverError("retirement source snapshot allowlist differs")
     entries: list[dict[str, Any]] = []
     for state in states:
-        classification = classify_ca_table(state.name)
+        table_classification = classification(state.name)
         path = f"{root}/tables/{state.name}"
         if state.exists:
             source = spark.table(state.name)
@@ -542,7 +657,7 @@ def archive_ca_tables(
                 **asdict(state),
                 "archive_path": path if state.exists else None,
                 "content_sha256": archive_content_sha256,
-                "classification": classification,
+                "classification": table_classification,
                 "history": history,
                 "history_sha256": sha256(history),
             }
@@ -551,10 +666,66 @@ def archive_ca_tables(
         "bundle_id": bundle_id,
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "cutover_id": CUTOVER_ID,
-        "schema": "people-counter-ca-retirement-v1",
+        "schema": manifest_schema,
         "tables": entries,
     }
+    if views:
+        manifest["views"] = [asdict(view) for view in views]
     return {**manifest, "manifest_sha256": sha256(manifest)}
+
+
+def archive_ca_tables(
+    spark: Any,
+    *,
+    bundle_id: str,
+    table_names: Sequence[str],
+    path_exists: Any | None = None,
+) -> dict[str, Any]:
+    """Create immutable Delta copies and return a Candidate-A manifest."""
+    root = retirement_bundle_path(bundle_id)
+    states = snapshot_ca_tables(spark, table_names)
+    return _archive_tables(
+        spark,
+        bundle_id=bundle_id,
+        table_names=table_names,
+        root=root,
+        states=states,
+        classification=classify_ca_table,
+        manifest_schema="people-counter-ca-retirement-v1",
+        path_exists=path_exists,
+    )
+
+
+def archive_legacy_tables(
+    spark: Any,
+    *,
+    bundle_id: str,
+    table_names: Sequence[str],
+    view_names: Sequence[str] = LEGACY_COMMITTED_VIEWS,
+    path_exists: Any | None = None,
+) -> dict[str, Any]:
+    """Archive the exact legacy tables and committed-view definitions."""
+    if set(table_names) != set(LEGACY_TABLE_ALLOWLIST):
+        raise CutoverError("legacy retirement table allowlist differs")
+    if set(view_names) != set(LEGACY_COMMITTED_VIEWS):
+        raise CutoverError("legacy retirement view allowlist differs")
+    root = legacy_retirement_bundle_path(bundle_id)
+    states = snapshot_legacy_tables(spark, table_names)
+    views = snapshot_legacy_views(spark, view_names)
+    manifest = _archive_tables(
+        spark,
+        bundle_id=bundle_id,
+        table_names=table_names,
+        root=root,
+        states=states,
+        classification=classify_legacy_table,
+        manifest_schema="people-counter-legacy-retirement-v1",
+        views=views,
+        path_exists=path_exists,
+    )
+    if snapshot_legacy_views(spark, view_names) != views:
+        raise CutoverError("legacy view definitions changed during archive")
+    return manifest
 
 
 def validate_retirement_archives(
@@ -569,7 +740,17 @@ def validate_retirement_archives(
     if manifest.get("manifest_sha256") != sha256(unsigned):
         raise CutoverError("retirement manifest digest differs")
     bundle_id = str(manifest.get("bundle_id"))
-    root = retirement_bundle_path(bundle_id)
+    manifest_schema = str(
+        manifest.get("schema") or "people-counter-ca-retirement-v1"
+    )
+    if manifest_schema == "people-counter-ca-retirement-v1":
+        root = retirement_bundle_path(bundle_id)
+        proof_schema = "people-counter-ca-rollback-proof-v1"
+    elif manifest_schema == "people-counter-legacy-retirement-v1":
+        root = legacy_retirement_bundle_path(bundle_id)
+        proof_schema = "people-counter-legacy-rollback-proof-v1"
+    else:
+        raise CutoverError("retirement manifest schema is invalid")
     entries = manifest.get("tables")
     if not isinstance(entries, list):
         raise CutoverError("retirement manifest tables are invalid")
@@ -636,10 +817,54 @@ def validate_retirement_archives(
                 "content_sha256": content_digest,
             }
         )
-    proof = {
-        "schema": "people-counter-ca-rollback-proof-v1",
-        "tables": rollback,
-    }
+    proof: dict[str, Any] = {"schema": proof_schema, "tables": rollback}
+    if manifest_schema == "people-counter-legacy-retirement-v1":
+        view_entries = manifest.get("views")
+        if not isinstance(view_entries, list):
+            raise CutoverError("legacy retirement manifest views are invalid")
+        by_view_name = {
+            str(entry.get("name")): entry
+            for entry in view_entries
+            if isinstance(entry, Mapping)
+        }
+        if (
+            len(by_view_name) != len(view_entries)
+            or set(by_view_name) != set(LEGACY_COMMITTED_VIEWS)
+        ):
+            raise CutoverError("legacy retirement view allowlist differs")
+        rollback_views: list[dict[str, Any]] = []
+        for name in sorted(by_view_name):
+            entry = by_view_name[name]
+            exists = bool(entry.get("exists"))
+            create_sql = entry.get("create_sql")
+            definition_sha256 = entry.get("definition_sha256")
+            if not exists:
+                if create_sql is not None or definition_sha256 is not None:
+                    raise CutoverError(
+                        f"missing legacy view has definition evidence for {name}"
+                    )
+                continue
+            if (
+                not isinstance(create_sql, str)
+                or re.match(
+                    r"(?is)^CREATE\s+(OR\s+REPLACE\s+)?VIEW\s",
+                    create_sql,
+                )
+                is None
+                or hashlib.sha256(create_sql.encode("utf-8")).hexdigest()
+                != definition_sha256
+            ):
+                raise CutoverError(
+                    f"legacy view definition evidence differs for {name}"
+                )
+            rollback_views.append(
+                {
+                    "create_sql": create_sql,
+                    "definition_sha256": definition_sha256,
+                    "name": name,
+                }
+            )
+        proof["views"] = rollback_views
     return {**proof, "rollback_proof_sha256": sha256(proof)}
 
 
@@ -667,6 +892,35 @@ def retirement_manifest_sources(
     if len(sources) != len(entries):
         raise CutoverError("retirement manifest table entry is invalid")
     return sources
+
+
+def retirement_manifest_views(
+    manifest: Mapping[str, Any],
+) -> tuple[SourceViewState, ...]:
+    entries = manifest.get("views")
+    if not isinstance(entries, list):
+        raise CutoverError("retirement manifest views are invalid")
+    views = tuple(
+        SourceViewState(
+            name=str(entry.get("name")),
+            exists=bool(entry.get("exists")),
+            create_sql=(
+                None
+                if entry.get("create_sql") is None
+                else str(entry["create_sql"])
+            ),
+            definition_sha256=(
+                None
+                if entry.get("definition_sha256") is None
+                else str(entry["definition_sha256"])
+            ),
+        )
+        for entry in entries
+        if isinstance(entry, Mapping)
+    )
+    if len(views) != len(entries):
+        raise CutoverError("retirement manifest view entry is invalid")
+    return views
 
 
 def retire_archived_ca_tables(
@@ -742,6 +996,120 @@ def retire_archived_ca_tables(
         "retired_at": datetime.now(timezone.utc).isoformat(),
         "rollback": rollback,
         "schema": "people-counter-ca-retirement-result-v1",
+        "zero_routing_proof_sha256": sha256(zero_routing),
+        "zero_writer_proof_sha256": gate.evidence_sha256,
+    }
+    return {**result, "retirement_result_sha256": sha256(result)}
+
+
+def retire_archived_legacy_tables(
+    spark: Any,
+    *,
+    gate: StoppedWriterGate,
+    manifest: Mapping[str, Any],
+    table_names: Sequence[str],
+    view_names: Sequence[str] = LEGACY_COMMITTED_VIEWS,
+    path_exists: Any,
+    absence_timeout_seconds: float = 15.0,
+) -> dict[str, Any]:
+    """Drop only freshly gated, exactly archived legacy tables and views."""
+    names = tuple(sorted(table_names))
+    views = tuple(sorted(view_names))
+    if len(names) != len(set(names)):
+        raise CutoverError("retirement table allowlist contains duplicates")
+    if len(views) != len(set(views)):
+        raise CutoverError("retirement view allowlist contains duplicates")
+    if set(names) != set(LEGACY_TABLE_ALLOWLIST):
+        raise CutoverError("legacy retirement table allowlist differs")
+    if set(views) != set(LEGACY_COMMITTED_VIEWS):
+        raise CutoverError("legacy retirement view allowlist differs")
+
+    current = snapshot_legacy_tables(spark, names)
+    validate_stopped_writer_gate(gate, gate.source_tables)
+    gated_by_name = {state.name: state for state in gate.source_tables}
+    if set(gated_by_name) != set(names):
+        raise CutoverError("retirement gate table allowlist differs")
+    for observed in current:
+        gated = gated_by_name[observed.name]
+        if observed.exists and observed != gated:
+            raise CutoverError(
+                f"legacy source changed after gate: {observed.name}"
+            )
+
+    expected = retirement_manifest_sources(manifest)
+    expected_by_name = {state.name: state for state in expected}
+    if set(expected_by_name) != set(names):
+        raise CutoverError("retirement manifest table allowlist differs")
+    expected_views = retirement_manifest_views(manifest)
+    expected_views_by_name = {view.name: view for view in expected_views}
+    if set(expected_views_by_name) != set(views):
+        raise CutoverError("retirement manifest view allowlist differs")
+    current_views = snapshot_legacy_views(spark, views)
+    if current_views != tuple(sorted(expected_views, key=lambda item: item.name)):
+        raise CutoverError("legacy view definitions changed after archive")
+
+    rollback = validate_retirement_archives(spark, manifest, expected)
+    for observed in current:
+        source = expected_by_name[observed.name]
+        if observed.exists and observed != source:
+            raise CutoverError(
+                f"legacy source changed during retirement: {observed.name}"
+            )
+        if observed.exists and not source.exists:
+            raise CutoverError(
+                f"legacy source appeared during retirement: {observed.name}"
+            )
+
+    for view in expected_views:
+        if view.exists:
+            spark.sql(f"DROP VIEW `{view.name}`")
+        deadline = time.monotonic() + absence_timeout_seconds
+        while spark.catalog.tableExists(view.name):
+            if time.monotonic() >= deadline:
+                raise CutoverError(f"retired view remains: {view.name}")
+            time.sleep(0.25)
+
+    for source in expected:
+        observed_by_name = {
+            item.name: item for item in snapshot_legacy_tables(spark, names)
+        }
+        observed = observed_by_name[source.name]
+        if observed.exists:
+            if observed != source:
+                raise CutoverError(
+                    f"legacy source changed during retirement: {source.name}"
+                )
+            spark.sql(f"DROP TABLE `{source.name}`")
+        table_path = f"Tables/dbo/{source.name}"
+        deadline = time.monotonic() + absence_timeout_seconds
+        while spark.catalog.tableExists(source.name) or path_exists(table_path):
+            if time.monotonic() >= deadline:
+                raise CutoverError(
+                    f"retired table or managed path remains: {source.name}"
+                )
+            time.sleep(0.25)
+
+    after = snapshot_legacy_tables(spark, names)
+    unexpected = [state.name for state in after if state.exists]
+    if unexpected:
+        raise CutoverError(f"retired tables remain: {unexpected!r}")
+    after_views = snapshot_legacy_views(spark, views)
+    unexpected_views = [view.name for view in after_views if view.exists]
+    if unexpected_views:
+        raise CutoverError(f"retired views remain: {unexpected_views!r}")
+    zero_routing = {
+        "routing_to_legacy": 0,
+        "schema": "people-counter-legacy-zero-routing-proof-v1",
+    }
+    result = {
+        "bundle_id": str(manifest.get("bundle_id")),
+        "dropped_tables": [state.name for state in expected if state.exists],
+        "dropped_views": [view.name for view in expected_views if view.exists],
+        "post_retirement": [asdict(state) for state in after],
+        "post_retirement_views": [asdict(view) for view in after_views],
+        "retired_at": datetime.now(timezone.utc).isoformat(),
+        "rollback": rollback,
+        "schema": "people-counter-legacy-retirement-result-v1",
         "zero_routing_proof_sha256": sha256(zero_routing),
         "zero_writer_proof_sha256": gate.evidence_sha256,
     }

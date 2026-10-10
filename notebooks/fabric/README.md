@@ -56,8 +56,8 @@ Run or deploy the notebooks in this order:
 | Notebook | Pipeline role | When it runs |
 |---|---|---|
 | [`00_bootstrap_lakehouse.ipynb`](./00_bootstrap_lakehouse.ipynb) | Creates control, attempt, output, benchmark, and gold tables plus committed-output views | Once per environment and after compatible schema releases |
-| [`01_register_event.ipynb`](./01_register_event.ipynb) | Validates an ADLS manifest event and registers a deduplicated `QUEUED` work item | Once for every matching storage event |
-| [`02_register_backfill.ipynb`](./02_register_backfill.ipynb) | Bulk-registers historical manifests without bypassing the normal queue | Once per backfill partition |
+| [`01_register_event.ipynb`](./01_register_event.ipynb) | Validates an ADLS manifest event and emits immutable arguments for the stable Control SJD `register` command; it does not write control tables | Once for every matching storage event |
+| [`02_register_backfill.ipynb`](./02_register_backfill.ipynb) | Validates a bounded historical partition and emits immutable arguments for stable Control SJD `bulk-register`; it does not write control tables | Once per backfill partition |
 | [`03_claim_work.ipynb`](./03_claim_work.ipynb) | Claims one runtime-compatible, bounded item batch when a worker slot is available | Every dispatcher pipeline run |
 | [`04_process_video.ipynb`](./04_process_video.ipynb) | Loads one offline runtime, processes a bounded video batch sequentially, and independently commits each attempt | Once per claimed worker batch |
 | [`05_watchdog_recovery.ipynb`](./05_watchdog_recovery.ipynb) | Requeues expired retryable leases and dead-letters exhausted work | Every five minutes |
@@ -438,9 +438,9 @@ flowchart LR
     E --> A[Activator rule]
     E --> EA[(Optional Eventhouse event audit)]
     A --> IP[Event intake pipeline]
-    IP --> N1[01 register event]
-    N1 --> ER[(event_receipts)]
-    N1 --> W[(video_work QUEUED)]
+    IP --> N1[01 validate manifest]
+    N1 --> CSJD[Stable Control SJD register]
+    CSJD --> SW[(people_counter_sjd_work READY)]
 
     SCH[1-minute dispatcher schedule] --> DP[Dispatcher pipeline]
     DP --> N3[03 claim work]
@@ -473,9 +473,11 @@ flowchart LR
 ### Why storage events do not invoke inference directly
 
 Fabric event delivery is at-least-once and does not provide a hard global
-worker limit. A fast intake notebook durably records the event and returns.
-The dispatcher then admits work according to measured capacity. This keeps
-event bursts from starting an unbounded number of model-heavy notebooks.
+worker limit. A fast intake notebook validates one manifest and returns
+canonical arguments to a dependent native Spark Job Definition activity.
+The stable Control SJD registers one idempotent `READY` item. A separate
+bounded dispatcher then admits work according to measured capacity. This
+keeps event bursts from starting an unbounded number of model-heavy jobs.
 
 ## 2. Producer and manifest contract
 
@@ -519,9 +521,9 @@ Therefore a manifest event means the referenced video is ready.
 
 Required fields are `schema_version`, `asset_id`, `asset_version`,
 `video_uri`, `source_etag`, `expected_size_bytes`, `camera_id`,
-`location_id`, `captured_at_utc`, `camera_timezone`, `counting_line`, and
-`expected_sha256`. Reversing the counting-line endpoints reverses `in` and
-`out`.
+`location_id`, `captured_at_utc`, `camera_timezone`, `counting_line`,
+`expected_sha256`, and a positive finite `duration_seconds`. Reversing the
+counting-line endpoints reverses `in` and `out`.
 
 Treat `camera_id` as the stable identity of one physical camera placement.
 It must map to exactly one `location_id` and one IANA `camera_timezone`.
@@ -532,14 +534,17 @@ build fails visibly rather than combining conflicting camera identities.
 Logical identities:
 
 ```text
-event_key = SHA256(cloud_event_source + "\n" + cloud_event_id)
 work_id   = SHA256(normalized_video_uri + "\n" + asset_version)
 attempt_id = a new UUID for every lease claim
 ```
 
-`event_key` suppresses duplicate delivery. `work_id` suppresses repeat work
-for the same immutable asset. `pipeline_run_id` and `activity_run_id` are
-correlation fields only.
+Stable Control registration suppresses duplicate delivery by `work_id` and
+the digest of the canonical immutable payload. Repeating the same event or
+receiving a new CloudEvent for the same immutable manifest returns the same
+registration. Reusing a `work_id` with different immutable content fails with
+an immutable conflict. CloudEvent IDs, event times, pipeline run IDs, and
+activity run IDs must not enter the stable payload because delivery-specific
+values would turn a legitimate replay into a conflict.
 
 The worker retains the producer ETag/version for provenance. Because Fabric
 `notebookutils.fs.getProperties` is unavailable in PySpark notebooks, runtime
@@ -555,26 +560,34 @@ sequenceDiagram
     participant ES as Eventstream
     participant ACT as Activator
     participant PIPE as Intake pipeline
-    participant REG as 01 register event
-    participant DELTA as Delta control tables
+    participant VAL as 01 validate manifest
+    participant CTRL as Stable Control SJD
+    participant DELTA as Stable SJD control tables
 
     ADLS->>ES: Manifest BlobRenamed event
     ES->>ACT: CloudEvent
     ACT->>PIPE: Start with event parameters
-    PIPE->>REG: source, id, subject, event time, manifest URI
-    REG->>REG: Validate incoming/*.json
-    REG->>REG: Read and validate manifest
-    REG->>REG: Derive event_key and work_id
-    REG->>DELTA: MERGE event_receipts by event_key
-    REG->>DELTA: INSERT video_work if work_id is new
-    alt duplicate event
-        REG-->>PIPE: Existing receipt status (QUEUED or EXISTING_WORK)
-    else existing immutable work
-        REG-->>PIPE: EXISTING_WORK
+    PIPE->>VAL: source, id, subject, event time, manifest URI
+    VAL->>VAL: Validate incoming/*.json
+    VAL->>VAL: Read manifest and require duration
+    VAL->>VAL: Derive work_id and canonical stable payload
+    VAL-->>PIPE: Control register command arguments
+    PIPE->>CTRL: Native SparkJobDefinition activity
+    CTRL->>DELTA: Register through people_counter_sjd_* contract
+    alt duplicate immutable work
+        CTRL-->>PIPE: Existing READY work
+    else immutable conflict
+        CTRL-->>PIPE: Fail visibly
     else new work
-        REG-->>PIPE: QUEUED
+        CTRL-->>PIPE: READY
     end
 ```
+
+The validation notebook has no `ControlWriter`, Spark table, Delta merge, or
+legacy receipt path. All control-plane mutation occurs inside the stable
+Control SJD. In particular, event intake does not write
+`people_counter_event_receipts`, `people_counter_video_work`,
+`people_counter_registration_leases`, or `people_counter_control_writer`.
 
 ### Bounded dispatch and worker execution
 
@@ -1423,7 +1436,7 @@ Create `pc-event-intake`:
    SUBJECT
    MANIFEST_URI
    ```
-3. Add one Notebook activity targeting
+3. Add a Notebook activity named `ValidateManifest` targeting
    the imported `01_register_event` Fabric notebook item, sourced from
    [`01_register_event.ipynb`](./01_register_event.ipynb). If it does not
    appear in the activity selector, return to section 6.2, import/save it,
@@ -1432,8 +1445,8 @@ Create `pc-event-intake`:
    `pc_adls_service_principal_<environment>`. If the dropdown is empty,
    create the centrally managed service-principal cloud connection from
    section 6.2, enable code-first Notebook access, then select **Refresh**.
-4. Select the Notebook activity, open **Settings**, and find **Base
-   parameters**. For each event/correlation parameter below, select its
+4. Select `ValidateManifest`, open **Settings**, and find **Base
+   parameters**. For each event parameter below, select its
    **Value** field, choose **Add dynamic content**, and enter the expression
    exactly as shown. `Expression` is not a parameter type. Set **Type** to
    `String` and put the expression in **Value** without surrounding quotes:
@@ -1446,37 +1459,29 @@ Create `pc-event-intake`:
    | `EVENT_TIME` | `String` | `@pipeline().parameters.EVENT_TIME` |
    | `SUBJECT` | `String` | `@pipeline().parameters.SUBJECT` |
    | `MANIFEST_URI` | `String` | `@pipeline().parameters.MANIFEST_URI` |
-   | `PIPELINE_RUN_ID` | `String` | `@pipeline().RunId` |
 
    Configure the remaining base parameters as literal values, not dynamic
    expressions:
 
    | Notebook base parameter | Type | Literal value |
    |---|---|---|
-   | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
-   | `TABLE_PREFIX` | `String` | `people_counter` |
    | `SOURCE_STORAGE_ACCOUNT` | `String` | `<storage-account>` |
    | `SOURCE_CONTAINER` | `String` | `<source-filesystem>` |
    | `SOURCE_SHORTCUT_ABFS_ROOT` | `String` | Environment shortcut ABFS root from section 6.2.1 |
-   | `MAX_ATTEMPTS` | `Int` | `4` |
-   | `PRIORITY` | `Int` | `100` |
-   | `PIPELINE` | `String` | `rtdetr-osnet` |
-   | `DEVICE_VARIANT` | `String` | `cpu` |
-   | `DEVICE` | `String` | `cpu` |
-   | `BATCH_SIZE` | `Int` | `1` |
-   | `SAMPLE_FPS` | `Float` | `3.0` |
-   | `DETECTION_THRESHOLD` | `Float` | `0.6` |
-   | `USE_FP16` | `Bool` | `false` |
-   | `DETECTOR_MODEL` | `String` | `r18` |
-   | `CAMERA_MOTION_COMPENSATION` | `String` | Empty; parsed as null |
+   | `PROFILE_ID` | `String` | Reviewed profile ID, for example `onnx-r18-b1-1fps-1t` |
+   | `PROFILE_SHA256` | `String` | SHA-256 of the reviewed profile |
+   | `RELEASE_MANIFEST_SHA256` | `String` | SHA-256 of the immutable release manifest |
+   | `MODEL_ARTIFACT_SHA256_JSON` | `String` | Canonical JSON object mapping every required model path to its SHA-256 |
+   | `MAX_ATTEMPTS` | `Int` | `3` |
 
    If Fabric already populated these literal defaults from the notebook's
    tagged parameter cell, verify them rather than adding duplicate rows.
-5. Do not validate the notebook by running its registration cell
+5. Do not validate the notebook by running its validation cell
    interactively with blank defaults. Pipeline parameters are injected only
    when the Notebook activity runs. For an interactive smoke test, populate
    the tagged parameter cell from one Eventstream preview event, rerun that
-   cell, and then run the registration cell.
+   cell, and then run the validation cell. A successful interactive run
+   returns arguments; it does not register work.
 6. In the Notebook activity **General** settings, use this initial production
    policy:
 
@@ -1492,19 +1497,33 @@ Create `pc-event-intake`:
 
    An empty condition list means retry on every failure. This is intentional
    for the initial deployment because Fabric Notebook activities can wrap
-   Python, Spark, storage, capacity, and Delta errors under tenant/runtime-
-   specific codes. `01_register_event` is idempotent: duplicate events merge
-   by `event_key`, and deterministic validation failures remain recorded as
-   `REJECTED`. A malformed manifest can therefore consume the three retries,
-   but it cannot create duplicate work.
+   Python, Spark, storage, and capacity errors under tenant/runtime-specific
+   codes. Validation is read-only. A malformed manifest can consume the three
+   retries, but it cannot create control-plane state.
 
    The 30-minute timeout includes Spark admission/session startup, manifest
-   read, validation, and Delta writes. It is not a video-processing timeout.
+   read, and validation. It is not a video-processing timeout.
    No additional action is required on this activity-settings screen. Before
    production, complete the 20-minute intake-duration alert described in
    section 8 under **Alerts**. Sustained queueing near 30 minutes means
    capacity/admission needs correction rather than a larger timeout.
-7. After test runs expose the actual error envelope in your tenant, you may
+7. Add a native **Spark Job Definition** activity named
+   `RegisterStableWork`. Connect it to `ValidateManifest` with the
+   **Succeeded** dependency condition. Select the stable Control SJD in the
+   same workspace. In Development its item ID is
+   `6df10e00-517c-409a-8dd6-40ae9bc62003`.
+8. In `RegisterStableWork` advanced settings, set **Command line arguments**
+   with **Add dynamic content** to:
+
+   ```text
+   @json(activity('ValidateManifest').output.result.exitValue).command_line_arguments
+   ```
+
+   Use a one-hour timeout and the same three-attempt exponential retry policy.
+   Stable registration is idempotent for identical immutable input, so retry
+   cannot create a second work row. Pipeline success now means the Control SJD
+   completed, not merely that manifest validation succeeded.
+9. After test runs expose the actual error envelope in your tenant, you may
    enable **Retry conditions (preview)** to avoid retrying deterministic
    validation failures. Conditions determine which failures are retried; join
    these rows with **Or**, not **And**:
@@ -1530,8 +1549,8 @@ Create `pc-event-intake`:
    `REJECTED` does not match. Fabric waits for the retry interval before
    evaluating a condition, so a nonmatching failure can still incur one
    delay.
-8. Save the pipeline so it becomes selectable by the Activator rule.
-9. After the complete event flow is validated, add terminal-failure alerting
+10. Save the pipeline so it becomes selectable by the Activator rule.
+11. After the complete event flow is validated, add terminal-failure alerting
    for this pipeline:
    - Open **Real-Time hub** and select **Fabric events**.
    - Find **Job events**, select **...**, and choose **Set alert**.
@@ -1585,8 +1604,8 @@ Create `pc-event-intake`:
    - Confirm the pipeline fails, a `Microsoft.Fabric.ItemJobFailed` event is
      produced, and the notification contains the job correlation fields.
    - Restore the retry count to `3`.
-   - Keep the rejected event receipt as an audit record, or remove it only
-     according to the approved development-data cleanup process.
+   - Confirm that no stable or legacy control row was created for the invalid
+     manifest. Use the pipeline and item-job events as the rejection evidence.
 
 #### Resolve ADLS `403 AccessDeniedException`
 
@@ -3030,7 +3049,7 @@ separate pipeline named `pc-backfill-register` for the historical load:
    abfss://<workspace-id>@onelake.dfs.fabric.microsoft.com/<lakehouse-id>/Files/<shortcut-name>/incoming/<partition-path>/*.json
    ```
 
-3. Add one Notebook activity targeting the imported
+3. Add one Notebook activity named `PrepareBackfillPartition` targeting the imported
    `02_register_backfill` Fabric notebook item, sourced from
    [`02_register_backfill.ipynb`](./02_register_backfill.ipynb).
 4. Confirm `people_counter_<environment>` is attached and pinned as that
@@ -3043,45 +3062,47 @@ separate pipeline named `pc-backfill-register` for the historical load:
    | `REGISTRATION_ID` | `String` | `@pipeline().RunId` |
    | `SOURCE_STORAGE_ACCOUNT` | `String` | `<storage-account>` |
    | `SOURCE_CONTAINER` | `String` | `<source-filesystem>` |
-   | `SOURCE_SHORTCUT_NAME` | `String` | `<shortcut-name>`, for example `source_footage` |
-   | `DATABASE` | `String` | Empty; uses the attached default Lakehouse |
-   | `TABLE_PREFIX` | `String` | `people_counter` |
-   | `MAX_ATTEMPTS` | `Int` | `4` |
-   | `PRIORITY` | `Int` | `10` |
-   | `PIPELINE` | `String` | `rtdetr-osnet` |
-   | `DEVICE_VARIANT` | `String` | `cpu` |
-   | `DEVICE` | `String` | `cpu` |
-   | `BATCH_SIZE` | `Int` | `1` |
-   | `SAMPLE_FPS` | `Float` | `3.0` |
-   | `DETECTION_THRESHOLD` | `Float` | `0.6` |
-   | `USE_FP16` | `Bool` | `false` |
-   | `DETECTOR_MODEL` | `String` | `r18` |
-   | `CAMERA_MOTION_COMPENSATION` | `String` | Empty; parsed as null |
+   | `PROFILE_ID` | `String` | Reviewed profile ID, for example `onnx-r18-b1-1fps-1t` |
+   | `PROFILE_SHA256` | `String` | SHA-256 of the reviewed profile |
+   | `RELEASE_MANIFEST_SHA256` | `String` | SHA-256 of the immutable stable release manifest |
+   | `MODEL_ARTIFACT_SHA256_JSON` | `String` | Canonical model-path-to-SHA-256 object |
+   | `MAX_ATTEMPTS` | `Int` | `3` |
+   | `MAX_ITEMS` | `Int` | `1000` |
+   | `MAX_PARTITION_BYTES` | `Int` | `16777216` |
 
    `MANIFEST_GLOB` and `REGISTRATION_ID` use **Add dynamic content** in the
    Value field; their Type remains `String`.
 
-   `SOURCE_SHORTCUT_NAME` must exactly match the shortcut folder name shown
-   under the default Lakehouse's **Files** node. For example, if Lakehouse
-   Explorer shows `Files/source_footage`, enter `source_footage`. Do not enter
-   the storage-account name, ADLS filesystem name, `Files/source_footage`, or
-   the full OneLake ABFS path.
-6. Set **Timeout** to `0.01:00:00`, enable `3` retries, choose
+6. Add a native **Spark Job Definition** activity named
+   `RegisterStableBackfill`. Connect it to `PrepareBackfillPartition` with the
+   **Succeeded** dependency condition and select the stable Control SJD. Set
+   **Command line arguments** to:
+
+   ```text
+   @json(activity('PrepareBackfillPartition').output.result.exitValue).command_line_arguments
+   ```
+
+   The notebook writes only a canonical immutable artifact under
+   `Files/people-counter/sjd/v1/intake/backfill/<registration-id>/`. The
+   Control SJD verifies its SHA-256 and item bound, then registers the whole
+   partition under one serialized stable control transaction. Neither
+   activity writes any legacy `people_counter_*` control table.
+7. Set both activities' **Timeout** to `0.01:00:00`, enable `3` retries, choose
    **Increasing Delay**, set the initial interval to `60` seconds and the
    maximum to `900` seconds. Leave preview retry conditions empty initially.
-7. Keep each `MANIFEST_GLOB` partition small enough that validation and
-   registration finish comfortably inside the notebook's 15-minute
-   registration mutex. Start with at most 1,000 manifests and adjust only
-   after measuring duration.
-8. Save the pipeline. Run it once per inventory partition or call it from a
+8. Keep each `MANIFEST_GLOB` partition at or below both `MAX_ITEMS` and
+   `MAX_PARTITION_BYTES`. Start with at most 1,000 manifests and 16 MiB of
+   aggregate manifest JSON, then adjust only through a reviewed release.
+9. Save the pipeline. Run it once per inventory partition or call it from a
    separate bounded inventory/ForEach orchestration pipeline.
-9. Verify the returned JSON counts:
-   `manifest_count`, `already_registered`, and `newly_registered`.
+10. Verify the SJD result reports `partition_sha256`, `item_count`, and
+    `work_ids_sha256`. Replaying an identical partition is idempotent;
+    changing immutable content for an existing `work_id` fails closed.
 
-Event intake and backfill registration share the global registration mutex.
-Event intake uses `event_key` as the lock owner; backfill uses the pipeline
-run ID supplied through `REGISTRATION_ID`. Do not run both registration paths
-outside these notebooks or append directly to `video_work`.
+Event intake and backfill registration converge on the same stable
+`people_counter_sjd_work` identity and global stable control writer. Do not
+register outside the stable Control SJD or append directly to any control
+table.
 
 ### 7.4 Capacity benchmark pipeline
 
@@ -8165,14 +8186,12 @@ pc-dispatcher-executor-00
      -> false: NoWork
 ```
 
-Explicit immutable routing prevents two worker implementations from claiming
-the same queue row. Event registration takes its authoritative engine from the
-deployment-level `pc-event-intake` pipeline parameter. Its Development default
-is `EXECUTOR_PARTITION`, so normal manifest generation remains
-destination-independent. A manifest may omit `processing_engine`; if it
-supplies one, it must match the configured intake engine. Blank, unknown, or
-conflicting values fail. Legacy null queue values are interpreted as
-`NOTEBOOK_04` only during the stopped-writer migration.
+Explicit immutable routing prevents two legacy worker implementations from
+claiming the same legacy queue row. New manifest intake no longer selects a
+legacy processing engine: `pc-event-intake` invokes the stable Control SJD and
+creates `READY` work only in the `people_counter_sjd_*` control plane. The
+legacy dispatchers remain documented here for migration evidence and must not
+be wired to the stable intake boundary.
 
 ### 13.1 Deployed Development items
 
@@ -8231,12 +8250,11 @@ same UI fields and live IDs were verified. The post-deployment definitions are
 To refresh them in the UI, open each pipeline, download/export its definition,
 review IDs and parameter defaults, and replace only the corresponding export.
 
-`pc-event-intake` owns routing for newly published manifests. Its
-`PROCESSING_ENGINE` pipeline parameter defaults to `EXECUTOR_PARTITION` and is
-passed to `01_register_event` with **Add dynamic content**. Keep routing out of
-the manifest generator. Change the pipeline default only as an explicit
-deployment decision; manifests that contain an optional `processing_engine`
-must agree with it.
+`pc-event-intake` owns validation and stable registration for newly published
+manifests. It has no `PROCESSING_ENGINE` parameter. `ValidateManifest` emits a
+canonical Control `register` command, and `RegisterStableWork` runs that
+command through the native Spark Job Definition activity. Keep runtime routing
+in the reviewed stable profile rather than the manifest generator.
 
 ### 13.3 Executor pipeline parameters
 
@@ -8377,6 +8395,99 @@ Rollback order:
 6. Preserve notebook 17, executor pipeline definitions, attempt events, and
    staging rows for diagnosis and retention. Remove schema objects only in a
    later reviewed stopped-writer migration.
+
+### 13.6 Stable SJD cutover and legacy retirement
+
+The stable Cutover SJD owns the destructive legacy retirement boundary. Do
+not use a notebook, SQL endpoint, Lakehouse explorer, or ad-hoc Spark command
+to drop legacy objects.
+
+Before enabling stable production traffic:
+
+1. Publish an immutable release containing the exact Cutover SJD source.
+2. Run event, bounded-backfill, dispatch, Gold, semantic-refresh, and
+   reconciliation canaries against that release.
+3. Require zero unresolved reconciliation findings, an acknowledged semantic
+   refresh outbox, and report-visible canary metrics.
+4. Enable only the five stable schedules and
+   `run_pc_event_intake_on_manifest_renamed`, then observe at least one
+   dispatcher, recovery, reconciliation, Gold, and refresh cadence.
+
+Legacy retirement requires a canonical stopped-writer gate no more than 15
+minutes old. The gate must contain terminal evidence for all 12 reviewed
+writer artifacts, exact state for all 30 `people_counter_*` legacy tables,
+zero Candidate-A routing, and the canonical evidence digest. The allowlist
+includes `people_counter_control_writer`, all seven
+`people_counter_executor_*` tables, the legacy control/attempt/event tables,
+and all legacy Gold tables. It also covers these dependent views:
+
+- `people_counter_line_counts_committed`;
+- `people_counter_runs_committed`; and
+- `people_counter_telemetry_committed`.
+
+Capture the gate with the Cutover SJD immediately before archiving. Supply
+exactly one current terminal state for every reviewed writer:
+
+```text
+capture-legacy-gate \
+  --gate-id legacy-<YYYYMMDDTHHMMSSZ> \
+  --writer-state <item-id>=Completed \
+  ... one --writer-state for each of the 12 reviewed item IDs
+```
+
+The command reads all 30 live Delta versions, row counts, and schemas, counts
+the Candidate-A routing allowlist, refuses active, missing, unknown, or
+duplicate writer states, and creates the canonical gate under
+`Files/people-counter/sjd/v1/cutovers/people_counter_sjd_0001/gates/`.
+
+Use a unique bundle ID and the immutable gate path:
+
+```text
+archive-legacy \
+  --bundle-id v<YYYYMMDDTHHMMSSZ>-<12-hex> \
+  --gate-path Files/people-counter/sjd/v1/cutovers/people_counter_sjd_0001/gates/<gate>.json
+```
+
+The archive command creates exact Delta rollback copies under
+`Files/people-counter/sjd/v1/retirements/legacy/<bundle-id>/tables/`, records
+the three view definitions, verifies row counts, schemas, and canonical
+content hashes, and rechecks the stopped-writer gate after archiving. Review
+the immutable manifest and rollback proof before proceeding.
+
+Retire only the same reviewed bundle:
+
+```text
+retire-legacy \
+  --bundle-id v<YYYYMMDDTHHMMSSZ>-<12-hex> \
+  --gate-path Files/people-counter/sjd/v1/cutovers/people_counter_sjd_0001/gates/<gate>.json
+```
+
+The command fails closed if a table version, row count, schema, content
+archive, view definition, writer state, or allowlist differs. It drops the
+dependent views first, drops only the exact archived tables, verifies both
+catalog and `Tables/dbo/<table>` path absence after every drop, writes an
+immutable retirement result, and appends the stable retirement journal.
+Preserve the disabled legacy pipelines, notebooks, bundle manifest, rollback
+SQL, and archived Delta paths through the approved rollback window.
+
+The production cutover completed on 2026-10-10 with immutable release
+`0.9.55`:
+
+- detached manifest SHA-256:
+  `58c779f12ac490c19fb6f1bfb01e91b24adc94f2c4dd279d8392d2b7243524cc`;
+- post-publish receipt SHA-256:
+  `9d4c67543b7f526f4344d1b7952733d95b5d8c5cdf5360129e6577647e44f72f`;
+- legacy retirement bundle:
+  `v20261010T104723Z-0955a11ce55a`;
+- retirement result SHA-256:
+  `00483cd4d5126d0738af8a126aa6a8ec2f8506a5f9f304b0f2c2893b9db0f1b2`;
+- rollback proof SHA-256:
+  `d6f9f193fd226bcdf8cf1865c3439ab27c8ab323b611fd1ea02c01bb252caefc`.
+
+The retirement readback proves all 30 legacy tables and all three committed
+views are absent. After retirement, all five stable schedule roles completed
+without a failed run, the schedules were left enabled, and the exact
+manifest-renamed Activator rule remained enabled against `pc-event-intake`.
 
 ## 14. Official references
 

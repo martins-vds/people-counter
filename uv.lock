@@ -3980,7 +3980,7 @@ wheels = [
 
 [[package]]
 name = "people-counter"
-version = "0.9.49"
+version = "0.9.55"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },

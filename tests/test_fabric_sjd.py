@@ -13,8 +13,10 @@ from people_counter.fabric_sjd import (
 )
 from people_counter.fabric_sjd_jobs import (
     control_main,
+    dispatcher_main,
     gold_main,
     process_main,
+    refresh_main,
     reconciliation_main,
 )
 from people_counter.fabric_sjd_definition import (
@@ -79,10 +81,25 @@ def test_stable_entry_points_bind_exact_production_config() -> None:
     assert run.call_args.kwargs["route_mode"] == "PRODUCTION"
 
     with patch(
+        "people_counter.fabric_sjd_runtime.dispatcher_main",
+        return_value=6,
+    ) as run:
+        assert dispatcher_main(["dispatch"]) == 6
+    assert isinstance(run.call_args.kwargs["config"], FabricSjdConfig)
+    assert run.call_args.kwargs["route_mode"] == "PRODUCTION"
+
+    with patch(
         "people_counter.fabric_sjd_runtime.gold_main",
         return_value=9,
     ) as run:
         assert gold_main(["validate"]) == 9
+    assert isinstance(run.call_args.kwargs["config"], FabricSjdConfig)
+
+    with patch(
+        "people_counter.fabric_sjd_runtime.refresh_main",
+        return_value=10,
+    ) as run:
+        assert refresh_main(["refresh"]) == 10
     assert isinstance(run.call_args.kwargs["config"], FabricSjdConfig)
 
 

@@ -26,16 +26,19 @@ from people_counter.sjd_control import (
     ClaimedBatch,
     ClaimedWork,
     ControlBatchState,
+    ControlError,
     ImmutableConflictError,
     LeaseBudgetError,
     LeaseLostError,
     RecoveryReport,
+    QuarantineReport,
     RegisteredWork,
     ReconciliationFinding,
     ReplayRequest,
     SQLiteControlStore,
     _claim_admission_settings,
     _largest_admissible_claim_prefix,
+    normalize_registration_requests,
 )
 
 
@@ -289,70 +292,142 @@ class FabricControlStoreImpl:
         max_attempts: int = 3,
         available_at: float | None = None,
     ) -> RegisteredWork:
-        identity = _text(work_id, "work_id")
-        runtime = _text(runtime_key, "runtime_key")
-        duration = _positive(duration_seconds, "duration_seconds")
-        if type(max_attempts) is not int or not 1 <= max_attempts <= 100:
-            raise ValueError("max_attempts must be between 1 and 100")
-        payload_json = _canonical(dict(payload))
-        payload_digest = hashlib.sha256(payload_json.encode()).hexdigest()
+        return self.register_many(
+            [
+                {
+                    "work_id": work_id,
+                    "payload": payload,
+                    "runtime_key": runtime_key,
+                    "duration_seconds": duration_seconds,
+                    "config_sha256": config_sha256,
+                    "release_digest": release_digest,
+                    "max_attempts": max_attempts,
+                    "available_at": available_at,
+                }
+            ]
+        )[0]
+
+    def register_many(
+        self,
+        requests: Sequence[Mapping[str, Any]],
+    ) -> tuple[RegisteredWork, ...]:
+        """Atomically register one bounded partition under the global writer."""
+        normalized = normalize_registration_requests(requests)
+        prepared: list[tuple[dict[str, Any], str, str]] = []
+        seen: dict[str, tuple[object, ...]] = {}
+        for request in normalized:
+            payload_json = _canonical(request["payload"])
+            payload_digest = hashlib.sha256(payload_json.encode()).hexdigest()
+            identity = request["work_id"]
+            immutable = (
+                payload_digest,
+                request["runtime_key"],
+                request["duration_seconds"],
+                request["config_sha256"],
+                request["release_digest"],
+                request["max_attempts"],
+            )
+            previous = seen.get(identity)
+            if previous is not None:
+                if previous != immutable:
+                    raise ImmutableConflictError(
+                        f"work {identity!r} is duplicated with different content"
+                    )
+                continue
+            seen[identity] = immutable
+            prepared.append((request, payload_json, payload_digest))
         now = self.now()
 
-        def operation() -> RegisteredWork:
+        def operation() -> tuple[RegisteredWork, ...]:
             rows = self._rows("work")
-            existing = _one(rows, "work_id", identity)
-            if existing is not None:
-                immutable = (
-                    existing["payload_sha256"],
-                    existing["runtime_key"],
-                    float(existing["duration_seconds"]),
-                    existing["config_sha256"],
-                    existing["release_digest"],
-                )
-                supplied = (
-                    payload_digest,
-                    runtime,
-                    duration,
-                    _text(config_sha256, "config_sha256"),
-                    _text(release_digest, "release_digest"),
-                )
-                if immutable != supplied:
-                    raise ImmutableConflictError(
-                        f"work {identity!r} was registered with different content"
+            existing_by_id = {row["work_id"]: row for row in rows}
+            registered: list[RegisteredWork] = []
+            changed = False
+            for request, payload_json, payload_digest in prepared:
+                identity = request["work_id"]
+                existing = existing_by_id.get(identity)
+                if existing is not None:
+                    immutable = (
+                        existing["payload_sha256"],
+                        existing["runtime_key"],
+                        float(existing["duration_seconds"]),
+                        existing["config_sha256"],
+                        existing["release_digest"],
+                        int(existing["original_max_attempts"]),
                     )
-                return _registered(existing)
-            row = {
-                "work_id": identity,
-                "payload_json": payload_json,
-                "payload_sha256": payload_digest,
-                "runtime_key": runtime,
-                "duration_seconds": duration,
-                "config_sha256": _text(config_sha256, "config_sha256"),
-                "release_digest": _text(release_digest, "release_digest"),
-                "status": "READY",
-                "attempt_count": 0,
-                "max_attempts": max_attempts,
-                "original_max_attempts": max_attempts,
-                "fence": 0,
-                "available_at": (
-                    now
-                    if available_at is None
-                    else _finite(available_at, "available_at")
-                ),
-                "lease_owner": None,
-                "lease_attempt_id": None,
-                "lease_expires_at": None,
-                "committed_attempt_id": None,
-                "publication_sequence": None,
-                "replay_generation": 0,
-                "last_replay_id": None,
-                "last_error": None,
-                "created_at": now,
-                "updated_at": now,
-            }
-            rows.append(row)
-            self._replace("work", rows)
-            return _registered(row)
+                    supplied = (
+                        payload_digest,
+                        request["runtime_key"],
+                        request["duration_seconds"],
+                        request["config_sha256"],
+                        request["release_digest"],
+                        request["max_attempts"],
+                    )
+                    if immutable != supplied:
+                        raise ImmutableConflictError(
+                            f"work {identity!r} was registered with different content"
+                        )
+                    registered.append(_registered(existing))
+                    continue
+                row = {
+                    "work_id": identity,
+                    "payload_json": payload_json,
+                    "payload_sha256": payload_digest,
+                    "runtime_key": request["runtime_key"],
+                    "duration_seconds": request["duration_seconds"],
+                    "config_sha256": request["config_sha256"],
+                    "release_digest": request["release_digest"],
+                    "status": "READY",
+                    "attempt_count": 0,
+                    "max_attempts": request["max_attempts"],
+                    "original_max_attempts": request["max_attempts"],
+                    "fence": 0,
+                    "available_at": (
+                        now
+                        if request["available_at"] is None
+                        else request["available_at"]
+                    ),
+                    "lease_owner": None,
+                    "lease_attempt_id": None,
+                    "lease_expires_at": None,
+                    "committed_attempt_id": None,
+                    "publication_sequence": None,
+                    "replay_generation": 0,
+                    "last_replay_id": None,
+                    "last_error": None,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                rows.append(row)
+                existing_by_id[identity] = row
+                registered.append(_registered(row))
+                changed = True
+            if changed:
+                self._replace("work", rows)
+                observed = {
+                    row["work_id"]: row
+                    for row in self._rows("work")
+                    if row["work_id"] in seen
+                }
+                if set(observed) != set(seen):
+                    raise ControlError(
+                        "bulk registration exact readback is incomplete"
+                    )
+                for identity, immutable in seen.items():
+                    row = observed[identity]
+                    readback = (
+                        row["payload_sha256"],
+                        row["runtime_key"],
+                        float(row["duration_seconds"]),
+                        row["config_sha256"],
+                        row["release_digest"],
+                        int(row["original_max_attempts"]),
+                    )
+                    if readback != immutable:
+                        raise ControlError(
+                            f"bulk registration readback differs for {identity!r}"
+                        )
+            return tuple(registered)
 
         return self.writer.run(operation)
 
@@ -362,6 +437,7 @@ class FabricControlStoreImpl:
         *,
         max_items: int,
         lease_seconds: float,
+        maximum_active_batches: int | None = None,
         minimum_speed_x: float | None = None,
         safety_factor: float | None = None,
         margin_seconds: float | None = None,
@@ -375,6 +451,16 @@ class FabricControlStoreImpl:
             raise ValueError("max_items must be between 1 and 100")
         if type(minimum_items) is not int or not 1 <= minimum_items <= max_items:
             raise ValueError("minimum_items must be between 1 and max_items")
+        if (
+            maximum_active_batches is not None
+            and (
+                type(maximum_active_batches) is not int
+                or not 1 <= maximum_active_batches <= 100
+            )
+        ):
+            raise ValueError(
+                "maximum_active_batches must be between 1 and 100"
+            )
         lease = _positive(lease_seconds, "lease_seconds")
         speed, factor, margin, profile_workers, profile_name = (
             _claim_admission_settings(
@@ -395,6 +481,13 @@ class FabricControlStoreImpl:
 
         def operation() -> ClaimedBatch | None:
             now = self.now()
+            if maximum_active_batches is not None:
+                active = sum(
+                    row["status"] in {"LEASED", "SEALED"}
+                    for row in self._rows("batches")
+                )
+                if active >= maximum_active_batches:
+                    return None
             work = self._rows("work")
             eligible = [
                 row
@@ -1096,6 +1189,78 @@ class FabricControlStoreImpl:
             self._replace_many(work=work, replay_requests=requests)
             return ReplayRequest(
                 replay_id, work_id, operator, reason, generation, now
+            )
+
+        return self.writer.run(operation)
+
+    def quarantine(
+        self,
+        expected_release_digests: Mapping[str, str],
+        *,
+        operator: str,
+        reason: str,
+    ) -> QuarantineReport:
+        """Terminalize exact READY work whose immutable release is obsolete."""
+        if not isinstance(expected_release_digests, Mapping) or not expected_release_digests:
+            raise ValueError("expected_release_digests must be a non-empty mapping")
+        expected = {
+            _text(work_id, "work_id"): _sha(
+                digest, f"release digest for {work_id}"
+            )
+            for work_id, digest in expected_release_digests.items()
+        }
+        actor = _text(operator, "operator")
+        explanation = _text(reason, "reason")
+
+        def operation() -> QuarantineReport:
+            now = self.now()
+            rows = self._rows("work")
+            observed = {
+                str(row["work_id"]): row
+                for row in rows
+                if row["work_id"] in expected
+            }
+            if set(observed) != set(expected):
+                raise KeyError(sorted(set(expected) - set(observed)))
+            for work_id, digest in expected.items():
+                row = observed[work_id]
+                marker = _canonical(
+                    {
+                        "operation": "quarantine",
+                        "operator": actor,
+                        "reason": explanation,
+                        "release_digest": digest,
+                    }
+                )
+                if row["release_digest"] != digest:
+                    raise ImmutableConflictError(
+                        f"work {work_id} release digest differs"
+                    )
+                if row["status"] == "DEAD" and row["last_error"] == marker:
+                    continue
+                if row["status"] != "READY" or row["committed_attempt_id"] is not None:
+                    raise ControlError(
+                        f"work {work_id} is not quarantine-eligible; "
+                        f"status={row['status']}"
+                    )
+                row.update(
+                    {
+                        "status": "DEAD",
+                        "available_at": now,
+                        "last_error": marker,
+                        "updated_at": now,
+                    }
+                )
+            self._replace_many(work=rows)
+            readback = {
+                str(row["work_id"]): row["status"]
+                for row in self._rows("work")
+                if row["work_id"] in expected
+            }
+            if readback != {work_id: "DEAD" for work_id in expected}:
+                raise ControlError("quarantine exact readback failed")
+            return QuarantineReport(
+                tuple(sorted(expected)), actor, explanation, now
             )
 
         return self.writer.run(operation)

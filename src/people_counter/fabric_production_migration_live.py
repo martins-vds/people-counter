@@ -99,8 +99,16 @@ GOLD_TABLES = (
     "people_counter_gold_video",
 )
 LEGACY_TABLES = (
+    "people_counter_control_writer",
     "people_counter_dispatcher_leases",
     "people_counter_event_receipts",
+    "people_counter_executor_attempt_results",
+    "people_counter_executor_benchmark_events",
+    "people_counter_executor_inference_runs",
+    "people_counter_executor_partition_input",
+    "people_counter_executor_partition_plans",
+    "people_counter_executor_partition_records",
+    "people_counter_executor_resource_snapshots",
     "people_counter_line_count_attempts",
     "people_counter_processing_benchmarks",
     "people_counter_reconciliation_findings",
@@ -1064,7 +1072,7 @@ def _catalog_diagnostics(spark_session: Any) -> dict[str, object]:
         raise LiveMigrationError("Spark catalog has no default Lakehouse")
     visibility = {
         name: bool(spark_session.catalog.tableExists(name))
-        for name in (LOCK_TABLE, *LEGACY_TABLES, *COMMITTED_VIEWS)
+        for name in (*LEGACY_TABLES, *COMMITTED_VIEWS)
     }
     required = {
         LOCK_TABLE,
@@ -1086,7 +1094,7 @@ def _catalog_diagnostics(spark_session: Any) -> dict[str, object]:
 
 def _delta_history_diagnostics(spark_session: Any) -> dict[str, int]:
     versions: dict[str, int] = {}
-    for name in (LOCK_TABLE, *LEGACY_TABLES):
+    for name in LEGACY_TABLES:
         if not spark_session.catalog.tableExists(name):
             continue
         rows = spark_session.sql(f"DESCRIBE HISTORY `{name}` LIMIT 1").collect()

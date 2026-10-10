@@ -15,6 +15,7 @@ from people_counter.sjd_control import (
     SQLiteControlStore,
     UnsupportedControlStoreError,
     main,
+    normalize_registration_requests,
 )
 from people_counter.sjd_process import LOCAL_TWO_WORKERS
 
@@ -104,6 +105,56 @@ class SJDControlTests(unittest.TestCase):
                 release_digest="release-a",
             )
 
+    def test_register_many_is_atomic_idempotent_and_rejects_partition_conflicts(self):
+        def request(work_id, source):
+            return {
+                "work_id": work_id,
+                "payload": {"source_video": source},
+                "runtime_key": "runtime-a",
+                "duration_seconds": 10,
+                "config_sha256": "config-a",
+                "release_digest": "release-a",
+                "max_attempts": 3,
+                "available_at": 25,
+            }
+
+        partition = [
+            request("work-1", "one.mp4"),
+            request("work-1", "one.mp4"),
+            request("work-2", "two.mp4"),
+        ]
+        first = self.store.register_many(partition)
+        second = self.store.register_many(partition)
+
+        self.assertEqual(first, second)
+        self.assertEqual([item.work_id for item in first], ["work-1", "work-2"])
+        with sqlite3.connect(self.store.database) as connection:
+            available = connection.execute(
+                "SELECT work_id, available_at FROM work ORDER BY work_id"
+            ).fetchall()
+        self.assertEqual(available, [("work-1", 25.0), ("work-2", 25.0)])
+        with self.assertRaisesRegex(
+            ImmutableConflictError,
+            "duplicated with different content",
+        ):
+            self.store.register_many(
+                [
+                    request("work-3", "three.mp4"),
+                    request("work-3", "different.mp4"),
+                ]
+            )
+        with self.assertRaises(KeyError):
+            self.store.get_work("work-3")
+
+    def test_registration_request_normalization_rejects_non_sequences(self):
+        for invalid in ({}, "items", b"items", bytearray(b"items")):
+            with self.subTest(value=invalid):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "registration requests must be a sequence",
+                ):
+                    normalize_registration_requests(invalid)
+
     def test_claim_is_homogeneous_bounded_and_materializes_verified_envelope(self):
         self.register("a-1", runtime="runtime-a")
         self.register("b-1", runtime="runtime-b")
@@ -148,6 +199,22 @@ class SJDControlTests(unittest.TestCase):
                 allowed_work_ids={"requested-1", "requested-2"},
             )
         )
+
+    def test_claim_respects_atomic_active_batch_limit(self):
+        self.register("work-1")
+        self.register("work-2")
+
+        first = self.claim(max_items=1, maximum_active_batches=1)
+        blocked = self.claim(max_items=1, maximum_active_batches=1)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(blocked)
+        self.assertEqual(self.store.get_work("work-2").status, "READY")
+        with self.assertRaisesRegex(
+            ValueError,
+            "maximum_active_batches must be between 1 and 100",
+        ):
+            self.claim(maximum_active_batches=0)
 
     def test_claim_fails_closed_for_cardinality_and_lease_budget(self):
         self.register("slow", duration=90)
@@ -505,6 +572,39 @@ class SJDControlTests(unittest.TestCase):
         self.assertEqual(after_replay.max_attempts, 3)
         with self.assertRaises(ImmutableConflictError):
             self.register("work", max_attempts=2)
+
+    def test_quarantine_terminalizes_only_exact_ready_release_work(self):
+        digest = "a" * 64
+        self.store.register(
+            "obsolete-work",
+            {"source_video": "obsolete.mp4"},
+            runtime_key="runtime-a",
+            duration_seconds=10,
+            config_sha256="config-a",
+            release_digest=digest,
+            available_at=0,
+        )
+
+        first = self.store.quarantine(
+            {"obsolete-work": digest},
+            operator="release-manager",
+            reason="release evidence is no longer executable",
+        )
+        second = self.store.quarantine(
+            {"obsolete-work": digest},
+            operator="release-manager",
+            reason="release evidence is no longer executable",
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.work_ids, ("obsolete-work",))
+        self.assertEqual(self.store.get_work("obsolete-work").status, "DEAD")
+        with self.assertRaises(ImmutableConflictError):
+            self.store.quarantine(
+                {"obsolete-work": "b" * 64},
+                operator="release-manager",
+                reason="release evidence is no longer executable",
+            )
 
     def test_reconcile_uses_stable_ids_for_all_integrity_classes(self):
         self.register("expired", max_attempts=2)
