@@ -1,6 +1,6 @@
 """Real Fabric/Spark executor inventory discovery and task-width planning.
 
-Candidate A previously planned partitions from a configured, hard-coded
+Fabric SJD previously planned partitions from a configured, hard-coded
 executor count (see ``ExecutionProfile`` in ``sjd_process.py``). This module
 discovers the *actual* active executors from Spark's live status store after
 a registration-stability window, computes CPU slots and a conservative

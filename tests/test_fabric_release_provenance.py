@@ -13,7 +13,7 @@ from people_counter import fabric_release_provenance as provenance
 def _manifest() -> dict[str, object]:
     identity = provenance.RELEASE_IDENTITY
     return {
-        "schema": "people-counter-candidate-a-detached-release-v1",
+        "schema": "people-counter-sjd-detached-release-v1",
         "release_identity_sha256": provenance.RELEASE_IDENTITY_SHA256,
         "package_version": identity.package_version,
         "wheel_filename": (
@@ -51,7 +51,7 @@ def _manifest() -> dict[str, object]:
 def _receipt(manifest_sha256: str) -> dict[str, object]:
     identity = provenance.RELEASE_IDENTITY
     return {
-        "schema": "people-counter-candidate-a-postpublish-receipt-v1",
+        "schema": "people-counter-sjd-postpublish-receipt-v1",
         "detached_manifest_sha256": manifest_sha256,
         "package_version": identity.package_version,
         "environment_id": identity.environment_id,
@@ -80,14 +80,14 @@ def test_embedded_identity_contains_no_final_artifact_hashes() -> None:
         (
             Path(provenance.__file__).parent
             / "data"
-            / "candidate_a_release_identity.json"
+            / "sjd_release_identity.json"
         ).read_text(encoding="utf-8")
     )
-    assert raw["package_version"] == "0.9.56"
+    assert raw["package_version"] == "0.9.57"
     assert "wheel_sha256" not in raw
     assert "cpu_bundle_sha256" not in raw
     assert "environment_target_version" not in raw
-    assert provenance.RELEASE_IDENTITY.release_evidence_root.endswith("/0.9.56")
+    assert provenance.RELEASE_IDENTITY.release_evidence_root.endswith("/0.9.57")
     assert all(
         str(uuid.UUID(item_id)) == item_id
         for item_id in provenance.RELEASE_IDENTITY.sjd_ids.values()
@@ -107,7 +107,7 @@ def test_detached_manifest_and_receipt_bind_exact_independent_bytes(
         receipt_path,
         expected_manifest_sha256=manifest_sha256,
         expected_receipt_sha256=receipt_sha256,
-        observed_package_version="0.9.56",
+        observed_package_version="0.9.57",
     )
 
     assert evidence.manifest.wheel_sha256 == "1" * 64
@@ -244,7 +244,7 @@ def test_release_build_hash_excludes_detached_identity_without_normalization(
         "build_input_sha256": "0" * 64,
         "package_version": "1.0",
     }
-    identity_path = data / "candidate_a_release_identity.json"
+    identity_path = data / "sjd_release_identity.json"
     identity_path.write_text(json.dumps(identity, sort_keys=True))
     first = provenance.release_build_input_sha256(tmp_path)
     identity["build_input_sha256"] = "f" * 64
@@ -313,7 +313,7 @@ def test_verify_file_sha256_streams_and_rejects_mismatch(tmp_path: Path) -> None
 
 def test_trackers_identity_is_checked_against_detached_manifest() -> None:
     manifest = provenance.DetachedReleaseManifest(
-        schema="people-counter-candidate-a-detached-release-v1",
+        schema="people-counter-sjd-detached-release-v1",
         release_identity_sha256=provenance.RELEASE_IDENTITY_SHA256,
         package_version="0.9.29",
         wheel_filename="wheel",

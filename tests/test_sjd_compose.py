@@ -15,7 +15,7 @@ pytestmark = [
     pytest.mark.skipif(
         os.environ.get("RUN_CANDIDATE_A_COMPOSE_E2E") != "1",
         reason=(
-            "set RUN_CANDIDATE_A_COMPOSE_E2E=1 to run the Candidate A "
+            "set RUN_CANDIDATE_A_COMPOSE_E2E=1 to run the Fabric SJD "
             "Docker Compose E2E"
         ),
     ),
@@ -25,8 +25,8 @@ pytestmark = [
 class CandidateACompose:
     def __init__(self) -> None:
         identity = uuid4().hex
-        self.project = f"pc-candidate-a-{identity[:12]}"
-        self.release_digest = f"candidate-a-e2e-{identity}"
+        self.project = f"pc-sjd-{identity[:12]}"
+        self.release_digest = f"sjd-e2e-{identity}"
         self.image = f"people-counter-spark:{self.release_digest}"
         self.output_root = (
             Path("local-data/output") / self.project
@@ -369,7 +369,7 @@ print(json.dumps(sorted({item["id"] for item in applications})))
 
 
 @pytest.fixture(scope="module")
-def candidate_a_compose() -> CandidateACompose:
+def sjd_compose() -> CandidateACompose:
     cluster = CandidateACompose()
     try:
         cluster.start()
@@ -378,10 +378,10 @@ def candidate_a_compose() -> CandidateACompose:
         cluster.close()
 
 
-def test_candidate_a_compose_current_source_e2e(
-    candidate_a_compose: CandidateACompose,
+def test_sjd_compose_current_source_e2e(
+    sjd_compose: CandidateACompose,
 ) -> None:
-    cluster = candidate_a_compose
+    cluster = sjd_compose
 
     first = cluster.pipeline()
     first_process = first["process"]
@@ -456,7 +456,7 @@ def test_candidate_a_compose_current_source_e2e(
     claim = cluster.control_json(
         "claim",
         "--owner",
-        "candidate-a-e2e-expiring-owner",
+        "sjd-e2e-expiring-owner",
         "--max-items",
         "1",
         "--minimum-items",

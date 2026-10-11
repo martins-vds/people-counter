@@ -6,7 +6,7 @@ are distributed with `mapPartitions`; each executor process reuses the existing
 `SdkRuntimeProcessor` cache in SDK mode. Results first land in immutable,
 batch-attempt-scoped local Delta staging.
 
-## Candidate A Spark Job Definitions
+## Fabric SJD Spark Job Definitions
 
 The current package also installs four lazy-import console commands:
 
@@ -30,9 +30,9 @@ staging validation, create-only marker, fence recheck, pointer transaction,
 reconciliation, gold builders, checkpoints, and refresh outbox:
 
 ```bash
-rm -rf local-data/candidate-a-probe
+rm -rf local-data/sjd-probe
 uv run pc-local-orchestrate pipeline \
-  --root local-data/candidate-a-probe \
+  --root local-data/sjd-probe \
   --fixture-count 2 \
   --mode probe \
   --profile local-two-workers \
@@ -45,10 +45,10 @@ does not execute inference or replace an existing winner.
 The two-worker Compose equivalent is:
 
 ```bash
-export COMPOSE_PROJECT_NAME=people-counter-candidate-a
+export COMPOSE_PROJECT_NAME=people-counter-sjd
 docker compose up -d --wait spark-master spark-worker-1 spark-worker-2 spark-client
 docker compose exec -T spark-client pc-local-orchestrate pipeline \
-  --root /data/output/candidate-a-probe \
+  --root /data/output/sjd-probe \
   --fixture-count 2 \
   --mode probe \
   --profile local-two-workers \
@@ -60,9 +60,9 @@ The result's `executor_identities` must name both physical workers. The fixed
 profile requires two one-core executors, `spark.task.cpus=1`, fixed allocation,
 and `spark.speculation=false`; conflicting overrides fail before processing.
 
-### Opt-in Candidate A Compose E2E
+### Opt-in Fabric SJD Compose E2E
 
-The Candidate A E2E is intentionally separate from
+The Fabric SJD E2E is intentionally separate from
 `tests/test_local_compose.py`, which remains the `people-counter-local` smoke.
 The E2E builds the current checkout under a unique image tag, starts a uniquely
 named Compose project, and runs `pc-local-orchestrate` with the real
@@ -70,7 +70,7 @@ named Compose project, and runs `pc-local-orchestrate` with the real
 
 ```bash
 RUN_CANDIDATE_A_COMPOSE_E2E=1 \
-  uv run pytest -m compose tests/test_candidate_a_compose.py -q
+  uv run pytest -m compose tests/test_sjd_compose.py -q
 ```
 
 Prerequisites are a running Docker Engine with Compose v2, network access for
@@ -94,10 +94,10 @@ ordinary unit tests do not require that extra.
 Bootstrap creates or validates local control and gold metadata:
 
 ```bash
-CONTROL=local-data/candidate-a/control/control.sqlite3
-CONTENT=local-data/candidate-a/content
-STAGING=local-data/candidate-a/attempts
-GOLD=local-data/candidate-a/gold
+CONTROL=local-data/sjd/control/control.sqlite3
+CONTENT=local-data/sjd/content
+STAGING=local-data/sjd/attempts
+GOLD=local-data/sjd/gold
 
 uv run pc-control-sjd \
   --database "$CONTROL" --content-root "$CONTENT" bootstrap

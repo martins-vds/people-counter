@@ -20,7 +20,7 @@ ENTRY_POINTS: Mapping[str, str] = {
 }
 
 
-def _part(path: str, content: bytes) -> dict[str, str]:
+def definition_part(path: str, content: bytes) -> dict[str, str]:
     return {
         "path": path,
         "payload": base64.b64encode(content).decode("ascii"),
@@ -63,8 +63,8 @@ def build_sjd_definition(kind: str) -> dict[str, object]:
         "definition": {
             "format": "SparkJobDefinitionV2",
             "parts": [
-                _part("Main/main.py", _main_source(ENTRY_POINTS[kind])),
-                _part("SparkJobDefinitionV1.json", metadata_bytes),
+                definition_part("Main/main.py", _main_source(ENTRY_POINTS[kind])),
+                definition_part("SparkJobDefinitionV1.json", metadata_bytes),
             ],
         }
     }

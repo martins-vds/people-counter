@@ -1,4 +1,4 @@
-"""Delta-backed Candidate A control plane for Microsoft Fabric.
+"""Delta-backed control plane for Microsoft Fabric.
 
 PySpark, Delta, and notebook utilities are imported only by operations that
 need them.  Every mutable transition runs under :class:`ControlWriter`; an
@@ -18,7 +18,7 @@ from pathlib import PurePosixPath
 from typing import Any, Protocol
 from uuid import uuid4
 
-from people_counter.fabric_candidate_a import FabricCandidateAConfig
+from people_counter.fabric_namespace import FabricNamespaceConfig
 from people_counter.fabric_control import ControlWriter
 from people_counter.sjd_control import (
     CLAIM_ENVELOPE_VERSION,
@@ -140,14 +140,14 @@ class OneLakeEnvelopeWriter:
         root: str,
         files: OneLakeFiles | None = None,
         *,
-        config: FabricCandidateAConfig | None = None,
+        config: FabricNamespaceConfig | None = None,
         verify_timeout_seconds: float = 15.0,
     ) -> None:
         self.root = root.rstrip("/")
-        expected = (config or FabricCandidateAConfig()).file_path("control").rstrip("/")
+        expected = (config or FabricNamespaceConfig()).file_path("control").rstrip("/")
         if self.root != expected:
             raise ValueError(
-                f"claim envelopes require the fixed Candidate A control root {expected!r}"
+                f"claim envelopes require the fixed Fabric SJD control root {expected!r}"
             )
         self.files = files or NotebookUtilsOneLakeFiles()
         if not math.isfinite(verify_timeout_seconds) or verify_timeout_seconds < 0:
@@ -223,13 +223,13 @@ class OneLakeEnvelopeWriter:
 
 
 class FabricControlStoreImpl:
-    """Real Delta implementation of the Candidate A control contract."""
+    """Real Delta implementation of the Fabric SJD control contract."""
 
     def __init__(
         self,
         spark_session: Any,
         *,
-        config: FabricCandidateAConfig | None = None,
+        config: FabricNamespaceConfig | None = None,
         files: OneLakeFiles | None = None,
         clock: Callable[[], float] = time.time,
         id_factory: Callable[[], str] | None = None,
@@ -238,7 +238,7 @@ class FabricControlStoreImpl:
         if spark_session is None:
             raise ValueError("spark_session is required")
         self.spark = spark_session
-        self.config = config or FabricCandidateAConfig()
+        self.config = config or FabricNamespaceConfig()
         self.config.require_write_enabled()
         self._clock = clock
         self._id_factory = id_factory or (lambda: str(uuid4()))
@@ -268,13 +268,13 @@ class FabricControlStoreImpl:
         rows = self._rows("locks")
         if len(rows) != 1 or rows[0].get("lock_name") != "global":
             raise RuntimeError(
-                "Candidate A lock table must contain exactly one global row"
+                "Fabric SJD lock table must contain exactly one global row"
             )
         if (rows[0].get("owner_id") is None) != (
             rows[0].get("acquired_at") is None
         ):
             raise RuntimeError(
-                "Candidate A lock ownership and timestamp are inconsistent"
+                "Fabric SJD lock ownership and timestamp are inconsistent"
             )
 
     def now(self) -> float:

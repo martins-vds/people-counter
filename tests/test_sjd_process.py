@@ -340,7 +340,7 @@ class SjdProcessTests(unittest.TestCase):
 
     def test_profile_is_fixed_and_rejects_incompatible_overrides(self):
         profile = resolve_profile(
-            "candidate-a-local",
+            "sjd-local",
             spark_overrides={
                 "spark.executor.instances": 2,
                 "spark.executor.cores": 1,

@@ -8,9 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from people_counter.fabric_canary_tool import make_token_provider
-from people_counter.fabric_production_migration import WORKSPACE_ID
-from people_counter.fabric_production_migration_tool import FabricRESTController
+from people_counter.fabric_rest import FabricRESTController, make_token_provider
+from people_counter.fabric_sjd import WORKSPACE_ID
 from scripts.deploy_sjd_analytics import (
     ReportingDeploymentError,
     _decoded_part,

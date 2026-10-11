@@ -1,4 +1,4 @@
-"""Pure contracts and evaluation logic for the Candidate A capacity benchmark."""
+"""Pure contracts and evaluation logic for the Fabric SJD capacity benchmark."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ WORKSPACE_ID = "c31ee864-230d-4005-8fd5-7c7130ebf774"
 LAKEHOUSE_ID = "883cff91-eaa8-40be-870f-6e9716303cb2"
 ENVIRONMENT_ID = "3e580f48-9ff7-4bc6-af2e-a59158029ada"
 TABLE_PREFIX = "pc_ca_benchmark_v1_"
-FILES_ROOT = "Files/_benchmark/people-counter/candidate-a/v1/"
+FILES_ROOT = "Files/_benchmark/people-counter/sjd/v1/"
 FABRIC_RUNTIME = "2.0"
 MEASUREMENT_SECONDS = 6 * 60 * 60
 THROUGHPUT_TARGET_X = 416.67

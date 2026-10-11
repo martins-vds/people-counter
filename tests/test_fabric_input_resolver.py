@@ -1,4 +1,4 @@
-"""Tests for the backend-neutral Candidate A input resolver."""
+"""Tests for the backend-neutral Fabric SJD input resolver."""
 
 from __future__ import annotations
 

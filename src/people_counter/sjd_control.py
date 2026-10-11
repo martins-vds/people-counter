@@ -1,4 +1,4 @@
-"""Serialized local control plane for Candidate A Spark Job Definitions.
+"""Serialized local control plane for Fabric SJD Spark Job Definitions.
 
 The module deliberately has no Spark dependency.  A control process creates a
 durable claim envelope and passes only its batch id, path, and digest to an SJD.
@@ -130,7 +130,7 @@ class ControlBatchState:
 
 
 class ControlStore(Protocol):
-    """Storage boundary used by a Candidate A control entry point."""
+    """Storage boundary used by a Fabric SJD control entry point."""
 
     def register(
         self,
@@ -223,7 +223,7 @@ class FabricControlStore:
             raise UnsupportedControlStoreError(
                 "FabricControlStore requires an explicit Fabric Spark session"
             )
-        from people_counter.fabric_candidate_a_control import (
+        from people_counter.fabric_control_store import (
             FabricControlStoreImpl,
         )
 
@@ -236,10 +236,10 @@ class FabricControlStore:
 
 
 class OneLakeEnvelopeWriter:
-    """Lazy public facade for immutable Candidate A claim envelopes."""
+    """Lazy public facade for immutable Fabric SJD claim envelopes."""
 
     def __init__(self, root: str, files: Any | None = None) -> None:
-        from people_counter.fabric_candidate_a_control import (
+        from people_counter.fabric_control_store import (
             OneLakeEnvelopeWriter as Implementation,
         )
 
@@ -250,7 +250,7 @@ class OneLakeEnvelopeWriter:
 
 
 class SQLiteControlStore:
-    """Authoritative single-database Candidate A control store."""
+    """Authoritative single-database Fabric SJD control store."""
 
     def __init__(
         self,
@@ -2492,7 +2492,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the local Candidate A control command."""
+    """Run the local Fabric SJD control command."""
     arguments = _parser().parse_args(argv)
     store = SQLiteControlStore(arguments.database, arguments.content_root)
     if arguments.command == "bootstrap":

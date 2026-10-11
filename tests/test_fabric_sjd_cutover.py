@@ -395,11 +395,8 @@ def test_retirement_bundle_path_is_versioned_and_fixed() -> None:
 
 
 def test_legacy_retirement_allowlists_cover_every_live_writer_and_table() -> None:
-    from people_counter.fabric_production_migration_live import LEGACY_TABLES
-
     assert len(LEGACY_TABLE_ALLOWLIST) == 30
     assert len(set(LEGACY_TABLE_ALLOWLIST)) == 30
-    assert set(LEGACY_TABLES) == set(LEGACY_TABLE_ALLOWLIST)
     assert {
         "5618506e-aed9-43cd-8943-d92322ef4d4a",
         "9169409b-82dc-4a3e-afad-611220b9930a",

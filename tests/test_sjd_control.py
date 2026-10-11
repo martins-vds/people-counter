@@ -692,9 +692,21 @@ class SJDControlTests(unittest.TestCase):
         )
 
     def test_module_never_imports_pyspark_and_fabric_placeholder_fails(self):
+        import subprocess
         import sys
 
-        self.assertNotIn("pyspark", sys.modules)
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; import people_counter.sjd_control; "
+                    "raise SystemExit('pyspark' in sys.modules)"
+                ),
+            ],
+            check=False,
+        )
+        self.assertEqual(probe.returncode, 0)
         with self.assertRaises(UnsupportedControlStoreError):
             FabricControlStore()
 

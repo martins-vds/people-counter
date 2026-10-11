@@ -1,139 +1,35 @@
 # People Counter
 
-For the two-worker local Spark development slice, see
-[Local Spark development](docs/local-spark-development.md).
+A CPU/GPU distinct-person counter with a stable Microsoft Fabric Spark Job
+Definition (SJD) pipeline for reliable, observable video processing.
 
-## Candidate A Spark job suite
+## Stable Fabric SJD pipeline
 
-The importable Candidate A suite runs one bounded, runtime-homogeneous
-multi-video application per nonempty claim:
+Production uses the fixed `people_counter_sjd_*` tables and
+`Files/people-counter/sjd/v1/` file boundary. The active roles are Control,
+Dispatcher, Process, Reconciliation, Gold, Refresh, and Cutover. The old
+notebook/Data Pipeline processors, canary definitions, experimental bundles,
+production-shadow code, and one-time migration controllers have been retired
+from this repository.
 
-- `pc-control-sjd` owns serialized SQLite registration, claims, fences,
-  recovery, reconciliation, replay, and committed-attempt pointers.
-- `pc-process-sjd` consumes only a durable `batch_id`, processes each complete
-  video sequentially in an explicitly planned partition, seals immutable
-  attempt output, and advances successful pointers only after validation.
-- `pc-gold-sjd` reads only committed pointers and incrementally replaces
-  affected date partitions for facts and dimensions.
-- `pc-local-orchestrate pipeline` runs all three jobs and acknowledges the
-  local semantic-refresh outbox.
+- [Fabric SJD operations](notebooks/fabric/README.md)
+- [Getting-started tutorial](notebooks/fabric/18_sjd_getting_started_demo_tutorial.md)
+- [Local Spark development](docs/local-spark-development.md)
 
-All commands import and display `--help` without Spark. A no-model local
-end-to-end run is:
+The local end-to-end contract can be exercised without a model:
 
 ```bash
 uv run pc-local-orchestrate pipeline \
-  --root local-data/candidate-a \
+  --root local-data/sjd \
   --fixture-count 2 \
   --mode probe \
   --harness direct
 ```
 
-Use `--harness spark --spark-master spark://spark-master:7077` inside the
-Compose client to execute the same planner, staging, seal, pointer, and gold
-protocol on the two one-core workers. SDK mode requires an immutable manifest
-whose payloads point to videos and offline models. Exact per-job commands,
-manifest shape, recovery procedure, output layout, the opt-in current-source
-Candidate A Compose E2E, and limitations are in
-[Local Spark development](docs/local-spark-development.md#candidate-a-spark-job-definitions).
-
-The local SQLite/content-addressed/path-Delta adapters remain
-production-contract test doubles. Version 0.9.11 includes the executable fixed
-production-shadow control/process/reconcile layer and preserves the fixed
-Candidate A canary defaults and adds confined benchmark/shadow namespaces plus
-an offline, additive-only production-migration safety contract. The stopped
-writer procedure and fail-closed recovery are in the
-[production migration runbook](docs/production-migration-benchmark-runbook.md);
-none of these local tests is a claim of Fabric throughput or deployment
-approval.
-
-Production-shadow host and installed-wheel entry points are packaged in 0.9.11:
-
-```bash
-pc-production-shadow-controller predeploy-snapshot
-pc-production-shadow-controller deploy-plan \
-  --predeploy-snapshot-sha256 <PREDEPLOY_SHA256>
-pc-production-shadow-controller deploy-review \
-  --deployment-plan-sha256 <DEPLOY_PLAN_SHA256> --reviewer <REVIEWER>
-pc-production-shadow-controller deploy --execute \
-  --deployment-plan-sha256 <DEPLOY_PLAN_SHA256> \
-  --deployment-token <DEPLOY_TOKEN>
-pc-production-shadow-controller snapshot
-pc-production-shadow-controller plan --work-id <ELIGIBLE_WORK_ID>
-pc-production-shadow-controller review --plan-sha256 <PLAN_SHA256> \
-  --reviewer <REVIEWER>
-pc-production-shadow-control-sjd --help
-pc-production-shadow-process-sjd --help
-pc-production-shadow-reconcile-sjd --help
-```
-
-The REST-only predeployment snapshot never invokes Spark or writes OneLake.
-Its separate reviewed deployment capability can only publish the exact 0.9.11
-project wheel and create/update the three deterministic shadow SJDs; it has no
-work identity or data-plane scope. The normal postdeployment snapshot requires
-all three exact SJD definitions and is the first operation that reads the
-authoritative Spark route inventory. Work plan/review remains separate and
-pins exactly one eligible route. Every changing command refuses to run without
-`--execute` and its matching reviewed plan/token. All Candidate A state is confined to
-`pc_ca_prod_shadow_v1_*` and
-`Files/_shadow/people-counter/candidate-a/v1/`; only append-only authorization
-and audit rows may enter the two migrated production auxiliary tables.
-The live host backend uses signed create-only OneLake request/result evidence
-and fixed installed-wheel Spark commands, but validates exact SJD presence and
-definition before creating a request. Request-only evidence from the old
-ordering is retained and reported as an unstarted diagnostic. Authorization is a serialized,
-idempotent two-table protocol with an immutable intent ledger and retained-lock
-recovery; it is not described as a cross-table ACID transaction.
-
-### Candidate A CPU decision
-
-**Candidate A on the fixed Spark/F64 CPU topology is rejected.** The best
-measured aggregate rate was `1.5899x` real time, versus the required
-`416.67x`: a `262.07x` shortfall. Applying the capacity headroom used by the
-benchmark sizing model would require 315 equivalent F64 allocations at the
-measured rate. That is not a plausible production architecture, so no
-six-hour run was started.
-
-This result covers the tested CPU optimizer profiles; it does **not** claim
-that every suggestion in the optimization document was implemented. The
-remaining incremental CPU/Spark optimizations cannot plausibly close a
-262-fold measured gap. The recommended next architecture is an
-accelerator-backed inference tier (GPU or a managed accelerator service) with
-Spark retained for durable orchestration, validation, publication, and gold
-processing. Correctness evidence remains valid: changed and unchanged/no-op
-gold paths passed, the final reviewed recovery/reconcile completed with zero
-findings, and no production authorization or publication was performed.
-
-Normal gold runs are checkpointed and idempotent: unchanged committed source
-and unchanged target versions do not rewrite gold tables or enqueue another
-semantic refresh. A changed full gold run commits its stage checkpoints with
-one combined semantic-refresh outbox row after validation. Process results
-report the driver package version, and every staged executor record carries
-the executor package version validated against the driver installation.
-`--force` deliberately resets normal incremental planning and rebuilds current
-partitions; it is non-idempotent maintenance behavior, not the normal
-production path.
-
-The isolated Runtime 2.0 canary and its dry-run/deployment tooling are
-documented in
-[docs/fabric-runtime2-sjd-canary.md](docs/fabric-runtime2-sjd-canary.md).
-The original Runtime 2.0 startup canary remains isolated from the Candidate A
-Phase 1 jobs.
-
-Run exactly one PyTorch variant at a time. Each command requires an explicit
-device selection and will fail instead of falling back to another device.
-The installed `people-counter` command provides `rtdetr-osnet` and
-`rfdetr-botsort` subcommands; run `people-counter --help` for an overview.
-
-The package separates its public Python SDK from the CLI, video sampling,
-tracking, line counting, and CSV output. Applications can use
-`people_counter.run(config)` with either typed pipeline configuration and
-convert the result to dependency-free records for pandas, Spark, databases,
-or APIs. The wheel includes a PEP 561 marker so downstream type checkers use
-the SDK's inline annotations.
-
-The legacy `people-counter-rtdetr` and `people-counter-rfdetr` commands remain
-available as aliases for the two subcommands.
+Use `--harness spark --spark-master spark://spark-master:7077` in the Compose
+client to execute the same claim, staging, seal, pointer, and Gold protocol on
+two local workers. The retained benchmark tooling is for capacity
+recalibration and forecast evidence; it is not a second production pipeline.
 
 ## Python SDK
 
@@ -297,7 +193,7 @@ to a Fabric Environment, and attach that environment to the notebook. A
 Fabric Data Pipeline can then invoke the notebook as an activity.
 
 Process each video sequentially because tracking state depends on frame order.
-Candidate A parallelizes complete videos across explicitly mapped Spark
+Fabric SJD parallelizes complete videos across explicitly mapped Spark
 partitions; it never distributes frames from one video across executors.
 
 Use a Lakehouse file path that OpenCV can open:

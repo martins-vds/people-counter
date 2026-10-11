@@ -21,7 +21,7 @@ from people_counter.fabric_benchmark import (
     WorkloadManifest,
     canonical_json_bytes,
 )
-from people_counter.fabric_candidate_a import FabricCandidateAConfig
+from people_counter.fabric_namespace import FabricNamespaceConfig
 
 if TYPE_CHECKING:
     from people_counter.fabric_executor_inventory import ExecutorRecord
@@ -162,7 +162,7 @@ def thin_main_source(job: str) -> bytes:
         ) from error
     module, function = target.rsplit(".", 1)
     return (
-        '"""Generated Candidate A benchmark SJD entry point."""\n\n'
+        '"""Generated Fabric SJD benchmark SJD entry point."""\n\n'
         f"from {module} import {function} as main\n\n"
         'if __name__ == "__main__":\n'
         "    raise SystemExit(main())\n"
@@ -428,7 +428,7 @@ def _resource_inventory_main(argv: Sequence[str]) -> int:
 
 
 def _spark() -> Any:
-    from people_counter.fabric_candidate_a_jobs import _spark as _live_spark
+    from people_counter.fabric_sjd_runtime import _spark as _live_spark
 
     return _live_spark()
 
@@ -441,7 +441,7 @@ def _prepare_pilot_main(arguments: tuple[str, ...]) -> int:
     should pass the actual discovered slot count (or a multiple of it, for
     multi-video-per-partition amortization) so every slot is exercised.
     """
-    from people_counter.fabric_candidate_a_jobs import _spark
+    from people_counter.fabric_sjd_runtime import _spark
     from people_counter.sjd_control import FabricControlStore
 
     parser = argparse.ArgumentParser(prog="pc-ca-benchmark-prepare-pilot")
@@ -458,7 +458,7 @@ def _prepare_pilot_main(arguments: tuple[str, ...]) -> int:
         raise BenchmarkValidationError("release digest must be SHA-256")
     if parsed.work_count < 1:
         raise BenchmarkValidationError("pilot work count must be at least 1")
-    store = FabricControlStore(_spark(), config=FabricCandidateAConfig.benchmark())
+    store = FabricControlStore(_spark(), config=FabricNamespaceConfig.benchmark())
     source = next(
         (
             row
@@ -530,10 +530,10 @@ def _diagnose_main() -> int:
     logic change, isolated so ``control_main`` stays a thin, fully-covered
     dispatcher.
     """
-    from people_counter.fabric_candidate_a_jobs import _spark
+    from people_counter.fabric_sjd_runtime import _spark
     from people_counter.sjd_control import FabricControlStore
 
-    store = FabricControlStore(_spark(), config=FabricCandidateAConfig.benchmark())
+    store = FabricControlStore(_spark(), config=FabricNamespaceConfig.benchmark())
     rows = {
         suffix: store._rows(suffix)
         for suffix in (
@@ -557,10 +557,10 @@ def _recover_stale_main() -> int:
     logic change, isolated so ``control_main`` stays a thin, fully-covered
     dispatcher.
     """
-    from people_counter.fabric_candidate_a_jobs import _spark
+    from people_counter.fabric_sjd_runtime import _spark
     from people_counter.sjd_control import FabricControlStore
 
-    store = FabricControlStore(_spark(), config=FabricCandidateAConfig.benchmark())
+    store = FabricControlStore(_spark(), config=FabricNamespaceConfig.benchmark())
     recovery = asdict(store.recover())
     findings = [asdict(item) for item in store.reconcile()]
     payload = {
@@ -593,7 +593,7 @@ def _tail_diagnostics_main(arguments: Sequence[str]) -> int:
     parsed = parser.parse_args(arguments)
     import notebookutils
 
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     target = config.file_path(parsed.path)
     try:
         entries = notebookutils.fs.ls(target)
@@ -626,7 +626,7 @@ def _tail_diagnostics_main(arguments: Sequence[str]) -> int:
 def control_main(argv: Sequence[str] | None = None) -> int:
     """Run explicit benchmark control arguments in the fixed namespace."""
 
-    from people_counter.fabric_candidate_a_jobs import control_main as candidate_main
+    from people_counter.fabric_sjd_runtime import control_main as candidate_main
 
     arguments = tuple(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "prepare-pilot":
@@ -643,7 +643,7 @@ def control_main(argv: Sequence[str] | None = None) -> int:
         raise BenchmarkValidationError(
             "benchmark claims require one or more explicit --work-id values"
         )
-    return candidate_main(arguments, config=FabricCandidateAConfig.benchmark())
+    return candidate_main(arguments, config=FabricNamespaceConfig.benchmark())
 
 
 def _benchmark_execution_profile(
@@ -728,9 +728,9 @@ def _benchmark_execution_profile(
     peak_rss_bytes = rss_result.value
     return build_profile_from_inventory(
         (
-            "candidate-a-benchmark-f64-fixed-v1"
+            "sjd-benchmark-f64-fixed-v1"
             if cpu_profile is None
-            else f"candidate-a-benchmark-f64-fixed-v1:{cpu_profile.profile_id}"
+            else f"sjd-benchmark-f64-fixed-v1:{cpu_profile.profile_id}"
         ),
         executors,
         task_cpus=task_cpus,
@@ -755,9 +755,9 @@ def process_main(argv: Sequence[str] | None = None) -> int:
     die before YARN log-aggregation completes) still leaves a diagnosable
     OneLake traceback, mirroring the proven control-dispatch pattern.
     """
-    from people_counter.fabric_candidate_a_jobs import _write_control_diagnostic
+    from people_counter.fabric_sjd_runtime import _write_control_diagnostic
 
-    entry_config = FabricCandidateAConfig.benchmark()
+    entry_config = FabricNamespaceConfig.benchmark()
     _write_process_stage_marker(entry_config, "entry", 0, "main-entry")
 
     parser = argparse.ArgumentParser(prog="pc-benchmark-process-sjd")
@@ -773,7 +773,7 @@ def process_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--release-receipt-path", default="")
     parser.add_argument("--release-receipt-sha256", default="")
     arguments = parser.parse_args(argv)
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     try:
         return _process_dispatch(arguments, config)
     except Exception as error:
@@ -784,7 +784,7 @@ def process_main(argv: Sequence[str] | None = None) -> int:
 
 
 def _write_process_stage_marker(
-    config: FabricCandidateAConfig, batch_id: str, sequence: int, stage: str
+    config: FabricNamespaceConfig, batch_id: str, sequence: int, stage: str
 ) -> None:
     """Best-effort bisection checkpoint for the live ``state=[dead]`` crash.
 
@@ -812,11 +812,11 @@ def _write_process_stage_marker(
 
 
 def _process_dispatch(
-    arguments: argparse.Namespace, config: FabricCandidateAConfig
+    arguments: argparse.Namespace, config: FabricNamespaceConfig
 ) -> int:
     """Pure extraction of ``process_main``'s body for a thin, covered wrapper."""
 
-    from people_counter.fabric_candidate_a_jobs import (
+    from people_counter.fabric_sjd_runtime import (
         _load_runtime_release_evidence,
         _bind_consumer_probe_to_executor_inventory,
         _localize_process_inputs,
@@ -826,7 +826,7 @@ def _process_dispatch(
     )
     from people_counter.sjd_control import FabricControlStore
     from people_counter.sjd_process import OneLakeDeltaAttemptAdapter, run_process_batch
-    from people_counter.fabric_candidate_a_control import (
+    from people_counter.fabric_control_store import (
         NotebookUtilsOneLakeFiles,
     )
 
@@ -886,7 +886,7 @@ def _process_dispatch(
     )
     _write_process_stage_marker(config, batch_id, 4, "inputs-localized")
     import functools
-    from people_counter.fabric_candidate_a_jobs import _executor_warm_works
+    from people_counter.fabric_sjd_runtime import _executor_warm_works
     from people_counter.sjd_process import warm_executor_for_works
 
     task_cpus = int(spark.conf.get("spark.task.cpus", "1"))
@@ -960,14 +960,14 @@ def gold_main(argv: Sequence[str] | None = None) -> int:
     """Run benchmark-only gold; production views and pointers are unreachable.
 
     Wrapped in the same bounded try/except diagnostic-capture pattern as
-    ``process_main`` and ``fabric_candidate_a_jobs.control_main`` so an
+    ``process_main`` and ``fabric_sjd_jobs.control_main`` so an
     uncaught gold-reconcile crash still leaves an OneLake traceback.
     """
 
-    from people_counter.fabric_candidate_a_jobs import _write_control_diagnostic
-    from people_counter.fabric_candidate_a_jobs import gold_main as candidate_main
+    from people_counter.fabric_sjd_runtime import _write_control_diagnostic
+    from people_counter.fabric_sjd_runtime import gold_main as candidate_main
 
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     try:
         return candidate_main(argv, config=config)
     except Exception as error:

@@ -1,4 +1,4 @@
-"""End-to-end local orchestrator for the Candidate A Spark job suite."""
+"""End-to-end local orchestrator for the Fabric SJD Spark job suite."""
 
 from __future__ import annotations
 
@@ -169,7 +169,7 @@ def _open_execution_runtime(config: LocalPipelineConfig) -> _ExecutionRuntime:
 
     spark = create_local_spark_session(
         master=config.spark_master,
-        app_name="people-counter-candidate-a-pipeline",
+        app_name="people-counter-sjd-pipeline",
         correlation_id="pc-local-orchestrate",
     )
     return _ExecutionRuntime(

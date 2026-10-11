@@ -2971,7 +2971,7 @@ class PersistConsumerCapabilityEvidenceTests(unittest.TestCase):
         files = _FakeOneLakeFiles()
         path = persist_consumer_capability_evidence(
             files,
-            "Files/_benchmark/people-counter/candidate-a/v1/capability_probe/batch-1.json",
+            "Files/_benchmark/people-counter/sjd/v1/capability_probe/batch-1.json",
             self._report(),
             backend="FABRIC_DIRECT",
             library_versions={"opencv-python": "5.0.0"},

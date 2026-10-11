@@ -16,12 +16,12 @@ import pytest
 
 import people_counter.fabric_benchmark as benchmark_module
 import people_counter.fabric_benchmark_jobs as benchmark_jobs_module
-import people_counter.fabric_candidate_a_jobs as candidate_jobs
+import people_counter.fabric_sjd_runtime as candidate_jobs
 import people_counter.sjd_control as sjd_control_module
 import people_counter.sjd_process as sjd_process_module
-from people_counter.fabric_candidate_a import (
-    CandidateANamespaceMode,
-    FabricCandidateAConfig,
+from people_counter.fabric_namespace import (
+    FabricNamespaceMode,
+    FabricNamespaceConfig,
 )
 from people_counter.fabric_benchmark import (
     ENVIRONMENT_ID,
@@ -1422,7 +1422,7 @@ def test_benchmark_execution_profile_is_fixed_to_observed_live_pool(
     profile = _benchmark_execution_profile(
         _FakeSpark(), discover_executors=lambda session, minimum: _fake_executors(5)
     )
-    assert profile.name == "candidate-a-benchmark-f64-fixed-v1"
+    assert profile.name == "sjd-benchmark-f64-fixed-v1"
     assert profile.executor_instances == 5
     assert profile.executor_cores == profile.task_cpus == 1
     assert profile.executor_memory_bytes == 56 * 1024**3
@@ -1672,7 +1672,7 @@ def test_benchmark_execution_profile_validates_task_cpus_against_cpu_profile(
         cpu_profile,
         discover_executors=lambda session, minimum: _fake_executors(5),
     )
-    assert profile.name == f"candidate-a-benchmark-f64-fixed-v1:{cpu_profile.profile_id}"
+    assert profile.name == f"sjd-benchmark-f64-fixed-v1:{cpu_profile.profile_id}"
 
     # A live spark.task.cpus that differs from the reviewed CPU profile must
     # fail closed with the exact, distinguishing message.
@@ -1925,7 +1925,7 @@ def test_prepare_pilot_main_defaults_to_five_work_items_for_backward_compatibili
         ],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: sentinel_spark
+        "people_counter.fabric_sjd_runtime._spark", lambda: sentinel_spark
     )
 
     exit_code = benchmark_control_main(
@@ -1944,7 +1944,7 @@ def test_prepare_pilot_main_defaults_to_five_work_items_for_backward_compatibili
     assert exit_code == 0
     assert len(calls.registered) == 5
     assert calls.constructed == [
-        {"spark": sentinel_spark, "config": FabricCandidateAConfig.benchmark()}
+        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark()}
     ]
 
     cpu_profile = CPU_PROFILES["pytorch-r18-b1-1fps-1t"]
@@ -2008,7 +2008,7 @@ def test_prepare_pilot_main_fills_every_discovered_slot_via_work_count(
         ],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     exit_code = benchmark_control_main(
@@ -2047,7 +2047,7 @@ def test_prepare_pilot_main_accepts_the_minimum_boundary_work_count_of_one(
         ],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     exit_code = benchmark_control_main(
@@ -2074,7 +2074,7 @@ def test_prepare_pilot_main_rejects_non_positive_work_count(
 ) -> None:
     _fake_control_store_module(monkeypatch)
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(BenchmarkValidationError) as exc_info:
@@ -2125,7 +2125,7 @@ def test_prepare_pilot_main_requires_both_matching_work_id_and_succeeded_status(
         ],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(BenchmarkValidationError) as exc_info:
@@ -2169,7 +2169,7 @@ def test_prepare_pilot_main_rejects_a_corrupted_nan_duration_seconds_source_row(
         ],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(ValueError, match="not JSON compliant"):
@@ -2193,7 +2193,7 @@ def test_prepare_pilot_main_rejects_unresolvable_source_work_id(
 ) -> None:
     _fake_control_store_module(monkeypatch, work=[])
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(BenchmarkValidationError) as exc_info:
@@ -2220,7 +2220,7 @@ def test_prepare_pilot_main_rejects_a_non_canonical_run_id(
 ) -> None:
     _fake_control_store_module(monkeypatch)
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(BenchmarkValidationError) as exc_info:
@@ -2245,7 +2245,7 @@ def test_prepare_pilot_main_rejects_a_malformed_release_digest(
 ) -> None:
     _fake_control_store_module(monkeypatch)
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(BenchmarkValidationError) as exc_info:
@@ -2274,7 +2274,7 @@ def test_prepare_pilot_main_requires_every_mandatory_flag(
 ) -> None:
     _fake_control_store_module(monkeypatch)
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
     arguments = [
         "prepare-pilot",
@@ -2299,7 +2299,7 @@ def test_prepare_pilot_main_rejects_an_unknown_profile_id(
 ) -> None:
     _fake_control_store_module(monkeypatch)
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(SystemExit):
@@ -2333,7 +2333,7 @@ def test_control_main_dispatches_diagnose_to_the_extracted_helper(
         reconciliation_findings=[],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: sentinel_spark
+        "people_counter.fabric_sjd_runtime._spark", lambda: sentinel_spark
     )
 
     assert benchmark_control_main(["diagnose"]) == 0
@@ -2353,7 +2353,7 @@ def test_control_main_dispatches_diagnose_to_the_extracted_helper(
     # ``sort_keys=True`` (not a falsy/omitted mutant) actually ran.
     assert out == json.dumps(expected, allow_nan=False, default=str, sort_keys=True) + "\n"
     assert calls.constructed == [
-        {"spark": sentinel_spark, "config": FabricCandidateAConfig.benchmark()}
+        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark()}
     ]
 
 
@@ -2375,7 +2375,7 @@ def test_diagnose_main_uses_str_fallback_for_non_json_native_row_values(
         reconciliation_findings=[],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     assert benchmark_control_main(["diagnose"]) == 0
@@ -2397,7 +2397,7 @@ def test_diagnose_main_rejects_nan_row_values(
         reconciliation_findings=[],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(ValueError, match="not JSON compliant"):
@@ -2417,7 +2417,7 @@ def test_control_main_dispatches_recover_stale_to_the_extracted_helper(
         ],
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: sentinel_spark
+        "people_counter.fabric_sjd_runtime._spark", lambda: sentinel_spark
     )
 
     assert benchmark_control_main(["recover-stale"]) == 0
@@ -2437,7 +2437,7 @@ def test_control_main_dispatches_recover_stale_to_the_extracted_helper(
     # alphabetical, so a byte-exact match also proves ``sort_keys=True`` ran.
     assert out == json.dumps(expected, allow_nan=False, default=str, sort_keys=True) + "\n"
     assert calls.constructed == [
-        {"spark": sentinel_spark, "config": FabricCandidateAConfig.benchmark()}
+        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark()}
     ]
     assert calls.recovered == 1
     assert calls.reconciled == 1
@@ -2454,7 +2454,7 @@ def test_recover_stale_main_uses_str_fallback_for_non_json_native_findings(
         monkeypatch, __findings__=[{"severity": "WARNING", "detail": _Opaque()}]
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     assert benchmark_control_main(["recover-stale"]) == 0
@@ -2471,7 +2471,7 @@ def test_recover_stale_main_rejects_nan_finding_values(
         monkeypatch, __findings__=[{"severity": "ERROR", "score": float("nan")}]
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: _FakeSpark()
+        "people_counter.fabric_sjd_runtime._spark", lambda: _FakeSpark()
     )
 
     with pytest.raises(ValueError, match="not JSON compliant"):
@@ -2771,7 +2771,7 @@ def test_write_process_stage_marker_writes_expected_path_and_payload(
     monkeypatch.setitem(
         sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs())
     )
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
 
     benchmark_jobs_module._write_process_stage_marker(
         config, "batch-007", 3, "envelope-loaded"
@@ -2800,7 +2800,7 @@ def test_write_process_stage_marker_swallows_write_failures(
     monkeypatch.setitem(
         sys.modules, "notebookutils", SimpleNamespace(fs=_FailingFs())
     )
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
 
     benchmark_jobs_module._write_process_stage_marker(
         config, "batch-008", 0, "bootstrap"
@@ -3008,7 +3008,7 @@ def test_process_dispatch_executes_the_real_body_on_success(
     mutation-test coverage; this closes that gap."""
 
     calls = _patch_process_dispatch_collaborators(monkeypatch)
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3109,7 +3109,7 @@ def test_process_dispatch_accepts_a_claim_payload_relying_on_documented_defaults
     _patch_process_dispatch_collaborators(
         monkeypatch, observed_payload={"sample_fps": 1.0}
     )
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3137,7 +3137,7 @@ def test_process_dispatch_rejects_a_payload_missing_sample_fps(
             "batch_size": 1,
         },
     )
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3160,7 +3160,7 @@ def test_process_dispatch_rejects_a_device_variant_mismatch(
             "sample_fps": 1.0,
         },
     )
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3183,7 +3183,7 @@ def test_process_dispatch_rejects_a_device_mismatch(
             "sample_fps": 1.0,
         },
     )
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3206,7 +3206,7 @@ def test_process_dispatch_rejects_a_batch_size_mismatch(
             "sample_fps": 1.0,
         },
     )
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3233,7 +3233,7 @@ def test_process_dispatch_rejects_a_payload_that_differs_from_the_cpu_profile(
             "sample_fps": 1.0,
         },
     )
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3270,8 +3270,8 @@ def test_process_main_dispatches_to_extracted_helper_on_success(
     assert arguments.batch_id == "batch-xyz"
     assert arguments.mode == "sdk"
     assert arguments.profile_id == "onnx-r18-b4-1fps-1t"
-    assert isinstance(config, FabricCandidateAConfig)
-    assert config.mode is CandidateANamespaceMode.BENCHMARK
+    assert isinstance(config, FabricNamespaceConfig)
+    assert config.mode is FabricNamespaceMode.BENCHMARK
 
 
 def test_process_main_writes_entry_marker_before_argument_parsing(
@@ -3400,7 +3400,7 @@ def test_gold_main_persists_diagnostic_traceback_and_still_raises(
     assert payload["error_message"] == "boom from gold reconcile"
 
 
-def test_gold_main_dispatches_to_candidate_a_gold_on_success(
+def test_gold_main_dispatches_to_sjd_gold_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[Any, Any]] = []
@@ -3417,7 +3417,7 @@ def test_gold_main_dispatches_to_candidate_a_gold_on_success(
     assert len(calls) == 1
     argv, config = calls[0]
     assert argv == ["--dry-run"]
-    assert isinstance(config, FabricCandidateAConfig)
+    assert isinstance(config, FabricNamespaceConfig)
 
 
 def test_resource_inventory_main_reports_live_executors_placement_and_probes(

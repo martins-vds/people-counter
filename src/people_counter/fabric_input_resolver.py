@@ -1,4 +1,4 @@
-"""Backend-neutral input resolution for Candidate A's live Fabric call path.
+"""Backend-neutral input resolution for Fabric SJD's live Fabric call path.
 
 Three backends are recognized, selected once per batch from *proven*
 capability evidence -- never assumed and never silently hardwired:
@@ -191,7 +191,7 @@ def select_input_backend(
     """Select the input-resolution backend from proven direct-mount capability.
 
     Mirrors
-    :func:`people_counter.fabric_candidate_a_jobs.select_process_execution_harness`'s
+    :func:`people_counter.fabric_sjd_runtime.select_process_execution_harness`'s
     contract exactly: prefers :data:`InputBackend.FABRIC_DIRECT` only once
     the mount is *proven* usable inside every discovered executor's own
     task; otherwise falls back to :data:`InputBackend.FABRIC_FALLBACK` and

@@ -1,4 +1,4 @@
-"""Installed-wheel entry points for Candidate A Fabric Spark jobs."""
+"""Installed-wheel entry points for Fabric Spark jobs."""
 
 from __future__ import annotations
 
@@ -21,10 +21,10 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
 
-from people_counter.fabric_candidate_a import (
+from people_counter.fabric_namespace import (
     LAKEHOUSE_ID,
     WORKSPACE_ID,
-    FabricCandidateAConfig,
+    FabricNamespaceConfig,
 )
 from people_counter.fabric_input_resolver import (
     InputBackend,
@@ -36,6 +36,19 @@ from people_counter.fabric_input_resolver import (
     verify_sha256,
 )
 from people_counter.fabric_source_cache import LocalizedSourceCache
+from people_counter.fabric_sjd import FabricSjdConfig
+
+
+def _sha256_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _spark() -> Any:
@@ -80,7 +93,7 @@ def _consumer_probe_profile(
         model_hashes = payload.get("model_artifact_sha256")
         if not isinstance(model_hashes, Mapping):
             raise ValueError("consumer probe requires model_artifact_sha256")
-        for model_path in _candidate_a_model_paths(
+        for model_path in _model_artifact_paths(
             payload, validation_error=ValueError
         ):
             digest = model_hashes.get(model_path)
@@ -110,7 +123,7 @@ def _consumer_probe_profile(
 
 def _probe_and_persist_consumer_decision(
     spark: Any,
-    config: FabricCandidateAConfig,
+    config: FabricNamespaceConfig,
     batch_id: str,
     envelope: Mapping[str, Any],
     *,
@@ -124,7 +137,7 @@ def _probe_and_persist_consumer_decision(
         CapabilityStatus,
         probe_direct_mount_consumer_capability,
     )
-    from people_counter.fabric_candidate_a_control import (
+    from people_counter.fabric_control_store import (
         NotebookUtilsOneLakeFiles,
     )
     from people_counter.fabric_executor_inventory import discover_active_executors
@@ -339,7 +352,7 @@ def _executor_warm_works(
             }
         )
     if not works:
-        raise RuntimeError("Candidate A requires at least one runtime warm-up")
+        raise RuntimeError("Fabric SJD requires at least one runtime warm-up")
     return tuple(works)
 
 
@@ -373,21 +386,21 @@ def _fabric_process_profile(
     from people_counter.sjd_process import GIB, build_profile_from_inventory
 
     if sys.version_info[:2] != (3, 13):
-        raise RuntimeError(f"Candidate A requires Python 3.13, got {sys.version}")
+        raise RuntimeError(f"Fabric SJD requires Python 3.13, got {sys.version}")
     if not str(spark.version).startswith("4.1.1"):
-        raise RuntimeError(f"Candidate A requires Spark 4.1.1, got {spark.version}")
+        raise RuntimeError(f"Fabric SJD requires Spark 4.1.1, got {spark.version}")
     java = str(
         spark.sparkContext._jvm.java.lang.System.getProperty("java.version")
     )
     if not java.startswith("21"):
-        raise RuntimeError(f"Candidate A requires Java 21, got {java}")
+        raise RuntimeError(f"Fabric SJD requires Java 21, got {java}")
     if str(spark.conf.get("spark.dynamicAllocation.enabled", "")).lower() != "false":
-        raise RuntimeError("Candidate A requires the reviewed fixed live pool")
+        raise RuntimeError("Fabric SJD requires the reviewed fixed live pool")
     if str(spark.conf.get("spark.speculation", "false")).lower() != "false":
-        raise RuntimeError("Candidate A requires Spark speculation disabled")
+        raise RuntimeError("Fabric SJD requires Spark speculation disabled")
     expected_executor_cores = int(spark.conf.get("spark.executor.cores"))
     if expected_executor_cores < 1:
-        raise RuntimeError("Candidate A requires at least one executor core")
+        raise RuntimeError("Fabric SJD requires at least one executor core")
     memory = str(spark.conf.get("spark.executor.memory")).lower()
     match = re.fullmatch(r"(\d+)([gmk])", memory)
     if match is None:
@@ -414,13 +427,13 @@ def _fabric_process_profile(
         rss_result = probe_peak_rss_bytes(spark, executors)
     if rss_result.status is not CapabilityStatus.AVAILABLE:
         raise RuntimeError(
-            "Candidate A profile promotion requires complete warmed executor "
+            "Fabric SJD profile promotion requires complete warmed executor "
             f"RSS evidence: {rss_result.evidence}"
         )
     peak_rss_bytes = rss_result.value
 
     return build_profile_from_inventory(
-        "candidate-a-fabric-runtime2-v1",
+        "sjd-fabric-runtime2-v1",
         executors,
         task_cpus=task_cpus,
         expected_executor_cores=expected_executor_cores,
@@ -438,7 +451,7 @@ def _fabric_process_profile(
 
 def select_process_execution_harness(
     spark: Any,
-    config: FabricCandidateAConfig,
+    config: FabricNamespaceConfig,
     batch_id: str,
     *,
     row_enrichment: Mapping[str, Mapping[str, Any]],
@@ -726,7 +739,7 @@ def _resolve_localized_video(
     mount_prefix = "/lakehouse/default/"
     if not source.startswith(mount_prefix):
         raise validation_error(
-            "Candidate A source_video must use the default Lakehouse"
+            "Fabric SJD source_video must use the default Lakehouse"
         )
     relative = source[len(mount_prefix) :]
 
@@ -758,13 +771,13 @@ def _resolve_localized_video(
     return relative, source_sha, video_localized_name
 
 
-def _candidate_a_model_paths(
+def _model_artifact_paths(
     payload: Mapping[str, Any], *, validation_error: type[Exception]
 ) -> tuple[str, ...]:
     """Build the four fixed RT-DETR/OSNet artifact paths for one item."""
     if payload.get("pipeline", "rtdetr-osnet") != "rtdetr-osnet":
         raise validation_error(
-            "Candidate A v1 localizer supports RT-DETR/OSNet only"
+            "Fabric SJD v1 localizer supports RT-DETR/OSNet only"
         )
     detector = str(payload.get("detector_model", "r18"))
     model_format = str(payload.get("model_format", "pytorch"))
@@ -851,10 +864,8 @@ def _check_synthetic_model_identity(
     """Pin a SHADOW_SYNTHETIC item's resolved model identity."""
     if route_mode != "SHADOW_SYNTHETIC":
         return
-    from people_counter.fabric_production_routing import sha256_json
-
     assert route_identity is not None
-    observed_model = sha256_json(
+    observed_model = _sha256_json(
         {
             "schema": "people-counter-fixed-model-artifacts-v1",
             "artifacts": {
@@ -964,8 +975,11 @@ def _localize_process_inputs(
             max_total_bytes=16 * 1024**3,
         )
     store_config = getattr(store, "config", None)
-    if not isinstance(store_config, FabricCandidateAConfig):
-        store_config = FabricCandidateAConfig()
+    if not isinstance(
+        store_config,
+        (FabricNamespaceConfig, FabricSjdConfig),
+    ):
+        store_config = FabricNamespaceConfig()
     distributed_alias_root_uri = (
         f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
         f"{LAKEHOUSE_ID}/{store_config.file_path('distributed-cache')}"
@@ -992,7 +1006,7 @@ def _localize_process_inputs(
             distributed_alias_root_uri=distributed_alias_root_uri,
             validation_error=validation_error,
         )
-        model_paths = _candidate_a_model_paths(
+        model_paths = _model_artifact_paths(
             payload, validation_error=validation_error
         )
         localized_models = _resolve_localized_models(
@@ -1079,13 +1093,13 @@ def _clear_stale_lock(
     spark: Any,
     expected_owner_id: str,
     *,
-    config: FabricCandidateAConfig | None = None,
+    config: FabricNamespaceConfig | None = None,
 ) -> dict[str, Any]:
     """Manually clear one investigated canary writer token by exact CAS."""
     from delta.tables import DeltaTable
     from pyspark.sql import functions
 
-    selected = config or FabricCandidateAConfig()
+    selected = config or FabricNamespaceConfig()
     selected.require_write_enabled()
     table = selected.table("locks")
     rows = spark.table(table).select(
@@ -1129,7 +1143,7 @@ def _clear_stale_lock(
 
 
 def _write_control_diagnostic(
-    config: FabricCandidateAConfig,
+    config: FabricNamespaceConfig,
     command: str,
     error: BaseException,
     *,
@@ -1179,13 +1193,13 @@ def _write_control_diagnostic(
 def control_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricCandidateAConfig | None = None,
+    config: FabricNamespaceConfig | None = None,
 ) -> int:
     """Run bounded control maintenance against the fixed canary tables."""
     arguments = _control_parser().parse_args(argv)
     from people_counter.sjd_control import FabricControlStore
 
-    selected = config or FabricCandidateAConfig()
+    selected = config or FabricNamespaceConfig()
     selected.require_write_enabled()
     store = FabricControlStore(_spark(), config=selected)
     try:
@@ -1198,7 +1212,7 @@ def control_main(
 def _control_dispatch(
     arguments: argparse.Namespace,
     store: Any,
-    selected: FabricCandidateAConfig,
+    selected: FabricNamespaceConfig,
 ) -> int:
     """Execute one parsed control command; isolated so the diagnostic
     wrapper in ``control_main`` always sees command failures."""
@@ -1228,7 +1242,7 @@ def _control_dispatch(
             )
         )
     elif arguments.command == "bulk-register":
-        from people_counter.fabric_candidate_a_control import (
+        from people_counter.fabric_control_store import (
             NotebookUtilsOneLakeFiles,
         )
         from people_counter.sjd_control import parse_registration_manifest
@@ -1366,14 +1380,14 @@ def _dispatcher_parser() -> argparse.ArgumentParser:
 def dispatcher_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricCandidateAConfig | None = None,
+    config: FabricNamespaceConfig | None = None,
     route_mode: str | None = None,
 ) -> int:
     """Atomically claim at most one bounded batch and process it."""
     arguments = _dispatcher_parser().parse_args(argv)
     from people_counter.sjd_control import FabricControlStore
 
-    selected = config or FabricCandidateAConfig()
+    selected = config or FabricNamespaceConfig()
     selected.require_write_enabled()
     owner = arguments.owner or f"pc-production-dispatcher-{uuid.uuid4().hex}"
     store = FabricControlStore(_spark(), config=selected)
@@ -1570,14 +1584,14 @@ def _refresh_semantic_model(
 def refresh_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricCandidateAConfig | None = None,
+    config: FabricNamespaceConfig | None = None,
 ) -> int:
     """Refresh the stable semantic model and acknowledge its durable outbox."""
     arguments = _refresh_parser().parse_args(argv)
-    from people_counter.fabric_candidate_a_gold import FabricGoldState
+    from people_counter.fabric_gold import FabricGoldState
     import notebookutils
 
-    selected = config or FabricCandidateAConfig()
+    selected = config or FabricNamespaceConfig()
     selected.require_write_enabled()
     state = FabricGoldState(_spark(), config=selected)
     pending = state.pending_refreshes()
@@ -1723,11 +1737,11 @@ def _process_output(
 def process_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricCandidateAConfig | None = None,
+    config: FabricNamespaceConfig | None = None,
     route_mode: str | None = None,
     route_identity: Mapping[str, Any] | None = None,
 ) -> int:
-    """Run one claimed batch using only fixed Candidate A Fabric backends."""
+    """Run one claimed batch using only fixed Fabric SJD Fabric backends."""
     arguments = _process_parser().parse_args(argv)
     from people_counter.sjd_control import FabricControlStore
     from people_counter.sjd_process import (
@@ -1738,12 +1752,12 @@ def process_main(
         warm_executor_for_works,
     )
     import functools
-    from people_counter.fabric_candidate_a_control import (
+    from people_counter.fabric_control_store import (
         NotebookUtilsOneLakeFiles,
     )
 
     spark = _spark()
-    config = config or FabricCandidateAConfig()
+    config = config or FabricNamespaceConfig()
     config.require_write_enabled()
     store = FabricControlStore(spark, config=config)
     release_evidence = _load_runtime_release_evidence(
@@ -1875,11 +1889,11 @@ def _gold_parser() -> argparse.ArgumentParser:
 def gold_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricCandidateAConfig | None = None,
+    config: FabricNamespaceConfig | None = None,
 ) -> int:
     """Build gold through committed pointers and typed Delta tables."""
     arguments = _gold_parser().parse_args(argv)
-    from people_counter.fabric_candidate_a_gold import (
+    from people_counter.fabric_gold import (
         FabricCommittedSource,
         FabricGoldJob,
         FabricGoldState,
@@ -1888,7 +1902,7 @@ def gold_main(
     from people_counter.sjd_process import OneLakeDeltaAttemptAdapter
 
     spark = _spark()
-    config = config or FabricCandidateAConfig()
+    config = config or FabricNamespaceConfig()
     config.require_write_enabled()
     source = FabricCommittedSource(
         spark,

@@ -593,7 +593,7 @@ def _verified_video(work: Mapping[str, Any]) -> Path:
     path), the registered Lakehouse-relative identity is resolved straight
     onto the proven mount with no distribution step at all; otherwise the
     existing ``SparkFiles`` broadcast name (now content-addressed -- see
-    :func:`people_counter.fabric_candidate_a_jobs._localize_process_inputs`)
+    :func:`people_counter.fabric_sjd_runtime._localize_process_inputs`)
     is used, matching every prior fallback behavior.
     """
     if work.get("resolver_backend") == "FABRIC_DIRECT":

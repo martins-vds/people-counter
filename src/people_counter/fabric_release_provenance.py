@@ -1,4 +1,4 @@
-"""Detached, immutable Candidate A release provenance.
+"""Detached, immutable SJD release provenance.
 
 The wheel contains only :class:`ReleaseIdentity`: stable package/build-input
 identity that does not depend on the wheel's final bytes. Exact wheel, lock,
@@ -23,7 +23,7 @@ from typing import Any, Mapping, Sequence
 PACKAGE_DISTRIBUTION = "people-counter"
 UNRESOLVED_PACKAGE_VERSION = "<people-counter-distribution-unresolved>"
 _IDENTITY_PATH = (
-    Path(__file__).resolve().parent / "data" / "candidate_a_release_identity.json"
+    Path(__file__).resolve().parent / "data" / "sjd_release_identity.json"
 )
 _HEX = frozenset("0123456789abcdef")
 
@@ -202,7 +202,7 @@ def load_release_identity(
 ) -> tuple[ReleaseIdentity, str]:
     raw, content = _load_json_object(path, "release identity")
     identity = _parse_identity(raw)
-    if identity.schema != "people-counter-candidate-a-release-identity-v1":
+    if identity.schema != "people-counter-sjd-release-identity-v1":
         raise ReleaseProvenanceError("unsupported release identity schema")
     return identity, _sha256_bytes(content)
 
@@ -303,7 +303,7 @@ def load_detached_release_manifest(
             raw.get("deployment_intent"), "manifest.deployment_intent"
         ),
     )
-    if manifest.schema != "people-counter-candidate-a-detached-release-v1":
+    if manifest.schema != "people-counter-sjd-detached-release-v1":
         raise ReleaseProvenanceError("unsupported detached manifest schema")
     expected_identity = {
         "release_identity_sha256": identity_sha256,
@@ -377,7 +377,7 @@ def load_postpublish_receipt(
         published_at=_text(raw.get("published_at"), "receipt.published_at"),
         recorded_at=_text(raw.get("recorded_at"), "receipt.recorded_at"),
     )
-    if receipt.schema != "people-counter-candidate-a-postpublish-receipt-v1":
+    if receipt.schema != "people-counter-sjd-postpublish-receipt-v1":
         raise ReleaseProvenanceError("unsupported postpublish receipt schema")
     if (
         receipt.detached_manifest_sha256 != manifest_sha256
@@ -485,7 +485,7 @@ def release_build_input_sha256(root: Path) -> str:
     binds the final packaged bytes, including that identity file.
     """
     package_root = root / "src" / "people_counter"
-    identity_path = package_root / "data" / "candidate_a_release_identity.json"
+    identity_path = package_root / "data" / "sjd_release_identity.json"
     paths = [root / "pyproject.toml", root / "README.md"]
     paths.extend(
         path

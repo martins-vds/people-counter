@@ -1229,7 +1229,7 @@ def persist_consumer_capability_evidence(
     idempotent retry), but any content conflict at an already-written path
     is a hard failure, and every write is verified by reading the content
     back rather than trusted blindly. ``files`` must implement the
-    :class:`people_counter.fabric_candidate_a_control.OneLakeFiles`
+    :class:`people_counter.fabric_control_store.OneLakeFiles`
     protocol (``exists``/``read_text``/``create_text``).
     """
 

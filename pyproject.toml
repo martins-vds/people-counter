@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "people-counter"
-version = "0.9.56"
+version = "0.9.57"
 description = "A permissively licensed CPU/GPU distinct person counter"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,14 +35,6 @@ pc-control-sjd = "people_counter.sjd_control:main"
 pc-process-sjd = "people_counter.sjd_process:main"
 pc-gold-sjd = "people_counter.sjd_gold:main"
 pc-local-orchestrate = "people_counter.sjd_orchestrate:main"
-pc-fabric-canary = "people_counter.fabric_canary_tool:main"
-pc-production-migration = "people_counter.fabric_production_migration:main"
-pc-production-migration-live = "people_counter.fabric_production_migration_live:main"
-pc-production-migration-controller = "people_counter.fabric_production_migration_tool:main"
-pc-production-shadow-controller = "people_counter.fabric_production_shadow_tool:main"
-pc-production-shadow-control-sjd = "people_counter.fabric_production_shadow_control:main"
-pc-production-shadow-process-sjd = "people_counter.fabric_production_shadow_process:main"
-pc-production-shadow-reconcile-sjd = "people_counter.fabric_production_shadow_reconcile:main"
 pc-benchmark-control-sjd = "people_counter.fabric_benchmark_jobs:control_main"
 pc-benchmark-process-sjd = "people_counter.fabric_benchmark_jobs:process_main"
 pc-benchmark-gold-sjd = "people_counter.fabric_benchmark_jobs:gold_main"
@@ -74,10 +66,9 @@ pytest_add_cli_args = ["-o", "pythonpath=src"]
 pytest_add_cli_args_test_selection = ["tests/"]
 also_copy = [
     "notebooks/fabric/",
-    "fabric/",
     "samples/",
     "scripts/",
-    "src/people_counter/data/candidate_a_release_identity.json",
+    "src/people_counter/data/sjd_release_identity.json",
 ]
 on_dependency_change = "rerun"
 

@@ -1,7 +1,7 @@
 """Direct unit tests for the private localization helpers extracted from
-``_localize_process_inputs`` in :mod:`people_counter.fabric_candidate_a_jobs`.
+``_localize_process_inputs`` in :mod:`people_counter.fabric_sjd_runtime`.
 
-These complement the end-to-end tests in ``test_fabric_candidate_a_phase1.py``
+These complement the end-to-end tests in ``test_fabric_sjd_phase1.py``
 by exercising each helper's branches, defaults, and exact argument wiring in
 isolation -- the level of detail needed to kill structural mutation gaps
 (flipped conditionals, wrong defaults, dropped arguments, off-by-one slicing)
@@ -18,9 +18,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import people_counter.fabric_candidate_a_jobs as candidate_jobs
-from people_counter.fabric_candidate_a_jobs import (
-    _candidate_a_model_paths,
+import people_counter.fabric_sjd_runtime as candidate_jobs
+from people_counter.fabric_sjd_runtime import (
+    _model_artifact_paths,
     _check_synthetic_model_identity,
     _check_synthetic_video_identity,
     _fallback_localize,
@@ -145,7 +145,7 @@ def test_resolve_localized_video_rejects_non_default_lakehouse_source() -> None:
             validation_error=_Boom,
         )
     assert str(exc_info.value) == (
-        "Candidate A source_video must use the default Lakehouse"
+        "Fabric SJD source_video must use the default Lakehouse"
     )
 
 
@@ -153,7 +153,7 @@ def test_resolve_localized_video_direct_backend_hashes_resolved_mount_path(
     tmp_path: Path,
 ) -> None:
     mount_root = tmp_path / "lakehouse"
-    relative = "Files/_canary/candidate-a/v1/assets/synthetic.mp4"
+    relative = "Files/_canary/sjd/v1/assets/synthetic.mp4"
     video_path = mount_root / relative
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video-bytes")
@@ -181,7 +181,7 @@ def test_resolve_localized_video_direct_backend_rejects_digest_mismatch(
     tmp_path: Path,
 ) -> None:
     mount_root = tmp_path / "lakehouse"
-    relative = "Files/_canary/candidate-a/v1/assets/synthetic.mp4"
+    relative = "Files/_canary/sjd/v1/assets/synthetic.mp4"
     video_path = mount_root / relative
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video-bytes")
@@ -215,7 +215,7 @@ def test_resolve_localized_video_fallback_backend_uses_exact_abfss_uri_and_basen
         "_stream_hadoop_uri_to_local",
         _stream_from(source),
     )
-    relative = "Files/_canary/candidate-a/v1/assets/synthetic.mp4"
+    relative = "Files/_canary/sjd/v1/assets/synthetic.mp4"
     payload = {
         "source_video": f"/lakehouse/default/{relative}",
         "source_sha256": _sha256_bytes(b"video-bytes"),
@@ -245,25 +245,25 @@ def test_resolve_localized_video_fallback_backend_uses_exact_abfss_uri_and_basen
 
 
 # --------------------------------------------------------------------------
-# _candidate_a_model_paths
+# _model_artifact_paths
 # --------------------------------------------------------------------------
 
 
-def test_candidate_a_model_paths_rejects_non_rtdetr_osnet_pipeline() -> None:
+def test_model_artifact_paths_rejects_non_rtdetr_osnet_pipeline() -> None:
     with pytest.raises(_Boom) as exc_info:
-        _candidate_a_model_paths(
+        _model_artifact_paths(
             {"pipeline": "rfdetr-botsort"}, validation_error=_Boom
         )
     assert str(exc_info.value) == (
-        "Candidate A v1 localizer supports RT-DETR/OSNet only"
+        "Fabric SJD v1 localizer supports RT-DETR/OSNet only"
     )
 
 
-def test_candidate_a_model_paths_defaults_pipeline_when_key_is_absent() -> None:
+def test_model_artifact_paths_defaults_pipeline_when_key_is_absent() -> None:
     # Omitting "pipeline" entirely must fall back to the "rtdetr-osnet"
     # default and succeed -- not raise, and not silently default to
     # ``None``/something else that would always reject.
-    assert _candidate_a_model_paths({}, validation_error=_Boom) == (
+    assert _model_artifact_paths({}, validation_error=_Boom) == (
         "rtdetr_osnet/rtdetr_v2_r18vd/config.json",
         "rtdetr_osnet/rtdetr_v2_r18vd/preprocessor_config.json",
         "rtdetr_osnet/rtdetr_v2_r18vd/model.safetensors",
@@ -321,11 +321,11 @@ def test_candidate_a_model_paths_defaults_pipeline_when_key_is_absent() -> None:
         ),
     ],
 )
-def test_candidate_a_model_paths_covers_every_detector_format_combination(
+def test_model_artifact_paths_covers_every_detector_format_combination(
     payload: dict[str, str], expected: tuple[str, ...]
 ) -> None:
     full_payload = {"pipeline": "rtdetr-osnet", **payload}
-    assert _candidate_a_model_paths(full_payload, validation_error=_Boom) == expected
+    assert _model_artifact_paths(full_payload, validation_error=_Boom) == expected
 
 
 # --------------------------------------------------------------------------
@@ -494,7 +494,7 @@ def test_check_synthetic_model_identity_is_noop_outside_shadow_synthetic() -> No
 
 
 def test_check_synthetic_model_identity_excludes_config_files_and_matches() -> None:
-    from people_counter.fabric_production_routing import sha256_json
+    from people_counter.fabric_sjd_runtime import _sha256_json as sha256_json
 
     localized_models = {
         "rtdetr_osnet/rtdetr_v2_r18vd/config.json": {"sha256": "config-sha"},
@@ -719,8 +719,8 @@ def test_real_local_spark_fallback_is_collision_safe_before_staging(
 
     spark = create_local_spark_session(
         master="local[2]",
-        app_name="candidate-a-collision-proof",
-        correlation_id="candidate-a-collision-proof",
+        app_name="sjd-collision-proof",
+        correlation_id="sjd-collision-proof",
     )
     try:
         sources: list[Path] = []

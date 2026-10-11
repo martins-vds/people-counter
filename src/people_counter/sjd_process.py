@@ -1,4 +1,4 @@
-"""Candidate A local process Spark Job Definition.
+"""Fabric SJD local process Spark Job Definition.
 
 The module keeps Spark and Delta imports behind the Spark harness so importing
 the package, constructing plans, and displaying CLI help work without PySpark.
@@ -158,7 +158,7 @@ def resolve_profile(
     spark_overrides: Mapping[str, object] | None = None,
 ) -> ExecutionProfile:
     """Resolve the reviewed fixed two-worker profile and reject drift."""
-    if name not in {"local-two-workers", "candidate-a-local"}:
+    if name not in {"local-two-workers", "sjd-local"}:
         raise ProcessValidationError(f"unsupported execution profile: {name!r}")
     profile = LOCAL_TWO_WORKERS
     supplied = {key: str(value).lower() for key, value in (spark_overrides or {}).items()}
@@ -212,7 +212,7 @@ def build_profile_from_inventory(
     exactly match the reviewed, benchmarked configuration or planning fails
     closed via ``assert_matches_reviewed_profile``. Speculation remains
     disabled; ``fixed_allocation`` records whether the live pool itself uses
-    fixed or dynamic allocation (Candidate A's live pool is dynamic; the
+    fixed or dynamic allocation (Fabric SJD's live pool is dynamic; the
     benchmark's is fixed) -- it does not change executor discovery.
 
     ``task_cpus`` must be one of the explicitly reviewed widths
@@ -1868,13 +1868,13 @@ class OneLakeDeltaAttemptAdapter:
                 "Fabric attempt storage is unsupported without an explicit "
                 "OneLake root and Fabric Spark session"
             )
-        from people_counter.fabric_candidate_a_control import (
+        from people_counter.fabric_control_store import (
             NotebookUtilsOneLakeFiles,
         )
-        from people_counter.fabric_candidate_a import FabricCandidateAConfig
+        from people_counter.fabric_namespace import FabricNamespaceConfig
 
         self.root = root.rstrip("/")
-        self.config = config or FabricCandidateAConfig()
+        self.config = config or FabricNamespaceConfig()
         try:
             namespace_mode = ProcessRouteMode(self.config.mode.value)
             selected_mode = (
@@ -1904,7 +1904,7 @@ class OneLakeDeltaAttemptAdapter:
             root_label = (
                 "stable production root"
                 if bool(getattr(self.config, "stable_production", False))
-                else "fixed Candidate A root"
+                else "fixed Fabric SJD root"
             )
             raise ProcessValidationError(
                 f"OneLake attempts require the route-mode {root_label}"
@@ -2780,7 +2780,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the local Candidate A process command."""
+    """Run the local Fabric SJD process command."""
     arguments = _parser().parse_args(argv)
     profile = resolve_profile(arguments.profile)
     from people_counter.sjd_control import SQLiteControlStore

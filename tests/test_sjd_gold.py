@@ -1172,15 +1172,15 @@ def test_fabric_gold_facades_require_explicit_spark_and_forward(
     state_impl = MagicMock()
     state_impl.pending_refreshes.return_value = ["refresh"]
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_gold.FabricGoldStoreImpl",
+        "people_counter.fabric_gold.FabricGoldStoreImpl",
         lambda *_args, **_kwargs: store_impl,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_gold.FabricCommittedSource",
+        "people_counter.fabric_gold.FabricCommittedSource",
         lambda *_args, **_kwargs: source_impl,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_gold.FabricGoldState",
+        "people_counter.fabric_gold.FabricGoldState",
         lambda *_args, **_kwargs: state_impl,
     )
 

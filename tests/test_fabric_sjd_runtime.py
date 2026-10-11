@@ -17,24 +17,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from people_counter.fabric_candidate_a import (
+from people_counter.fabric_namespace import (
     ENVIRONMENT_ID,
     FILES_ROOT,
     LAKEHOUSE_ID,
     TABLE_PREFIX,
     WORKSPACE_ID,
-    FabricCandidateAConfig,
+    FabricNamespaceConfig,
     build_sjd_v2_definition,
     validate_environment_library_policy,
 )
-from people_counter.fabric_candidate_a_control import (
+from people_counter.fabric_control_store import (
     BatchValidationError,
     FabricControlStoreImpl,
     ImmutableConflictError,
     OneLakeEnvelopeWriter,
     _SCHEMAS,
 )
-from people_counter.fabric_candidate_a_gold import (
+from people_counter.fabric_gold import (
     FabricCommittedSource,
     FabricGoldJob,
     FabricGoldState,
@@ -42,7 +42,7 @@ from people_counter.fabric_candidate_a_gold import (
     _sha256,
     _spark_timestamp,
 )
-from people_counter.fabric_candidate_a_jobs import (
+from people_counter.fabric_sjd_runtime import (
     _bind_consumer_probe_to_executor_inventory,
     _clear_stale_lock,
     _control_parser,
@@ -103,11 +103,11 @@ def test_process_main_resumes_committed_batch_before_live_probing(
     monkeypatch,
     capsys,
 ) -> None:
-    import people_counter.fabric_candidate_a_control as control_module
+    import people_counter.fabric_control_store as control_module
     import people_counter.sjd_control as sjd_control_module
     import people_counter.sjd_process as process_module
 
-    runtime = sys.modules["people_counter.fabric_candidate_a_jobs"]
+    runtime = sys.modules["people_counter.fabric_sjd_runtime"]
     spark = object()
     store = object()
     attempts = object()
@@ -272,7 +272,7 @@ def test_consumer_decision_is_workload_specific_immutable_and_read_back() -> Non
         "consumer open failed on every executor",
     )
     files = MemoryFiles()
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     observed_profiles: list[object] = []
 
     def probe(_spark, _executors, *, profile):
@@ -401,7 +401,7 @@ def test_consumer_decision_reuses_immutable_probe_after_executor_drift() -> None
 
     _, first = _probe_and_persist_consumer_decision(
         spark,
-        FabricCandidateAConfig.benchmark(),
+        FabricNamespaceConfig.benchmark(),
         "batch-drift",
         envelope,
         discover_executors=lambda _spark: next(discoveries),
@@ -410,7 +410,7 @@ def test_consumer_decision_reuses_immutable_probe_after_executor_drift() -> None
     )
     drifted, repeated = _probe_and_persist_consumer_decision(
         spark,
-        FabricCandidateAConfig.benchmark(),
+        FabricNamespaceConfig.benchmark(),
         "batch-drift",
         envelope,
         discover_executors=lambda _spark: next(discoveries),
@@ -503,7 +503,7 @@ def test_consumer_decision_rejects_corrupt_persistence(
         {"opened": True},
     )
     files = MemoryFiles()
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
 
     _probe_and_persist_consumer_decision(
         spark,
@@ -632,7 +632,7 @@ def test_consumer_decision_uses_default_discovery_and_probe(
     }
     _probe_and_persist_consumer_decision(
         spark,
-        FabricCandidateAConfig.benchmark(),
+        FabricNamespaceConfig.benchmark(),
         "default-probe",
         envelope,
         files=MemoryFiles(),
@@ -646,11 +646,11 @@ def test_consumer_decision_uses_default_discovery_and_probe(
 
 class MemoryControlStore(FabricControlStoreImpl):
     def __init__(self, files: MemoryFiles) -> None:
-        self.config = FabricCandidateAConfig()
+        self.config = FabricNamespaceConfig()
         self.data = {name: [] for name in _SCHEMAS}
         self.writer = ImmediateWriter()
         self.envelopes = OneLakeEnvelopeWriter(
-            FabricCandidateAConfig().file_path("control"), files
+            FabricNamespaceConfig().file_path("control"), files
         )
         self._clock_value = 100.0
         self._clock = lambda: self._clock_value
@@ -830,7 +830,7 @@ class FakeFrame:
     def save(self, path):
         self.spark.rows[path] = copy.deepcopy(self.rows)
         relative = path.split(
-            f"/{FabricCandidateAConfig().lakehouse_id}/", 1
+            f"/{FabricNamespaceConfig().lakehouse_id}/", 1
         )[-1]
         self.spark.files.paths.add(f"{relative}/_delta_log")
 
@@ -873,7 +873,7 @@ def _decode_parts(payload):
 
 
 def test_fixed_config_and_sjd_v2_mappings() -> None:
-    config = FabricCandidateAConfig()
+    config = FabricNamespaceConfig()
     assert (
         config.workspace_id,
         config.lakehouse_id,
@@ -890,14 +890,14 @@ def test_fixed_config_and_sjd_v2_mappings() -> None:
         "2.0",
     )
     with pytest.raises(ValueError, match="fixed"):
-        FabricCandidateAConfig(runtime="1.3")
+        FabricNamespaceConfig(runtime="1.3")
     assert config.abfss_path(config.file_path("attempts")).endswith(
         f"/{LAKEHOUSE_ID}/{FILES_ROOT}attempts"
     )
-    with pytest.raises(ValueError, match="fixed Candidate A root"):
+    with pytest.raises(ValueError, match="fixed Fabric SJD root"):
         config.abfss_path("Files/production")
 
-    shadow = FabricCandidateAConfig.production_shadow()
+    shadow = FabricNamespaceConfig.production_shadow()
     adapter = OneLakeDeltaAttemptAdapter(
         shadow.file_path("attempts"),
         object(),
@@ -934,7 +934,7 @@ def test_fixed_config_and_sjd_v2_mappings() -> None:
             config=shadow,
             route_mode=ProcessRouteMode.BENCHMARK,
         )
-    with pytest.raises(ProcessValidationError, match="fixed Candidate A root"):
+    with pytest.raises(ProcessValidationError, match="fixed Fabric SJD root"):
         OneLakeDeltaAttemptAdapter(
             config.file_path("attempts"),
             object(),
@@ -943,7 +943,7 @@ def test_fixed_config_and_sjd_v2_mappings() -> None:
             route_mode=ProcessRouteMode.SHADOW_SYNTHETIC,
         )
     with pytest.raises(ProcessValidationError, match="production"):
-        production = FabricCandidateAConfig.production()
+        production = FabricNamespaceConfig.production()
         OneLakeDeltaAttemptAdapter(
             production.file_path("attempts"),
             object(),
@@ -960,7 +960,7 @@ def test_fixed_config_and_sjd_v2_mappings() -> None:
         assert metadata["environmentArtifactId"] == ENVIRONMENT_ID
         assert metadata["additionalLibraryUris"] == []
         source = parts["Main/main.py"].decode()
-        assert "people_counter.fabric_candidate_a_jobs import" in source
+        assert "people_counter.fabric_sjd_runtime import" in source
         assert "sys.path" not in source and "source" not in source.lower()
 
 
@@ -1003,7 +1003,7 @@ def test_fabric_committed_source_converts_staged_records_to_gold_document() -> N
             "publication": {
                 "publication_sequence": 1,
                 "output_path": (
-                    "Files/_canary/people-counter/candidate-a/v1/attempts/"
+                    "Files/_canary/people-counter/sjd/v1/attempts/"
                     "process/batch=batch-1/attempt=process-1"
                 ),
                 "output_sha256": _sha256(records),
@@ -1046,7 +1046,7 @@ def test_fabric_gold_optional_publication_time_uses_only_committed_batch_time() 
         "publication": {
             "publication_sequence": 1,
             "output_path": (
-                "Files/_benchmark/people-counter/candidate-a/v1/attempts/"
+                "Files/_benchmark/people-counter/sjd/v1/attempts/"
                 "process/batch=batch-1/attempt=process-1"
             ),
             "output_sha256": _sha256(records),
@@ -1580,11 +1580,11 @@ def test_environment_policy_is_published_full_mode_only() -> None:
         )
 
 
-def test_default_candidate_a_consumer_profile_targets_real_model_paths() -> None:
+def test_default_sjd_consumer_profile_targets_real_model_paths() -> None:
     from people_counter.fabric_capability_probe import ConsumerProbeProfile
-    from people_counter.fabric_candidate_a import default_candidate_a_consumer_profile
+    from people_counter.fabric_namespace import default_sjd_consumer_profile
 
-    profile = default_candidate_a_consumer_profile(
+    profile = default_sjd_consumer_profile(
         reference_video_relative_path="Files/_benchmark/reference/sample.mp4",
     )
     assert isinstance(profile, ConsumerProbeProfile)
@@ -1611,10 +1611,10 @@ def test_default_candidate_a_consumer_profile_targets_real_model_paths() -> None
     assert profile.planned_concurrent_tasks == 4
 
 
-def test_default_candidate_a_consumer_profile_honors_overrides() -> None:
-    from people_counter.fabric_candidate_a import default_candidate_a_consumer_profile
+def test_default_sjd_consumer_profile_honors_overrides() -> None:
+    from people_counter.fabric_namespace import default_sjd_consumer_profile
 
-    profile = default_candidate_a_consumer_profile(
+    profile = default_sjd_consumer_profile(
         models_dir="Files/other-models/",
         detector_model="r50",
         reference_video_relative_path="Files/_benchmark/reference/other.mp4",
@@ -1627,14 +1627,14 @@ def test_default_candidate_a_consumer_profile_honors_overrides() -> None:
     assert profile.planned_concurrent_tasks == 7
 
 
-def test_default_candidate_a_consumer_profile_strips_only_trailing_slashes() -> None:
+def test_default_sjd_consumer_profile_strips_only_trailing_slashes() -> None:
     """``models_dir`` normalization must strip trailing ``/`` characters
     only -- never any other trailing character (a looser ``rstrip`` charset
     would silently truncate a legitimate directory name ending in a
     coincidentally similar character)."""
-    from people_counter.fabric_candidate_a import default_candidate_a_consumer_profile
+    from people_counter.fabric_namespace import default_sjd_consumer_profile
 
-    profile = default_candidate_a_consumer_profile(
+    profile = default_sjd_consumer_profile(
         models_dir="Files/other-modelsX",
         reference_video_relative_path="Files/_benchmark/reference/sample.mp4",
     )
@@ -1717,7 +1717,7 @@ def test_control_transitions_are_homogeneous_fenced_and_monotonic() -> None:
 def test_onelake_envelope_and_delta_attempts_are_immutable() -> None:
     files = MemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         files,
         verify_timeout_seconds=0.3,
     )
@@ -1736,7 +1736,7 @@ def test_onelake_envelope_and_delta_attempts_are_immutable() -> None:
 
     spark = FakeSpark(files)
     adapter = OneLakeDeltaAttemptAdapter(
-        FabricCandidateAConfig().file_path("attempts"), spark, files
+        FabricNamespaceConfig().file_path("attempts"), spark, files
     )
     records = [
         {
@@ -1801,10 +1801,10 @@ def test_onelake_envelope_write_succeeds_without_retry_logs_nothing(
     """
     files = MemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"), files
+        FabricNamespaceConfig().file_path("control"), files
     )
     with caplog.at_level(
-        logging.WARNING, logger="people_counter.fabric_candidate_a_control"
+        logging.WARNING, logger="people_counter.fabric_control_store"
     ):
         envelopes.write("batch-1", {"batch_id": "batch-1"})
     assert files.read_calls == 1
@@ -1823,18 +1823,18 @@ def test_onelake_envelope_write_retries_transient_read_after_write_lag(
     """
     files = FlakyReadMemoryFiles(stale_reads=2)
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         files,
         verify_timeout_seconds=5.0,
     )
     clock_values = iter([0.0, 1.0, 2.0, 3.0, 4.0])
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_control.time.monotonic",
+        "people_counter.fabric_control_store.time.monotonic",
         lambda: next(clock_values, 5.0),
     )
     sleeps: list[float] = []
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_control.time.sleep", sleeps.append
+        "people_counter.fabric_control_store.time.sleep", sleeps.append
     )
     bounds: list[tuple[float, float]] = []
 
@@ -1843,11 +1843,11 @@ def test_onelake_envelope_write_retries_transient_read_after_write_lag(
         return 0.2
 
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_control.random.uniform",
+        "people_counter.fabric_control_store.random.uniform",
         _tracking_uniform,
     )
     with caplog.at_level(
-        logging.WARNING, logger="people_counter.fabric_candidate_a_control"
+        logging.WARNING, logger="people_counter.fabric_control_store"
     ):
         path, digest = envelopes.write("batch-1", {"batch_id": "batch-1"})
     assert files.read_calls == 3
@@ -1865,12 +1865,12 @@ def test_onelake_envelope_write_raises_on_persistent_readback_mismatch(
 ) -> None:
     files = AlwaysStaleMemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         files,
         verify_timeout_seconds=0.05,
     )
     with caplog.at_level(
-        logging.WARNING, logger="people_counter.fabric_candidate_a_control"
+        logging.WARNING, logger="people_counter.fabric_control_store"
     ):
         with pytest.raises(BatchValidationError, match="readback differs"):
             envelopes.write("batch-1", {"batch_id": "batch-1"})
@@ -1884,7 +1884,7 @@ def test_onelake_envelope_write_retries_before_false_immutable_conflict(
 ) -> None:
     files = FlakyReadMemoryFiles(stale_reads=1)
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         files,
         verify_timeout_seconds=2.0,
     )
@@ -1895,7 +1895,7 @@ def test_onelake_envelope_write_retries_before_false_immutable_conflict(
     files._stale_reads_remaining = 1
     caplog.clear()
     with caplog.at_level(
-        logging.WARNING, logger="people_counter.fabric_candidate_a_control"
+        logging.WARNING, logger="people_counter.fabric_control_store"
     ):
         result = envelopes.write("batch-1", {"batch_id": "batch-1"})
     assert result == (path, digest)
@@ -1911,7 +1911,7 @@ def test_onelake_envelope_write_retries_before_false_immutable_conflict(
 def test_onelake_envelope_write_raises_immutable_conflict_on_genuine_mismatch() -> None:
     files = MemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         files,
         verify_timeout_seconds=0.05,
     )
@@ -1930,7 +1930,7 @@ def test_onelake_envelope_writer_rejects_invalid_verify_timeout(
         match=r"^verify_timeout_seconds must be finite and non-negative$",
     ):
         OneLakeEnvelopeWriter(
-            FabricCandidateAConfig().file_path("control"),
+            FabricNamespaceConfig().file_path("control"),
             MemoryFiles(),
             verify_timeout_seconds=verify_timeout_seconds,
         )
@@ -1940,13 +1940,13 @@ def test_onelake_envelope_writer_accepts_zero_verify_timeout() -> None:
     # 0.0 is the boundary-valid case (pins ``< 0`` against an ``<= 0``
     # mutation) and the implicit default must be exactly 15.0 seconds.
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         MemoryFiles(),
         verify_timeout_seconds=0.0,
     )
     assert envelopes._verify_timeout_seconds == 0.0
     default_envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"), MemoryFiles()
+        FabricNamespaceConfig().file_path("control"), MemoryFiles()
     )
     assert default_envelopes._verify_timeout_seconds == 15.0
 
@@ -1960,7 +1960,7 @@ def test_onelake_envelope_verify_readback_stops_exactly_at_deadline_boundary(
     """
     files = AlwaysStaleMemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         files,
         verify_timeout_seconds=3.0,
     )
@@ -1971,11 +1971,11 @@ def test_onelake_envelope_verify_readback_stops_exactly_at_deadline_boundary(
         return 0.0 if clock_calls["count"] == 1 else 3.0
 
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_control.time.monotonic",
+        "people_counter.fabric_control_store.time.monotonic",
         _fake_monotonic,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_control.time.sleep",
+        "people_counter.fabric_control_store.time.sleep",
         lambda _: pytest.fail("must not sleep once the deadline is reached"),
     )
     with pytest.raises(BatchValidationError, match="readback differs"):
@@ -1995,7 +1995,7 @@ def test_onelake_envelope_verify_readback_breaks_when_remaining_hits_zero(
     """
     files = AlwaysStaleMemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         files,
         verify_timeout_seconds=5.0,
     )
@@ -2003,11 +2003,11 @@ def test_onelake_envelope_verify_readback_breaks_when_remaining_hits_zero(
     # True); a2 -> "remaining" computation lands exactly on the deadline.
     clock_values = iter([0.0, 1.0, 5.0])
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_control.time.monotonic",
+        "people_counter.fabric_control_store.time.monotonic",
         lambda: next(clock_values, 5.0),
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_control.time.sleep",
+        "people_counter.fabric_control_store.time.sleep",
         lambda _: pytest.fail("must not sleep when remaining has hit zero"),
     )
     observed = envelopes._verify_readback("some/path", "expected-content")
@@ -2021,7 +2021,7 @@ def test_onelake_envelope_verify_readback_returns_last_observed_on_timeout() -> 
     """
     files = AlwaysStaleMemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricCandidateAConfig().file_path("control"),
+        FabricNamespaceConfig().file_path("control"),
         files,
         verify_timeout_seconds=0.05,
     )
@@ -2029,25 +2029,17 @@ def test_onelake_envelope_verify_readback_returns_last_observed_on_timeout() -> 
     assert observed == "corrupted"
 
 
-def test_fabric_modules_are_lazy_and_checked_in_mains_are_thin() -> None:
+def test_fabric_modules_are_lazy() -> None:
     before = set(sys.modules)
     for module in (
-        "people_counter.fabric_candidate_a_control",
-        "people_counter.fabric_candidate_a_gold",
-        "people_counter.fabric_candidate_a_jobs",
+        "people_counter.fabric_control_store",
+        "people_counter.fabric_gold",
+        "people_counter.fabric_sjd_runtime",
     ):
         importlib.reload(importlib.import_module(module))
     imported = set(sys.modules) - before
     assert "pyspark" not in imported
     assert "delta" not in imported
-
-    root = Path(__file__).parents[1] / "fabric" / "candidate_a"
-    for job in ("control", "process", "gold"):
-        source = (root / job / "Main" / "main.py").read_text()
-        assert "people_counter.fabric_candidate_a_jobs import" in source
-        assert "sys.path" not in source
-        assert "except ImportError" not in source
-
 
 def _pointer_rows() -> dict[str, list[dict[str, object]]]:
     return {
@@ -2416,15 +2408,15 @@ def test_select_process_execution_harness_prefers_direct_mount_when_proven() -> 
     usable inside every executor's own task, the streaming harness staged
     directly under that mount must be selected -- the direct Lakehouse path
     optimization -- not the collecting fallback harness."""
-    from people_counter.fabric_candidate_a_jobs import select_process_execution_harness
-    from people_counter.fabric_candidate_a import FabricCandidateAConfig
+    from people_counter.fabric_sjd_runtime import select_process_execution_harness
+    from people_counter.fabric_namespace import FabricNamespaceConfig
     from people_counter.fabric_capability_probe import (
         CapabilityProbeResult,
         CapabilityStatus,
     )
     from people_counter.sjd_process import StreamingSparkExecutionHarness
 
-    config = FabricCandidateAConfig.canary()
+    config = FabricNamespaceConfig.canary()
     spark = SimpleNamespace()
 
     def fake_probe(session, executors):
@@ -2492,14 +2484,14 @@ def test_select_process_execution_harness_uses_default_executor_discovery() -> N
     ``discover_active_executors(spark, minimum_executors=1)`` -- not silently
     skip discovery or use the wrong minimum/session."""
     from people_counter import fabric_executor_inventory
-    from people_counter.fabric_candidate_a_jobs import select_process_execution_harness
-    from people_counter.fabric_candidate_a import FabricCandidateAConfig
+    from people_counter.fabric_sjd_runtime import select_process_execution_harness
+    from people_counter.fabric_namespace import FabricNamespaceConfig
     from people_counter.fabric_capability_probe import (
         CapabilityProbeResult,
         CapabilityStatus,
     )
 
-    config = FabricCandidateAConfig.canary()
+    config = FabricNamespaceConfig.canary()
     spark = SimpleNamespace()
     recorded_calls = []
 
@@ -2537,15 +2529,15 @@ def test_select_process_execution_harness_falls_back_when_mount_unproven() -> No
     """When the probe cannot prove the mount (any reason), the collecting
     harness must be used and the exact capability evidence reported -- an
     unproven mount must never be hardwired."""
-    from people_counter.fabric_candidate_a_jobs import select_process_execution_harness
-    from people_counter.fabric_candidate_a import FabricCandidateAConfig
+    from people_counter.fabric_sjd_runtime import select_process_execution_harness
+    from people_counter.fabric_namespace import FabricNamespaceConfig
     from people_counter.fabric_capability_probe import (
         CapabilityProbeResult,
         CapabilityStatus,
     )
     from people_counter.sjd_process import StreamingSparkExecutionHarness
 
-    config = FabricCandidateAConfig.canary()
+    config = FabricNamespaceConfig.canary()
     spark = SimpleNamespace()
 
     def fake_probe(session, executors):
@@ -2586,8 +2578,8 @@ def test_select_process_execution_harness_upgrades_to_consumer_probe_when_given(
     an ``AVAILABLE`` result whose ``value`` is a ``ConsumerCapabilityReport``
     must unwrap to its ``mount_root`` for the staging root -- never the
     report object itself."""
-    from people_counter.fabric_candidate_a_jobs import select_process_execution_harness
-    from people_counter.fabric_candidate_a import FabricCandidateAConfig
+    from people_counter.fabric_sjd_runtime import select_process_execution_harness
+    from people_counter.fabric_namespace import FabricNamespaceConfig
     from people_counter.fabric_capability_probe import (
         CapabilityProbeResult,
         CapabilityStatus,
@@ -2595,7 +2587,7 @@ def test_select_process_execution_harness_upgrades_to_consumer_probe_when_given(
         ConsumerProbeProfile,
     )
 
-    config = FabricCandidateAConfig.canary()
+    config = FabricNamespaceConfig.canary()
     spark = SimpleNamespace()
     profile = ConsumerProbeProfile()
     recorded = {}
@@ -2647,14 +2639,14 @@ def test_select_process_execution_harness_uses_bare_posix_probe_by_default() -> 
     given, the real bare POSIX probe (``probe_direct_mounted_lakehouse_path``)
     must be the one actually invoked -- not ``None``/a silently-dropped
     callable."""
-    from people_counter.fabric_candidate_a_jobs import select_process_execution_harness
-    from people_counter.fabric_candidate_a import FabricCandidateAConfig
+    from people_counter.fabric_sjd_runtime import select_process_execution_harness
+    from people_counter.fabric_namespace import FabricNamespaceConfig
     from people_counter.fabric_capability_probe import (
         CapabilityProbeResult,
         CapabilityStatus,
     )
 
-    config = FabricCandidateAConfig.canary()
+    config = FabricNamespaceConfig.canary()
     spark = SimpleNamespace()
     fake_result = CapabilityProbeResult(
         capability="direct_mounted_lakehouse_path",
@@ -2683,15 +2675,15 @@ def test_select_process_execution_harness_probe_mounted_path_wins_over_profile()
     """An explicit ``probe_mounted_path`` override must always win over
     ``consumer_probe_profile`` -- test/call-site injection is never
     silently superseded by the new default-upgrade behavior."""
-    from people_counter.fabric_candidate_a_jobs import select_process_execution_harness
-    from people_counter.fabric_candidate_a import FabricCandidateAConfig
+    from people_counter.fabric_sjd_runtime import select_process_execution_harness
+    from people_counter.fabric_namespace import FabricNamespaceConfig
     from people_counter.fabric_capability_probe import (
         CapabilityProbeResult,
         CapabilityStatus,
         ConsumerProbeProfile,
     )
 
-    config = FabricCandidateAConfig.canary()
+    config = FabricNamespaceConfig.canary()
     spark = SimpleNamespace()
     calls = []
 
@@ -2741,7 +2733,7 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
     payload = {
         "source_video": (
             "/lakehouse/default/Files/_canary/people-counter/"
-            "candidate-a/v1/assets/synthetic.mp4"
+            "sjd/v1/assets/synthetic.mp4"
         ),
         "source_sha256": _sha256_bytes(b"video"),
         "pipeline": "rtdetr-osnet",
@@ -2772,7 +2764,7 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
     spark = SimpleNamespace(
         sparkContext=SimpleNamespace(addFile=MagicMock())
     )
-    current_jobs_module = sys.modules["people_counter.fabric_candidate_a_jobs"]
+    current_jobs_module = sys.modules["people_counter.fabric_sjd_runtime"]
 
     def stream_remote(_spark, uri, destination):
         source = tmp_path / uri.rsplit("/", 1)[-1]
@@ -2845,7 +2837,7 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
         for arg in broadcast_args
     )
 
-    from people_counter.fabric_production_routing import sha256_json
+    from people_counter.fabric_sjd_runtime import _sha256_json as sha256_json
 
     model_sha256 = sha256_json(
         {
@@ -2968,7 +2960,7 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
     payload = {
         "source_video": (
             "/lakehouse/default/Files/_canary/people-counter/"
-            "candidate-a/v1/assets/synthetic.mp4"
+            "sjd/v1/assets/synthetic.mp4"
         ),
         "source_sha256": _sha256_bytes(b"video"),
         "pipeline": "rtdetr-osnet",
@@ -3015,7 +3007,7 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
         received["discover_session"] = session
         return _fake_candidate_executors(2)
 
-    from people_counter import fabric_candidate_a_jobs
+    from people_counter import fabric_sjd_runtime
     from people_counter.fabric_source_cache import LocalizedSourceCache
 
     real_cache_cls = LocalizedSourceCache
@@ -3026,7 +3018,7 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
             received["cache_kwargs"] = kwargs
             super().__init__(root, **kwargs)
 
-    monkeypatch.setattr(fabric_candidate_a_jobs, "LocalizedSourceCache", _RecordingCache)
+    monkeypatch.setattr(fabric_sjd_runtime, "LocalizedSourceCache", _RecordingCache)
 
     def stream_remote(_spark, uri, destination):
         source = tmp_path / uri.rsplit("/", 1)[-1]
@@ -3035,12 +3027,12 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
                 write_stream.write(chunk)
 
     monkeypatch.setattr(
-        fabric_candidate_a_jobs,
+        fabric_sjd_runtime,
         "_stream_hadoop_uri_to_local",
         stream_remote,
     )
     monkeypatch.setattr(
-        fabric_candidate_a_jobs,
+        fabric_sjd_runtime,
         "_stage_hadoop_alias",
         lambda *_args, **_kwargs: None,
     )
@@ -3078,7 +3070,7 @@ def test_process_input_localizer_direct_backend_resolves_mount_without_distribut
     mount_root = tmp_path / "lakehouse"
     video_path = (
         mount_root
-        / "Files/_canary/people-counter/candidate-a/v1/assets/synthetic.mp4"
+        / "Files/_canary/people-counter/sjd/v1/assets/synthetic.mp4"
     )
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video")
@@ -3096,7 +3088,7 @@ def test_process_input_localizer_direct_backend_resolves_mount_without_distribut
     payload = {
         "source_video": (
             "/lakehouse/default/Files/_canary/people-counter/"
-            "candidate-a/v1/assets/synthetic.mp4"
+            "sjd/v1/assets/synthetic.mp4"
         ),
         "source_sha256": _sha256_bytes(b"video"),
         "pipeline": "rtdetr-osnet",
@@ -3141,7 +3133,7 @@ def test_process_input_localizer_direct_backend_resolves_mount_without_distribut
     assert row["resolver_backend"] == "FABRIC_DIRECT"
     assert row["lakehouse_mount_root"] == str(mount_root)
     assert row["lakehouse_relative_video_path"] == (
-        "Files/_canary/people-counter/candidate-a/v1/assets/synthetic.mp4"
+        "Files/_canary/people-counter/sjd/v1/assets/synthetic.mp4"
     )
     assert row["lakehouse_relative_models_root"] == "Files/models"
     # The direct backend never distributes or copies: no addFile call at all.
@@ -3159,7 +3151,7 @@ def test_process_input_localizer_direct_backend_rejects_video_digest_mismatch(
     mount_root = tmp_path / "lakehouse"
     video_path = (
         mount_root
-        / "Files/_canary/people-counter/candidate-a/v1/assets/synthetic.mp4"
+        / "Files/_canary/people-counter/sjd/v1/assets/synthetic.mp4"
     )
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"video")
@@ -3167,7 +3159,7 @@ def test_process_input_localizer_direct_backend_rejects_video_digest_mismatch(
     payload = {
         "source_video": (
             "/lakehouse/default/Files/_canary/people-counter/"
-            "candidate-a/v1/assets/synthetic.mp4"
+            "sjd/v1/assets/synthetic.mp4"
         ),
         "source_sha256": "0" * 64,
         "pipeline": "rtdetr-osnet",
@@ -3228,7 +3220,7 @@ def test_localize_process_inputs_forwards_consumer_probe_profile_unchanged() -> 
         return InputBackend.FABRIC_DIRECT, {"mount_root": "/lakehouse/default"}
 
     with patch(
-        "people_counter.fabric_candidate_a_jobs.select_input_backend",
+        "people_counter.fabric_sjd_runtime.select_input_backend",
         side_effect=fake_select_input_backend,
     ) as patched:
         _localize_process_inputs(
@@ -3267,7 +3259,7 @@ def test_synthetic_localizer_pins_r50_onnx_artifacts(
     payload = {
         "source_video": (
             "/lakehouse/default/Files/_shadow/people-counter/"
-            "candidate-a/v1/assets/synthetic.mp4"
+            "sjd/v1/assets/synthetic.mp4"
         ),
         "source_sha256": _sha256_bytes(files["synthetic.mp4"]),
         "pipeline": "rtdetr-osnet",
@@ -3302,8 +3294,8 @@ def test_synthetic_localizer_pins_r50_onnx_artifacts(
     spark = SimpleNamespace(
         sparkContext=SimpleNamespace(addFile=MagicMock())
     )
-    from people_counter.fabric_production_routing import sha256_json
-    from people_counter import fabric_candidate_a_jobs
+    from people_counter.fabric_sjd_runtime import _sha256_json as sha256_json
+    from people_counter import fabric_sjd_runtime
 
     def stream_remote(_spark, uri, destination):
         source = tmp_path / uri.rsplit("/", 1)[-1]
@@ -3312,12 +3304,12 @@ def test_synthetic_localizer_pins_r50_onnx_artifacts(
                 write_stream.write(chunk)
 
     monkeypatch.setattr(
-        fabric_candidate_a_jobs,
+        fabric_sjd_runtime,
         "_stream_hadoop_uri_to_local",
         stream_remote,
     )
     monkeypatch.setattr(
-        fabric_candidate_a_jobs,
+        fabric_sjd_runtime,
         "_stage_hadoop_alias",
         lambda *_args, **_kwargs: None,
     )
@@ -3409,7 +3401,7 @@ def test_control_main_dispatches_all_safe_commands(
     )
     spark_sentinel = object()
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: spark_sentinel
+        "people_counter.fabric_sjd_runtime._spark", lambda: spark_sentinel
     )
     clear_lock_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
@@ -3418,10 +3410,10 @@ def test_control_main_dispatches_all_safe_commands(
         return {"cleared_owner_id": "owner", "acquired_at": "never"}
 
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._clear_stale_lock",
+        "people_counter.fabric_sjd_runtime._clear_stale_lock",
         _fake_clear_stale_lock,
     )
-    shared_config = FabricCandidateAConfig.benchmark()
+    shared_config = FabricNamespaceConfig.benchmark()
     partition_path = shared_config.file_path(
         "intake/backfill/run-1/partition.json"
     )
@@ -3446,7 +3438,7 @@ def test_control_main_dispatches_all_safe_commands(
     files = MemoryFiles()
     files.content[partition_path] = partition_content
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_control.NotebookUtilsOneLakeFiles",
+        "people_counter.fabric_control_store.NotebookUtilsOneLakeFiles",
         lambda: files,
     )
     commands = (
@@ -3574,7 +3566,7 @@ def test_control_main_persists_diagnostic_traceback_and_still_raises(
         lambda *_args, **_kwargs: store,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark", lambda: object()
+        "people_counter.fabric_sjd_runtime._spark", lambda: object()
     )
     written: dict[str, object] = {}
 
@@ -3644,13 +3636,13 @@ def test_dispatcher_main_claims_one_bounded_batch_and_processes_it(
     )
     store = MagicMock()
     store.claim.return_value = claimed
-    shared_config = FabricCandidateAConfig.benchmark()
+    shared_config = FabricNamespaceConfig.benchmark()
     monkeypatch.setattr(
         "people_counter.sjd_control.FabricControlStore",
         lambda *_args, **_kwargs: store,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark",
+        "people_counter.fabric_sjd_runtime._spark",
         lambda: object(),
     )
     process_calls: list[tuple[list[str], dict[str, object]]] = []
@@ -3663,7 +3655,7 @@ def test_dispatcher_main_claims_one_bounded_batch_and_processes_it(
         return 0
 
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs.process_main",
+        "people_counter.fabric_sjd_runtime.process_main",
         _process,
     )
 
@@ -3731,12 +3723,12 @@ def test_dispatcher_main_is_a_successful_noop_when_capacity_is_full(
         lambda *_args, **_kwargs: store,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark",
+        "people_counter.fabric_sjd_runtime._spark",
         lambda: object(),
     )
     process = MagicMock()
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs.process_main",
+        "people_counter.fabric_sjd_runtime.process_main",
         process,
     )
 
@@ -3753,7 +3745,7 @@ def test_dispatcher_main_is_a_successful_noop_when_capacity_is_full(
             "--release-receipt-sha256",
             "b" * 64,
         ],
-        config=FabricCandidateAConfig.benchmark(),
+        config=FabricNamespaceConfig.benchmark(),
     ) == 0
 
     process.assert_not_called()
@@ -3838,15 +3830,15 @@ def test_refresh_main_acknowledges_only_after_completed_refresh(
     ]
     state.acknowledge_refresh.return_value = True
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_gold.FabricGoldState",
+        "people_counter.fabric_gold.FabricGoldState",
         lambda *_args, **_kwargs: state,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark",
+        "people_counter.fabric_sjd_runtime._spark",
         lambda: object(),
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._refresh_semantic_model",
+        "people_counter.fabric_sjd_runtime._refresh_semantic_model",
         lambda *_args, **_kwargs: {
             "request_id": "refresh-1",
             "status": "Completed",
@@ -3866,7 +3858,7 @@ def test_refresh_main_acknowledges_only_after_completed_refresh(
             "--semantic-model-id",
             "model-1",
         ],
-        config=FabricCandidateAConfig.benchmark(),
+        config=FabricNamespaceConfig.benchmark(),
     ) == 0
 
     assert state.acknowledge_refresh.call_args_list == [
@@ -3906,11 +3898,11 @@ def test_refresh_main_refreshes_every_model_before_acknowledging(
     ]
     state.acknowledge_refresh.return_value = True
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_gold.FabricGoldState",
+        "people_counter.fabric_gold.FabricGoldState",
         lambda *_args, **_kwargs: state,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark",
+        "people_counter.fabric_sjd_runtime._spark",
         lambda: object(),
     )
     refreshed: list[str] = []
@@ -3920,7 +3912,7 @@ def test_refresh_main_refreshes_every_model_before_acknowledging(
         return {"request_id": f"refresh-{model_id}", "status": "Completed"}
 
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._refresh_semantic_model",
+        "people_counter.fabric_sjd_runtime._refresh_semantic_model",
         refresh,
     )
     monkeypatch.setitem(
@@ -3940,7 +3932,7 @@ def test_refresh_main_refreshes_every_model_before_acknowledging(
             "--semantic-model-id",
             "operations",
         ],
-        config=FabricCandidateAConfig.benchmark(),
+        config=FabricNamespaceConfig.benchmark(),
     ) == 0
 
     assert refreshed == ["analytics", "operations"]
@@ -3967,11 +3959,11 @@ def test_refresh_main_keeps_outbox_pending_when_any_model_fails(
         {"outbox_id": 4, "dedupe_key": "dedupe-4"},
     ]
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_gold.FabricGoldState",
+        "people_counter.fabric_gold.FabricGoldState",
         lambda *_args, **_kwargs: state,
     )
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._spark",
+        "people_counter.fabric_sjd_runtime._spark",
         lambda: object(),
     )
 
@@ -3981,7 +3973,7 @@ def test_refresh_main_keeps_outbox_pending_when_any_model_fails(
         return {"request_id": "refresh-analytics", "status": "Completed"}
 
     monkeypatch.setattr(
-        "people_counter.fabric_candidate_a_jobs._refresh_semantic_model",
+        "people_counter.fabric_sjd_runtime._refresh_semantic_model",
         refresh,
     )
     monkeypatch.setitem(
@@ -4002,7 +3994,7 @@ def test_refresh_main_keeps_outbox_pending_when_any_model_fails(
                 "--semantic-model-id",
                 "operations",
             ],
-            config=FabricCandidateAConfig.benchmark(),
+            config=FabricNamespaceConfig.benchmark(),
         )
 
     state.acknowledge_refresh.assert_not_called()
@@ -4014,7 +4006,7 @@ def test_write_control_diagnostic_swallows_its_own_failures(
     """Diagnostic capture must never mask or replace the real exception."""
 
     monkeypatch.delitem(sys.modules, "notebookutils", raising=False)
-    config = FabricCandidateAConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark()
     result = _write_control_diagnostic(config, "claim", RuntimeError("original"))
     assert result is None
 

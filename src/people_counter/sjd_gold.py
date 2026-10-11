@@ -1,4 +1,4 @@
-"""Local Candidate A gold builder with committed-pointer visibility.
+"""Local Fabric SJD gold builder with committed-pointer visibility.
 
 The local implementation deliberately uses JSON tables and SQLite so planning,
 aggregation, checkpointing, and refresh signalling can be tested without
@@ -332,7 +332,7 @@ class FabricGoldStore:
                 "Fabric gold storage is unsupported without an explicit "
                 "Fabric Spark session"
             )
-        from people_counter.fabric_candidate_a_gold import (
+        from people_counter.fabric_gold import (
             FabricGoldStoreImpl,
         )
 
@@ -348,7 +348,7 @@ class FabricGoldSource:
     """Lazy facade for committed-pointer Fabric source reads."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        from people_counter.fabric_candidate_a_gold import (
+        from people_counter.fabric_gold import (
             FabricCommittedSource,
         )
 
@@ -362,7 +362,7 @@ class FabricGoldState:
     """Lazy facade for Fabric checkpoint and refresh-outbox state."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        from people_counter.fabric_candidate_a_gold import (
+        from people_counter.fabric_gold import (
             FabricGoldState as Implementation,
         )
 
@@ -764,7 +764,7 @@ class SQLiteGoldState:
 
 
 class LocalGoldJob:
-    """Plan, build, and validate local Candidate A gold tables."""
+    """Plan, build, and validate local Fabric SJD gold tables."""
 
     def __init__(
         self,
@@ -2858,7 +2858,7 @@ def _quoted_identifier(value: str) -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m people_counter.sjd_gold",
-        description="Build local Candidate A gold facts and dimensions.",
+        description="Build local Fabric SJD gold facts and dimensions.",
     )
     parser.add_argument(
         "mode",

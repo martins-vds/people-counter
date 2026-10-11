@@ -1,4 +1,4 @@
-"""Fabric source, typed gold store, and checkpoint/outbox state."""
+"""Fabric source, typed Gold store, and checkpoint/outbox state."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from people_counter.fabric_candidate_a import FabricCandidateAConfig
+from people_counter.fabric_namespace import FabricNamespaceConfig
 from people_counter.fabric_control import ControlWriter
 from people_counter.sjd_gold import (
     CommittedOutput,
@@ -48,11 +48,11 @@ class FabricCommittedSource:
         spark_session: Any,
         attempt_adapter: Any,
         *,
-        config: FabricCandidateAConfig | None = None,
+        config: FabricNamespaceConfig | None = None,
     ) -> None:
         self.spark = spark_session
         self.attempts = attempt_adapter
-        self.config = config or FabricCandidateAConfig()
+        self.config = config or FabricNamespaceConfig()
 
     def checkpoint(self) -> SourceCheckpoint:
         rows = self._visible_rows()
@@ -258,10 +258,10 @@ class FabricGoldStoreImpl:
         self,
         spark_session: Any,
         *,
-        config: FabricCandidateAConfig | None = None,
+        config: FabricNamespaceConfig | None = None,
     ) -> None:
         self.spark = spark_session
-        self.config = config or FabricCandidateAConfig()
+        self.config = config or FabricNamespaceConfig()
         self.writer = ControlWriter(
             spark_session, self.config.table("locks")
         )
@@ -368,7 +368,7 @@ class FabricGoldStoreImpl:
 
     def _table(self, name: str) -> str:
         if not name.startswith("gold_"):
-            raise ValueError(f"not a Candidate A gold table: {name!r}")
+            raise ValueError(f"not a Fabric SJD gold table: {name!r}")
         return self.config.table(name)
 
 
@@ -379,12 +379,12 @@ class FabricGoldState:
         self,
         spark_session: Any,
         *,
-        config: FabricCandidateAConfig | None = None,
+        config: FabricNamespaceConfig | None = None,
         clock: Callable[[], datetime] | None = None,
         auto_bootstrap: bool = True,
     ) -> None:
         self.spark = spark_session
-        self.config = config or FabricCandidateAConfig()
+        self.config = config or FabricNamespaceConfig()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.writer = ControlWriter(
             spark_session, self.config.table("locks")
