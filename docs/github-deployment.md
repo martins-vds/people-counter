@@ -235,6 +235,70 @@ If the API returns no matching capacity or an authorization error, use the
 Fabric Admin portal method above. Verify the display name, tenant,
 subscription, and stage before saving the value as an environment variable.
 
+## Resource ownership and deployment order
+
+The deployment has four ownership boundaries:
+
+| Owner | Resources and actions |
+|---|---|
+| Bootstrap Terraform | Azure resource group, state storage, Entra applications, service principals, OIDC trust, state RBAC, and Fabric capacities |
+| Environment Terraform | Target workspace, workspace roles, Lakehouse, Environment, seven SJDs, Variable Library, and configured optional Fabric items |
+| Runtime automation | Lakehouse tables, `Files/` directories, release manifest, model refreshes, supported service settings, and schedules |
+| Operator or external system | Tenant settings, GitHub configuration, approvals, shortcut source items, Activator action evidence, and unsupported integrations |
+
+Do not create the target workspace, Lakehouse, Environment, SJD, semantic
+model, report, RTI item, Activator, or shortcut manually. Environment Terraform
+creates these resources.
+
+### Destination IDs and shortcut source IDs
+
+Terraform creates the destination workspace and Lakehouse. It passes their IDs
+directly to the Fabric provider. An operator does not enter these destination
+IDs.
+
+A OneLake shortcut points from the new Lakehouse to an existing OneLake item.
+The shortcut configuration therefore requires two source IDs:
+
+- `target_workspace_id` identifies the existing source workspace.
+- `target_item_id` identifies the existing source item, usually a Lakehouse.
+
+The source item can belong to another Terraform environment or another team.
+The source item must exist before shortcut creation. If you need no shortcut,
+set `FABRIC_ONELAKE_SHORTCUTS` to `{}`.
+
+### Definition bundles and target IDs
+
+Definition bundles are files in Git. They are not target Fabric resources.
+Terraform creates the target resources from these committed files.
+
+During apply, Terraform injects the new target IDs into the bundles. This
+includes workspace, Lakehouse, Environment, semantic model, Eventhouse, and KQL
+database IDs.
+
+The repository already contains the required deployment bundles. A normal
+environment deployment does not require a source authoring workspace. Use the
+definition export process only when you change a committed bundle.
+
+### Required steps after bootstrap
+
+Complete these steps after the bootstrap apply:
+
+1. Add each generated service principal to the approved tenant-settings group.
+2. Create GitHub Environments named `dev`, `test`, and `prod`.
+3. Configure branch restrictions and required reviewers.
+4. Add the eight required variables to each GitHub Environment.
+5. Set each `FABRIC_CAPACITY_ID` to the Fabric capacity UUID.
+6. Set `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` for each environment.
+7. Set `FABRIC_ONELAKE_SHORTCUTS` to `{}` or provide existing source IDs.
+8. Review each optional definition bundle.
+9. Set the Reporting, RTI, and Activator flags.
+10. Add the Activator checkpoint secret when you enable Activator.
+11. Run an authorized protected Terraform plan to verify OIDC and access.
+12. Merge the reviewed commit to deploy Development.
+
+Terraform creates the target Fabric resources after step 12. Operators approve
+Test and Production promotion through the protected GitHub Environments.
+
 Optional environment variables are:
 
 | Variable | Accepted value and behavior |
@@ -246,7 +310,7 @@ Optional environment variables are:
 
 Committed bundles control Reporting and RTI item creation. Do not set a flag
 until every bundle named in
-[the source-definition section](#source-definitions-and-live-export) is
+[Definition bundles and target IDs](#definition-bundles-and-target-ids) is
 reviewed. Activator requires both bundles and its flag.
 
 ### OneLake shortcut configuration
@@ -342,9 +406,11 @@ the Fabric provider's Go-template definition tokens.
 
 Semantic model, report, RTI, Activator, Variable Library, and other supported
 workspace definitions follow the deterministic definition export process in
-[`fabric/README.md`](../fabric/README.md). Pull requests validate each committed
-part against its schema, size, and SHA-256 evidence. The repository does not
-manufacture definitions when source-workspace credentials are unavailable.
+[`fabric/README.md`](../fabric/README.md). Normal deployment reads the committed
+bundles. It does not access the authoring workspace.
+
+Use the definition export process only when you change a bundle. Pull requests
+validate each committed part against its schema, size, and SHA-256 evidence.
 
 Required bundle locations are:
 
