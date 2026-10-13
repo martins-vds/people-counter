@@ -294,9 +294,6 @@ Bootstrap can create the storage account or reference an existing account.
 Environment Terraform creates the workspace identity, connection, RBAC, and
 shortcut. It can also create the configured container.
 
-This architecture does not use OneLake-to-OneLake shortcuts. Do not create the
-`FABRIC_ONELAKE_SHORTCUTS` GitHub Environment variable.
-
 ### Definition bundles and target IDs
 
 Definition bundles are files in Git. They are not target Fabric resources.
@@ -352,9 +349,6 @@ until every bundle named in
 reviewed. Activator requires both bundles and its flag.
 
 ### ADLS Gen2 shortcut configuration
-
-Do not create `FABRIC_ONELAKE_SHORTCUTS`. This architecture supports only ADLS
-Gen2 shortcuts through the two variables in this section.
 
 Set `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` to the bootstrap output for the
 same stage. Use the complete Azure resource ID. Do not use the account name or
