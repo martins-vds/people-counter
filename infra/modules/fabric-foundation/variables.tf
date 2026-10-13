@@ -301,8 +301,10 @@ variable "variable_library" {
       length(trimspace(var.variable_library.display_name)) > 0
       && contains(["dev", "test", "prod"], var.variable_library.deployment_stage)
       && (
-        var.variable_library.folder_key == null
-        || contains(keys(var.workspace_folders), var.variable_library.folder_key)
+        var.variable_library.folder_key == null ? true : contains(
+          keys(var.workspace_folders),
+          var.variable_library.folder_key,
+        )
       )
     )
     error_message = "Variable Library needs a name, a dev/test/prod stage, and a declared folder_key when set."
