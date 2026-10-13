@@ -15,15 +15,17 @@ runs:
   every workflow, including deployment and drift workflows.
 
 Each job uploads machine-readable or text evidence for 14 days. Mutmut requires
-a green changed-test baseline and complete mutant results. Surviving mutants
-are reported as advisory evidence; missing tests, unchecked mutants, timeouts,
-and execution failures block the pull request.
+a green changed-test baseline and complete results for every test-associated
+mutant. Surviving mutants and functions with no associated tests are reported
+as advisory evidence. Unchecked mutants, suspicious results, timeouts,
+segfaults, execution failures, or a selection with no active test-associated
+mutants block the pull request.
 
-Two pre-existing type issues are isolated in
-`.github/scripts/validate-python-quality.sh`: the Fabric export transport
-adapter and the Fabric reconciler's mutable mapping annotations. All other
-changed production and utility Python files are type-gated. Remove an entry
-from that baseline as soon as its annotations are corrected.
+One pre-existing type issue is isolated in
+`.github/scripts/validate-python-quality.sh`: the Fabric reconciler's mutable
+mapping annotations. All other changed production and utility Python files are
+type-gated. Remove the entry from that baseline as soon as its annotations are
+corrected.
 
 ## Environment-authorized Terraform plans
 

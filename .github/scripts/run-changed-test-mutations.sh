@@ -117,10 +117,10 @@ if [[ ! -s "${selected_results}" ]]; then
   echo "::error::mutmut produced no results for the selected targets."
   exit 1
 fi
-if grep -Eq ': (not checked|no tests|suspicious|timeout|segfault)$' \
+if grep -Eq ': (not checked|suspicious|timeout|segfault)$' \
   "${selected_results}"; then
   echo "::error::Mutation run was incomplete or has invalid results."
-  grep -E ': (not checked|no tests|suspicious|timeout|segfault)$' \
+  grep -E ': (not checked|suspicious|timeout|segfault)$' \
     "${selected_results}"
   exit 1
 fi
@@ -128,22 +128,33 @@ fi
 killed=$(grep -Ec ': killed$' "${selected_results}" || true)
 survived=$(grep -Ec ': survived$' "${selected_results}" || true)
 skipped=$(grep -Ec ': skipped$' "${selected_results}" || true)
+no_tests=$(grep -Ec ': no tests$' "${selected_results}" || true)
+if ((killed + survived + skipped == 0)); then
+  echo "::error::Selected mutation targets had no active test-associated mutants."
+  exit 1
+fi
 jq -n \
   --argjson changedTests "${#changed_tests[@]}" \
   --argjson targets "${#targets[@]}" \
   --argjson killed "${killed}" \
   --argjson survived "${survived}" \
   --argjson skipped "${skipped}" \
+  --argjson noTests "${no_tests}" \
   '{
     changedTests: $changedTests,
     targets: $targets,
     killed: $killed,
     survived: $survived,
     skipped: $skipped,
+    noTests: $noTests,
     status: "complete",
-    survivorPolicy: "advisory"
+    survivorPolicy: "advisory",
+    uncoveredMutantPolicy: "advisory"
   }' > "${evidence_dir}/policy.json"
 
 if ((survived > 0)); then
   echo "::warning::${survived} selected mutants survived; inspect mutation evidence."
+fi
+if ((no_tests > 0)); then
+  echo "::warning::${no_tests} selected mutants have no associated tests; inspect mutation evidence."
 fi

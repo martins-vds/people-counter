@@ -175,11 +175,12 @@ def test_run_spark_job_polls_job_instance_and_surfaces_failure() -> None:
         command_line_arguments="bootstrap",
         sleep=sleeps.append,
         monotonic=lambda: 0.0,
+        poll_seconds=0.0,
     )
 
     assert evidence.status == "succeeded"
     assert evidence.operation_id == "job-1"
-    assert sleeps == [15.0]
+    assert sleeps == [0.0]
 
     failed = _FakeClient(
         get_results={

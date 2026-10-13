@@ -26,7 +26,6 @@ uvx --from ruff==0.14.1 ruff check \
   2>&1 | tee "${evidence_dir}/ruff.txt"
 
 readonly -a type_debt=(
-  "scripts/export_fabric_definition.py"
   "src/people_counter/fabric_reconcilers.py"
 )
 type_targets=()

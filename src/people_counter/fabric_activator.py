@@ -211,8 +211,7 @@ def _instance(
 
 def _argument_entity_id(row: Mapping[str, Any]) -> str | None:
     stack: list[object] = [row.get("arguments", [])]
-    while stack:
-        current = stack.pop()
+    for current in stack:
         if isinstance(current, list):
             stack.extend(current)
         elif isinstance(current, Mapping):
