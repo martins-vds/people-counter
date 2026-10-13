@@ -49,10 +49,41 @@ terraform -chdir=infra/bootstrap apply bootstrap.tfplan
 terraform -chdir=infra/bootstrap output -json
 ```
 
+Before the bootstrap plan, configure `adls_storage_by_environment` in the
+local `terraform.tfvars`. Use one entry for each environment that needs ADLS
+shortcuts.
+
+Use `mode = "create"` to create an ADLS Gen2 account:
+
+```hcl
+adls_storage_by_environment = {
+  dev = {
+    mode                 = "create"
+    storage_account_name = "peoplecounterdev"
+  }
+}
+```
+
+Use `mode = "existing"` to use an existing ADLS Gen2 account:
+
+```hcl
+adls_storage_by_environment = {
+  prod = {
+    mode                        = "existing"
+    storage_account_resource_id = "/subscriptions/<subscription-uuid>/resourceGroups/<resource-group>/providers/Microsoft.Storage/storageAccounts/<account-name>"
+  }
+}
+```
+
+The `create` mode creates a StorageV2 account with hierarchical namespace
+enabled. The `existing` mode does not change the account. The existing account
+must have hierarchical namespace enabled.
+
 Bootstrap state is local, access-restricted, and never committed. It creates
 the state backend, one OIDC application/service principal per environment,
 environment-scoped federated credentials, state-container RBAC, and Fabric
-capacities. It does not create a client secret.
+capacities. It also creates configured ADLS accounts and ADLS role
+assignments. It does not create a client secret.
 
 Record the bootstrap outputs immediately:
 
@@ -64,6 +95,8 @@ terraform -chdir=infra/bootstrap output -json \
   github_oidc_service_principal_object_ids
 terraform -chdir=infra/bootstrap output -json \
   fabric_capacity_ids_by_environment
+terraform -chdir=infra/bootstrap output -json \
+  adls_storage_account_ids_by_environment
 terraform -chdir=infra/bootstrap output -raw tenant_id
 terraform -chdir=infra/bootstrap output -raw subscription_id
 ```
@@ -241,8 +274,8 @@ The deployment has four ownership boundaries:
 
 | Owner | Resources and actions |
 |---|---|
-| Bootstrap Terraform | Azure resource group, state storage, Entra applications, service principals, OIDC trust, state RBAC, and Fabric capacities |
-| Environment Terraform | Target workspace, workspace roles, Lakehouse, Environment, seven SJDs, Variable Library, and configured optional Fabric items |
+| Bootstrap Terraform | Azure resource group, state storage, Entra applications, service principals, OIDC trust, state RBAC, Fabric capacities, and configured ADLS accounts |
+| Environment Terraform | Target workspace, workspace roles, Lakehouse, Environment, seven SJDs, Variable Library, configured shortcuts, and optional Fabric items |
 | Runtime automation | Lakehouse tables, `Files/` directories, release manifest, model refreshes, supported service settings, and schedules |
 | Operator or external system | Tenant settings, GitHub configuration, approvals, shortcut source items, Activator action evidence, and unsupported integrations |
 
@@ -265,6 +298,11 @@ The shortcut configuration therefore requires two source IDs:
 The source item can belong to another Terraform environment or another team.
 The source item must exist before shortcut creation. If you need no shortcut,
 set `FABRIC_ONELAKE_SHORTCUTS` to `{}`.
+
+An ADLS Gen2 shortcut points to a container in the configured storage account.
+Bootstrap can create the storage account or reference an existing account.
+Environment Terraform creates the workspace identity, connection, RBAC, and
+shortcut. It can also create the configured container.
 
 ### Definition bundles and target IDs
 
@@ -290,13 +328,14 @@ Complete these steps after the bootstrap apply:
 5. Set each `FABRIC_CAPACITY_ID` to the Fabric capacity UUID.
 6. Set `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` for each environment.
 7. Set `FABRIC_ONELAKE_SHORTCUTS` to `{}` or provide existing source IDs.
-8. Review each optional definition bundle.
-9. Set the Reporting, RTI, and Activator flags.
-10. Add the Activator checkpoint secret when you enable Activator.
-11. Run an authorized protected Terraform plan to verify OIDC and access.
-12. Merge the reviewed commit to deploy Development.
+8. Set the two ADLS variables when the environment needs ADLS shortcuts.
+9. Review each optional definition bundle.
+10. Set the Reporting, RTI, and Activator flags.
+11. Add the Activator checkpoint secret when you enable Activator.
+12. Run an authorized protected Terraform plan to verify OIDC and access.
+13. Merge the reviewed commit to deploy Development.
 
-Terraform creates the target Fabric resources after step 12. Operators approve
+Terraform creates the target Fabric resources after step 13. Operators approve
 Test and Production promotion through the protected GitHub Environments.
 
 Optional environment variables are:
@@ -304,6 +343,8 @@ Optional environment variables are:
 | Variable | Accepted value and behavior |
 |---|---|
 | `FABRIC_ONELAKE_SHORTCUTS` | JSON object described under [OneLake shortcut configuration](#onelake-shortcut-configuration). Omit it or use `{}` to create no shortcuts. |
+| `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` | Value from `adls_storage_account_ids_by_environment[stage]`. Set it when `FABRIC_ADLS_SHORTCUTS` is not `{}`. |
+| `FABRIC_ADLS_SHORTCUTS` | JSON object described under [ADLS Gen2 shortcut configuration](#adls-gen2-shortcut-configuration). Omit it or use `{}` to create no ADLS shortcuts. |
 | `FABRIC_ENABLE_REPORTING` | String `true` or `false`. The default is `false`. `true` requires both reporting bundles and verifies both semantic models and reports. |
 | `FABRIC_ENABLE_RTI` | String `true` or `false`. The default is `false`. `true` requires and verifies the Eventhouse, KQL database, queryset, and dashboard. |
 | `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates both Reflex items and requires definition and action evidence. |
@@ -365,11 +406,72 @@ If this repository manages the source, use its Terraform outputs. Otherwise,
 list the workspace and items through the Fabric API. Confirm that the
 deployment identity can access the source through Fabric and OneLake.
 
-This input supports only OneLake-to-OneLake shortcuts. It does not configure
-external ADLS, S3, Dataverse, or other credential-bearing shortcut types.
 Terraform uses conflict policy `Abort`. Deployment fails when another object
 uses `<path>/<name>`. Remove the conflict or choose another destination.
 Keep each stable map label unchanged after deployment.
+
+### ADLS Gen2 shortcut configuration
+
+Set `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` to the bootstrap output for the
+same stage. Use the complete Azure resource ID. Do not use the account name or
+DFS URL.
+
+`FABRIC_ADLS_SHORTCUTS` is a GitHub Environment variable containing JSON text.
+Its top level is an object, not an array. Each top-level key is a stable
+Terraform label for one shortcut.
+
+Every shortcut value requires:
+
+- `name`: leaf name of the shortcut in the managed Lakehouse.
+- `path`: parent path in the managed Lakehouse. Start it with `Files/` or
+  `Tables/`.
+- `container`: ADLS Gen2 container name.
+- `target_path`: source path inside the container. Use `""` for the container
+  root.
+- `create_container`: boolean value. Use `true` to create the container.
+
+Use `create_container = false` when the container already exists. Terraform
+does not create or change that container. The deployment fails if Fabric
+cannot access it.
+
+This example creates two shortcuts. Terraform creates the `incoming` container.
+The `archive` container must already exist.
+
+```json
+{
+  "incoming_videos": {
+    "name": "incoming_videos",
+    "path": "Files/input",
+    "container": "incoming",
+    "target_path": "videos",
+    "create_container": true
+  },
+  "archive": {
+    "name": "archive",
+    "path": "Files/history",
+    "container": "archive",
+    "target_path": "",
+    "create_container": false
+  }
+}
+```
+
+Paste the object directly as the GitHub variable value. Do not add quotes
+around the complete object. Use `{}` when the environment needs no ADLS
+shortcut.
+
+Environment Terraform enables the workspace identity. It grants that identity
+`Storage Blob Data Contributor` on the storage account. It then creates one
+WorkspaceIdentity Fabric connection and all configured shortcuts.
+
+Bootstrap grants the deployment principal `Storage Blob Data Contributor`.
+This role permits container creation. Bootstrap also grants
+`Reader` so Terraform can verify the account. Bootstrap grants
+`User Access Administrator` for the workspace identity role assignment.
+
+The storage account must use ADLS Gen2 hierarchical namespace. Fabric must be
+able to reach its DFS endpoint. This implementation does not support S3,
+Dataverse, storage keys, SAS tokens, or client secrets.
 
 ### Fallback secret exception policy
 
@@ -440,7 +542,7 @@ on failure after evidence initialization. Authorized PR plan artifacts are
 retained for 14 days. Plans that
 delete or replace protected Fabric resources fail before apply unless a
 protected-environment dispatch explicitly enables `allow_protected_changes`.
-OneLake shortcut changes, workspace identity changes, capacity changes, and
+Managed shortcut changes, workspace identity changes, capacity changes, and
 Production Fabric item deletions/replacements each have a separate approval
 checkbox. A change in more than one category requires every applicable
 checkbox. The job still waits for the target GitHub Environment reviewer. A dispatcher

@@ -165,7 +165,7 @@ jobs:
           jq '{
             workspace_id: .workspace_id.value,
             lakehouse_id: .lakehouse_id.value,
-            onelake_shortcuts: .onelake_shortcuts.value,
+            managed_shortcuts: .managed_shortcuts.value,
             environment_id: .environment_id.value,
             spark_job_definition_ids: .spark_job_definition_ids.value,
             semantic_model_ids: .semantic_model_ids.value,

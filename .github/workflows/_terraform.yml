@@ -27,7 +27,7 @@ on:
         type: boolean
         default: false
       approve_shortcut_changes:
-        description: Approve reviewed OneLake shortcut changes
+        description: Approve reviewed managed shortcut changes
         required: false
         type: boolean
         default: false
@@ -101,6 +101,8 @@ jobs:
       TF_VAR_workspace_role_assignments: ${{ vars.FABRIC_WORKSPACE_ROLE_ASSIGNMENTS }}
       TF_VAR_enable_activator: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
       TF_VAR_onelake_shortcuts: ${{ vars.FABRIC_ONELAKE_SHORTCUTS || '{}' }}
+      TF_VAR_adls_storage_account_resource_id: ${{ vars.FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID }}
+      TF_VAR_adls_shortcuts: ${{ vars.FABRIC_ADLS_SHORTCUTS || '{}' }}
       TF_ENVIRONMENT: ${{ inputs.environment }}
       TF_ROOT: ${{ inputs.working_directory }}
       DEPLOY_REF: ${{ inputs.ref || github.sha }}
@@ -256,7 +258,18 @@ jobs:
                   type,
                   deletes: deletes,
                   protectedDeletion: (deletes and protected_type),
-                  shortcutChange: (.type == "fabric_shortcut"),
+                  shortcutChange: (
+                    .type == "fabric_shortcut"
+                    or .type == "azurerm_storage_data_lake_gen2_filesystem"
+                    or (
+                      .type == "fabric_connection"
+                      and (.address | contains("adls_workspace_identity"))
+                    )
+                    or (
+                      .type == "azurerm_role_assignment"
+                      and (.address | contains("adls_workspace_identity"))
+                    )
+                  ),
                   workspaceIdentityChange: (
                     .type == "fabric_workspace"
                     and ((.change.before.identity // null) != (.change.after.identity // null))

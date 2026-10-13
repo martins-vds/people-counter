@@ -53,6 +53,22 @@ variable "onelake_shortcuts" {
   default = {}
 }
 
+variable "adls_storage_account_resource_id" {
+  type    = string
+  default = ""
+}
+
+variable "adls_shortcuts" {
+  type = map(object({
+    name             = string
+    path             = string
+    container        = string
+    target_path      = string
+    create_container = bool
+  }))
+  default = {}
+}
+
 variable "enable_preview_features" {
   type    = bool
   default = false

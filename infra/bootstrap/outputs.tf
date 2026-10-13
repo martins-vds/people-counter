@@ -43,6 +43,11 @@ output "fabric_capacity_ids_by_environment" {
   }
 }
 
+output "adls_storage_account_ids_by_environment" {
+  description = "New or existing ADLS Gen2 storage account resource IDs."
+  value       = local.adls_storage_account_ids
+}
+
 output "tenant_id" {
   value = var.tenant_id
 }

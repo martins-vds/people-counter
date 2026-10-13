@@ -37,6 +37,62 @@ output "onelake_shortcuts" {
   }
 }
 
+output "adls_shortcut_ids" {
+  value = {
+    for key, shortcut in fabric_shortcut.adls : key => shortcut.id
+  }
+}
+
+output "adls_shortcuts" {
+  description = "Managed ADLS shortcut identities and non-secret targets."
+  value = {
+    for key, shortcut in var.adls_shortcuts : key => {
+      id            = fabric_shortcut.adls[key].id
+      name          = shortcut.name
+      path          = shortcut.path
+      location      = local.adls_shortcut_targets[key].location
+      subpath       = local.adls_shortcut_targets[key].subpath
+      connection_id = fabric_connection.adls_workspace_identity[0].id
+      container     = shortcut.container
+      target_path   = shortcut.target_path
+    }
+  }
+}
+
+output "managed_shortcuts" {
+  description = "All managed Lakehouse shortcuts keyed by target type and label."
+  value = merge(
+    {
+      for key, shortcut in var.onelake_shortcuts : "onelake:${key}" => {
+        target_type         = "OneLake"
+        id                  = fabric_shortcut.onelake[key].id
+        name                = shortcut.name
+        path                = shortcut.path
+        target_workspace_id = shortcut.target_workspace_id
+        target_item_id      = shortcut.target_item_id
+        target_path         = shortcut.target_path
+        location            = null
+        subpath             = null
+        connection_id       = null
+      }
+    },
+    {
+      for key, shortcut in var.adls_shortcuts : "adls:${key}" => {
+        target_type         = "AdlsGen2"
+        id                  = fabric_shortcut.adls[key].id
+        name                = shortcut.name
+        path                = shortcut.path
+        target_workspace_id = null
+        target_item_id      = null
+        target_path         = shortcut.target_path
+        location            = local.adls_shortcut_targets[key].location
+        subpath             = local.adls_shortcut_targets[key].subpath
+        connection_id       = fabric_connection.adls_workspace_identity[0].id
+      }
+    },
+  )
+}
+
 output "environment_id" {
   value = fabric_environment.this.id
 }
@@ -61,6 +117,15 @@ output "connection_ids" {
   value = {
     for key, connection in fabric_connection.this : key => connection.id
   }
+}
+
+output "adls_connection_id" {
+  description = "WorkspaceIdentity ADLS connection ID, or null when disabled."
+  value = (
+    length(var.adls_shortcuts) == 0
+    ? null
+    : fabric_connection.adls_workspace_identity[0].id
+  )
 }
 
 output "connection_role_assignment_ids" {

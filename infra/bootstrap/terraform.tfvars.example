@@ -17,3 +17,18 @@ fabric_capacity_sku_by_environment = {
 }
 
 fabric_admin_members = []
+
+adls_storage_by_environment = {
+  dev = {
+    mode                 = "create"
+    storage_account_name = "stpeoplecounterdev01"
+  }
+  test = {
+    mode                 = "create"
+    storage_account_name = "stpeoplecountertest01"
+  }
+  prod = {
+    mode                        = "existing"
+    storage_account_resource_id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-data/providers/Microsoft.Storage/storageAccounts/stpeoplecounterprod01"
+  }
+}

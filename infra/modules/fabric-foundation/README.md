@@ -9,6 +9,7 @@ Provisions one environment's:
 - Fabric workspace, assigned capacity, and optional system identity
 - workspace roles
 - schema-enabled Lakehouse
+- optional OneLake and ADLS Gen2 shortcuts
 - Fabric Environment
 - all seven canonical Spark Job Definitions
 - a source-controlled, non-secret deployment Variable Library
@@ -66,9 +67,19 @@ requires reviewed `fabric/activators/{operations,manifest-arrival}` bundles
 plus `enable_activator = true`.
 
 The `fabric_shortcut.onelake` resource manages OneLake shortcuts from the
-`onelake_shortcuts` input. Each external shortcut target has a different
-provider schema. Add a typed target only after you define its connector.
-Use `non_secret_connections` to manage non-secret connections.
+`onelake_shortcuts` input.
+
+The `adls_shortcuts` input manages ADLS Gen2 shortcuts. Each entry specifies
+the destination path, container, source path, and container ownership. The
+module creates one WorkspaceIdentity connection. It grants the workspace
+identity `Storage Blob Data Contributor` on the configured storage account.
+
+Set `create_container = true` to create an ADLS filesystem. Set it to `false`
+when the filesystem already exists. The storage account must use hierarchical
+namespace.
+
+Other external shortcut target types are not supported. Use
+`non_secret_connections` only for reviewed non-secret connections.
 
 For bootstrap, environment variables, OIDC, definition export, deployment
 verification, approvals, and recovery, use the
