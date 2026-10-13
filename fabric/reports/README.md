@@ -1,15 +1,21 @@
 # Power BI report definitions
 
 Export reviewed report definitions into `analytics/` and `operational/` with
-the batch manifest in [`fabric/README.md`](../README.md). It requests `PBIR`
-and rejects a legacy or otherwise different response format.
+the manifest in [`fabric/README.md`](../README.md). The metadata records the
+format that Fabric returns.
 
 Replace the source model ID and name during export with the environment-backed
 `TargetSemanticModelId` and `TargetSemanticModelName` tokens. Terraform injects
 the corresponding model created in the same plan.
 
-After `.fabric-item.json` and all listed parts are reviewed and committed, the
-Fabric foundation module deploys the report automatically.
+Review `.fabric-item.json` and every listed part. The Fabric foundation module
+deploys each committed report.
 
-Keep the clone-based migration path until visuals, filters, bookmarks, mobile
-layout, model binding, and permissions have been compared in nonproduction.
+Confirm these items in Development:
+
+- visuals
+- filters
+- bookmarks
+- mobile layout
+- semantic model binding
+- permissions

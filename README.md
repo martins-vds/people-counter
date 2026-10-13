@@ -5,30 +5,36 @@ Definition (SJD) pipeline for reliable, observable video processing.
 
 ## Stable Fabric SJD pipeline
 
-Production uses the fixed `people_counter_sjd_*` tables and
-`Files/people-counter/sjd/v1/` file boundary. The active roles are Control,
-Dispatcher, Process, Reconciliation, Gold, Refresh, and Cutover. The old
-notebook/Data Pipeline processors, canary definitions, experimental bundles,
-production-shadow code, and one-time migration controllers have been retired
-from this repository.
+The Fabric solution starts with seven Spark Job Definitions:
+
+- Control registers work and coordinates recovery.
+- Dispatcher claims bounded batches and starts Process jobs.
+- Process runs inference and publishes immutable attempt output.
+- Reconciliation records differences between control state and data state.
+- Gold builds the analytics and operations tables.
+- Refresh updates both semantic models.
+- Cutover applies approved schema changes and verifies release boundaries.
+
+All roles use the `people_counter_sjd_*` tables. They also use the
+`Files/people-counter/sjd/v1/` file boundary.
 
 - [Fabric SJD operations](notebooks/fabric/README.md)
 - [GitHub/Terraform deployment](docs/github-deployment.md)
 - [Source-controlled Fabric definitions](fabric/README.md)
 - [Getting-started tutorial](notebooks/fabric/18_sjd_getting_started_demo_tutorial.md)
 
-Fabric is deployed from an immutable `main` commit through protected GitHub
-Environments. Do not copy workspace or item GUIDs into deployment commands:
-Terraform outputs feed postconfiguration and acceptance automatically. A merge
-deploys Development; `promote.yml` promotes the same 40-character commit to
-Test only after retained successful Development evidence exists, and to
-Production only after retained successful evidence exists for that exact SHA
-in both Development and Test. The gate reads immutable workflow artifacts and
-fails closed when evidence is missing or ambiguous. Deployments reconcile
-twice with schedules disabled, require zero Terraform drift and live clean-room
-acceptance evidence, and enable Production schedules only through the final
-gate. Start with the
-[deployment bootstrap and clean-room runbook](docs/github-deployment.md).
+Protected GitHub Environments deploy one immutable `main` commit. A merge
+deploys Development. The `promote.yml` workflow promotes the same commit to
+Test and Production.
+
+Do not put workspace or item GUIDs in deployment commands. Terraform supplies
+these IDs to each workflow step.
+
+Each deployment runs the runtime configuration twice. Schedules stay disabled
+during deployment verification. The workflow requires zero Terraform drift.
+The Production final gate then enables the five recurring schedules.
+
+Start with the [GitHub deployment runbook](docs/github-deployment.md).
 
 - [Local Spark development](docs/local-spark-development.md)
 
@@ -44,8 +50,8 @@ uv run pc-local-orchestrate pipeline \
 
 Use `--harness spark --spark-master spark://spark-master:7077` in the Compose
 client to execute the same claim, staging, seal, pointer, and Gold protocol on
-two local workers. The retained benchmark tooling is for capacity
-recalibration and forecast evidence; it is not a second production pipeline.
+two local workers. The benchmark tooling provides capacity and forecast evidence. It does not
+deploy or schedule production jobs.
 
 ## Python SDK
 

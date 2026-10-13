@@ -1,4 +1,4 @@
-"""Live clean-room acceptance validation for Microsoft Fabric deployments."""
+"""Live deployment verification for Microsoft Fabric environments."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from people_counter.fabric_reconcilers import (
 )
 from people_counter.fabric_sjd import TABLE_SUFFIXES
 
-ACCEPTANCE_EVIDENCE_SCHEMA = "people-counter-fabric-cleanroom-evidence-v1"
+ACCEPTANCE_EVIDENCE_SCHEMA = "people-counter-fabric-deployment-verification-v1"
 _SJD_DEFINITION_ROOT = (
     Path(__file__).resolve().parents[2] / "fabric" / "spark-job-definitions"
 )
@@ -56,7 +56,7 @@ _DEFINITION_ROUTES = {
 
 
 class CleanroomAcceptanceError(RuntimeError):
-    """The deployed environment does not satisfy the clean-room contract."""
+    """The deployed environment does not satisfy the verification contract."""
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -606,7 +606,7 @@ def _verify_postconfigure(
 ) -> dict[str, Any]:
     if len(evidence) != 2:
         raise CleanroomAcceptanceError(
-            "clean-room acceptance requires exactly two deployment evidences"
+            "deployment verification requires exactly two evidence documents"
         )
     for index, item in enumerate(evidence):
         if (

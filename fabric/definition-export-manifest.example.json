@@ -167,6 +167,6 @@
       ]
     }
   ],
-  "schema": "people-counter-fabric-definition-migration-v1",
+  "schema": "people-counter-fabric-definition-export-v1",
   "workspaceIdEnv": "FABRIC_SOURCE_WORKSPACE_ID"
 }

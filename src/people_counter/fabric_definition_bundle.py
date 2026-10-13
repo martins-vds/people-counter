@@ -14,7 +14,7 @@ from typing import Any
 
 
 BUNDLE_SCHEMA = "people-counter-fabric-definition-bundle-v2"
-MIGRATION_SCHEMA = "people-counter-fabric-definition-migration-v1"
+DEFINITION_EXPORT_SCHEMA = "people-counter-fabric-definition-export-v1"
 METADATA_FILE = ".fabric-item.json"
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -35,8 +35,8 @@ class TokenReplacement:
 
 
 @dataclass(frozen=True)
-class MigrationItem:
-    """One live Fabric item to export from a migration manifest."""
+class DefinitionExportItem:
+    """One live Fabric item from a definition export manifest."""
 
     item_id: str
     item_type: str
@@ -46,11 +46,11 @@ class MigrationItem:
 
 
 @dataclass(frozen=True)
-class MigrationManifest:
+class DefinitionExportManifest:
     """Resolved environment-backed inputs for a batch definition export."""
 
     workspace_id: str
-    items: tuple[MigrationItem, ...]
+    items: tuple[DefinitionExportItem, ...]
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -86,7 +86,7 @@ def _relative_destination(value: object) -> PurePosixPath:
     path_value = _part_path(value)
     path = PurePosixPath(path_value)
     if path.name == METADATA_FILE:
-        raise DefinitionBundleError("migration destination must be a directory")
+        raise DefinitionBundleError("export destination must be a directory")
     return path
 
 
@@ -603,31 +603,31 @@ def _environment_value(
     return value
 
 
-def load_migration_manifest(
+def load_definition_export_manifest(
     path: Path,
     environment: Mapping[str, str],
-) -> MigrationManifest:
+) -> DefinitionExportManifest:
     """Resolve a strict batch export manifest without storing live IDs in Git."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise DefinitionBundleError(f"invalid migration manifest at {path}") from error
-    manifest = _manifest_object(raw, "migration manifest")
-    _manifest_keys(manifest, {"items", "schema", "workspaceIdEnv"}, "migration manifest")
-    if manifest.get("schema") != MIGRATION_SCHEMA:
-        raise DefinitionBundleError("migration manifest schema is unsupported")
+        raise DefinitionBundleError(f"invalid export manifest at {path}") from error
+    manifest = _manifest_object(raw, "definition export manifest")
+    _manifest_keys(manifest, {"items", "schema", "workspaceIdEnv"}, "export manifest")
+    if manifest.get("schema") != DEFINITION_EXPORT_SCHEMA:
+        raise DefinitionBundleError("definition export schema is unsupported")
     workspace_id = _environment_value(
         environment, manifest.get("workspaceIdEnv"), "workspace ID"
     )
     raw_items = manifest.get("items")
     if not isinstance(raw_items, list) or not raw_items:
-        raise DefinitionBundleError("migration manifest must contain items")
+        raise DefinitionBundleError("definition export manifest must contain items")
 
-    items: list[MigrationItem] = []
+    items: list[DefinitionExportItem] = []
     destinations: set[PurePosixPath] = set()
     item_ids: set[str] = set()
     for index, raw_item in enumerate(raw_items):
-        context = f"migration item {index}"
+        context = f"definition export item {index}"
         item = _manifest_object(raw_item, context)
         _manifest_keys(
             item,
@@ -677,14 +677,14 @@ def load_migration_manifest(
             )
         if destination in destinations:
             raise DefinitionBundleError(
-                f"duplicate migration destination {destination.as_posix()!r}"
+                f"duplicate export destination {destination.as_posix()!r}"
             )
         if item_id in item_ids:
-            raise DefinitionBundleError(f"duplicate migration item ID {item_id!r}")
+            raise DefinitionBundleError(f"duplicate export item ID {item_id!r}")
         destinations.add(destination)
         item_ids.add(item_id)
         items.append(
-            MigrationItem(
+            DefinitionExportItem(
                 item_id=item_id,
                 item_type=item_type,
                 destination=path.parent.joinpath(*destination.parts),
@@ -692,4 +692,4 @@ def load_migration_manifest(
                 replacements=tuple(replacements),
             )
         )
-    return MigrationManifest(workspace_id=workspace_id, items=tuple(items))
+    return DefinitionExportManifest(workspace_id=workspace_id, items=tuple(items))

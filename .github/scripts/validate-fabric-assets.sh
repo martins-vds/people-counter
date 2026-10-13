@@ -9,7 +9,7 @@ uv run python scripts/validate_fabric_definitions.py "${root}" \
   --output "${evidence_dir}/definition-hashes.json"
 
 jq -e '
-  .schema == "people-counter-fabric-definition-migration-v1"
+  .schema == "people-counter-fabric-definition-export-v1"
   and (.workspaceIdEnv | type == "string" and length > 0)
   and (.items | type == "array")
   and (all(.items[];
@@ -19,8 +19,8 @@ jq -e '
     and (.destination | startswith("/") | not)
     and (.destination | contains("..") | not)
   ))
-' "${root}/migration-manifest.example.json" \
-  > "${evidence_dir}/migration-schema.txt"
+' "${root}/definition-export-manifest.example.json" \
+  > "${evidence_dir}/definition-export-schema.txt"
 
 jq -e '
   .schema == "people-counter-fabric-definition-drift-v1"
