@@ -246,7 +246,7 @@ Optional environment variables are:
 
 Reporting and RTI item creation is driven by committed bundles, not by their
 acceptance flags. Do not set a flag until every bundle named in
-[the source-definition section](#4-source-definitions-and-live-export) is
+[the source-definition section](#source-definitions-and-live-export) is
 reviewed. Activator requires both bundles and its flag.
 
 ### OneLake shortcut configuration
