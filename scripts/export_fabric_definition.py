@@ -12,7 +12,7 @@ from people_counter.fabric_automation import FabricAutomationClient
 from people_counter.fabric_definition_bundle import (
     DefinitionBundleError,
     TokenReplacement,
-    load_migration_manifest,
+    load_definition_export_manifest,
     write_definition_bundle,
 )
 from people_counter.fabric_rest import AzureCliTokenProvider, UrllibTransport
@@ -88,7 +88,7 @@ def export_manifest(
     manifest_path: Path,
     environment: Mapping[str, str],
 ) -> dict[str, object]:
-    manifest = load_migration_manifest(manifest_path, environment)
+    manifest = load_definition_export_manifest(manifest_path, environment)
     workspace_id = _resolved_uuid(manifest.workspace_id, "workspace ID")
     exports = []
     for item in manifest.items:
@@ -151,7 +151,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--manifest",
         type=Path,
-        help="batch migration manifest; destinations are relative to this file",
+        help="definition export manifest; destinations are relative to this file",
     )
     mode.add_argument("--item-id", type=_uuid, help="single Fabric item UUID")
     parser.add_argument("--workspace-id", type=_uuid)

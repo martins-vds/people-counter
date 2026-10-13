@@ -9,10 +9,10 @@ import pytest
 
 from people_counter.fabric_definition_bundle import (
     BUNDLE_SCHEMA,
-    MIGRATION_SCHEMA,
+    DEFINITION_EXPORT_SCHEMA,
     DefinitionBundleError,
     TokenReplacement,
-    load_migration_manifest,
+    load_definition_export_manifest,
     read_definition_bundle,
     write_definition_bundle,
 )
@@ -362,9 +362,9 @@ def test_validate_tree_reports_schema_and_hash_evidence(tmp_path: Path) -> None:
     assert len(result["bundles"][0]["contentSha256"]) == 64
 
 
-def _migration_manifest() -> dict[str, object]:
+def _definition_export_manifest() -> dict[str, object]:
     return {
-        "schema": MIGRATION_SCHEMA,
+        "schema": DEFINITION_EXPORT_SCHEMA,
         "workspaceIdEnv": "SOURCE_WORKSPACE_ID",
         "items": [
             {
@@ -383,13 +383,13 @@ def _migration_manifest() -> dict[str, object]:
     }
 
 
-def test_load_migration_manifest_resolves_only_environment_backed_values(
+def test_load_definition_export_manifest_resolves_environment_values(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "migration.json"
-    path.write_text(json.dumps(_migration_manifest()))
+    path = tmp_path / "definition-export.json"
+    path.write_text(json.dumps(_definition_export_manifest()))
 
-    manifest = load_migration_manifest(
+    manifest = load_definition_export_manifest(
         path,
         {
             "SOURCE_WORKSPACE_ID": "11111111-1111-1111-1111-111111111111",
@@ -407,8 +407,8 @@ def test_load_migration_manifest_resolves_only_environment_backed_values(
     )
 
 
-def test_repository_migration_manifest_covers_first_class_item_types() -> None:
-    path = Path("fabric/migration-manifest.example.json")
+def test_repository_definition_export_manifest_covers_item_types() -> None:
+    path = Path("fabric/definition-export-manifest.example.json")
     raw = json.loads(path.read_text())
     environment_names = {raw["workspaceIdEnv"]}
     for item in raw["items"]:
@@ -418,7 +418,7 @@ def test_repository_migration_manifest_covers_first_class_item_types() -> None:
         name: f"value-for-{name.lower()}" for name in environment_names
     }
 
-    manifest = load_migration_manifest(path, environment)
+    manifest = load_definition_export_manifest(path, environment)
 
     assert {item.item_type for item in manifest.items} == {
         "Eventhouse",
@@ -445,22 +445,22 @@ def test_repository_migration_manifest_covers_first_class_item_types() -> None:
         ),
         (
             lambda value: value["items"].append(dict(value["items"][0])),
-            "duplicate migration destination",
+            "duplicate export destination",
         ),
     ],
 )
-def test_load_migration_manifest_rejects_unsafe_or_ambiguous_entries(
+def test_load_definition_export_manifest_rejects_unsafe_entries(
     tmp_path: Path,
     mutate: object,
     message: str,
 ) -> None:
-    value = _migration_manifest()
+    value = _definition_export_manifest()
     mutate(value)  # type: ignore[operator]
-    path = tmp_path / "migration.json"
+    path = tmp_path / "definition-export.json"
     path.write_text(json.dumps(value))
 
     with pytest.raises(DefinitionBundleError, match=message):
-        load_migration_manifest(
+        load_definition_export_manifest(
             path,
             {
                 "SOURCE_WORKSPACE_ID": "11111111-1111-1111-1111-111111111111",
@@ -470,8 +470,8 @@ def test_load_migration_manifest_rejects_unsafe_or_ambiguous_entries(
 
 
 def test_export_manifest_batches_items_and_writes_bundle(tmp_path: Path) -> None:
-    path = tmp_path / "migration.json"
-    path.write_text(json.dumps(_migration_manifest()))
+    path = tmp_path / "definition-export.json"
+    path.write_text(json.dumps(_definition_export_manifest()))
     environment = {
         "SOURCE_WORKSPACE_ID": "11111111-1111-1111-1111-111111111111",
         "SOURCE_MODEL_ID": "22222222-2222-2222-2222-222222222222",

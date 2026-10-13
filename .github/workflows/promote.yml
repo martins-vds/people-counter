@@ -123,15 +123,18 @@ jobs:
               rm -f "${evidence_dir}/evidence.zip"
 
               local smoke_files=()
-              local cleanroom_files=()
+              local verification_files=()
               while IFS= read -r path; do
                 [ -n "${path}" ] && smoke_files+=("${path}")
               done < <(find "${evidence_dir}" -type f -name smoke.json -print)
               while IFS= read -r path; do
-                [ -n "${path}" ] && cleanroom_files+=("${path}")
-              done < <(find "${evidence_dir}" -type f -name cleanroom.json -print)
+                [ -n "${path}" ] && verification_files+=("${path}")
+              done < <(
+                find "${evidence_dir}" -type f \
+                  -name deployment-verification.json -print
+              )
               if [ "${#smoke_files[@]}" -ne 1 ] \
-                || [ "${#cleanroom_files[@]}" -ne 1 ]; then
+                || [ "${#verification_files[@]}" -ne 1 ]; then
                 continue
               fi
 
@@ -150,11 +153,11 @@ jobs:
                   --arg commit "${RELEASE_SHA}" \
                   --arg environment "${environment}" \
                   '
-                    .schema == "people-counter-fabric-cleanroom-evidence-v1"
+                    .schema == "people-counter-fabric-deployment-verification-v1"
                     and .status == "succeeded"
                     and .commitSha == $commit
                     and .stage == $environment
-                  ' "${cleanroom_files[0]}" >/dev/null; then
+                  ' "${verification_files[0]}" >/dev/null; then
                 echo "Verified immutable ${environment} evidence: ${run_url}"
                 return 0
               fi

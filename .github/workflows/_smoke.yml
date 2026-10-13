@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
           if [ "${EXPECT_SCHEDULES_ENABLED}" != "false" ]; then
-            echo "::error::Clean-room acceptance requires disabled schedules"
+            echo "::error::Deployment verification requires disabled schedules"
             exit 1
           fi
           test "$(git rev-parse HEAD)" = "${DEPLOY_REF}"
@@ -202,7 +202,7 @@ jobs:
           uv run --frozen python scripts/validate_fabric_definitions.py fabric
           --output "${RUNNER_TEMP}/smoke-evidence/fabric-definitions.json"
 
-      - name: Run clean-room acceptance
+      - name: Run deployment verification
         env:
           TERRAFORM_DRIFT_EXIT_CODE: ${{ steps.drift.outputs.exit_code }}
         run: |
@@ -221,8 +221,8 @@ jobs:
           [ "${EXPECT_RTI}" = "true" ] && args+=(--require-rti)
           [ "${EXPECT_ACTIVATOR}" = "true" ] && args+=(--require-activator)
           set -o pipefail
-          uv run --frozen pc-validate-fabric-cleanroom "${args[@]}" \
-            | tee "${RUNNER_TEMP}/smoke-evidence/cleanroom.json"
+          uv run --frozen pc-validate-fabric-deployment "${args[@]}" \
+            | tee "${RUNNER_TEMP}/smoke-evidence/deployment-verification.json"
 
       - name: Probe deployed Fabric resources
         id: verify

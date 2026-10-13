@@ -1,21 +1,27 @@
 # Source-controlled Microsoft Fabric definitions
 
-This tree stores exact `getDefinition` responses as reviewable files. No live
-workspace definition is synthesized in this repository. Each exported item has
-a `.fabric-item.json` file that records the response format, item type, sorted
-parts, byte lengths, SHA-256 hashes, token evidence, and an aggregate content
-hash. The validator rejects modified, missing, extra, unsorted, unsafe, or
-symlinked files.
+This directory stores reviewable `getDefinition` responses. Each exported item
+has a `.fabric-item.json` file. This file records:
 
-## Export a live definition (migration only)
+- response format
+- item type
+- sorted parts
+- byte lengths
+- SHA-256 hashes
+- token evidence
+- aggregate content hash
 
-Prerequisites are Azure CLI authentication to the tenant, permission to read
-each source item definition, and Python dependencies installed by `uv`.
-Export is the only supported way to seed definition bundles from a live
-workspace. Do not copy source workspace/item GUIDs into Terraform, GitHub
-workflow inputs, or definition files. The source IDs below exist only in the
-operator's environment for the duration of the export and are replaced with
-provider tokens before commit.
+The validator rejects modified, missing, extra, unsorted, unsafe, or symlinked
+files.
+
+## Export a live definition
+
+Before export, authenticate Azure CLI to the tenant. Confirm that you can read
+each source item. Install the Python dependencies with `uv`.
+
+Do not put source workspace or item GUIDs in Terraform or GitHub inputs. Keep
+source IDs only in the operator environment. The exporter replaces these IDs
+with provider tokens.
 
 ```bash
 az login --tenant "$AZURE_TENANT_ID"
@@ -37,21 +43,19 @@ export FABRIC_SOURCE_ACTIVATOR_ID="<source-activator-uuid>"
 export FABRIC_SOURCE_VARIABLE_LIBRARY_ID="<source-variable-library-uuid>"
 
 uv run python scripts/export_fabric_definition.py \
-  --manifest fabric/migration-manifest.example.json \
+  --manifest fabric/definition-export-manifest.example.json \
   --evidence fabric-definition-export-evidence.json
 uv run python scripts/validate_fabric_definitions.py fabric \
   --require-bundles \
   --output fabric-definition-validation-evidence.json
 ```
 
-The two evidence files contain live item IDs and operation IDs and are review
-artifacts, not source definitions; do not commit them. The manifest stores only
-environment-variable names. Edit its item list and token list to match the
-actual source workspace before export. A token is required to occur at least
-once, source values may not overlap, substitution is simultaneous, and a match
-inside a non-UTF-8 part is rejected. This prevents silent binary corruption,
-partial sanitization, and replacement cascades. `parts` may be added to a token
-entry to restrict replacement to exact definition part paths.
+The evidence files contain live item and operation IDs. Do not commit these
+files. The manifest stores only environment variable names.
+
+Edit the item and token lists before export. Each token must occur at least
+once. Source values must not overlap. The exporter rejects token matches in
+non-UTF-8 parts. Use `parts` to limit a token to exact definition paths.
 
 For a single item:
 
@@ -68,61 +72,62 @@ uv run python scripts/export_fabric_definition.py \
   --evidence fabric-definition-export-evidence.json
 ```
 
-Use `--format PBIR` for new report definitions. Omit `--format` when that item
-type exposes only its default definition format. `--token-env` reads the source
-literal from the named environment variable, so it does not expose that value
-in command arguments. Export fails if Fabric returns a different requested
-format.
+Use the report format that the Fabric item supports. Omit `--format` when the
+item exposes only its default format.
 
-The batch interface is item-type agnostic: append any workspace item that
-supports the public `getDefinition` operation with `itemIdEnv`, `itemType`,
-`destination`, optional `format`, and optional `tokens`. Unsupported or
-permission-gated item types fail with the original Fabric API error rather than
-creating placeholder content.
+`--token-env` reads the source value from an environment variable. It does not
+put the value in command arguments. Export fails when Fabric returns a
+different requested format.
 
-Scheduled drift checks use `definition-drift-manifest.json`. Terraform outputs
-resolve target item IDs and token values at runtime; no live IDs are committed.
-The checker decodes and tokenizes each live definition in memory, compares its
-aggregate content hash with the validated `.fabric-item.json`, and writes only
-paths, item types, statuses, and SHA-256 hashes. It never writes or uploads live
-definition parts, operation IDs, item IDs, workspace IDs, or token source
-values. Entries marked `optional` become active automatically when their source
-bundle is committed.
+The batch interface accepts any item with a public `getDefinition` operation.
+Set `itemIdEnv`, `itemType`, and `destination`. Add `format` and `tokens` when
+required.
 
-After committing reviewed bundles, deployment is performed only by
-`deploy-dev.yml` and `promote.yml`; do not run the exporter against a target as
-a substitute for promotion. Reporting creation is bundle-driven, RTI creation
-is bundle-driven, and Activator additionally requires
-`FABRIC_ENABLE_ACTIVATOR=true`. The protected environment flags and acceptance
-gates are documented in the
+The exporter reports Fabric API errors. It does not create placeholder files.
+
+Scheduled drift verification uses `definition-drift-manifest.json`. Terraform resolves
+target item IDs and token values during the workflow.
+
+The checker tokenizes each live definition in memory. It compares the content
+hash with `.fabric-item.json`. Evidence contains only paths, item types,
+statuses, and SHA-256 hashes.
+
+The checker does not store definition parts or live IDs. An optional entry
+becomes active when its source bundle exists.
+
+After you commit reviewed bundles, use `deploy-dev.yml` and `promote.yml`.
+Do not use the exporter to deploy a target environment.
+
+Committed bundles control reporting and RTI deployment. Activator deployment
+also requires `FABRIC_ENABLE_ACTIVATOR=true`. See the
 [GitHub deployment runbook](../docs/github-deployment.md).
 
 ## Review and commit
 
-1. Inspect every exported text part and confirm no source-only endpoint, ID,
-   credential, email address, or action target remains.
-2. Confirm `.platform` logical IDs remain unchanged; never replace logical IDs
-   merely because they resemble environment IDs.
-3. Run the validator and compare `treeSha256`, per-bundle `contentSha256`, and
+1. Inspect every exported text part.
+2. Confirm that no source endpoint, ID, credential, email, or action target
+   remains.
+3. Confirm that `.platform` logical IDs remain unchanged.
+4. Run the validator and compare `treeSha256`, per-bundle `contentSha256`, and
    `bundleSha256` in its evidence.
-4. Commit only the definition directories and `.fabric-item.json` metadata.
-5. Keep clone-based migration scripts until TMDL/PBIR and runtime behavior have
-   been compared in a nonproduction workspace.
+5. Commit only the definition directories and `.fabric-item.json` metadata.
+6. Deploy to Development and confirm item behavior.
 
 Re-export refuses to overwrite a modified or unlisted file. Review, revert, or
 commit local changes before replacing a bundle.
 
 ## Runtime postconfiguration
 
-`runtime/dev.json`, `runtime/test.json`, and `runtime/prod.json` are the
-non-secret post-provisioning contracts consumed after Terraform apply. They
-declare Lakehouse folder/table/release-manifest checks plus optional connection,
-Power BI, and access reconciliation. Keep secret values in protected
-environment variables and reference only their names through
+`runtime/dev.json`, `runtime/test.json`, and `runtime/prod.json` define runtime
+configuration after Terraform apply. They contain no secret values.
+
+These files define Lakehouse checks and optional service configuration. Keep
+secrets in protected environment variables. Reference only their names through
 `valuesFromEnvironment`.
 
-The runtime CLI uses only documented Fabric, OneLake DFS, and Power BI
-operations. Unsupported OAuth2 consent, on-premises gateway credential
-encryption, Direct Lake rewrites, and item-share removal become explicit
-operator checkpoints. Any unresolved checkpoint exits with status 2 and leaves
-recurring SJD schedules disabled.
+The runtime CLI uses documented Fabric, OneLake DFS, and Power BI operations.
+Some operations require an operator checkpoint. Examples include OAuth2
+consent and on-premises gateway credential encryption.
+
+An unresolved checkpoint returns status 2. Recurring SJD schedules remain
+disabled.

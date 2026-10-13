@@ -48,7 +48,7 @@ pc-production-schema-cutover = "people_counter.fabric_sjd_cutover_jobs:main"
 prepare-manifests = "people_counter.manifest_publisher:prepare_main"
 publish-manifests = "people_counter.manifest_publisher:publish_main"
 pc-reconcile-fabric-runtime = "people_counter.fabric_reconcilers:main"
-pc-validate-fabric-cleanroom = "people_counter.fabric_acceptance:main"
+pc-validate-fabric-deployment = "people_counter.fabric_acceptance:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -63,7 +63,7 @@ source_paths = [
     "scripts/deploy_sjd_analytics.py",
     "scripts/deploy_sjd_operational_report.py",
     "scripts/check_fabric_definition_drift.py",
-    "scripts/validate_fabric_cleanroom.py",
+    "scripts/validate_fabric_deployment.py",
     "scripts/download_models.py",
 ]
 pytest_add_cli_args = ["-o", "pythonpath=src"]

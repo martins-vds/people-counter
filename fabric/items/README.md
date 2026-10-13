@@ -1,11 +1,11 @@
 # Other Fabric item definitions
 
-Items not assigned a first-class directory may be exported here when their
-public Fabric API supports `getDefinition`. Add an entry to
-`fabric/migration-manifest.example.json`, use a destination of
-`items/<item-type>/<logical-name>`, omit `format` unless the API documents a
-specific selectable format, and declare every environment-specific literal as
-an environment-backed token.
+Store other supported Fabric item definitions in this directory. Add each item
+to `fabric/definition-export-manifest.example.json`.
+
+Use `items/<item-type>/<logical-name>` as the destination. Omit `format` unless
+the API documents a selectable format. Define a token for each
+environment-specific value.
 
 The exporter does not infer support, invent definitions, or imply deployment
 support. It preserves the live response and fails on API, format, token, path,
