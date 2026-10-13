@@ -327,7 +327,7 @@ Complete these steps after the bootstrap apply:
 4. Add the eight required variables to each GitHub Environment.
 5. Set each `FABRIC_CAPACITY_ID` to the Fabric capacity UUID.
 6. Set `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` for each environment.
-7. Set `FABRIC_ONELAKE_SHORTCUTS` to `{}` or provide existing source IDs.
+7. Leave `FABRIC_ONELAKE_SHORTCUTS` unset unless you need a OneLake shortcut.
 8. Set the two ADLS variables when the environment needs ADLS shortcuts.
 9. Review each optional definition bundle.
 10. Set the Reporting, RTI, and Activator flags.
@@ -342,7 +342,7 @@ Optional environment variables are:
 
 | Variable | Accepted value and behavior |
 |---|---|
-| `FABRIC_ONELAKE_SHORTCUTS` | JSON object described under [OneLake shortcut configuration](#onelake-shortcut-configuration). Omit it or use `{}` to create no shortcuts. |
+| `FABRIC_ONELAKE_SHORTCUTS` | Set this variable only for OneLake-to-OneLake shortcuts. Leave it unset to create no OneLake shortcuts. |
 | `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` | Value from `adls_storage_account_ids_by_environment[stage]`. Set it when `FABRIC_ADLS_SHORTCUTS` is not `{}`. |
 | `FABRIC_ADLS_SHORTCUTS` | JSON object described under [ADLS Gen2 shortcut configuration](#adls-gen2-shortcut-configuration). Omit it or use `{}` to create no ADLS shortcuts. |
 | `FABRIC_ENABLE_REPORTING` | String `true` or `false`. The default is `false`. `true` requires both reporting bundles and verifies both semantic models and reports. |
@@ -356,10 +356,32 @@ reviewed. Activator requires both bundles and its flag.
 
 ### OneLake shortcut configuration
 
-`FABRIC_ONELAKE_SHORTCUTS` is a GitHub Environment variable containing JSON
-text. Its top level is an **object/map, not an array**. Each top-level key is a
-caller-chosen stable Terraform label for one shortcut. Use `{}` rather than an
-empty string when the environment needs no shortcuts.
+Do not set `FABRIC_ONELAKE_SHORTCUTS` for the ADLS Gen2 shortcut described in
+this runbook. `FABRIC_ADLS_SHORTCUTS` configures that shortcut.
+
+Set `FABRIC_ONELAKE_SHORTCUTS` only when the managed Lakehouse must read data
+from an existing OneLake item. The pipeline passes `{}` to Terraform when the
+GitHub Environment variable is absent. Therefore, both of these configurations
+create no OneLake shortcuts:
+
+- `FABRIC_ONELAKE_SHORTCUTS` does not exist.
+- `FABRIC_ONELAKE_SHORTCUTS` contains `{}`.
+
+Leaving the variable unset is the recommended configuration when you use only
+ADLS Gen2 shortcuts.
+
+The repository manages the destination Lakehouse and the shortcut resource.
+It does not automatically select or create the source OneLake item. A OneLake
+shortcut always requires the UUID of an existing source workspace and source
+item.
+
+The pipeline does not copy source UUIDs from another Terraform state. If
+another environment in this repository owns the source item, copy its
+`workspace_id` and `lakehouse_id` outputs into this variable. Otherwise,
+request the source UUIDs from the team that owns the source item.
+
+`FABRIC_ONELAKE_SHORTCUTS` contains JSON text. Its top level is an object, not
+an array. Each top-level key is a stable Terraform label for one shortcut.
 
 Every shortcut value requires:
 
@@ -402,9 +424,12 @@ entire value in another pair of quotes. Compact single-line and formatted
 multiline JSON are equivalent. Use separate values per GitHub Environment
 when Dev, Test, and Production point at different source workspaces or items.
 
-If this repository manages the source, use its Terraform outputs. Otherwise,
-list the workspace and items through the Fabric API. Confirm that the
-deployment identity can access the source through Fabric and OneLake.
+The deployment identity must have access to the configured source workspace
+and source item.
+
+If Terraform already manages OneLake shortcuts and you remove this variable,
+the next plan proposes deletion of those shortcuts. Review that plan before
+apply.
 
 Terraform uses conflict policy `Abort`. Deployment fails when another object
 uses `<path>/<name>`. Remove the conflict or choose another destination.
