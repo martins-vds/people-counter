@@ -109,11 +109,28 @@ Configure these required non-secret variables in every environment:
 | `TF_BACKEND_STORAGE_ACCOUNT_NAME` | bootstrap `state_storage_account_name` |
 | `TF_BACKEND_CONTAINER_NAME` | bootstrap `state_container_name` |
 | `FABRIC_CAPACITY_ID` | Fabric API capacity UUID, not the Azure resource ID |
-| `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` | Terraform JSON map matching `workspace_role_assignments` |
+| `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` | JSON object keyed by stable assignment labels; each value contains `principal_id`, `principal_type`, and `role` as described below |
 
-At minimum, `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` must give the stage's generated
-service-principal object ID enough workspace access for postconfiguration. The
-map shape is:
+### Workspace role assignments
+
+`FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` is a GitHub Environment variable whose
+value is JSON text. Its top level is an **object/map, not an array**. Each
+top-level property name is a caller-chosen stable label used by Terraform to
+track that assignment; the label is not a Fabric role or principal name.
+
+Each assignment value must contain these required fields:
+
+- `principal_id`: the Microsoft Entra **object ID** of a user, group, service
+  principal, or service-principal profile. For the deployment identity, use
+  `github_oidc_service_principal_object_ids[stage]`, not
+  `github_oidc_client_ids[stage]`.
+- `principal_type`: one of `User`, `Group`, `ServicePrincipal`, or
+  `ServicePrincipalProfile`.
+- `role`: one of `Admin`, `Contributor`, `Member`, or `Viewer`.
+
+At minimum, grant the stage's generated deployment service principal `Admin`
+so Terraform and postconfiguration can manage the workspace. For one
+assignment, paste this JSON object directly as the GitHub variable value:
 
 ```json
 {
@@ -124,6 +141,37 @@ map shape is:
   }
 }
 ```
+
+Do not wrap the entire JSON value in another pair of quotes. Compact,
+single-line JSON and formatted, multiline JSON represent the same value.
+
+To grant multiple principals access, add sibling properties to the same
+top-level object. Do not convert it to an array:
+
+```json
+{
+  "deployment": {
+    "principal_id": "<github_oidc_service_principal_object_ids[stage]>",
+    "principal_type": "ServicePrincipal",
+    "role": "Admin"
+  },
+  "platform_operators": {
+    "principal_id": "<operators-group-object-id>",
+    "principal_type": "Group",
+    "role": "Admin"
+  },
+  "report_readers": {
+    "principal_id": "<readers-group-object-id>",
+    "principal_type": "Group",
+    "role": "Viewer"
+  }
+}
+```
+
+Use a separate JSON value for each GitHub Environment so its `deployment`
+entry references that stage's generated service-principal object ID. Keep
+stable labels unchanged after deployment unless intentionally replacing the
+corresponding Terraform-managed role assignment.
 
 The bootstrap `fabric_capacity_ids_by_environment` output is an Azure Resource
 Manager ID, while the Fabric provider variable validates a UUID. Resolve the
