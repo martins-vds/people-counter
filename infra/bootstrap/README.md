@@ -53,8 +53,27 @@ terraform output -raw subscription_id
 `fabric_capacity_ids_by_environment` contains Azure Resource Manager resource
 IDs. The environment stack's `capacity_id` requires the Fabric API capacity
 UUID, so do not pass the bootstrap output directly as `FABRIC_CAPACITY_ID`.
-Resolve and verify the matching Fabric capacity once during the GitHub
-Environment handoff as documented in the
+
+To obtain the required UUID from the Fabric portal:
+
+1. Open Microsoft Fabric and select **Settings** > **Admin portal**.
+2. In the Admin portal, select **Capacity settings**.
+3. Select the Fabric capacity created by this bootstrap stack. Match its name
+   to the final segment of the corresponding
+   `fabric_capacity_ids_by_environment` Azure resource ID.
+4. In the capacity's **Settings** panel, copy the UUID shown under
+   **Capacity ID**.
+5. Save that UUID, without the surrounding Azure resource path, as the
+   `FABRIC_CAPACITY_ID` variable in the matching GitHub Environment.
+
+For example, do not use an Azure resource ID such as
+`/subscriptions/.../providers/Microsoft.Fabric/capacities/fabpcdev...`.
+Use the UUID displayed as **Capacity ID**, such as
+`00000000-0000-0000-0000-000000000000`.
+
+Repeat this handoff for every deployed stage and verify the capacity name, SKU,
+region, and GitHub Environment before saving the value. The API-based lookup
+and full output mapping are documented in the
 [deployment runbook](../../docs/github-deployment.md#github-environments-and-variables).
 
 Configure downstream environment stacks from
