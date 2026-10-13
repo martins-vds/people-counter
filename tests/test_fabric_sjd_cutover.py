@@ -1874,6 +1874,35 @@ def test_synthetic_cleanup_archives_before_exact_deletes() -> None:
     assert len(spark.statements) == 12
 
 
+def test_cutover_jobs_immutable_write_verifies_readback_without_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Fs:
+        values: dict[str, str] = {}
+
+        def exists(self, path):
+            return path in self.values
+
+        def put(self, path, content, overwrite):
+            assert overwrite is False
+            self.values[path] = content
+            return True
+
+        def head(self, path, _size):
+            return self.values[path]
+
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=Fs()))
+    value = {"schema": "proof", "value": 1}
+
+    assert cutover_jobs._write_immutable_json(
+        f"{cutover_jobs.EVIDENCE_ROOT}/immediate-proof.json",
+        value,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: 0.0,
+        readback_timeout=0.0,
+    ) == sha256(value)
+
+
 def test_cutover_jobs_write_inventory_bootstrap_and_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

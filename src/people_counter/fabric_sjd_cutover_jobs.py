@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# pyright: reportMissingImports=false
+
 import argparse
 import base64
 import json
@@ -91,7 +93,14 @@ def _spark() -> Any:
     return session
 
 
-def _write_immutable_json(path: str, value: Mapping[str, Any]) -> str:
+def _write_immutable_json(
+    path: str,
+    value: Mapping[str, Any],
+    *,
+    sleep=time.sleep,
+    monotonic=time.monotonic,
+    readback_timeout: float = 15.0,
+) -> str:
     import notebookutils
 
     content = canonical_bytes(value).decode("utf-8")
@@ -106,7 +115,7 @@ def _write_immutable_json(path: str, value: Mapping[str, Any]) -> str:
             raise FileExistsError(path)
     elif notebookutils.fs.put(path, content, False) is not True:
         raise OSError(f"immutable evidence create failed at {path}")
-    deadline = time.monotonic() + 15.0
+    deadline = monotonic() + readback_timeout
     observed = ""
     while observed != content:
         observed = notebookutils.fs.head(path, len(content.encode("utf-8")) + 1)
@@ -115,9 +124,9 @@ def _write_immutable_json(path: str, value: Mapping[str, Any]) -> str:
         )
         if observed == content:
             break
-        if time.monotonic() >= deadline:
+        if monotonic() >= deadline:
             raise OSError(f"immutable evidence readback differs at {path}")
-        time.sleep(0.25)
+        sleep(0.25)
     if observed != content:
         raise OSError(f"immutable evidence readback differs at {path}")
     return sha256(value)
