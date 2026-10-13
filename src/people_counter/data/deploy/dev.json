@@ -1,0 +1,32 @@
+{
+  "schema": "people-counter-deployment-manifest-v1",
+  "stage": "dev",
+  "workspace_id": null,
+  "fabric_environment_id": null,
+  "fabric_runtime": "2.0",
+  "lakehouse": {
+    "lakehouse_id": null,
+    "table_prefix": "people_counter_dev_",
+    "files_root": "Files/people-counter/dev/v1/"
+  },
+  "roles": {
+    "control": {"display_name": "pc-sjd-dev-control", "item_id": null, "schedule": {"interval_minutes": 5, "enabled": false}},
+    "dispatcher": {"display_name": "pc-sjd-dev-dispatcher", "item_id": null, "schedule": {"interval_minutes": 5, "enabled": false}},
+    "process": {"display_name": "pc-sjd-dev-process", "item_id": null, "schedule": null},
+    "refresh": {"display_name": "pc-sjd-dev-refresh", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
+    "reconciliation": {"display_name": "pc-sjd-dev-reconciliation", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
+    "gold": {"display_name": "pc-sjd-dev-gold", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
+    "cutover": {"display_name": "pc-sjd-dev-cutover", "item_id": null, "schedule": null}
+  },
+  "analytics_reporting": {
+    "semantic_model": {"source_item_id": null, "source_name": "pc_analytics_model", "target_name": "pc_sjd_dev_analytics_model"},
+    "report": {"source_item_id": null, "source_name": "pc_analytics_report", "target_name": "pc_sjd_dev_analytics_report"}
+  },
+  "operational_reporting": {
+    "semantic_model": {"source_item_id": null, "source_name": "pc_operations_model", "target_name": "pc_sjd_dev_operations_model"},
+    "report": {"source_item_id": null, "source_name": "pc_operations_report", "target_name": "pc_sjd_dev_operations_report"}
+  },
+  "real_time_intelligence": {"eventhouse_id": null, "kql_database_id": null, "queryset_id": null},
+  "activator": {"reflex_id": null, "trigger_name": null},
+  "release": {"require_identity": false, "identity_schema": "people-counter-sjd-release-identity-v1"}
+}

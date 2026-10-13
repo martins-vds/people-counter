@@ -1,0 +1,176 @@
+name: Detect Infrastructure Drift
+
+on:
+  schedule:
+    - cron: "17 6 * * 1-5"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  dev:
+    name: Plan Development
+    permissions:
+      id-token: write # Passed to the environment-scoped Terraform workflow.
+      contents: read
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: dev
+      working_directory: infra/environments/dev
+      terraform_action: plan
+      check_definition_drift: true
+
+  test:
+    name: Plan Test
+    permissions:
+      id-token: write # Passed to the environment-scoped Terraform workflow.
+      contents: read
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: test
+      working_directory: infra/environments/test
+      terraform_action: plan
+      check_definition_drift: true
+
+  prod:
+    name: Plan Production
+    permissions:
+      id-token: write # Passed to the environment-scoped Terraform workflow.
+      contents: read
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: prod
+      working_directory: infra/environments/prod
+      terraform_action: plan
+      check_definition_drift: true
+
+  report:
+    name: Report drift
+    runs-on: ubuntu-latest
+    needs:
+      - dev
+      - test
+      - prod
+    if: always() && !cancelled()
+    permissions:
+      contents: read
+      issues: write # Opens, updates, and closes the singleton drift issue.
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DRIFT_TITLE: Fabric deployment drift detected
+      DEV_RESULT: ${{ needs.dev.result }}
+      TEST_RESULT: ${{ needs.test.result }}
+      PROD_RESULT: ${{ needs.prod.result }}
+      WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      RECOVERY_URL: ${{ github.server_url }}/${{ github.repository }}/blob/main/docs/github-deployment.md#drift-import-and-state-recovery
+    steps:
+      - name: Build drift report
+        id: drift
+        env:
+          DEV_DRIFT: ${{ needs.dev.outputs.has_changes }}
+          TEST_DRIFT: ${{ needs.test.outputs.has_changes }}
+          PROD_DRIFT: ${{ needs.prod.outputs.has_changes }}
+          DEV_DEFINITION_DRIFT: ${{ needs.dev.outputs.definition_has_changes }}
+          TEST_DEFINITION_DRIFT: ${{ needs.test.outputs.definition_has_changes }}
+          PROD_DEFINITION_DRIFT: ${{ needs.prod.outputs.definition_has_changes }}
+          DEV_ARTIFACT: ${{ needs.dev.outputs.plan_artifact }}
+          TEST_ARTIFACT: ${{ needs.test.outputs.plan_artifact }}
+          PROD_ARTIFACT: ${{ needs.prod.outputs.plan_artifact }}
+        run: |
+          {
+            echo "<!-- people-counter-drift-report -->"
+            echo "Scheduled Terraform planning and sanitized Fabric definition exports detected the following state:"
+            echo
+            echo "| Environment | Terraform drift | Definition drift | Job | Plan artifact |"
+            echo "|---|---|---|---|---|"
+            echo "| dev | ${DEV_DRIFT:-unknown} | ${DEV_DEFINITION_DRIFT:-unknown} | ${DEV_RESULT} | \`${DEV_ARTIFACT:-unavailable}\` |"
+            echo "| test | ${TEST_DRIFT:-unknown} | ${TEST_DEFINITION_DRIFT:-unknown} | ${TEST_RESULT} | \`${TEST_ARTIFACT:-unavailable}\` |"
+            echo "| prod | ${PROD_DRIFT:-unknown} | ${PROD_DEFINITION_DRIFT:-unknown} | ${PROD_RESULT} | \`${PROD_ARTIFACT:-unavailable}\` |"
+            echo
+            echo "## Action required"
+            echo
+            echo "1. Open [the scheduled workflow run](${WORKFLOW_RUN_URL}) and download each retained plan artifact."
+            echo "2. Review \`tfplan.json\`, \`protected-changes.json\`, and \`definition-drift.json\` before changing state or source."
+            echo "3. Import legitimate out-of-band resources or restore source-controlled definitions; never approve a delete merely to silence drift."
+            echo "4. Rerun this workflow. This issue closes automatically only after all three jobs are successful and clean."
+            echo
+            echo "Recovery procedures: [deployment drift and state recovery](${RECOVERY_URL})."
+          } > "${RUNNER_TEMP}/drift-report.md"
+          if [ "${DEV_DRIFT}" = "true" ] || [ "${TEST_DRIFT}" = "true" ] || [ "${PROD_DRIFT}" = "true" ] \
+            || [ "${DEV_DEFINITION_DRIFT}" = "true" ] \
+            || [ "${TEST_DEFINITION_DRIFT}" = "true" ] \
+            || [ "${PROD_DEFINITION_DRIFT}" = "true" ] \
+            || [ "${DEV_RESULT}" != "success" ] \
+            || [ "${TEST_RESULT}" != "success" ] \
+            || [ "${PROD_RESULT}" != "success" ]; then
+            echo "detected=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "detected=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Open or update drift issue
+        if: steps.drift.outputs.detected == 'true'
+        run: |
+          issues=$(gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state all \
+            --limit 100 \
+            --search "\"${DRIFT_TITLE}\" in:title" \
+            --json number,state,title)
+          issue_number=$(jq -r \
+            --arg title "${DRIFT_TITLE}" \
+            '[.[] | select(.title == $title) | select(.state == "OPEN")][0].number // empty' \
+            <<< "${issues}")
+          if [ -z "${issue_number}" ]; then
+            issue_number=$(jq -r \
+              --arg title "${DRIFT_TITLE}" \
+              '[.[] | select(.title == $title)][0].number // empty' \
+              <<< "${issues}")
+          fi
+          if [ -z "${issue_number}" ]; then
+            issue_url=$(gh issue create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${DRIFT_TITLE}" \
+              --body-file "${RUNNER_TEMP}/drift-report.md")
+            issue_number=${issue_url##*/}
+          else
+            issue_state=$(jq -r \
+              --argjson number "${issue_number}" \
+              '.[] | select(.number == $number) | .state' \
+              <<< "${issues}")
+            if [ "${issue_state}" = "CLOSED" ]; then
+              gh issue reopen "${issue_number}" --repo "${GITHUB_REPOSITORY}"
+            fi
+            gh issue edit "${issue_number}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body-file "${RUNNER_TEMP}/drift-report.md"
+          fi
+          jq -r \
+            --arg title "${DRIFT_TITLE}" \
+            --argjson canonical "${issue_number}" \
+            '.[] | select(.title == $title)
+              | select(.state == "OPEN")
+              | select(.number != $canonical)
+              | .number' \
+            <<< "${issues}" |
+            while IFS= read -r duplicate; do
+              gh issue close "${duplicate}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --comment "Superseded by the singleton drift report #${issue_number}."
+            done
+
+      - name: Close resolved drift issue
+        if: steps.drift.outputs.detected == 'false'
+        run: |
+          gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --limit 100 \
+            --search "\"${DRIFT_TITLE}\" in:title" \
+            --json number,title \
+            --jq '.[] | select(.title == "Fabric deployment drift detected") | .number' |
+            while IFS= read -r issue_number; do
+              gh issue close "${issue_number}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --comment "Terraform plans and Fabric definition hashes are clean in dev, test, and prod. Closing resolved drift report."
+            done

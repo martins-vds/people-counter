@@ -1,0 +1,400 @@
+name: Terraform reusable
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      working_directory:
+        required: true
+        type: string
+      terraform_action:
+        required: true
+        type: string
+      terraform_version:
+        required: false
+        type: string
+        default: "1.9.8"
+      ref:
+        description: Immutable repository commit to plan or apply
+        required: false
+        type: string
+        default: ""
+      allow_protected_changes:
+        description: Allow explicitly approved delete/replace actions for protected resources
+        required: false
+        type: boolean
+        default: false
+      approve_shortcut_changes:
+        description: Approve reviewed OneLake shortcut changes
+        required: false
+        type: boolean
+        default: false
+      approve_workspace_identity_changes:
+        description: Approve reviewed workspace identity changes
+        required: false
+        type: boolean
+        default: false
+      approve_capacity_changes:
+        description: Approve reviewed capacity assignment or lifecycle changes
+        required: false
+        type: boolean
+        default: false
+      approve_production_deletions:
+        description: Approve reviewed deletion or replacement of Production Fabric items
+        required: false
+        type: boolean
+        default: false
+      check_definition_drift:
+        description: Compare live Fabric definition hashes with committed bundles
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      has_changes:
+        description: Whether the Terraform plan contains changes
+        value: ${{ jobs.terraform.outputs.has_changes }}
+      plan_artifact:
+        description: Name of the uploaded Terraform evidence artifact
+        value: ${{ jobs.terraform.outputs.plan_artifact }}
+      definition_has_changes:
+        description: Whether a live Fabric definition hash differs from Git
+        value: ${{ jobs.terraform.outputs.definition_has_changes }}
+
+permissions: {}
+
+concurrency:
+  group: terraform-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.terraform_action }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write # Exchanges the environment-scoped OIDC identity.
+      contents: read
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      plan_artifact: ${{ steps.metadata.outputs.artifact_name }}
+      definition_has_changes: ${{ steps.definition.outputs.has_changes || 'false' }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD_AUTH: "true"
+      FABRIC_USE_OIDC: "true"
+      FABRIC_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      FABRIC_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      TF_VAR_capacity_id: ${{ vars.FABRIC_CAPACITY_ID }}
+      TF_VAR_workspace_role_assignments: ${{ vars.FABRIC_WORKSPACE_ROLE_ASSIGNMENTS }}
+      TF_VAR_enable_activator: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
+      TF_VAR_onelake_shortcuts: ${{ vars.FABRIC_ONELAKE_SHORTCUTS || '{}' }}
+      TF_ENVIRONMENT: ${{ inputs.environment }}
+      TF_ROOT: ${{ inputs.working_directory }}
+      DEPLOY_REF: ${{ inputs.ref || github.sha }}
+      TF_ACTION: ${{ inputs.terraform_action }}
+      ALLOW_PROTECTED_CHANGES: ${{ inputs.allow_protected_changes }}
+      APPROVE_SHORTCUT_CHANGES: ${{ inputs.approve_shortcut_changes }}
+      APPROVE_WORKSPACE_IDENTITY_CHANGES: ${{ inputs.approve_workspace_identity_changes }}
+      APPROVE_CAPACITY_CHANGES: ${{ inputs.approve_capacity_changes }}
+      APPROVE_PRODUCTION_DELETIONS: ${{ inputs.approve_production_deletions }}
+      TF_BACKEND_RESOURCE_GROUP_NAME: ${{ vars.TF_BACKEND_RESOURCE_GROUP_NAME }}
+      TF_BACKEND_STORAGE_ACCOUNT_NAME: ${{ vars.TF_BACKEND_STORAGE_ACCOUNT_NAME }}
+      TF_BACKEND_CONTAINER_NAME: ${{ vars.TF_BACKEND_CONTAINER_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Validate inputs
+        run: |
+          if [[ ! "${DEPLOY_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Deployment ref must be a full commit SHA"
+            exit 1
+          fi
+          case "${TF_ACTION}" in
+            plan|apply) ;;
+            *)
+              echo "::error::terraform_action must be plan or apply"
+              exit 1
+              ;;
+          esac
+          case "${TF_ENVIRONMENT}" in
+            dev|test|prod) ;;
+            *)
+              echo "::error::Unsupported deployment environment"
+              exit 1
+              ;;
+          esac
+          if [ "${TF_ROOT}" != "infra/environments/${TF_ENVIRONMENT}" ]; then
+            echo "::error::Terraform root does not match the environment"
+            exit 1
+          fi
+          if [ ! -d "${GITHUB_WORKSPACE}/${TF_ROOT}" ]; then
+            echo "::error::Terraform root does not exist: ${TF_ROOT}"
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "${DEPLOY_REF}"
+
+      - name: Prepare Terraform evidence
+        id: metadata
+        run: |
+          artifact_name="tfplan-${TF_ENVIRONMENT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+          mkdir -p .deployment-evidence
+          jq -n \
+            --arg action "${TF_ACTION}" \
+            --arg commitSha "${DEPLOY_REF}" \
+            --arg environment "${TF_ENVIRONMENT}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            '{
+              schema: "people-counter-terraform-evidence-v1",
+              action: $action,
+              commitSha: $commitSha,
+              environment: $environment,
+              runId: $runId
+            }' > .deployment-evidence/context.json
+
+      - name: Azure login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        run: |
+          set -o pipefail
+          terraform init -input=false \
+            -backend-config="resource_group_name=${TF_BACKEND_RESOURCE_GROUP_NAME}" \
+            -backend-config="storage_account_name=${TF_BACKEND_STORAGE_ACCOUNT_NAME}" \
+            -backend-config="container_name=${TF_BACKEND_CONTAINER_NAME}" \
+            -backend-config="key=people-counter/${TF_ENVIRONMENT}.tfstate" \
+            -backend-config="use_azuread_auth=true" \
+            2>&1 | tee .deployment-evidence/init.log
+
+      - name: Terraform validate
+        run: |
+          set -o pipefail
+          terraform validate -no-color \
+            2>&1 | tee .deployment-evidence/validate.log
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          set +e
+          set -o pipefail
+          terraform plan -input=false -detailed-exitcode -out=tfplan \
+            2>&1 | tee .deployment-evidence/plan.log
+          status=${PIPESTATUS[0]}
+          set -e
+          case "${status}" in
+            0)
+              echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+              ;;
+            2)
+              echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              exit "${status}"
+              ;;
+          esac
+          terraform show -json tfplan > tfplan.json
+
+      - name: Summarize plan
+        run: |
+          {
+            echo "### Terraform plan: ${TF_ENVIRONMENT}"
+            echo
+            echo "| Action | Count |"
+            echo "|---|---:|"
+            jq -r '
+              [.resource_changes[]?.change.actions | join("/")]
+              | group_by(.)
+              | map({action: .[0], count: length})
+              | .[]
+              | "| \(.action) | \(.count) |"
+            ' tfplan.json
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Detect protected changes
+        run: |
+          jq --arg environment "${TF_ENVIRONMENT}" '
+            def changed:
+              any(.change.actions[]?; . != "no-op" and . != "read");
+            def deletes:
+              any(.change.actions[]?; . == "delete");
+            def protected_type:
+              (.type | startswith("fabric_"))
+              or .type == "azurerm_fabric_capacity";
+            [
+              .resource_changes[]?
+              | select(changed)
+              | {
+                  address,
+                  actions: .change.actions,
+                  type,
+                  deletes: deletes,
+                  protectedDeletion: (deletes and protected_type),
+                  shortcutChange: (.type == "fabric_shortcut"),
+                  workspaceIdentityChange: (
+                    .type == "fabric_workspace"
+                    and ((.change.before.identity // null) != (.change.after.identity // null))
+                  ),
+                  capacityChange: (
+                    .type == "azurerm_fabric_capacity"
+                    or (
+                      .type == "fabric_workspace"
+                      and (
+                        (.change.before.capacity_id // null)
+                        != (.change.after.capacity_id // null)
+                      )
+                    )
+                  ),
+                  productionDeletion: (
+                    $environment == "prod"
+                    and (.type | startswith("fabric_"))
+                    and deletes
+                  )
+                }
+            ] as $changes
+            | {
+                protectedChanges: [$changes[] | select(.protectedDeletion)],
+                shortcutChanges: [$changes[] | select(.shortcutChange)],
+                workspaceIdentityChanges: [
+                  $changes[] | select(.workspaceIdentityChange)
+                ],
+                capacityChanges: [$changes[] | select(.capacityChange)],
+                productionDeletions: [
+                  $changes[] | select(.productionDeletion)
+                ]
+              }
+          ' tfplan.json > protected-changes.json
+          jq -r '
+            to_entries[]
+            | .key as $category
+            | .value[]
+            | "\($category): \(.address) [\(.actions | join("/"))]"
+          ' protected-changes.json > protected-changes.txt
+          if [ -s protected-changes.txt ]; then
+            {
+              echo
+              echo "#### Approval-gated changes"
+              echo '```text'
+              cat protected-changes.txt
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          if [ "${TF_ACTION}" != "apply" ]; then
+            exit 0
+          fi
+          violations=()
+          if [ "$(jq '.protectedChanges | length' protected-changes.json)" -gt 0 ] \
+            && [ "${ALLOW_PROTECTED_CHANGES}" != "true" ]; then
+            violations+=("allow_protected_changes")
+          fi
+          if [ "$(jq '.shortcutChanges | length' protected-changes.json)" -gt 0 ] \
+            && [ "${APPROVE_SHORTCUT_CHANGES}" != "true" ]; then
+            violations+=("approve_shortcut_changes")
+          fi
+          if [ "$(jq '.workspaceIdentityChanges | length' protected-changes.json)" -gt 0 ] \
+            && [ "${APPROVE_WORKSPACE_IDENTITY_CHANGES}" != "true" ]; then
+            violations+=("approve_workspace_identity_changes")
+          fi
+          if [ "$(jq '.capacityChanges | length' protected-changes.json)" -gt 0 ] \
+            && [ "${APPROVE_CAPACITY_CHANGES}" != "true" ]; then
+            violations+=("approve_capacity_changes")
+          fi
+          if [ "$(jq '.productionDeletions | length' protected-changes.json)" -gt 0 ] \
+            && [ "${APPROVE_PRODUCTION_DELETIONS}" != "true" ]; then
+            violations+=("approve_production_deletions")
+          fi
+          if [ "${#violations[@]}" -gt 0 ]; then
+            printf -v missing '%s, ' "${violations[@]}"
+            echo "::error::Plan requires explicit protected-environment approvals: ${missing%, }"
+            exit 1
+          fi
+
+      - name: Export non-secret Terraform outputs for definition drift
+        if: inputs.check_definition_drift
+        run: |
+          terraform output -json > "${RUNNER_TEMP}/terraform-output.json"
+
+      - name: Compare live Fabric definition hashes
+        if: inputs.check_definition_drift
+        id: definition
+        working-directory: .
+        env:
+          PYTHONPATH: src
+        run: |
+          set +e
+          python scripts/check_fabric_definition_drift.py \
+            --manifest fabric/definition-drift-manifest.json \
+            --terraform-outputs "${RUNNER_TEMP}/terraform-output.json" \
+            --source-root fabric \
+            --output "${TF_ROOT}/.deployment-evidence/definition-drift.json"
+          status=$?
+          set -e
+          case "${status}" in
+            0)
+              echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+              ;;
+            2)
+              echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              exit "${status}"
+              ;;
+          esac
+          jq -r '
+            "### Fabric definition drift: \(.status)\n\n"
+            + "| Source bundle | Type | Status |\n"
+            + "|---|---|---|\n"
+            + (
+                .items
+                | map("| \(.path) | \(.itemType) | \(.status) |")
+                | join("\n")
+              )
+          ' "${TF_ROOT}/.deployment-evidence/definition-drift.json" \
+            >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Terraform apply
+        if: inputs.terraform_action == 'apply'
+        run: |
+          set -o pipefail
+          terraform apply -input=false -auto-approve tfplan \
+            2>&1 | tee .deployment-evidence/apply.log
+
+      - name: Upload Terraform plan and execution evidence
+        if: always() && steps.metadata.conclusion == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: |
+            ${{ inputs.working_directory }}/tfplan
+            ${{ inputs.working_directory }}/tfplan.json
+            ${{ inputs.working_directory }}/protected-changes.json
+            ${{ inputs.working_directory }}/protected-changes.txt
+            ${{ inputs.working_directory }}/.deployment-evidence/
+          if-no-files-found: error
+          retention-days: 30

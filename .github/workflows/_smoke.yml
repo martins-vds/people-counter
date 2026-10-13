@@ -1,0 +1,434 @@
+name: Fabric smoke tests
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      working_directory:
+        required: true
+        type: string
+      ref:
+        description: Immutable repository commit being verified
+        required: true
+        type: string
+      expect_schedules_enabled:
+        required: false
+        type: boolean
+        default: false
+      initial_evidence_artifact:
+        description: First safe-state postconfiguration evidence artifact
+        required: true
+        type: string
+      repeat_evidence_artifact:
+        description: Repeated safe-state postconfiguration evidence artifact
+        required: true
+        type: string
+    outputs:
+      status:
+        description: Smoke-test evidence status
+        value: ${{ jobs.smoke.outputs.status }}
+      evidence_artifact:
+        description: Name of the uploaded smoke-test artifact
+        value: ${{ jobs.smoke.outputs.evidence_artifact }}
+
+permissions: {}
+
+concurrency:
+  group: fabric-smoke-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Verify deployed Fabric resources
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write # Exchanges the environment-scoped OIDC identity.
+    outputs:
+      status: ${{ steps.verify.outputs.status }}
+      evidence_artifact: ${{ steps.metadata.outputs.artifact_name }}
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD_AUTH: "true"
+      EXPECT_REPORTING: ${{ vars.FABRIC_ENABLE_REPORTING || 'false' }}
+      EXPECT_RTI: ${{ vars.FABRIC_ENABLE_RTI || 'false' }}
+      EXPECT_ACTIVATOR: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
+      TF_VAR_capacity_id: ${{ vars.FABRIC_CAPACITY_ID }}
+      TF_VAR_workspace_role_assignments: ${{ vars.FABRIC_WORKSPACE_ROLE_ASSIGNMENTS }}
+      TF_VAR_enable_activator: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
+      TF_VAR_onelake_shortcuts: ${{ vars.FABRIC_ONELAKE_SHORTCUTS || '{}' }}
+      TF_BACKEND_RESOURCE_GROUP_NAME: ${{ vars.TF_BACKEND_RESOURCE_GROUP_NAME }}
+      TF_BACKEND_STORAGE_ACCOUNT_NAME: ${{ vars.TF_BACKEND_STORAGE_ACCOUNT_NAME }}
+      TF_BACKEND_CONTAINER_NAME: ${{ vars.TF_BACKEND_CONTAINER_NAME }}
+      TF_ENVIRONMENT: ${{ inputs.environment }}
+      TF_ROOT: ${{ inputs.working_directory }}
+      DEPLOY_REF: ${{ inputs.ref }}
+      EXPECT_SCHEDULES_ENABLED: ${{ inputs.expect_schedules_enabled }}
+    steps:
+      - name: Check out deployed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Validate immutable inputs
+        run: |
+          if [[ ! "${DEPLOY_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Deployment ref must be a full commit SHA"
+            exit 1
+          fi
+          case "${TF_ENVIRONMENT}" in
+            dev|test|prod) ;;
+            *)
+              echo "::error::Unsupported deployment environment"
+              exit 1
+              ;;
+          esac
+          if [ "${TF_ROOT}" != "infra/environments/${TF_ENVIRONMENT}" ]; then
+            echo "::error::Terraform root does not match the environment"
+            exit 1
+          fi
+          if [ "${EXPECT_SCHEDULES_ENABLED}" != "false" ]; then
+            echo "::error::Clean-room acceptance requires disabled schedules"
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "${DEPLOY_REF}"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Prepare smoke evidence
+        id: metadata
+        run: |
+          artifact_name="fabric-smoke-${TF_ENVIRONMENT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+          mkdir -p "${RUNNER_TEMP}/smoke-evidence"
+          jq -n \
+            --arg commitSha "${DEPLOY_REF}" \
+            --arg environment "${TF_ENVIRONMENT}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            '{
+              schema: "people-counter-fabric-smoke-evidence-v1",
+              status: "not-run",
+              environment: $environment,
+              commitSha: $commitSha,
+              runId: $runId,
+              checks: []
+            }' > "${RUNNER_TEMP}/smoke-evidence/smoke.json"
+
+      - name: Download initial deployment evidence
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ inputs.initial_evidence_artifact }}
+          path: ${{ runner.temp }}/postconfigure-initial
+
+      - name: Download repeated deployment evidence
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ inputs.repeat_evidence_artifact }}
+          path: ${{ runner.temp }}/postconfigure-repeat
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Read deployed Terraform outputs
+        run: |
+          set -o pipefail
+          terraform -chdir="${TF_ROOT}" init -input=false \
+            -backend-config="resource_group_name=${TF_BACKEND_RESOURCE_GROUP_NAME}" \
+            -backend-config="storage_account_name=${TF_BACKEND_STORAGE_ACCOUNT_NAME}" \
+            -backend-config="container_name=${TF_BACKEND_CONTAINER_NAME}" \
+            -backend-config="key=people-counter/${TF_ENVIRONMENT}.tfstate" \
+            -backend-config="use_azuread_auth=true" \
+            2>&1 | tee "${RUNNER_TEMP}/smoke-evidence/terraform-init.log"
+          terraform -chdir="${TF_ROOT}" output -json \
+            > "${RUNNER_TEMP}/smoke-evidence/terraform-output.json"
+          jq '{
+            workspace_id: .workspace_id.value,
+            lakehouse_id: .lakehouse_id.value,
+            onelake_shortcuts: .onelake_shortcuts.value,
+            environment_id: .environment_id.value,
+            spark_job_definition_ids: .spark_job_definition_ids.value,
+            semantic_model_ids: .semantic_model_ids.value,
+            report_ids: .report_ids.value,
+            eventhouse_id: .eventhouse_id.value,
+            kql_database_id: .kql_database_id.value,
+            kql_queryset_id: .kql_queryset_id.value,
+            kql_dashboard_id: .kql_dashboard_id.value,
+            activator_ids: .activator_ids.value
+          }' "${RUNNER_TEMP}/smoke-evidence/terraform-output.json" \
+            > "${RUNNER_TEMP}/smoke-evidence/deployment-outputs.json"
+
+      - name: Require zero Terraform drift
+        id: drift
+        run: |
+          set +e
+          terraform -chdir="${TF_ROOT}" plan \
+            -detailed-exitcode -input=false -lock-timeout=5m -no-color \
+            -out="${RUNNER_TEMP}/smoke-evidence/repeat.tfplan" \
+            > "${RUNNER_TEMP}/smoke-evidence/terraform-repeat-plan.txt" 2>&1
+          exit_code=$?
+          set -e
+          echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
+          if [ "${exit_code}" -le 1 ]; then
+            terraform -chdir="${TF_ROOT}" show -json \
+              "${RUNNER_TEMP}/smoke-evidence/repeat.tfplan" \
+              > "${RUNNER_TEMP}/smoke-evidence/terraform-repeat-plan.json" \
+              || true
+          fi
+
+      - name: Validate source-controlled definitions
+        run: >
+          uv run --frozen python scripts/validate_fabric_definitions.py fabric
+          --output "${RUNNER_TEMP}/smoke-evidence/fabric-definitions.json"
+
+      - name: Run clean-room acceptance
+        env:
+          TERRAFORM_DRIFT_EXIT_CODE: ${{ steps.drift.outputs.exit_code }}
+        run: |
+          args=(
+            --manifest-path "src/people_counter/data/deploy/${TF_ENVIRONMENT}.json"
+            --runtime-contract-path "fabric/runtime/${TF_ENVIRONMENT}.json"
+            --terraform-output-path "${RUNNER_TEMP}/smoke-evidence/terraform-output.json"
+            --definition-evidence-path "${RUNNER_TEMP}/smoke-evidence/fabric-definitions.json"
+            --postconfigure-evidence-path "${RUNNER_TEMP}/postconfigure-initial/fabric-evidence.json"
+            --postconfigure-evidence-path "${RUNNER_TEMP}/postconfigure-repeat/fabric-evidence.json"
+            --stage "${TF_ENVIRONMENT}"
+            --commit-sha "${DEPLOY_REF}"
+            --terraform-drift-exit-code "${TERRAFORM_DRIFT_EXIT_CODE}"
+          )
+          [ "${EXPECT_REPORTING}" = "true" ] && args+=(--require-reporting)
+          [ "${EXPECT_RTI}" = "true" ] && args+=(--require-rti)
+          [ "${EXPECT_ACTIVATOR}" = "true" ] && args+=(--require-activator)
+          set -o pipefail
+          uv run --frozen pc-validate-fabric-cleanroom "${args[@]}" \
+            | tee "${RUNNER_TEMP}/smoke-evidence/cleanroom.json"
+
+      - name: Probe deployed Fabric resources
+        id: verify
+        shell: bash
+        run: |
+          set -u -o pipefail
+          evidence_dir="${RUNNER_TEMP}/smoke-evidence"
+          outputs="${evidence_dir}/terraform-output.json"
+          checks='[]'
+          failures=0
+
+          record() {
+            local name=$1
+            local status=$2
+            local detail=$3
+            checks=$(jq -c \
+              --arg name "${name}" \
+              --arg status "${status}" \
+              --arg detail "${detail}" \
+              '. + [{name: $name, status: $status, detail: $detail}]' \
+              <<<"${checks}")
+            if [ "${status}" != "succeeded" ]; then
+              failures=$((failures + 1))
+            fi
+          }
+
+          output_value() {
+            jq -er --arg name "$1" '.[$name].value // empty' "${outputs}"
+          }
+
+          token=$(az account get-access-token \
+            --resource "https://api.fabric.microsoft.com" \
+            --query accessToken -o tsv)
+          if [ -z "${token}" ]; then
+            record "fabric-token" "failed" "Azure CLI returned no Fabric access token"
+          else
+            echo "::add-mask::${token}"
+            record "fabric-token" "succeeded" "OIDC exchange returned a token"
+          fi
+
+          workspace_id=$(output_value workspace_id 2>/dev/null || true)
+          lakehouse_id=$(output_value lakehouse_id 2>/dev/null || true)
+          environment_id=$(output_value environment_id 2>/dev/null || true)
+          sjd_ids=$(output_value spark_job_definition_ids 2>/dev/null || echo '{}')
+          semantic_model_ids=$(output_value semantic_model_ids 2>/dev/null || echo '{}')
+          report_ids=$(output_value report_ids 2>/dev/null || echo '{}')
+          activator_ids=$(output_value activator_ids 2>/dev/null || echo '{}')
+
+          probe() {
+            local name=$1
+            local path=$2
+            local response_file="${evidence_dir}/response.json"
+            local status
+            status=$(curl --silent --show-error \
+              --connect-timeout 15 --max-time 90 \
+              --retry 3 --retry-all-errors --retry-delay 5 \
+              --output "${response_file}" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${token}" \
+              --header "Accept: application/json" \
+              "https://api.fabric.microsoft.com/v1${path}") || status="000"
+            if [[ "${status}" =~ ^2[0-9][0-9]$ ]]; then
+              record "${name}" "succeeded" "HTTP ${status}"
+              return 0
+            fi
+            record "${name}" "failed" "HTTP ${status}"
+            return 1
+          }
+
+          if [ -z "${workspace_id}" ]; then
+            record "workspace-output" "failed" "workspace_id is absent"
+          else
+            probe "workspace" "/workspaces/${workspace_id}" || true
+          fi
+          if [ -z "${lakehouse_id}" ]; then
+            record "lakehouse-output" "failed" "lakehouse_id is absent"
+          else
+            probe "lakehouse" \
+              "/workspaces/${workspace_id}/lakehouses/${lakehouse_id}" || true
+          fi
+          if [ -z "${environment_id}" ]; then
+            record "environment-output" "failed" "environment_id is absent"
+          else
+            probe "environment" \
+              "/workspaces/${workspace_id}/environments/${environment_id}" || true
+          fi
+
+          expected_roles='["control","cutover","dispatcher","gold","process","reconciliation","refresh"]'
+          actual_roles=$(jq -c 'keys | sort' <<<"${sjd_ids}" 2>/dev/null || echo '[]')
+          if [ "${actual_roles}" != "${expected_roles}" ]; then
+            record "sjd-role-set" "failed" \
+              "Expected seven canonical roles; received ${actual_roles}"
+          else
+            record "sjd-role-set" "succeeded" "All seven canonical roles exist"
+          fi
+          while IFS=$'\t' read -r role item_id; do
+            [ -n "${role}" ] || continue
+            probe "sjd-${role}" \
+              "/workspaces/${workspace_id}/sparkJobDefinitions/${item_id}" || true
+          done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"${sjd_ids}")
+
+          scheduled_roles=(control dispatcher refresh reconciliation gold)
+          for role in "${scheduled_roles[@]}"; do
+            item_id=$(jq -er --arg role "${role}" '.[$role]' \
+              <<<"${sjd_ids}" 2>/dev/null || true)
+            if [ -z "${item_id}" ]; then
+              record "schedule-${role}" "failed" "SJD output is absent"
+              continue
+            fi
+            schedule_path="/workspaces/${workspace_id}/items/${item_id}/jobs/sparkjob/schedules"
+            schedule_file="${evidence_dir}/schedule-${role}.json"
+            http_status=$(curl --silent --show-error \
+              --connect-timeout 15 --max-time 90 \
+              --retry 3 --retry-all-errors --retry-delay 5 \
+              --output "${schedule_file}" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${token}" \
+              --header "Accept: application/json" \
+              "https://api.fabric.microsoft.com/v1${schedule_path}") \
+              || http_status="000"
+            if [[ ! "${http_status}" =~ ^2[0-9][0-9]$ ]]; then
+              record "schedule-${role}" "failed" "HTTP ${http_status}"
+              continue
+            fi
+            expected_enabled=false
+            [ "${EXPECT_SCHEDULES_ENABLED}" = "true" ] \
+              && expected_enabled=true
+            if jq -e --argjson enabled "${expected_enabled}" \
+              '(.value // []) | length == 1 and .[0].enabled == $enabled' \
+              "${schedule_file}" >/dev/null; then
+              record "schedule-${role}" "succeeded" \
+                "Exactly one schedule has enabled=${expected_enabled}"
+            else
+              record "schedule-${role}" "failed" \
+                "Expected exactly one schedule with enabled=${expected_enabled}"
+            fi
+          done
+
+          if [ "${EXPECT_REPORTING}" = "true" ]; then
+            for bundle in analytics operational; do
+              model_id=$(jq -er --arg key "${bundle}" '.[$key]' \
+                <<<"${semantic_model_ids}" 2>/dev/null || true)
+              report_id=$(jq -er --arg key "${bundle}" '.[$key]' \
+                <<<"${report_ids}" 2>/dev/null || true)
+              if [ -z "${model_id}" ] || [ -z "${report_id}" ]; then
+                record "reporting-${bundle}" "failed" \
+                  "Enabled reporting outputs are incomplete"
+                continue
+              fi
+              probe "semantic-model-${bundle}" \
+                "/workspaces/${workspace_id}/semanticModels/${model_id}" || true
+              probe "report-${bundle}" \
+                "/workspaces/${workspace_id}/reports/${report_id}" || true
+            done
+          else
+            record "reporting-gate" "skipped" \
+              "FABRIC_ENABLE_REPORTING is not true"
+            failures=$((failures - 1))
+          fi
+
+          if [ "${EXPECT_ACTIVATOR}" = "true" ]; then
+            activator_id=$(jq -er '.operations' \
+              <<<"${activator_ids}" 2>/dev/null || true)
+            if [ -z "${activator_id}" ]; then
+              record "activator-output" "failed" \
+                "Enabled Activator output is absent"
+            else
+              probe "activator" \
+                "/workspaces/${workspace_id}/reflexes/${activator_id}" || true
+            fi
+          else
+            record "activator-gate" "skipped" \
+              "FABRIC_ENABLE_ACTIVATOR is not true"
+            failures=$((failures - 1))
+          fi
+
+          status="succeeded"
+          [ "${failures}" -eq 0 ] || status="failed"
+          jq \
+            --arg status "${status}" \
+            --arg generatedAt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --argjson checks "${checks}" \
+            '.status = $status | .generatedAt = $generatedAt | .checks = $checks' \
+            "${evidence_dir}/smoke.json" \
+            > "${evidence_dir}/smoke.next.json"
+          mv "${evidence_dir}/smoke.next.json" "${evidence_dir}/smoke.json"
+          rm -f "${evidence_dir}/response.json" "${evidence_dir}"/schedule-*.json
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+
+      - name: Remove transient Terraform output
+        if: always() && steps.metadata.conclusion == 'success'
+        run: rm -f "${RUNNER_TEMP}/smoke-evidence/terraform-output.json"
+
+      - name: Upload smoke-test evidence
+        if: always() && steps.metadata.conclusion == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: ${{ runner.temp }}/smoke-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce smoke-test gate
+        if: always()
+        env:
+          SMOKE_STATUS: ${{ steps.verify.outputs.status }}
+        run: |
+          if [ "${SMOKE_STATUS}" != "succeeded" ]; then
+            echo "::error::Fabric smoke tests did not succeed; schedules remain in their reconciled safe state."
+            exit 1
+          fi

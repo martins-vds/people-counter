@@ -1,0 +1,594 @@
+{
+  "config": "{\"version\":\"5.77\",\"themeCollection\":{\"baseTheme\":{\"name\":\"Fluent2-CY26SU09\",\"type\":2,\"version\":{\"visual\":\"2.13.0\",\"report\":\"3.4.0\",\"page\":\"2.3.1\"}}},\"activeSectionIndex\":4,\"defaultDrillFilterOtherVisuals\":true,\"linguisticSchemaSyncVersion\":0,\"settings\":{\"useNewFilterPaneExperience\":true,\"allowChangeFilterTypes\":true,\"useStylableVisualContainerHeader\":true,\"queryLimitOption\":6,\"useEnhancedTooltips\":true,\"exportDataMode\":1,\"useDefaultAggregateDisplayName\":true},\"objects\":{\"section\":[{\"properties\":{\"verticalAlignment\":{\"expr\":{\"Literal\":{\"Value\":\"'Top'\"}}}}}]}}",
+  "layoutOptimization": 0,
+  "resourcePackages": [
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "Fluent2-CY26SU09",
+            "path": "BaseThemes/Fluent2-CY26SU09.json",
+            "type": 202
+          }
+        ],
+        "name": "SharedResources",
+        "type": 2
+      }
+    }
+  ],
+  "sections": [
+    {
+      "config": "{}",
+      "displayName": "Data quality",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 1080.00,
+      "name": "13ae0e7920a5b4d30772",
+      "ordinal": 4,
+      "visualContainers": [
+        {
+          "config": "{\"name\":\"00818369213a05be823d\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":0,\"width\":280,\"height\":280,\"z\":0,\"tabOrder\":0}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Data Freshness Minutes\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Data Freshness Minutes\"},\"Name\":\"people_counter_gold_operations_hour.Data Freshness Minutes\",\"NativeReferenceName\":\"Data Freshness Minutes\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Data Freshness Minutes\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Data Freshness Minutes\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Overall data freshness (minutes)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRzU7DMAx+lcnnCm0cewQ6DqhoMMQFTVWUmjVTm0ROglZVfXfsdMBp4mYn35/tCe7dMCjbBig/Jtgj19Hol4Q0Pqio9p3yeIFAOUH+kOIdKRhnobwtYEtuyPRnNSCU4KGAimXiKA0632OjXbIRqTm6vm2cR1KR6aHpXCKGv42emev5UHCGHnXMejWqkAjFrzp7wrBYck5maXzFz78m+85zATsS+ewtE6y2zOssc1e1sSliAAb9JP0/3M0VEdGI5ktCIKHVeJG85nlg1ztjW2OPEnpHZlDLKh/JJc/Pywk4/onnF3/u14dM/N32hpvqjDoJoMZIRocnI7fZzIz8Bo0g1N7PAQAA",
+          "width": 280.00,
+          "x": 10.00,
+          "y": 0.00,
+          "z": 0.00
+        },
+        {
+          "config": "{\"name\":\"09eb434f96cc07dc5554\",\"layouts\":[{\"id\":0,\"position\":{\"x\":9.134157944814463,\"y\":290.46622264509995,\"z\":5,\"width\":938.9914367269267,\"height\":279.5052331113226,\"tabOrder\":5}}],\"singleVisual\":{\"visualType\":\"tableEx\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_model_config.config_sha256\"},{\"queryRef\":\"people_counter_gold_dim_model_config.pipeline\"},{\"queryRef\":\"people_counter_gold_dim_model_config.detector_model\"},{\"queryRef\":\"people_counter_gold_dim_model_config.sample_fps\"},{\"queryRef\":\"people_counter_gold_dim_model_config.detection_threshold\"},{\"queryRef\":\"people_counter_gold_dim_model_config.batch_size\"},{\"queryRef\":\"people_counter_gold_dim_model_config.first_capture_utc\"},{\"queryRef\":\"people_counter_gold_dim_model_config.last_capture_utc\"},{\"queryRef\":\"people_counter_gold_dim_model_config.video_count\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_model_config\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"config_sha256\"},\"Name\":\"people_counter_gold_dim_model_config.config_sha256\",\"NativeReferenceName\":\"config_sha256\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"pipeline\"},\"Name\":\"people_counter_gold_dim_model_config.pipeline\",\"NativeReferenceName\":\"pipeline\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"detector_model\"},\"Name\":\"people_counter_gold_dim_model_config.detector_model\",\"NativeReferenceName\":\"detector_model\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"sample_fps\"},\"Name\":\"people_counter_gold_dim_model_config.sample_fps\",\"NativeReferenceName\":\"sample_fps\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"detection_threshold\"},\"Name\":\"people_counter_gold_dim_model_config.detection_threshold\",\"NativeReferenceName\":\"detection_threshold\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"batch_size\"},\"Name\":\"people_counter_gold_dim_model_config.batch_size\",\"NativeReferenceName\":\"batch_size\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"first_capture_utc\"},\"Name\":\"people_counter_gold_dim_model_config.first_capture_utc\",\"NativeReferenceName\":\"first_capture_utc\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"last_capture_utc\"},\"Name\":\"people_counter_gold_dim_model_config.last_capture_utc\",\"NativeReferenceName\":\"last_capture_utc\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"video_count\"},\"Name\":\"people_counter_gold_dim_model_config.video_count\",\"NativeReferenceName\":\"video_count\"}]},\"drillFilterOtherVisuals\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Observed model configurations'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 279.51,
+          "queryBinary": "H4sIAAAAAAAEAK2VSW/bMBCF/wvPRGA7dRroGMfpoWiRDckhCAiGGlssxAVckriG/nuHUhbJjooq6o1D8r33aSRhtmRhlOI69yS725IrwHWQ4iKC25zywK8KbuHlCsm2pD5IixtwXhpNshklZ86oWv6TKyAZsYSSJdqETSrA2BKYMFEHcGxtypzlUjFlcihxW6/kGu9fbyxKJ9U9RYgSRKgNF6aMSqe85bN14JtI5DTRCbiE1XtR51YVJefOWHB1duPOfMFn8yOCZ6+A/8B00BUnbZCPKRMcaAEvVrsRo5mttFBKDUNx33R9pC3j0ZA5BHxFxjUIQ1F31H3AeyGjsT1XiW5l/VDklrIPt2P+nzqMGhYKVBdI9bk2dy3+3uvduNFP8cCDKJiXvwd/zi1lH3PHfDTqSjofmOA2RAcsBjGUeN+gD/yjqNH8JR+Hv6fvo/8gaDT8o8zBNIBDudvSPuSO/T0GnEidS71OUOdOKt7MtG/ORIvbzSxEvF/NP5HqCZ3SGT2kX+icHtGv9DgNqvgQTOAlyaa1axqYl5DHWpQM08ZN6gxCHNJ21C0CmKe0WtRU2XwyqVJT3ubqFIvlM4iYzH5AcFL47zJN4WmFaX8Ar6R/YbkHAAA=",
+          "width": 938.99,
+          "x": 9.13,
+          "y": 290.47,
+          "z": 5.00
+        },
+        {
+          "config": "{\"name\":\"14fc7628e4db0834ea0e\",\"layouts\":[{\"id\":0,\"position\":{\"x\":9,\"y\":580,\"width\":939,\"height\":280,\"z\":6,\"tabOrder\":6}}],\"singleVisual\":{\"visualType\":\"tableEx\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_video.work_id\"},{\"queryRef\":\"people_counter_gold_dim_video.asset_id\"},{\"queryRef\":\"people_counter_gold_dim_video.camera_id\"},{\"queryRef\":\"people_counter_gold_dim_video.location_id\"},{\"queryRef\":\"people_counter_gold_dim_video.captured_at_utc\"},{\"queryRef\":\"Sum(people_counter_gold_video.video_duration_seconds)\"},{\"queryRef\":\"Sum(people_counter_gold_video.processing_seconds)\"},{\"queryRef\":\"Sum(people_counter_gold_video.distinct_people)\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_video\",\"Type\":0},{\"Name\":\"p1\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"work_id\"},\"Name\":\"people_counter_gold_dim_video.work_id\",\"NativeReferenceName\":\"work_id\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"asset_id\"},\"Name\":\"people_counter_gold_dim_video.asset_id\",\"NativeReferenceName\":\"asset_id\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"camera_id\"},\"Name\":\"people_counter_gold_dim_video.camera_id\",\"NativeReferenceName\":\"camera_id\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"location_id\"},\"Name\":\"people_counter_gold_dim_video.location_id\",\"NativeReferenceName\":\"location_id\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"captured_at_utc\"},\"Name\":\"people_counter_gold_dim_video.captured_at_utc\",\"NativeReferenceName\":\"captured_at_utc\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"video_duration_seconds\"},\"Name\":\"Sum(people_counter_gold_video.video_duration_seconds)\",\"NativeReferenceName\":\"video_duration_seconds\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"processing_seconds\"},\"Name\":\"Sum(people_counter_gold_video.processing_seconds)\",\"NativeReferenceName\":\"processing_seconds\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"distinct_people\"},\"Name\":\"Sum(people_counter_gold_video.distinct_people)\",\"NativeReferenceName\":\"distinct_people\"}]},\"drillFilterOtherVisuals\":true,\"filterSortOrder\":3,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Videos with missing processing metrics'\"}}}}}]}}}",
+          "filters": "[{\"name\":\"f7d03782cb90a0b78cd5\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_dim_video\"}},\"Property\":\"asset_id\"}},\"type\":\"Categorical\",\"howCreated\":0,\"isHiddenInViewMode\":false,\"ordinal\":0},{\"name\":\"7d4e55cfcdb99a2b4001\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_dim_video\"}},\"Property\":\"camera_id\"}},\"type\":\"Categorical\",\"howCreated\":0,\"isHiddenInViewMode\":false,\"ordinal\":1},{\"name\":\"fc00ae3f0a1e7c357d2a\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_dim_video\"}},\"Property\":\"captured_at_utc\"}},\"type\":\"Categorical\",\"howCreated\":0,\"isHiddenInViewMode\":false,\"ordinal\":2},{\"name\":\"a15557a06e830bc38728\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_video\"}},\"Property\":\"distinct_people\"}},\"type\":\"Advanced\",\"howCreated\":0,\"isHiddenInViewMode\":false,\"ordinal\":3},{\"name\":\"d85778011cb4798c41a2\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_dim_video\"}},\"Property\":\"location_id\"}},\"type\":\"Categorical\",\"howCreated\":0,\"isHiddenInViewMode\":false,\"ordinal\":4},{\"name\":\"667a63c5d4c5302a0343\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_video\"}},\"Property\":\"processing_seconds\"}},\"type\":\"Advanced\",\"howCreated\":0,\"isHiddenInViewMode\":false,\"ordinal\":5},{\"name\":\"4c95ae73ea54c800c767\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_video\"}},\"Property\":\"video_duration_seconds\"}},\"type\":\"Advanced\",\"howCreated\":0,\"isHiddenInViewMode\":false,\"ordinal\":6},{\"name\":\"149c6e64cad5c0521200\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_dim_video\"}},\"Property\":\"work_id\"}},\"type\":\"Categorical\",\"howCreated\":0,\"isHiddenInViewMode\":false,\"ordinal\":7},{\"name\":\"2d773ddd2e525b30dcbe\",\"expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"people_counter_gold_video\"}},\"Property\":\"Missing Required Metrics Flag\"}},\"filter\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Where\":[{\"Condition\":{\"Comparison\":{\"ComparisonKind\":0,\"Left\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Missing Required Metrics Flag\"}},\"Right\":{\"Literal\":{\"Value\":\"1L\"}}}}}]},\"type\":\"Advanced\",\"howCreated\":1,\"ordinal\":8}]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEALWWUW/TMBDHv0rlJ5CsqdkYSHlkdDzQotFO28M0Rca5pYYkDo69rar63blz2qXLFiAkVV/i5P7/+53VO3vNznSWiTwuWXizZgvAZ6vkNwdm9UlYsViKArYhLFwz/4EersCUSucsPObs3OjMy7+KDFjICsbZBG3sihagixQiqV1uwUSJTuMoVll0r2LQGHi5KlAz3vBaHvxN39TeciRPQVpPcaZTl+UEOXksDJQVJxannZEwh7t64WE3G84ujC7A+IQP2vyMVMzw7Q7oTyUc7eIp3Kp7SgAGcglbde3XG02UJdgubE+CNrg9x950Ei2N6IJXK9r49j17A6ZaYhKdd0Hc17RBPvcdYB8L6wzEkbCRs7LDbj7Xte9p078zctBk9gRR7Ey1ESVITTOlRl+47E1rKx+9Ln/bWkJruv6VFEZLUuVJ5ypeStsreDVNf/pYlVbl0kYV5T+jN3Tt3C8S4Oy9XmLIdvTmsbJbZjw2CmFU2Vx9UXSWjDmbwp2lTzMQpSOH/616pvxOjubwyyn8Z49mYI2S5eg8FYkPnqtk6XNNFVYuUn+EidSRXzDFEAq6FCaBYc+QQYf+sDN66IF6iMl3yNF0qGFxkDbe3OKPs4/YOpiM1BdGZaK6i3022hX4urrDoc0PvAphRlqPecCP+Ql/x0/5e/6Bbkruu9WWWiDwnnTNm0Ps5K5v6cUVFYBsJ3w/0TWm1w9VN+MIYeHpeOw75+k2GOBi8gjSkdm2C6t+D6iG32l2G3JvCgAA",
+          "width": 939.00,
+          "x": 9.00,
+          "y": 580.00,
+          "z": 6.00
+        },
+        {
+          "config": "{\"name\":\"3ec6914d05bd93472a19\",\"layouts\":[{\"id\":0,\"position\":{\"x\":847.6498572787822,\"y\":0,\"z\":2,\"width\":280,\"height\":280,\"tabOrder\":2}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Latest Video Completion Age Minutes\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Latest Video Completion Age Minutes\"},\"Name\":\"people_counter_gold_operations_hour.Latest Video Completion Age Minutes\",\"NativeReferenceName\":\"Latest Video Completion Age Minutes\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Latest Video Completion Age Minutes\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Latest Video Completion Age Minutes\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Latest video completion age (minutes)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAI2RQU/DMAyF/0rlczVtHHsbUDhA0WBoF1RVUep1QW0SOQlaVfW/46QDjuwWJ37vfY4nuDPDIHTroPiYYI989kq+BqTxXnixPwmLlxYoJkgP8XBAcspoKG5yeCAzJPmLGBAKsJBDyTZ+jAUa22MjTdAeqelM3zbGIgnPctecTCBufx8tK9dznTNDj9InvwqFC4QxrzxbQrdEMierJL7h8a9IufOcw46ifcp+Fh6dzw6qRZPxFAwSU7Nth1mldOBXYMUP9v+kq2sco6FXXxEPCbXEi/9VNDXz3CrdKt3F2XakBrH8+COZYPl62RRP+cnfFMm4XtdJ+LuUDRflGWWIDRV6UtI9qbjCzcyd36puro/2AQAA",
+          "width": 280.00,
+          "x": 847.65,
+          "y": 0.00,
+          "z": 2.00
+        },
+        {
+          "config": "{\"name\":\"83288f5e50c62ca1e53a\",\"layouts\":[{\"id\":0,\"position\":{\"x\":288.639391056137,\"y\":0,\"z\":3,\"width\":280,\"height\":210,\"tabOrder\":3}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Flow Data Freshness Minutes\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Flow Data Freshness Minutes\"},\"Name\":\"people_counter_gold_operations_hour.Flow Data Freshness Minutes\",\"NativeReferenceName\":\"Flow Data Freshness Minutes\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Flow Data Freshness Minutes\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Flow Data Freshness Minutes\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Flow data freshness (minutes)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 210.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRzU7DMAx+lcrnato49gi0HFDR2BAXVFVRatagNomcBFZVfXecdMBt3Ozk+7M9w50ZR6E7B8XbDEfk2iv5HJCme+HFsRcWLxAoZkgfsXhFcspoKG5yqMiMif4kRoQCLORQsoyfYoPGDthKE7RHak9m6FpjkYRnumt7E4jhL5Nl5nZpcs4woPRJr0bhAmH0K8+W0K2WnJNZEg/4/tck32XJYU9RPnlXg/nK4hhZxeRes0BWKx08OmDkT9z/E26uKUUhrz5jHCTUEi+6V90b9r9VulP6FGfYkxrFutkHMsHy83oRnuaD1xGTcL9tEvF3+TtuyjPKEAE1elLSPap4qt3CyG9ipvCY3gEAAA==",
+          "width": 280.00,
+          "x": 288.64,
+          "y": 0.00,
+          "z": 3.00
+        },
+        {
+          "config": "{\"name\":\"c8829f367a706ec0ea06\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1127.1550903901048,\"y\":0,\"z\":4,\"width\":280,\"height\":280,\"tabOrder\":4}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_video.Videos Missing Required Metrics\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Videos Missing Required Metrics\"},\"Name\":\"people_counter_gold_video.Videos Missing Required Metrics\",\"NativeReferenceName\":\"Videos Missing Required Metrics\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Videos Missing Required Metrics\"}}}]},\"columnProperties\":{\"people_counter_gold_video.Videos Missing Required Metrics\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Videos missing required metrics'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRTU/DMAz9K5XPFdo49jgoHFDRPtAuqKqi1GxBbRKcZFpV9b/jpAVOaLe8+Pm9Z3uEB9P3QrcOivcRDshvr+QuIA2PwovDWVhcKFCMkArxcURyymgo7nN4ItOn9lfRIxRgIYeSZfwQARrbYSNN0B6pOZmubS6qRcOkt8EyfzXVOTt3KH1SqVC4QBhdyqsldLMRpzOBJO7x4w8kt2nKYUvGIiXHY1R3WaW4UZ+yPX4FRdhmFXpS0gGzf4L+l+3ulkaU8OoSwyChlrgo3vSu2X2jdMvVOMWWVC/mjT6TCZa/50vwPJ+8EJ484lWdGn+XvmZQXlGGSFi0X1Q80Xpi5jdsXi7E1gEAAA==",
+          "width": 280.00,
+          "x": 1127.16,
+          "y": 0.00,
+          "z": 4.00
+        },
+        {
+          "config": "{\"name\":\"ddad4fd00daad3a61c0e\",\"layouts\":[{\"id\":0,\"position\":{\"x\":568.1446241674596,\"y\":0,\"z\":1,\"width\":280,\"height\":280,\"tabOrder\":1}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Operations Data Freshness Minutes\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Operations Data Freshness Minutes\"},\"Name\":\"people_counter_gold_operations_hour.Operations Data Freshness Minutes\",\"NativeReferenceName\":\"Operations Data Freshness Minutes\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Operations Data Freshness Minutes\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Operations Data Freshness Minutes\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Operations data freshness (minutes)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAI1RzU7DMAx+lcrnCm0cexx0HFDZYIgLqqoo9dagNomcBK2q+u446RjHcbOT78/2BA9mGIRuHRSfExyQa6/ka0AaH4UXh05YvECgmCB9xOIDySmjobjPYUtmSPQXMSAUYCGHkmX8GBs0tsdGmqA9UnMyfdsYiyQ8013TmUAMfx8tM1dznXOGHqVPehUKFwijX3m2hG6x5JzMkviGx78m+c5zDnuK8sl7d/XJ4jDZliU6zTJZpXTw6IDxv6Fv57y7rRflvPqO0ZBQS7yo/yNJzVk2SrdKn+JUe1KDWHb9RCZYfl5uxPN98YKiFverOhGv51hzU55Rhgio0JOS7lnF461nRv4AJnmirPABAAA=",
+          "width": 280.00,
+          "x": 568.14,
+          "y": 0.00,
+          "z": 1.00
+        }
+      ],
+      "width": 1920.00
+    },
+    {
+      "config": "{}",
+      "displayName": "Video processing",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 1080.00,
+      "name": "361e613179612be95d9c",
+      "ordinal": 1,
+      "visualContainers": [
+        {
+          "config": "{\"name\":\"15145d505d3ea6d16e6b\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1498.001902949572,\"y\":330.65651760228354,\"z\":8001,\"width\":284.98572787821126,\"height\":210.08563273073264,\"tabOrder\":8001}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_model_config.pipeline\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_model_config\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"pipeline\"},\"Name\":\"people_counter_gold_dim_model_config.pipeline\",\"NativeReferenceName\":\"pipeline\"}]},\"drillFilterOtherVisuals\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Dropdown'\"}}}}}]},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Pipeline'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 210.09,
+          "queryBinary": "H4sIAAAAAAAEAI1RS0/DMAz+Lz5XaINbj4yCEAKNDY0Dmqoq8UZQXnITWDX1v2OnbHDkZn/x97BzhEVwrvO6h/rtCGvkOhn1nJGGmy516/cu4s8I1EcoD1JskHoTPNSXFdxScIX+1DmEGiJU0LBMGqTBEC22KmSfkNp9sLrVxrUuaLQM+53Z8/zLEJk6G7cVh7CoUhFcBJudF7/mEAn7yZJzhkwKV7j7bYrvOFawpBCRJm8T0RqPwPAp2z/iXJx5QkvmU5yQ0Cs8qZyFtyx9bbw2fi9ZlmRcN13ojkKODE+X5VQfvBXnl362LUS58Ap1LrhwBNjIzmxyVf1Ve2WP8MXVKDvee2WzxsbFNBQfFk2Usfr9lzmPNQdUWbQfMZFR/YORX5yPbP4N/GuDHfkBAAA=",
+          "width": 284.99,
+          "x": 1498.00,
+          "y": 330.66,
+          "z": 8001.00
+        },
+        {
+          "config": "{\"name\":\"4feb48969770ccbdb4bc\",\"layouts\":[{\"id\":0,\"position\":{\"x\":288.639391056137,\"y\":0,\"z\":1000,\"width\":280,\"height\":280,\"tabOrder\":1000}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_video.Video Hours Processed\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Video Hours Processed\"},\"Name\":\"people_counter_gold_video.Video Hours Processed\",\"NativeReferenceName\":\"Video Hours Processed\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Video Hours Processed\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Video hours processed'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAHVRTU/DMAz9K5PPFdo49ggUkNDQYGgXVE1R+hhBbRM5ybSq6n/HSQdc2C2235edkW5t16m+8VS+j7SFvIPRLxE83Kmgtp/K4QyhcqQ8SI8d2BvbU3ld0D3bLtOfVQcqyVFBlciEIRWwrsVe29gH8P5g22Z/NA2sgN4GJ/jlVBfi3EKHrLKG8pGRXKqTY/jZSNLZyBqv+Pgrsts0FbRh68DZcZfUF48y9wtpaxFAQ4L5iXcp0dX/zEQM5piMweg1zjoXfGpxujF9Y/pDyrlh06n5Zg9so5P2fGuhfMnKsluql3Um/p51JUV1go4JsEZgo/2TSZ+wmgT5DVLhZGS4AQAA",
+          "width": 280.00,
+          "x": 288.64,
+          "y": 0.00,
+          "z": 1000.00
+        },
+        {
+          "config": "{\"name\":\"50842c046478768a1703\",\"layouts\":[{\"id\":0,\"position\":{\"x\":847.6498572787822,\"y\":34.709800190294956,\"z\":3000,\"width\":280,\"height\":210,\"tabOrder\":3000}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_video.Processing Speed x Real Time\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Processing Speed x Real Time\"},\"Name\":\"people_counter_gold_video.Processing Speed x Real Time\",\"NativeReferenceName\":\"Processing Speed x Real Time\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Processing Speed x Real Time\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Processing speed (x real time)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 210.00,
+          "queryBinary": "H4sIAAAAAAAEAH1RPU/DMBD9K5HnCLWMGYHAgIpKU7GgKLKcRzFKbOtiV4mi/HfOToGJbne+9+W7WdzbvpemHUTxPosKXHutXgNoepBeVp/S4QIRxSzSIBZvoEFbI4rbXDyS7RP9RfYQhXAiFyXL+Ck2sK5Do2wwHtScbNc2Z93CMug4OcZvljpn5w7KJ5Ud5BAI0aUcHWFYjTidDaRwwMdfk9yWJRd7sg6UHLlUkWROWeWANhuzA2SXHTWnY+hPyv+C3VwViHyvzzEGCEbhInfdtWbfO21aHsfwe9K9XBf5RDY4fl4PwCpfvAf+cOw3dSL+7nrLTTlChQjYwZNWw7OOl9kujPwGN3gZWs0BAAA=",
+          "width": 280.00,
+          "x": 847.65,
+          "y": 34.71,
+          "z": 3000.00
+        },
+        {
+          "config": "{\"name\":\"5dedf2211028c571a279\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1483.3872502378688,\"y\":601.0275927687917,\"z\":8000,\"width\":325.17602283539486,\"height\":210.08563273073264,\"tabOrder\":8000}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_model_config.detector_model\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_model_config\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"detector_model\"},\"Name\":\"people_counter_gold_dim_model_config.detector_model\",\"NativeReferenceName\":\"detector_model\"}]},\"drillFilterOtherVisuals\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Dropdown'\"}}}}}]},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Detector Model'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 210.09,
+          "queryBinary": "H4sIAAAAAAAEAI2RQU/DMAyF/0vOFdrg1iOjIDSBxobGAU1VlXglqIkjN4FVU/87djo0tBO32PF734tzVAt0rvGmV+X7UW2Az9HqlwQ03DWx2Xw0AU4jqjyqfCGHLVBv0avyulD3hC7LnxsHqlRBFapimzhIARg6qDUmH4HqFjtTG+tqhwY6bvu9bXn+dQgsnY27gkN0oGM2XGCXnBdedQgE/YTknJhIwxr25yJzx7FQK8IAlNkGIjshTTDFl78J/xHq6kIt4mi/hAoEXsPJ6xKyY8yt9cb6VtKtyLpm2tkDYQrcnnbNOT9ZyC+SerbLQtn5GkzKfdFIYytbYNRN8dftjRn4zadRXv3odZcMVC7EIXPYNFKC4vxTcx6rDqCTeD9BJKv7pZV/nY8M/wEpjareCwIAAA==",
+          "width": 325.18,
+          "x": 1483.39,
+          "y": 601.03,
+          "z": 8000.00
+        },
+        {
+          "config": "{\"name\":\"5f869d9dd20640197155\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":0,\"width\":280,\"height\":280,\"z\":0,\"tabOrder\":0}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_video.Videos Processed\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Videos Processed\"},\"Name\":\"people_counter_gold_video.Videos Processed\",\"NativeReferenceName\":\"Videos Processed\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Videos Processed\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Videos processed'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAHVQO0/DMBD+K+jmCLWMGYHAgIoKRV1QFFnORzFKbOvsVI2i/HfOToGhYrvH97qb6M71vbJtoPJ9oh2kjka/DODxXkW1+1QeZwiVE+VFKvbgYJyl8qagB3Z9pj+rHlSSp4IqkYljauB8h0a7wUZwc3Bd2xxNCyegt9ELfjXXhTh30DGrbKDCwEgu1ckzwmIk6dzAGq/4+Guy2zwXtGXnwdlxn9TDlUy0cNGSrH+S/Rfm+oKUONEckx0YVuMscalei/6tsa2xhxRsy6ZXy5Me2Q1exstzhfIlN8oxqV/Vmfj7x7U01Ql6SIANIhsdnkz6+noW5DdIb3ElqQEAAA==",
+          "width": 280.00,
+          "x": 10.00,
+          "y": 0.00,
+          "z": 0.00
+        },
+        {
+          "config": "{\"name\":\"9fc4c14a012919d30463\",\"layouts\":[{\"id\":0,\"position\":{\"x\":9,\"y\":580,\"width\":1092,\"height\":280,\"z\":5000,\"tabOrder\":5000}}],\"singleVisual\":{\"visualType\":\"tableEx\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_video.work_id\"},{\"queryRef\":\"people_counter_gold_dim_video.asset_id\"},{\"queryRef\":\"people_counter_gold_dim_video.asset_version\"},{\"queryRef\":\"people_counter_gold_dim_camera.camera_id\"},{\"queryRef\":\"people_counter_gold_dim_location.location_id\"},{\"queryRef\":\"people_counter_gold_dim_video.captured_at_utc\"},{\"queryRef\":\"Sum(people_counter_gold_video.video_duration_seconds)\"},{\"queryRef\":\"Sum(people_counter_gold_video.processing_seconds)\"},{\"queryRef\":\"Sum(people_counter_gold_video.speed_x_realtime)\"},{\"queryRef\":\"Sum(people_counter_gold_video.distinct_people)\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_video\",\"Type\":0},{\"Name\":\"p1\",\"Entity\":\"people_counter_gold_dim_camera\",\"Type\":0},{\"Name\":\"p2\",\"Entity\":\"people_counter_gold_dim_location\",\"Type\":0},{\"Name\":\"p3\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"work_id\"},\"Name\":\"people_counter_gold_dim_video.work_id\",\"NativeReferenceName\":\"work_id\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"asset_id\"},\"Name\":\"people_counter_gold_dim_video.asset_id\",\"NativeReferenceName\":\"asset_id\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"asset_version\"},\"Name\":\"people_counter_gold_dim_video.asset_version\",\"NativeReferenceName\":\"asset_version\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"camera_id\"},\"Name\":\"people_counter_gold_dim_camera.camera_id\",\"NativeReferenceName\":\"camera_id\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p2\"}},\"Property\":\"location_id\"},\"Name\":\"people_counter_gold_dim_location.location_id\",\"NativeReferenceName\":\"location_id\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"captured_at_utc\"},\"Name\":\"people_counter_gold_dim_video.captured_at_utc\",\"NativeReferenceName\":\"captured_at_utc\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p3\"}},\"Property\":\"video_duration_seconds\"},\"Name\":\"Sum(people_counter_gold_video.video_duration_seconds)\",\"NativeReferenceName\":\"video_duration_seconds\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p3\"}},\"Property\":\"processing_seconds\"},\"Name\":\"Sum(people_counter_gold_video.processing_seconds)\",\"NativeReferenceName\":\"processing_seconds\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p3\"}},\"Property\":\"speed_x_realtime\"},\"Name\":\"Sum(people_counter_gold_video.speed_x_realtime)\",\"NativeReferenceName\":\"speed_x_realtime\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p3\"}},\"Property\":\"distinct_people\"},\"Name\":\"Sum(people_counter_gold_video.distinct_people)\",\"NativeReferenceName\":\"distinct_people\"}]},\"drillFilterOtherVisuals\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Video processing details'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAK2WX2/TMBTFv4ufQLKqpmX8ySOl8IBAY0XbA5osY1+GIYktx+5aVfnu+CbtUrJ4JApvcXrPub97nCY+kJXOc17IkqTfDmQD4dop8cWD3b/jjm9+cgPHEpIeSP0DXlyDLZUuSLqg5L3VeS3/zHMgKTGEknWwcXtcgDYZMKF94cCyO51JJlXOtkqCDoVf9yZo5hVt5ckQvQjFlvcbLIYYZFpwhyP0Wiz/ZdHlv6UhvQyEq5NY6cznBQa13hkLZZNVCFh7K+AKfrSLOrCqouTSagO2bniv7W+mJAl3T0BPxTg71WO5U1tsABYKAUd16zcZjZcluDFsD4IY3Jnjf6LbHh/OcYgn1dOcrfdo2KRL2zzDw8JsametJIZ5bjoacdFFPP1LhkGeqmfnshjo39aTt15w47wFybhj3onBm9/VxXPt+o9GXnaZawImvW2CKEFofBW36BufP4u+fWb98ufREaLtpk9irBaoKu5GT/FYGp+gt810+tJA2Ngds8Azp0KnoexdYZy8p8V0bqlKpwrhWEM4GLuji1M/anAbWrxVhQw7gGyXVuW8ORF8sNqbcLs5SQTIX+FjGObB9ZwmdEGX9AW9oC/pK/qavsHvpf/utOMZSZPaFw8cVyB9LUNLvHGNEQWUJT1vdhMQ9D1erXA6kl7M5xWG83AuScJivQPh0ewTOKtE+VHhKSapQrc/QLtPZfkIAAA=",
+          "width": 1092.00,
+          "x": 9.00,
+          "y": 580.00,
+          "z": 5000.00
+        },
+        {
+          "config": "{\"name\":\"c3c6bc273e0ac959ace2\",\"layouts\":[{\"id\":0,\"position\":{\"x\":568.1446241674596,\"y\":0,\"z\":2000,\"width\":280,\"height\":280,\"tabOrder\":2000}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_video.Distinct Tracks per Video\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Distinct Tracks per Video\"},\"Name\":\"people_counter_gold_video.Distinct Tracks per Video\",\"NativeReferenceName\":\"Distinct Tracks per Video\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Distinct Tracks per Video\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Average distinct tracks per video'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAH1RwU7DMAz9lcnnCm0ce4QVDmhosGkXVFVRaoahTSInmVZV/XecdMBp3Pyc9/yenRHubd8r03oo30bYodSB9EtEHtYqqN2HcnihQDlCfkjFAdmTNVDeFvDAts/yZ9UjlOCggErGhCEBtK7DRttoAnJztF3bnKhFK6T94IS/nOpCnDvUIU/ZoPKRMblUZ8foZyNJZyNrfMX3P5DdpqmALVuHnB3X5AMZHRZ7VvrLL6S/OGRH4f1EvJbq5ro6iQOdUgBkNBovs/7xq8XxjkxL5pgyb5l6Nd/vkW100p7vLuk/ZX3ZM+FlnYW/J14JqM6oYyJsMDBp/0TpQ1aTML8BuuICUsQBAAA=",
+          "width": 280.00,
+          "x": 568.14,
+          "y": 0.00,
+          "z": 2000.00
+        },
+        {
+          "config": "{\"name\":\"c3e5371034063cac7418\",\"layouts\":[{\"id\":0,\"position\":{\"x\":9.134157944814463,\"y\":290.46622264509995,\"z\":4000,\"width\":1092.4452901998097,\"height\":279.5052331113226,\"tabOrder\":4000}}],\"singleVisual\":{\"visualType\":\"lineChart\",\"projections\":{\"Category\":[{\"queryRef\":\"people_counter_gold_dim_date.date_key\",\"active\":true}],\"Y\":[{\"queryRef\":\"people_counter_gold_video.Videos Processed\"}],\"Y2\":[{\"queryRef\":\"people_counter_gold_video.Video Hours Processed\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_date\",\"Type\":0},{\"Name\":\"p1\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"date_key\"},\"Name\":\"people_counter_gold_dim_date.date_key\",\"NativeReferenceName\":\"date_key\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"Videos Processed\"},\"Name\":\"people_counter_gold_video.Videos Processed\",\"NativeReferenceName\":\"Videos Processed\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"Video Hours Processed\"},\"Name\":\"people_counter_gold_video.Video Hours Processed\",\"NativeReferenceName\":\"Video Hours Processed\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"date_key\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Processed videos by capture date'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 279.51,
+          "queryBinary": "H4sIAAAAAAAEAK2TwU4CMRCGX4X03BCWeNqjiJooBsFwMWTTtCNWt+2m2xLIZt/dmYJARMEYb53p/PN/00wbNnDGCKtqlj83bAp4Dlo+RvDrKxHE9FVUsC1hecPSBR1m4GvtLMv7nF17Z5L8QRhgOasYZ0NsE9YUgKtKKKSLNoAvFq5UhdKmUCIA1j2tK5T0Wr5XZ+fkS63AHWjnHMFLkCFBDFwZjSXG4aryUG8wcTYXvYQJvOyDxNq2nI29q8AnQ+Iq3mHNMP1JdGKE7q6eyoNekgN4sBK26oOGDRuBqKOHX9NlX/FmNHvdwYxEMagzmOmpukein1i/6f5fzJ1bLPgT+JHyJP2xzxydLrVV2i4IdOy1EZslvvEuVpjeLD9K3nCJcDiKezzj/XkS00eYgIrpjnSUmNGaoesFP+yIPhbUvbYwFQaHwlxLr7H7LhkGwxXISL1GELyW9Z2mz5W1aPYB5Sm6IpADAAA=",
+          "width": 1092.45,
+          "x": 9.13,
+          "y": 290.47,
+          "z": 4000.00
+        },
+        {
+          "config": "{\"name\":\"c8aed51fa8700089d414\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1498.001902949572,\"y\":0,\"z\":6000,\"width\":310.56137012369174,\"height\":210.08563273073264,\"tabOrder\":6000}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_camera.camera_id\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_camera\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"camera_id\"},\"Name\":\"people_counter_gold_dim_camera.camera_id\",\"NativeReferenceName\":\"camera_id\"}]},\"drillFilterOtherVisuals\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Dropdown'\"}}}}}]},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Camera'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 210.09,
+          "queryBinary": "H4sIAAAAAAAEAH1RS0/DMAz+Lz5XaINbj4yCEAKNDY0Dmqoo8UZQ85CbwKqp/x07HdpO3Gzne9k5wiI4p7zpof44whq5Tla/ZqThTiW1/lQRTxCoj1AepNgg9TZ4qK8ruKfgCv1FOYQaIlTQsEwapMEQO2x1yD4htfvQmdZY12rGkmLk2xCZNBu3Fdt3qFORWoQuOy9OzSES9pMZJwyZNK5wd26K4zhWsKQQkYrrpN5aAzz/i/VvkqszRRjJfosLEnqNJ4EL0S3L3lpvrN9LkCVZp6bDPFDIkcfTQTnSF6/E4aWfbQtRDrtCk8tcODLYyMLsclNdqr2zR/jhapQFH73ussHGxTQUHxZNlLE6f8ecYc0BdRbtZ0xkdf9k5fPmI5v/AqBWdQ7wAQAA",
+          "width": 310.56,
+          "x": 1498.00,
+          "y": 0.00,
+          "z": 6000.00
+        },
+        {
+          "config": "{\"name\":\"d4e329fa7498b5dbc041\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1498.001902949572,\"y\":173.5490009514748,\"z\":7000,\"width\":310.56137012369174,\"height\":210.08563273073264,\"tabOrder\":7000}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_location.location_id\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_location\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"location_id\"},\"Name\":\"people_counter_gold_dim_location.location_id\",\"NativeReferenceName\":\"location_id\"}]},\"drillFilterOtherVisuals\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Dropdown'\"}}}}}]},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Location'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 210.09,
+          "queryBinary": "H4sIAAAAAAAEAIWRT0/DMAzFv4vPEdrg1iOjIIRAY0PjgKoqSrwR1PxRmsCqqt8dO9u0ceIWO3m/9+yMsPDWSqd7qD5GWCOdk1GvGeNwJ5Ncf8qAxydQjVAu+LDB2BvvoLoWcB+9LfIXaREqCCCgJkwauEAfOmyVzy5hbHe+0602tu28kokJAt6GQLLZ1AgK0KFKBbbwXbaOvep9iNgf7Cijz1HhCrfnonhOk4Bl9AFj8T3xW6OBbk7R/klzdSljVTLf7IURncIj5A+6Ifitcdq4HQdaRmPlYUUP0edA7cNqKdoXjUYyrmdNEfKKV6hz6bOGGxsenHxuxCXtnTz8D50mHvTRqS5rrG1IQ/EhaIoZxflj5vSs3qPKzH7GFI3qnwx/43wi818r2UM7+gEAAA==",
+          "width": 310.56,
+          "x": 1498.00,
+          "y": 173.55,
+          "z": 7000.00
+        }
+      ],
+      "width": 1920.00
+    },
+    {
+      "config": "{}",
+      "displayName": "Traffic",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 1080.00,
+      "name": "4e5692966614ed457090",
+      "visualContainers": [
+        {
+          "config": "{\"name\":\"2b6402a433e51d8b6064\",\"layouts\":[{\"id\":0,\"position\":{\"x\":840.3425309229306,\"y\":524.3006660323501,\"z\":6000,\"width\":280,\"height\":280,\"tabOrder\":6000}}],\"singleVisual\":{\"visualType\":\"clusteredBarChart\",\"projections\":{\"Category\":[{\"queryRef\":\"people_counter_gold_dim_camera.camera_id\",\"active\":true}],\"Y\":[{\"queryRef\":\"people_counter_gold_flow_minute.Total Entries\"},{\"queryRef\":\"people_counter_gold_flow_minute.Total Exits\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_camera\",\"Type\":0},{\"Name\":\"p1\",\"Entity\":\"people_counter_gold_flow_minute\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"camera_id\"},\"Name\":\"people_counter_gold_dim_camera.camera_id\",\"NativeReferenceName\":\"camera_id\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"Total Entries\"},\"Name\":\"people_counter_gold_flow_minute.Total Entries\",\"NativeReferenceName\":\"Total Entries\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"Total Exits\"},\"Name\":\"people_counter_gold_flow_minute.Total Exits\",\"NativeReferenceName\":\"Total Exits\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"Total Entries\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Traffic by camera'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAK2UTU/DMAyG/wrKuZpaxKlHxocQjI9tGgc0VVFqtqA0qdwENk3979jpxsYkGEK7Janf149dJyvRd1UlbdmI/GUlRkBrr9VTAFxeSC9Hc1nDOkTkKxE/8GIC2GhnRX6aiCt0VZTfywpELmqRiEuy8UvegKsNFMoF6wGLmTNlUeqqUBSLkiLHy5pEaZts9dkhg1fjPopK2+Bhx2GaUAEGlI8wfWdCZZn1clEjNB0u1egCKhjC63YTmds2EY/oasCYtuMrdCnofAP2ay29rYQVXr9zFkCwCtYGu6YrMQDZBIQ/I2b7jGPnpTmhTqGG5gDnTst633U/we67Hw94of0/cKPqAGznTIPwPAcGjXNgS+3XoDd7A9EceVQ49USaAGxMzneaKpIm3hg+pmgbjOHAaRujH7AEPF9GjguNNL2ba/Wd5djDQsnp+7mm5tgZSx9RV7K73NfoQk3HXXfI463D4n2aZMnpNIr5gRhCGdSmu3ww4V4SwVmy6/hMedwHr/r8l0WepWnaMuHXQ5K1XDKowG4DIEzV3Gp+djJm/QRRGMk6qgQAAA==",
+          "width": 280.00,
+          "x": 840.34,
+          "y": 524.30,
+          "z": 6000.00
+        },
+        {
+          "config": "{\"name\":\"37c1b4d959462e5ad060\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1286.0894386298764,\"y\":637.5642245480495,\"z\":9000,\"width\":280,\"height\":189,\"tabOrder\":9000}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_camera.camera_id\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_camera\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"camera_id\"},\"Name\":\"people_counter_gold_dim_camera.camera_id\",\"NativeReferenceName\":\"camera_id\"}]},\"drillFilterOtherVisuals\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Dropdown'\"}}}}}],\"general\":[{\"properties\":{\"filter\":{\"filter\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_camera\",\"Type\":0}],\"Where\":[{\"Condition\":{\"In\":{\"Expressions\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"camera_id\"}}],\"Values\":[[{\"Literal\":{\"Value\":\"null\"}}]]}}}]}}}}]},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Camera'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 189.00,
+          "queryBinary": "H4sIAAAAAAAEAH1RS0/DMAz+Lz5XaINbj4yCEAKNDY0Dmqoo8UZQ85CbwKqp/x07HdpO3Gzne9k5wiI4p7zpof44whq5Tla/ZqThTiW1/lQRTxCoj1AepNgg9TZ4qK8ruKfgCv1FOYQaIlTQsEwapMEQO2x1yD4htfvQmdZY12rGkmLk2xCZNBu3Fdt3qFORWoQuOy9OzSES9pMZJwyZNK5wd26K4zhWsKQQkYrrpN5aAzz/i/VvkqszRRjJfosLEnqNJ4EL0S3L3lpvrN9LkCVZp6bDPFDIkcfTQTnSF6/E4aWfbQtRDrtCk8tcODLYyMLsclNdqr2zR/jhapQFH73ussHGxTQUHxZNlLE6f8ecYc0BdRbtZ0xkdf9k5fPmI5v/AqBWdQ7wAQAA",
+          "width": 280.00,
+          "x": 1286.09,
+          "y": 637.56,
+          "z": 9000.00
+        },
+        {
+          "config": "{\"name\":\"3c0c3db445069502439b\",\"layouts\":[{\"id\":0,\"position\":{\"x\":323.7470725995316,\"y\":0,\"z\":1000,\"width\":280,\"height\":280,\"tabOrder\":1000}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_flow_minute.Total Exits\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_flow_minute\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Total Exits\"},\"Name\":\"people_counter_gold_flow_minute.Total Exits\",\"NativeReferenceName\":\"Total Exits\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Total Exits\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAI2STU/DMAyG/wrKuUIrxx4ZBSEYGmwaBzRVUeptQfmSk8Cmqf8dJy3s4wBcqjh+/fpx4z0bW625aT2r3vZsBnQOUjxHwN0ND3y24Q4GCav2LCfSYQHopTWsuirYLVqdy5+4BlYxxwpWk03YpQCsU9AIG00AbNZWtc1K2c9GSxMDkHS+c1Q16oqDQfmXQyt1I0iM/MhgWdAACkTIMBPgPiIk2HrrEHzPS0PaiAJeYHUIMnTXFWyK1gHmtnMbuLqotzJ4RplvtN/HuTyuSkVBfqRWgGAEDB4nzgT9uoHEScxja1oZBs57c8ruB4mK2vx7qvJ8rP6vNbKlBPVecBUhOZP1o6SRuMrPm65JbaJSSbjs6ENG15IAzTpJpig175fhDm10dN0TUrN3eoSBeLTMhT/7UlJQb0HEJJhAQCn8g0zbVaYWX+ZAnrqRAgAA",
+          "width": 280.00,
+          "x": 323.75,
+          "y": 0.00,
+          "z": 1000.00
+        },
+        {
+          "config": "{\"name\":\"63ee4f60b922dc92c164\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":290,\"width\":280,\"height\":280,\"z\":3000,\"tabOrder\":3000}}],\"singleVisual\":{\"visualType\":\"lineChart\",\"projections\":{\"Category\":[{\"queryRef\":\"people_counter_gold_flow_minute.minute_utc\",\"active\":true}],\"Y\":[{\"queryRef\":\"people_counter_gold_flow_minute.Total Entries\"},{\"queryRef\":\"people_counter_gold_flow_minute.Total Exits\"}],\"Tooltips\":[{\"queryRef\":\"people_counter_gold_flow_minute.Net Flow\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_flow_minute\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"minute_utc\"},\"Name\":\"people_counter_gold_flow_minute.minute_utc\",\"NativeReferenceName\":\"minute_utc\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Total Entries\"},\"Name\":\"people_counter_gold_flow_minute.Total Entries\",\"NativeReferenceName\":\"Total Entries\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Total Exits\"},\"Name\":\"people_counter_gold_flow_minute.Total Exits\",\"NativeReferenceName\":\"Total Exits\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Net Flow\"},\"Name\":\"people_counter_gold_flow_minute.Net Flow\",\"NativeReferenceName\":\"Net Flow\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"minute_utc\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Entries and exits by minute (UTC)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAK2U20oDMRCGX6XkOoirXvVSreKRaku9kLKEZNRIDks20Zay7+5MdmsPoGL1ZslOZv75/jDJgp14a4VTNes/LtgIcB21vEsQ5qciitGLqKBLYf0Fyxu0mECotXesf8DZWfA2l98KC6zPKsbZAGXinH7AVwZK6ZOLEMpnb1T5ZPx7abVLETB1PK+war/hK4HiJwWlbSkxOYg1gSlHAwZkzDAn3iTriHUwqwLULS569ClIuIen1U9mbhrOhsFXEHLXFq9MUTLcWIJ9b2ZvrYhqon6jRhDASegkNnQX7AZEnQLsjDn2UZgenlXQUP+CdLPuK9ht9X/jnem4A22u+oG1U/476S3E3hky/ALzs+QrxpUmzurDCxBeHlWndOzwLrZmtt5lmottN+1lKbXCDew9ESYBKaP0tUYzwuRbTWHMdskYSpw2+EGhY42A7plShkFb0b4B58GnCsMtITZ7xbvXEe/zgh/ww2kup5fkHlSSS48UmJAjbHbE1zWxkwN1rR2MhMXDxlhDVkapyrZBXXrthgGUliJmC4fkZ/kcFZg7mIFM1OoGcHBlfaXp8SrIygd9cHK18AQAAA==",
+          "width": 280.00,
+          "x": 10.00,
+          "y": 290.00,
+          "z": 3000.00
+        },
+        {
+          "config": "{\"name\":\"66567125b077c6a37e4e\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":580,\"width\":280,\"height\":280,\"z\":4000,\"tabOrder\":4000}}],\"singleVisual\":{\"visualType\":\"lineChart\",\"projections\":{\"Category\":[{\"queryRef\":\"people_counter_gold_flow_minute.minute_utc\",\"active\":true}],\"Y\":[{\"queryRef\":\"people_counter_gold_flow_minute.Cumulative Net Flow\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_flow_minute\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"minute_utc\"},\"Name\":\"people_counter_gold_flow_minute.minute_utc\",\"NativeReferenceName\":\"minute_utc\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Cumulative Net Flow\"},\"Name\":\"people_counter_gold_flow_minute.Cumulative Net Flow\",\"NativeReferenceName\":\"Cumulative Net Flow\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"minute_utc\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Cumulative net flow (UTC)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAJ2T30/CMBDH/xXS58Uw49MeRTBGIAgGHwxZmu6Amv5YulYhy/537zoQJKiRl6W93n3v8721NetZrbkpKpa91mwGuPZSPAVw2zvu+WzNS9ilsKxm8YAWc3CVtIZl1wkbOKtj+ZhrYBkrWcL6KOO3tAFbKsiFDcaDy1dWFflS2Y9cSxM8YOrztsSqbpMcBNK/FAqpc4HJjh8JLBI0oED4CNOzKmhDrP1N6aBqcdGjDU7AFJaHTWRumoRNnC3Bxa4tXh68YHiwB/vdzNVREdV4+U6NwIERsJP4pluzEfAqOLgYsxd0ULFRZwy+M0CYf/Ceq/4J/GwnHPnLGog/TtwU0u/4H05GX13yU9JTu+0/z2WBB9h7zlUAUkbpoUSLXMXLSWHMNkEpSlw0+EGhW4mAZkUpEyc1b6/yvbOhxHBLiM3e8ArtiLtJuoil9BimUASx90eBObnBRjfJsR52MVAMpYEZ1zh+jDVk4+vJpLjpb0AE0hqBd1JUj5IeWEqcn2TQTnKUAwAA",
+          "width": 280.00,
+          "x": 10.00,
+          "y": 580.00,
+          "z": 4000.00
+        },
+        {
+          "config": "{\"name\":\"87b3857eb0b25ae78853\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":870,\"width\":280,\"height\":210,\"z\":5000,\"tabOrder\":5000}}],\"singleVisual\":{\"visualType\":\"pivotTable\",\"projections\":{\"Rows\":[{\"queryRef\":\"people_counter_gold_dim_date.day_name\",\"active\":true}],\"Columns\":[{\"queryRef\":\"people_counter_gold_dim_time.hour_label\",\"active\":true}],\"Values\":[{\"queryRef\":\"people_counter_gold_flow_minute.Total Entries\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_date\",\"Type\":0},{\"Name\":\"p1\",\"Entity\":\"people_counter_gold_dim_time\",\"Type\":0},{\"Name\":\"p2\",\"Entity\":\"people_counter_gold_flow_minute\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"day_name\"},\"Name\":\"people_counter_gold_dim_date.day_name\",\"NativeReferenceName\":\"day_name\"},{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p1\"}},\"Property\":\"hour_label\"},\"Name\":\"people_counter_gold_dim_time.hour_label\",\"NativeReferenceName\":\"hour_label\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p2\"}},\"Property\":\"Total Entries\"},\"Name\":\"people_counter_gold_flow_minute.Total Entries\",\"NativeReferenceName\":\"Total Entries\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"day_name\"}}}]},\"drillFilterOtherVisuals\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Entries by weekday and hour (UTC)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 210.00,
+          "queryBinary": "H4sIAAAAAAAEAK2UTU/jMBCG/wryOaqa9NYjn0LALtCqHBCKjD1QI39Ejg0bVfnvO+MUSCMVwmpvsT3vzON3Jt6wI2cMt7Jm8/sNWwB+ByVuIvjmmAe+WPMKtiFsvmHpgD5W4GvlLJsXGTv1ziT5L26AzVnFMnaCaUJDC3CVhlK4aAP48tlpWUplSskDYNyyqVAybbNPdT5GHpTZIy++kz9p91YaZeM+gNkYAIHBnvcSPGRonwYRkhVHTkdjyamTP5WHujMLHXbRC7iFp89FcqxtM3btXQU+VZW8KS3h4PY71hdGTj7iKTyoV6oAHqyArbqX8Mdw+ZBujUel5o+gR/BRpyY9xT7CnaQbdgW8jh5GQxZDyKULXB9gH72C+hvO3khMdnX7aAfZsfl3ayDc1HsrVdjing98rv9lPGbDy3XTVyqJB1h7xXUEyoypLxVei+v0k9I2RtuoNQU+tCn6t5fgD5sEcqw8jmyqnmcDmP82w1gVjw4V2mKfSXTtleHdQ3LmXaxwu/MF5S8dD62n9E/Fx0BeI1/KsgCB9o4Q51mxIy+SnB61W5BRvPeHNlZ0UbzDLOuT3SGve+uMwFlBgOm0HRIsXTWMwJCP1zFvyVQQkcpdAU6LqC8UvaU5mfIX/25kU38FAAA=",
+          "width": 280.00,
+          "x": 10.00,
+          "y": 870.00,
+          "z": 5000.00
+        },
+        {
+          "config": "{\"name\":\"8df67fd9b1aca858bb8e\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":0,\"width\":280,\"height\":280,\"z\":0,\"tabOrder\":0}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_flow_minute.Total Entries\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_flow_minute\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Total Entries\"},\"Name\":\"people_counter_gold_flow_minute.Total Entries\",\"NativeReferenceName\":\"Total Entries\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Total Entries\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAI2SS08CMRSF/4rpemIYl7MUR2MUg0JwYcik6Vygpq/ctgoh89+97YwiLMRN08e5536n7Z6NrdbctJ5Vb3s2A5oHKZ4j4O6GBz7bcAeDhFV7lg/SZAHopTWsuirYLVqdy5+4BlYxxwpWk03YpQVYp6ARNpoA2KytapuVsp+NliYGIOl856hq1BUHg/KcQyt1I0iM/JfBsqAACkTIMBPgPiIk2HrrEHzPSyFtRAEvsDosMnTXFWyK1gHmtnMbuLogCpTgGZ19w/0d6PK4LpUF+ZHaAYIRMLicuBP66wYSLZGPrWllGGjvzXECP0hU1Obf2crTcP3dNbKlA+q94CpCcibrR0mxuMqPnLZJbaJSSbjsaCCja0mAZp0kU5Sa91/iDm10tN0TUrN3eoqBeLTMhT+/pqRFvQURk2ACdAvCP8j0x8rU4gvi8+KZlwIAAA==",
+          "width": 280.00,
+          "x": 10.00,
+          "y": 0.00,
+          "z": 0.00
+        },
+        {
+          "config": "{\"name\":\"afe36a0809154eed8e02\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1287,\"y\":0,\"width\":280,\"height\":280,\"z\":7000,\"tabOrder\":7000}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_date.date_key\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_date\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"date_key\"},\"Name\":\"people_counter_gold_dim_date.date_key\",\"NativeReferenceName\":\"date_key\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"date_key\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Between'\"}}}}}]},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Date range (UTC)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAMVSS0vDQBD+L3NSCGKrp9y0piJSqVa8SAnLZoyr2QeTXWkI+e/ObqrtQaQHwds8vtfA9DCzWgtTtZA/97BCrr2S9wGpuxJerF6Fwy0E8h7SIhZPSK2yBvJpBnOyOtHvhEbIwUEGBcv4LjZoXYOltMF4pLK2TVVWSpeV8Mi4x84x5XRYZ2zeoPRJaGaboE30KTaOsB2tOJ8NJPEBX3ZN8huGDJZkHVLyjNrlO3bA469Mv8Q4+cZHuFcf0QEJjcQte0+wh4u6JqwZZ39I+GfJeT4PRo4uZ7tDFsocHXTM8X+FPd8LKzYHh10z7VKZSpk62i5JaTH+2jXZ4Hg8/igHeMNkFftJNl0n6o2RTaiw0M53icBbTwGz3atOGFZsUIZIXqAnJdtbFR97MrDGJ9EXQM8MAwAA",
+          "width": 280.00,
+          "x": 1287.00,
+          "y": 0.00,
+          "z": 7000.00
+        },
+        {
+          "config": "{\"name\":\"be76d2fb65d0de168539\",\"layouts\":[{\"id\":0,\"position\":{\"x\":641.4988290398126,\"y\":0,\"z\":2000,\"width\":280,\"height\":280,\"tabOrder\":2000}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_flow_minute.Net Flow\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_flow_minute\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Net Flow\"},\"Name\":\"people_counter_gold_flow_minute.Net Flow\",\"NativeReferenceName\":\"Net Flow\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Net Flow\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAI2STU/DMAyG/wrKuUIrxx4ZG0KwaTA0DmiqotTbgvIlN4FNU/87dloYcAAuVey8fv049VGMvbXSNa2ono9iCXSOWt0nwMOVjHK5kwEGiaiOIl/wYQXYau9EdVGIKXqby+fSgqhEEIWYkE08cAA+GKiVTy4C1ltvmnpj/FtttUsRSPp4CFQ16oqTQfmXQ6NtrUiM8ovBuqABDKiYYWYg24TAsJN9QGh7XhrSJ1TwAJtTkKG7rhAL9AEwt51DPJsSqKD0B9fvs5x/lnBF1K/cBBCcgsHg5EmsTztgPEIde9foOODduO/I7SAxybp/D1P+nKZ/rFo3dEG9V9IkYGeyvtM0jDT5r3Ka1C4Zw8J1Rx8yutQE6LYsWaC2st+Ba/QpULonpGYv9PYD8WidCz/XpKRgsgeVWDCDiFq1t5qXquQW77V7T4eIAgAA",
+          "width": 280.00,
+          "x": 641.50,
+          "y": 0.00,
+          "z": 2000.00
+        },
+        {
+          "config": "{\"name\":\"bf83c9eae7b1320bc491\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1287,\"y\":290,\"width\":280,\"height\":280,\"z\":8000,\"tabOrder\":8000}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_location.location_id\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_location\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"location_id\"},\"Name\":\"people_counter_gold_dim_location.location_id\",\"NativeReferenceName\":\"location_id\"}]},\"drillFilterOtherVisuals\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Dropdown'\"}}}}}]},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Location'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAJ2Sy07DMBBF/8VrCzWwy5ISEOKh0qJ2garIcobWyC85NjSq8u/MOKlaugGxifyYuffcePZs6owRtmlZ+bZnC8B1VPIlQehuRBSLrfAwlrByz/IFLZYQWuUsKy85uw3O5PZnYYCVzDPOKpSJHW3AeQ21dMlGCPXG6aZulKm1kyKSAmevnce2Sc+PCsVfJCQWB3EisOaYQIOMmWbqdDKWYKudD9AOvBjSpSBhDu/HTYbue85mwXkI2fUAWKuG4c2B7Jc4F6dt1BXVJ3lBACthFPkhjdCrLV6PzLZRcQS9P4Nv/xOrOM81/LVsTd5LoROQMko/KswkdH5fOsZqm7SmwnWPHxS6VghoN1QyC8qIYRrugksejwdCNPvARxiJJ+vcSNM0hybJQzo6WFIWtLnip2or9HBfuOoJ/d5KnRqojI9d9kHRGBLw4wwWWFbtQCbSfoIYlGwfFE1sQdTfo3PZRuUCAAA=",
+          "width": 280.00,
+          "x": 1287.00,
+          "y": 290.00,
+          "z": 8000.00
+        }
+      ],
+      "width": 1920.00
+    },
+    {
+      "config": "{}",
+      "displayName": "Forecast",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 1080.00,
+      "name": "b1bcb7f07b096d30b250",
+      "ordinal": 5,
+      "visualContainers": [
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":145.0,\"tabOrder\":8,\"width\":1800.0,\"x\":60.0,\"y\":875.0,\"z\":8}}],\"name\":\"afc8fb83483ff0580a4e\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"objects\":{\"general\":[{\"properties\":{\"paragraphs\":[{\"horizontalTextAlignment\":\"left\",\"textRuns\":[{\"textStyle\":{\"color\":\"#252423\",\"fontFamily\":\"Segoe UI\",\"fontSize\":\"14px\"},\"value\":\"Not modeled: Spark quotas and concurrency limits; executor startup and idle tail; capacity throttling; storage/network I/O; model-cache behavior; workload contention; retry and failure overhead; or nonlinear scaling between SKUs.\"}]},{\"horizontalTextAlignment\":\"left\",\"textRuns\":[{\"textStyle\":{\"color\":\"#252423\",\"fontFamily\":\"Segoe UI\",\"fontSize\":\"14px\"},\"value\":\"Experimental single-video ONNX batch-one: 1.3036x vs PyTorch 0.8142x (1.60x faster). It is not the planning baseline until a comparable concurrent pilot is qualified.\"}]}]}}]},\"visualType\":\"textbox\"}}",
+          "filters": "[]",
+          "height": 145.00,
+          "width": 1800.00,
+          "x": 60.00,
+          "y": 875.00,
+          "z": 8.00
+        },
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":180.0,\"tabOrder\":2,\"width\":470.0,\"x\":60.0,\"y\":220.0,\"z\":2}}],\"name\":\"56212c0ae55ae20eb795\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Dropdown'\"}}},\"numericStart\":{\"expr\":{\"Literal\":{\"Value\":\"200000D\"}}}}}],\"general\":[{\"properties\":{\"filter\":{\"filter\":{\"From\":[{\"Entity\":\"Forecast Workload\",\"Name\":\"f\",\"Type\":0}],\"Version\":2,\"Where\":[{\"Condition\":{\"In\":{\"Expressions\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Video Hours\"}}],\"Values\":[[{\"Literal\":{\"Value\":\"200000L\"}}]]}}}]}}}}],\"selection\":[{\"properties\":{\"strictSingleSelect\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}}}}],\"slider\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}}}}]},\"projections\":{\"Values\":[{\"active\":true,\"queryRef\":\"Forecast Workload.Video Hours\"}]},\"prototypeQuery\":{\"From\":[{\"Entity\":\"Forecast Workload\",\"Name\":\"f\",\"Type\":0}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Video Hours\"}}}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Video Hours\"},\"Name\":\"Forecast Workload.Video Hours\",\"NativeReferenceName\":\"Video Hours\"}],\"Version\":2},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Video hours to process'\"}}}}}]},\"visualType\":\"slicer\"}}",
+          "filters": "[]",
+          "height": 180.00,
+          "width": 470.00,
+          "x": 60.00,
+          "y": 220.00,
+          "z": 2.00
+        },
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":180.0,\"tabOrder\":3,\"width\":400.0,\"x\":560.0,\"y\":220.0,\"z\":3}}],\"name\":\"cdf20479a23187a896e1\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"projections\":{\"Data\":[{\"queryRef\":\"Forecast Workload.Selected Video Hours\"}]},\"prototypeQuery\":{\"From\":[{\"Entity\":\"Forecast Workload\",\"Name\":\"f\",\"Type\":0}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Selected Video Hours\"}}}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Selected Video Hours\"},\"Name\":\"Forecast Workload.Selected Video Hours\",\"NativeReferenceName\":\"Selected Video Hours\"}],\"Version\":2},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Selected video-hours'\"}}}}}]},\"visualType\":\"cardVisual\"}}",
+          "filters": "[]",
+          "height": 180.00,
+          "width": 400.00,
+          "x": 560.00,
+          "y": 220.00,
+          "z": 3.00
+        },
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":180.0,\"tabOrder\":4,\"width\":400.0,\"x\":990.0,\"y\":220.0,\"z\":4}}],\"name\":\"7f09f0ed21db906572e8\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"projections\":{\"Data\":[{\"queryRef\":\"Forecast Workload.Bare Throughput Target\"}]},\"prototypeQuery\":{\"From\":[{\"Entity\":\"Forecast Workload\",\"Name\":\"f\",\"Type\":0}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Bare Throughput Target\"}}}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Bare Throughput Target\"},\"Name\":\"Forecast Workload.Bare Throughput Target\",\"NativeReferenceName\":\"Bare Throughput Target\"}],\"Version\":2},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Bare target for 30 days (x)'\"}}}}}]},\"visualType\":\"cardVisual\"}}",
+          "filters": "[]",
+          "height": 180.00,
+          "width": 400.00,
+          "x": 990.00,
+          "y": 220.00,
+          "z": 4.00
+        },
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":180.0,\"tabOrder\":5,\"width\":440.0,\"x\":1420.0,\"y\":220.0,\"z\":5}}],\"name\":\"497611eec895c02836b5\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"projections\":{\"Data\":[{\"queryRef\":\"Forecast Workload.Planning Throughput Target\"}]},\"prototypeQuery\":{\"From\":[{\"Entity\":\"Forecast Workload\",\"Name\":\"f\",\"Type\":0}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Planning Throughput Target\"}}}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Planning Throughput Target\"},\"Name\":\"Forecast Workload.Planning Throughput Target\",\"NativeReferenceName\":\"Planning Throughput Target\"}],\"Version\":2},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Planning target (20% headroom, 80% utilization)'\"}}}}}]},\"visualType\":\"cardVisual\"}}",
+          "filters": "[]",
+          "height": 180.00,
+          "width": 440.00,
+          "x": 1420.00,
+          "y": 220.00,
+          "z": 5.00
+        },
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":330.0,\"tabOrder\":6,\"width\":1800.0,\"x\":60.0,\"y\":420.0,\"z\":6}}],\"name\":\"cc33d974eee1a0409b6c\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"projections\":{\"Values\":[{\"queryRef\":\"Forecast Capacity.Capacity SKU\"},{\"queryRef\":\"Forecast Capacity.Estimated Throughput\"},{\"queryRef\":\"Forecast Capacity.Estimated Completion Days\"}]},\"prototypeQuery\":{\"From\":[{\"Entity\":\"Forecast Capacity\",\"Name\":\"f\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Capacity SKU\"},\"Name\":\"Forecast Capacity.Capacity SKU\",\"NativeReferenceName\":\"Capacity SKU\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Estimated Throughput\"},\"Name\":\"Forecast Capacity.Estimated Throughput\",\"NativeReferenceName\":\"Estimated Throughput\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"f\"}},\"Property\":\"Estimated Completion Days\"},\"Name\":\"Forecast Capacity.Estimated Completion Days\",\"NativeReferenceName\":\"Estimated Completion Days\"}],\"Version\":2},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Capacity forecast for selected workload'\"}}}}}]},\"visualType\":\"tableEx\"}}",
+          "filters": "[]",
+          "height": 330.00,
+          "width": 1800.00,
+          "x": 60.00,
+          "y": 420.00,
+          "z": 6.00
+        },
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":80.0,\"tabOrder\":0,\"width\":1800.0,\"x\":60.0,\"y\":35.0,\"z\":0}}],\"name\":\"4b37ed9e9a732f3c91a5\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"objects\":{\"general\":[{\"properties\":{\"paragraphs\":[{\"horizontalTextAlignment\":\"left\",\"textRuns\":[{\"textStyle\":{\"color\":\"#118DFF\",\"fontFamily\":\"Segoe UI Semibold\",\"fontSize\":\"30px\",\"fontWeight\":\"bold\"},\"value\":\"Capacity throughput forecast\"}]}]}}]},\"visualType\":\"textbox\"}}",
+          "filters": "[]",
+          "height": 80.00,
+          "width": 1800.00,
+          "x": 60.00,
+          "y": 35.00,
+          "z": 0.00
+        },
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":95.0,\"tabOrder\":1,\"width\":1800.0,\"x\":60.0,\"y\":115.0,\"z\":1}}],\"name\":\"3a72c9208f7cf4eb613c\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"objects\":{\"general\":[{\"properties\":{\"paragraphs\":[{\"horizontalTextAlignment\":\"left\",\"textRuns\":[{\"textStyle\":{\"color\":\"#252423\",\"fontFamily\":\"Segoe UI\",\"fontSize\":\"15px\"},\"value\":\"Directional estimate based on the best measured F64 pilot\"}]},{\"horizontalTextAlignment\":\"left\",\"textRuns\":[{\"textStyle\":{\"color\":\"#252423\",\"fontFamily\":\"Segoe UI\",\"fontSize\":\"15px\"},\"value\":\"Baseline: pytorch-r18-b1-1fps-1t at 1.5899x aggregate real time\"}]},{\"horizontalTextAlignment\":\"left\",\"textRuns\":[{\"textStyle\":{\"color\":\"#252423\",\"fontFamily\":\"Segoe UI\",\"fontSize\":\"15px\"},\"value\":\"Default workload: 200,000 video-hours; adjust it with the selector below.\"}]}]}}]},\"visualType\":\"textbox\"}}",
+          "filters": "[]",
+          "height": 95.00,
+          "width": 1800.00,
+          "x": 60.00,
+          "y": 115.00,
+          "z": 1.00
+        },
+        {
+          "config": "{\"layouts\":[{\"id\":0,\"position\":{\"height\":95.0,\"tabOrder\":7,\"width\":1800.0,\"x\":60.0,\"y\":770.0,\"z\":7}}],\"name\":\"cc4c80698d87cb5892e4\",\"singleVisual\":{\"drillFilterOtherVisuals\":true,\"objects\":{\"general\":[{\"properties\":{\"paragraphs\":[{\"horizontalTextAlignment\":\"left\",\"textRuns\":[{\"textStyle\":{\"color\":\"#C50F1F\",\"fontFamily\":\"Segoe UI\",\"fontSize\":\"16px\",\"fontWeight\":\"bold\"},\"value\":\"DIRECTIONAL ESTIMATE ONLY — not a capacity guarantee.\"}]},{\"horizontalTextAlignment\":\"left\",\"textRuns\":[{\"textStyle\":{\"color\":\"#C50F1F\",\"fontFamily\":\"Segoe UI\",\"fontSize\":\"16px\",\"fontWeight\":\"bold\"},\"value\":\"Linear SKU scaling is an intentionally gross planning approximation. Validate with a representative, concurrent qualification run before resizing.\"}]}]}}]},\"visualType\":\"textbox\"}}",
+          "filters": "[]",
+          "height": 95.00,
+          "width": 1800.00,
+          "x": 60.00,
+          "y": 770.00,
+          "z": 7.00
+        }
+      ],
+      "width": 1920.00
+    },
+    {
+      "config": "{}",
+      "displayName": "Throughput",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 1080.00,
+      "name": "e62786e9e4504b595595",
+      "ordinal": 3,
+      "visualContainers": [
+        {
+          "config": "{\"name\":\"0fa0f2ce1aea432c0da6\",\"layouts\":[{\"id\":0,\"position\":{\"x\":9.134157944814463,\"y\":290.46622264509995,\"z\":4,\"width\":1066.8696479543294,\"height\":279.5052331113226,\"tabOrder\":4}}],\"singleVisual\":{\"visualType\":\"lineChart\",\"projections\":{\"Category\":[{\"queryRef\":\"people_counter_gold_operations_hour.hour_utc\",\"active\":true}],\"Y\":[{\"queryRef\":\"people_counter_gold_operations_hour.Completed Video Hours\"}],\"Tooltips\":[{\"queryRef\":\"people_counter_gold_operations_hour.Succeeded Attempts\"},{\"queryRef\":\"people_counter_gold_operations_hour.Failed Attempts\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"hour_utc\"},\"Name\":\"people_counter_gold_operations_hour.hour_utc\",\"NativeReferenceName\":\"hour_utc\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Completed Video Hours\"},\"Name\":\"people_counter_gold_operations_hour.Completed Video Hours\",\"NativeReferenceName\":\"Completed Video Hours\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Succeeded Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Succeeded Attempts\",\"NativeReferenceName\":\"Succeeded Attempts\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Failed Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Failed Attempts\",\"NativeReferenceName\":\"Failed Attempts\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"hour_utc\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Hourly completed video hours (UTC)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 279.51,
+          "queryBinary": "H4sIAAAAAAAEAKWUX0/CMBTFvwrpc2MAfdqbImhUDDLDiyFL016hZmubrjWQZd/dewcKURYDvPXPPed3brO7ig1sUQijSpa8VSwFXActXyL49a0IIl0KB9sSllSsuaDFDHyprWFJn7ORt0UjfxYFsIQ5xtkQbcKaNmBdDpm00QTw2cLmKrMOvAgoL7OljR7LX9cOld16zjFDDjI0fgObx8IQbrhyHsoNEWOiSMIU3nebBlvXnE08uTdo8s5ikAyPv6P9n+biR0aqoD8JBB6MhK3Jnm/FxiDK6OHkkPi4mCiA6sy0Atu5x8ryyMSHPdritxHP7yWNUgIodL4OAQoXjm3kgEFbFwdZ57cwEjo/Pf9vdVv4P5Q5cm60UdosKN/E60JsBu3O2+jweDOgmPQDp4OIuO/yHu/zy3kjp3GdgorNLSnpYEYThMQrvu+JJAPqSRtIBX0LeFbTO6TRNU8G6sFqM/GgtBQBCEUYvpv6HlYPVyAjwcYQvJblo6Z/RK/GNF9drHWbVwQAAA==",
+          "width": 1066.87,
+          "x": 9.13,
+          "y": 290.47,
+          "z": 4.00
+        },
+        {
+          "config": "{\"name\":\"1612aead29d0bc450c91\",\"layouts\":[{\"id\":0,\"position\":{\"x\":9,\"y\":580,\"width\":1067,\"height\":280,\"z\":5,\"tabOrder\":5}}],\"singleVisual\":{\"visualType\":\"lineChart\",\"projections\":{\"Category\":[{\"queryRef\":\"people_counter_gold_operations_hour.hour_utc\",\"active\":true}],\"Y\":[{\"queryRef\":\"people_counter_gold_operations_hour.Queued Work\"},{\"queryRef\":\"people_counter_gold_operations_hour.Started Attempts\"},{\"queryRef\":\"people_counter_gold_operations_hour.Succeeded Attempts\"},{\"queryRef\":\"people_counter_gold_operations_hour.Failed Attempts\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"hour_utc\"},\"Name\":\"people_counter_gold_operations_hour.hour_utc\",\"NativeReferenceName\":\"hour_utc\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Queued Work\"},\"Name\":\"people_counter_gold_operations_hour.Queued Work\",\"NativeReferenceName\":\"Queued Work\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Started Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Started Attempts\",\"NativeReferenceName\":\"Started Attempts\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Succeeded Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Succeeded Attempts\",\"NativeReferenceName\":\"Succeeded Attempts\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Failed Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Failed Attempts\",\"NativeReferenceName\":\"Failed Attempts\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"hour_utc\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Hourly processing outcomes (UTC)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAK2UT08CMRDFv4rpuTGgnPamCB4Ug6zBgyGbpjtCdfsn3dZAyH53ZxZEFDYG8NaZ9r33a5POknWt1sLkJUteliwFXAclHyP4xY0IIp0JB+sjLFmyeoMWY/ClsoYlF5z1vdW1/EFoYAlzjLMe2oQFFWBdAZm00QTw2dQWeWYdeBFQXmYzGz0ef1o4VLaqCUeGAmSo/bq2iNpQXG/uPJSrRMREkYQRvH4XdWxVcTb05F5Hk3cWg2TY/kL7m+Z8IyNVUB8UBB6MhLXJlu+SDUCU0cPRkPiiEfKzZ+vfD+TcVjah/nQ/nTYNwgc0vAoBtAvlgcg78ibuPTn/AB+lBMhPwN81aLzAvqzTr9AXqjie/7e6CX4nZYI518rkykyJb+iVFqs5cOttdNhezQ8kfcPPS4lYt3ibX/BL3pnUBjRPRpDHep+01BjTF8fMDt92xSwD+b0ykAqN18JeRS+xmTptLHpzkJG8BhC8kuWdohnVrjDsE4luYgfXBAAA",
+          "width": 1067.00,
+          "x": 9.00,
+          "y": 580.00,
+          "z": 5.00
+        },
+        {
+          "config": "{\"name\":\"26662747b063c0c3eee4\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1373.7773549000951,\"y\":0,\"z\":6,\"width\":279.5052331113226,\"height\":210.08563273073264,\"tabOrder\":6}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_date.date_key\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_date\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"date_key\"},\"Name\":\"people_counter_gold_dim_date.date_key\",\"NativeReferenceName\":\"date_key\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"date_key\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Between'\"}}}}}]},\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Date range (UTC)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 210.09,
+          "queryBinary": "H4sIAAAAAAAEAMVSS0vDQBD+L3NSCGKrp9y0piJSqVa8SAnLZoyr2QeTXWkI+e/ObqrtQaQHwds8vtfA9DCzWgtTtZA/97BCrr2S9wGpuxJerF6Fwy0E8h7SIhZPSK2yBvJpBnOyOtHvhEbIwUEGBcv4LjZoXYOltMF4pLK2TVVWSpeV8Mi4x84x5XRYZ2zeoPRJaGaboE30KTaOsB2tOJ8NJPEBX3ZN8huGDJZkHVLyjNrlO3bA469Mv8Q4+cZHuFcf0QEJjcQte0+wh4u6JqwZZ39I+GfJeT4PRo4uZ7tDFsocHXTM8X+FPd8LKzYHh10z7VKZSpk62i5JaTH+2jXZ4Hg8/igHeMNkFftJNl0n6o2RTaiw0M53icBbTwGz3atOGFZsUIZIXqAnJdtbFR97MrDGJ9EXQM8MAwAA",
+          "width": 279.51,
+          "x": 1373.78,
+          "y": 0.00,
+          "z": 6.00
+        },
+        {
+          "config": "{\"name\":\"543f3eb5ccd109e16ce1\",\"layouts\":[{\"id\":0,\"position\":{\"x\":288.639391056137,\"y\":0,\"z\":1,\"width\":280,\"height\":280,\"tabOrder\":1}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_video.Videos Processed\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Videos Processed\"},\"Name\":\"people_counter_gold_video.Videos Processed\",\"NativeReferenceName\":\"Videos Processed\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Videos Processed\"}}}]},\"columnProperties\":{\"people_counter_gold_video.Videos Processed\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Videos processed (capture date)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAHVQO0/DMBD+K+jmCLWMGYHAgIoKRV1QFFnORzFKbOvsVI2i/HfOToGhYrvH97qb6M71vbJtoPJ9oh2kjka/DODxXkW1+1QeZwiVE+VFKvbgYJyl8qagB3Z9pj+rHlSSp4IqkYljauB8h0a7wUZwc3Bd2xxNCyegt9ELfjXXhTh30DGrbKDCwEgu1ckzwmIk6dzAGq/4+Guy2zwXtGXnwdlxn9TDlUy0cNGSrH+S/Rfm+oKUONEckx0YVuMscalei/6tsa2xhxRsy6ZXy5Me2Q1exstzhfIlN8oxqV/Vmfj7x7U01Ql6SIANIhsdnkz6+noW5DdIb3ElqQEAAA==",
+          "width": 280.00,
+          "x": 288.64,
+          "y": 0.00,
+          "z": 1.00
+        },
+        {
+          "config": "{\"name\":\"8e62f4a78c3ab6ee1d09\",\"layouts\":[{\"id\":0,\"position\":{\"x\":834.8620361560419,\"y\":0,\"z\":3,\"width\":280,\"height\":280,\"tabOrder\":3}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_video.Processing Speed x Real Time\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Processing Speed x Real Time\"},\"Name\":\"people_counter_gold_video.Processing Speed x Real Time\",\"NativeReferenceName\":\"Processing Speed x Real Time\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Processing Speed x Real Time\"}}}]},\"columnProperties\":{\"people_counter_gold_video.Processing Speed x Real Time\":{\"formatString\":\"0.00\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Processing speed (x real time)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAH1RPU/DMBD9K5HnCLWMGYHAgIpKU7GgKLKcRzFKbOtiV4mi/HfOToGJbne+9+W7WdzbvpemHUTxPosKXHutXgNoepBeVp/S4QIRxSzSIBZvoEFbI4rbXDyS7RP9RfYQhXAiFyXL+Ck2sK5Do2wwHtScbNc2Z93CMug4OcZvljpn5w7KJ5Ud5BAI0aUcHWFYjTidDaRwwMdfk9yWJRd7sg6UHLlUkWROWeWANhuzA2SXHTWnY+hPyv+C3VwViHyvzzEGCEbhInfdtWbfO21aHsfwe9K9XBf5RDY4fl4PwCpfvAf+cOw3dSL+7nrLTTlChQjYwZNWw7OOl9kujPwGN3gZWs0BAAA=",
+          "width": 280.00,
+          "x": 834.86,
+          "y": 0.00,
+          "z": 3.00
+        },
+        {
+          "config": "{\"name\":\"9b9e8aa54207111e950e\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":0,\"width\":280,\"height\":280,\"z\":0,\"tabOrder\":0}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Completed Video Hours\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Completed Video Hours\"},\"Name\":\"people_counter_gold_operations_hour.Completed Video Hours\",\"NativeReferenceName\":\"Completed Video Hours\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Completed Video Hours\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Completed Video Hours\":{\"formatString\":\"0.00\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Completed video hours (completion date)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRXUvDMBT9K+M+F9l87KNaFWQynexFSgnpcYu0SbhJZaX0v3uTTX1RfLsnOV+5meja9b2ybaDydaItZI5GPw3g8UZFtT0ojzOFyonyRRp24GCcpfKyoFt2fZY/qh5UkqeCKrGJYwJwvkOj3WAjuNm7rm2cB6so8tAc3MBCfxm9KJdzXUiHDjpmvzVUGBgprzp6RjhFSk9RaTzj7Qfk3HkuaMPJPmdLccmOaBc708It7oUZSDhfRf/vdvG7R7KI5iNVAMNqnB3/SKwl88rY1th9arxh06vTHu/YDV6OT/uX7u/y+JQueFln4feqVwKqI/SQCGtENjo8mPQxq1mYn5sH0wvMAQAA",
+          "width": 280.00,
+          "x": 10.00,
+          "y": 0.00,
+          "z": 0.00
+        },
+        {
+          "config": "{\"name\":\"cde0f54a085044a85a3a\",\"layouts\":[{\"id\":0,\"position\":{\"x\":568.1446241674596,\"y\":0,\"z\":2,\"width\":280,\"height\":280,\"tabOrder\":2}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_video.Video Hours Processed\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_video\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Video Hours Processed\"},\"Name\":\"people_counter_gold_video.Video Hours Processed\",\"NativeReferenceName\":\"Video Hours Processed\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Video Hours Processed\"}}}]},\"columnProperties\":{\"people_counter_gold_video.Video Hours Processed\":{\"formatString\":\"0.00\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Video hours processed (capture date)'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAHVRTU/DMAz9K5PPFdo49ggUkNDQYGgXVE1R+hhBbRM5ybSq6n/HSQdc2C2235edkW5t16m+8VS+j7SFvIPRLxE83Kmgtp/K4QyhcqQ8SI8d2BvbU3ld0D3bLtOfVQcqyVFBlciEIRWwrsVe29gH8P5g22Z/NA2sgN4GJ/jlVBfi3EKHrLKG8pGRXKqTY/jZSNLZyBqv+Pgrsts0FbRh68DZcZfUF48y9wtpaxFAQ4L5iXcp0dX/zEQM5piMweg1zjoXfGpxujF9Y/pDyrlh06n5Zg9so5P2fGuhfMnKsluql3Um/p51JUV1go4JsEZgo/2TSZ+wmgT5DVLhZGS4AQAA",
+          "width": 280.00,
+          "x": 568.14,
+          "y": 0.00,
+          "z": 2.00
+        }
+      ],
+      "width": 1920.00
+    },
+    {
+      "config": "{}",
+      "displayName": "Operations",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 1080.00,
+      "name": "f1818b44c0ca03dea006",
+      "ordinal": 2,
+      "visualContainers": [
+        {
+          "config": "{\"name\":\"168c466f026cacdc8b1d\",\"layouts\":[{\"id\":0,\"position\":{\"x\":568.1446241674596,\"y\":0,\"z\":2,\"width\":280,\"height\":280,\"tabOrder\":2}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Succeeded Attempts\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Succeeded Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Succeeded Attempts\",\"NativeReferenceName\":\"Succeeded Attempts\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Succeeded Attempts\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Succeeded Attempts\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Succeeded attempts'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRy07DMBD8FbTnCLUcc+NROKCiQhAXFEWWM7RGcWytbdQoyr+zTgpcKnHbsefl9Ui3zlrVt4HK95EqyByNfk7g4U5FVR2Ux4lC5UjzRR7ewMG4nsqrgu7Z2Vn+pCyoJE8FbcQmDhnA+Q6NdqmP4GbvurZxHqyiyENzcImF/jp4Ua6mupAOHXSc/bZQITFy3uboGWGJlJ6i0njBxx+Yc6epoB1n+zm7SloDLdqL6xhhfQwkhJ+W/xe7PGOQ9dF85XAweo2T3bmsWtJuTN+afp+L7thYtazvgV3ycrysXSp/yptzruBVPQt/N7wWsDlCp0zYIrLR4dHk/1hPwvwGUZZzocMBAAA=",
+          "width": 280.00,
+          "x": 568.14,
+          "y": 0.00,
+          "z": 2.00
+        },
+        {
+          "config": "{\"name\":\"1c1300be91c9c604d819\",\"layouts\":[{\"id\":0,\"position\":{\"x\":847.6498572787822,\"y\":0,\"z\":3,\"width\":280,\"height\":280,\"tabOrder\":3}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Failed Attempts\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Failed Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Failed Attempts\",\"NativeReferenceName\":\"Failed Attempts\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Failed Attempts\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Failed Attempts\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Failed attempts'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRyU7DMBD9FTTnCLUcc2NJOaCiQhEXFEWWM22N4kXjMWpU5d8ZOwUkOHDz87zN4xPcemuV6yPUbyfYopzZ6KeENN4pVtuDCnimQH2CMsiHV6RovIP6qoIVeVvkj8oi1BCggkZseMwAfRiw0z45Rur2fug7H5AUizx2B59I6C9jEOViaivpMKDm4rdGFRNhzmuOgTDOkdJTVBqfcfcDSu40VbChbF+yV8oM2F9cM6MNHEGmXxX/b3X5W53FbD5yLBI6jWevPymt5NwY1xu3z/02ZKyat3ZPPgW5nrctTd/lqTlR8KItwu/FLgU0R9QpE9bIZHR8MPkblpMwPwEA2jtTugEAAA==",
+          "width": 280.00,
+          "x": 847.65,
+          "y": 0.00,
+          "z": 3.00
+        },
+        {
+          "config": "{\"name\":\"24de8d6d51bb04544ab8\",\"layouts\":[{\"id\":0,\"position\":{\"x\":9.134157944814463,\"y\":290.46622264509995,\"z\":6,\"width\":1576.5556612749763,\"height\":387.28829686013324,\"tabOrder\":6}}],\"singleVisual\":{\"visualType\":\"lineChart\",\"projections\":{\"Category\":[{\"queryRef\":\"people_counter_gold_operations_hour.hour_utc\",\"active\":true}],\"Y\":[{\"queryRef\":\"people_counter_gold_operations_hour.Queued Work\"},{\"queryRef\":\"people_counter_gold_operations_hour.Started Attempts\"},{\"queryRef\":\"people_counter_gold_operations_hour.Succeeded Attempts\"},{\"queryRef\":\"people_counter_gold_operations_hour.Failed Attempts\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"hour_utc\"},\"Name\":\"people_counter_gold_operations_hour.hour_utc\",\"NativeReferenceName\":\"hour_utc\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Queued Work\"},\"Name\":\"people_counter_gold_operations_hour.Queued Work\",\"NativeReferenceName\":\"Queued Work\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Started Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Started Attempts\",\"NativeReferenceName\":\"Started Attempts\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Succeeded Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Succeeded Attempts\",\"NativeReferenceName\":\"Succeeded Attempts\"},{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Failed Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Failed Attempts\",\"NativeReferenceName\":\"Failed Attempts\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"hour_utc\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"objects\":{},\"vcObjects\":{\"title\":[{\"properties\":{\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Hourly operational outcomes'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 387.29,
+          "queryBinary": "H4sIAAAAAAAEAK2UT08CMRDFv4rpuTGgnPamCB4Ug6zBgyGbpjtCdfsn3dZAyH53ZxZEFDYG8NaZ9r33a5POknWt1sLkJUteliwFXAclHyP4xY0IIp0JB+sjLFmyeoMWY/ClsoYlF5z1vdW1/EFoYAlzjLMe2oQFFWBdAZm00QTw2dQWeWYdeBFQXmYzGz0ef1o4VLaqCUeGAmSo/bq2iNpQXG/uPJSrRMREkYQRvH4XdWxVcTb05F5Hk3cWg2TY/kL7m+Z8IyNVUB8UBB6MhLXJlu+SDUCU0cPRkPiiEfKzZ+vfD+TcVjah/nQ/nTYNwgc0vAoBtAvlgcg78ibuPTn/AB+lBMhPwN81aLzAvqzTr9AXqjie/7e6CX4nZYI518rkykyJb+iVFqs5cOttdNhezQ8kfcPPS4lYt3ibX/BL3pnUBjRPRpDHep+01BjTF8fMDt92xSwD+b0ykAqN18JeRS+xmTptLHpzkJG8BhC8kuWdohnVrjDsE4luYgfXBAAA",
+          "width": 1576.56,
+          "x": 9.13,
+          "y": 290.47,
+          "z": 6.00
+        },
+        {
+          "config": "{\"name\":\"5ebec8f3c97ce9192c19\",\"layouts\":[{\"id\":0,\"position\":{\"x\":288.639391056137,\"y\":0,\"z\":1,\"width\":280,\"height\":280,\"tabOrder\":1}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Started Attempts\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Started Attempts\"},\"Name\":\"people_counter_gold_operations_hour.Started Attempts\",\"NativeReferenceName\":\"Started Attempts\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Started Attempts\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Started Attempts\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Started attempts'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRO0/DMBD+K+jmCLWM2XgUBlRUCGJBUWQ5R2sUP3Q+o0ZR/jtnp8DQgc2f73v5PMGtt1a5PkL9PkGDcmajnxPSeKdYNQcV8ESBeoIyyIc3pGi8g/qqgnvytsiflEWoIUAFG7HhMQP0YcBO++QYqdv7oe98QFIs8tgdfCKhv45BlKu5raTDgJqL3xZVTIQ5b3MMhHGJlJ6i0viCH3+g5M5zBTvK9iW7YUWM/cU1M9rAEWT80/H/Wpdn8qxm85WDkdBpPJmd57SSdGNcb9w+V9yRsWpZ3AP5FOR6WbiU/ZTX5kzBq7YIf3e7FrA5ok6ZsEUmo+OjyT+xnoX5DdoXAWC9AQAA",
+          "width": 280.00,
+          "x": 288.64,
+          "y": 0.00,
+          "z": 1.00
+        },
+        {
+          "config": "{\"name\":\"5fd2a6468aa888aa0438\",\"layouts\":[{\"id\":0,\"position\":{\"x\":9,\"y\":687,\"width\":1577,\"height\":387,\"z\":7,\"tabOrder\":7}}],\"singleVisual\":{\"visualType\":\"slicer\",\"projections\":{\"Values\":[{\"queryRef\":\"people_counter_gold_dim_date.date_key\",\"active\":true}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_dim_date\",\"Type\":0}],\"Select\":[{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"date_key\"},\"Name\":\"people_counter_gold_dim_date.date_key\",\"NativeReferenceName\":\"date_key\"}],\"OrderBy\":[{\"Direction\":1,\"Expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"date_key\"}}}]},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"objects\":{\"data\":[{\"properties\":{\"mode\":{\"expr\":{\"Literal\":{\"Value\":\"'Between'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 387.00,
+          "queryBinary": "H4sIAAAAAAAEAMVSS0vDQBD+L3NSCGKrp9y0piJSqVa8SAnLZoyr2QeTXWkI+e/ObqrtQaQHwds8vtfA9DCzWgtTtZA/97BCrr2S9wGpuxJerF6Fwy0E8h7SIhZPSK2yBvJpBnOyOtHvhEbIwUEGBcv4LjZoXYOltMF4pLK2TVVWSpeV8Mi4x84x5XRYZ2zeoPRJaGaboE30KTaOsB2tOJ8NJPEBX3ZN8huGDJZkHVLyjNrlO3bA469Mv8Q4+cZHuFcf0QEJjcQte0+wh4u6JqwZZ39I+GfJeT4PRo4uZ7tDFsocHXTM8X+FPd8LKzYHh10z7VKZSpk62i5JaTH+2jXZ4Hg8/igHeMNkFftJNl0n6o2RTaiw0M53icBbTwGz3atOGFZsUIZIXqAnJdtbFR97MrDGJ9EXQM8MAwAA",
+          "width": 1577.00,
+          "x": 9.00,
+          "y": 687.00,
+          "z": 7.00
+        },
+        {
+          "config": "{\"name\":\"84b19af77cc03d6c6b29\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1390.2188392007613,\"y\":0,\"z\":5,\"width\":280,\"height\":280,\"tabOrder\":5}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Attempt Failure Rate\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Attempt Failure Rate\"},\"Name\":\"people_counter_gold_operations_hour.Attempt Failure Rate\",\"NativeReferenceName\":\"Attempt Failure Rate\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Attempt Failure Rate\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Attempt Failure Rate\":{\"formatString\":\"0.00 %;-0.00 %;0.00 %\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Attempt failure rate'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRyWrDMBD9lTBnU5Iefevi9FBS0qT0UowR8iRRsRZGoxJj/O8d2Wl7CfQ2T3qbRgM8eGuVayOUHwPsUWY2+jUh9Y+K1f6kAl4oUA4wXeThHSka76C8LWBN3k7yF2URSghQQCU23GeAPnTYaJ8cIzVH37WND0iKRR6bk08k9Lc+iHI51oV06FDz5LdBFRNhzqvOgTDOkdJTVBp3ePgDU+44FrClbD9l3zGjDbxYK9OJz2KnGEEoPz3/r3Zz1SI7sPnKBZDQabwYXs+rJfHeuNa4Y667JWPVvMQn8inI8bx8Kf4pL8/Zgpf1JPzd80pAdUadMmGDTEbHZ5N/ZTUK8xs1LVd4yQEAAA==",
+          "width": 280.00,
+          "x": 1390.22,
+          "y": 0.00,
+          "z": 5.00
+        },
+        {
+          "config": "{\"name\":\"a1606c8f443cc073927e\",\"layouts\":[{\"id\":0,\"position\":{\"x\":1127.1550903901048,\"y\":0,\"z\":4,\"width\":280,\"height\":280,\"tabOrder\":4}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Attempt Success Rate\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Attempt Success Rate\"},\"Name\":\"people_counter_gold_operations_hour.Attempt Success Rate\",\"NativeReferenceName\":\"Attempt Success Rate\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Attempt Success Rate\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Attempt Success Rate\":{\"formatString\":\"0.00 %;-0.00 %;0.00 %\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Attempt success rate'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVRyU7DMBD9lWrOEWo55sYSOKCi0iAuKIosZ2iN4kWTMWoU5d8ZOwUulbjNs9/m8QR33lrlugHK9wlqlJmNfolI471iVR9VwDMFygnyRRrekAbjHZTXBTyQt1n+rCxCCQEKqMSGxwTQhx5b7aNjpPbg+671AUmxyIf26CMJ/XUMolzPTSEdetSc/baohkiY8qpTIByWSOkpKo17/PgDOXeeC9hRss/ZN8xoA6/qqLWIV3vFCEL56fl/tauLFsmBzVcqgIRO49nwcl4jibfGdcYdUt0dGauWJT6Sj0GOl+VL8U95ecoWvG6y8HfPGwHVCXVMhC0yGT08mfQrm1mY36xR6sDJAQAA",
+          "width": 280.00,
+          "x": 1127.16,
+          "y": 0.00,
+          "z": 4.00
+        },
+        {
+          "config": "{\"name\":\"edfd9d80161004de80a9\",\"layouts\":[{\"id\":0,\"position\":{\"x\":10,\"y\":0,\"width\":280,\"height\":280,\"z\":0,\"tabOrder\":0}}],\"singleVisual\":{\"visualType\":\"cardVisual\",\"projections\":{\"Data\":[{\"queryRef\":\"people_counter_gold_operations_hour.Queued Work\"}]},\"prototypeQuery\":{\"Version\":2,\"From\":[{\"Name\":\"p\",\"Entity\":\"people_counter_gold_operations_hour\",\"Type\":0}],\"Select\":[{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Queued Work\"},\"Name\":\"people_counter_gold_operations_hour.Queued Work\",\"NativeReferenceName\":\"Queued Work\"}],\"OrderBy\":[{\"Direction\":2,\"Expression\":{\"Measure\":{\"Expression\":{\"SourceRef\":{\"Source\":\"p\"}},\"Property\":\"Queued Work\"}}}]},\"columnProperties\":{\"people_counter_gold_operations_hour.Queued Work\":{\"formatString\":\"0\"}},\"drillFilterOtherVisuals\":true,\"hasDefaultSort\":true,\"vcObjects\":{\"title\":[{\"properties\":{\"show\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"text\":{\"expr\":{\"Literal\":{\"Value\":\"'Queued work'\"}}}}}]}}}",
+          "filters": "[]",
+          "height": 280.00,
+          "queryBinary": "H4sIAAAAAAAEAIVQTU/DMAz9K8jnCm0cewQKBzS0MQQHVFVR6m1hbRw5CVpV9b/jpOPrxM0v9vvIG+GG+l7Z1kP5NsIWZQ5GbyLycKuC2h6Uw/MJlCPkRRpekL0hC+VVAXdMfaY/qh6hBAcFVCIThgSQXIeNpmgDcrOnrm3IIasgdN8cKLKcPw9OmIupLiRDhzpkvRUqHxmTX3VyjH62lJzC0viEux+QfaepgDUn+ewtaSO2F6/ER5DNV7z/E13+ZiZiMB/JDhmtxrPOH/Va9K+NbY3dp0xrNr2am7pnik6e54Yl3bt8LzkJXtSZ+F3mUkB1Qh3TwQoDG+0fTKp+OcnlJ/434iauAQAA",
+          "width": 280.00,
+          "x": 10.00,
+          "y": 0.00,
+          "z": 0.00
+        }
+      ],
+      "width": 1920.00
+    }
+  ]
+}

@@ -1,0 +1,172 @@
+table people_counter_gold_dim_model_config
+	lineageTag: 1267477e-22ed-407a-80bd-f0b4bd38c6ff
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_dim_model_config]
+
+	column config_sha256
+		dataType: string
+		lineageTag: eea82f99-8b17-4bfd-8a91-de62f88172cf
+		sourceLineageTag: config_sha256
+		summarizeBy: none
+		sourceColumn: config_sha256
+
+		annotation SummarizationSetBy = Automatic
+
+	column config_json
+		dataType: string
+		isHidden
+		lineageTag: 58af90d3-a0c6-423e-ac19-f9d04e044654
+		sourceLineageTag: config_json
+		summarizeBy: none
+		sourceColumn: config_json
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column pipeline
+		dataType: string
+		lineageTag: bf0d83cc-c324-4257-ac7b-a51d4cccc333
+		sourceLineageTag: pipeline
+		summarizeBy: none
+		sourceColumn: pipeline
+
+		annotation SummarizationSetBy = Automatic
+
+	column device_variant
+		dataType: string
+		lineageTag: 08ec3c6e-2844-45cc-ac84-27c2db82047b
+		sourceLineageTag: device_variant
+		summarizeBy: none
+		sourceColumn: device_variant
+
+		annotation SummarizationSetBy = Automatic
+
+	column device
+		dataType: string
+		lineageTag: f0cfe3e0-b133-4168-8d4d-b54c6f602af1
+		sourceLineageTag: device
+		summarizeBy: none
+		sourceColumn: device
+
+		annotation SummarizationSetBy = Automatic
+
+	column batch_size
+		dataType: int64
+		formatString: 0
+		lineageTag: cca03200-b81a-4bda-9196-61f9bd24c62c
+		sourceLineageTag: batch_size
+		summarizeBy: none
+		sourceColumn: batch_size
+
+		annotation SummarizationSetBy = Automatic
+
+	column sample_fps
+		dataType: double
+		lineageTag: 771be3ba-e626-4806-b976-9b876df56f8e
+		sourceLineageTag: sample_fps
+		summarizeBy: none
+		sourceColumn: sample_fps
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column detection_threshold
+		dataType: double
+		lineageTag: 8ffb52d3-3fd1-47b9-acb8-4893c0ce04e0
+		sourceLineageTag: detection_threshold
+		summarizeBy: none
+		sourceColumn: detection_threshold
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column use_fp16
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 534186a9-65f9-46cd-9b93-248733692ad0
+		sourceLineageTag: use_fp16
+		summarizeBy: none
+		sourceColumn: use_fp16
+
+		annotation SummarizationSetBy = Automatic
+
+	column detector_model
+		dataType: string
+		lineageTag: 68abd60c-7948-4bfe-bc83-fa7e555e6b9d
+		sourceLineageTag: detector_model
+		summarizeBy: none
+		sourceColumn: detector_model
+
+		annotation SummarizationSetBy = Automatic
+
+	column camera_motion_compensation
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 577f11b9-ff7a-41ca-89e3-c256aa1b8431
+		sourceLineageTag: camera_motion_compensation
+		summarizeBy: none
+		sourceColumn: camera_motion_compensation
+
+		annotation SummarizationSetBy = Automatic
+
+	column counting_line_json
+		dataType: string
+		isHidden
+		lineageTag: 23bda73a-dd5d-40a0-b0c0-91882ae3930e
+		sourceLineageTag: counting_line_json
+		summarizeBy: none
+		sourceColumn: counting_line_json
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column first_capture_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: cf449a26-e7c1-40b5-8775-88540d5bc772
+		sourceLineageTag: first_capture_utc
+		summarizeBy: none
+		sourceColumn: first_capture_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_capture_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 8ba96a3f-68b4-4136-bb40-3392703dd90c
+		sourceLineageTag: last_capture_utc
+		summarizeBy: none
+		sourceColumn: last_capture_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column video_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 6334f8df-96b7-4631-be99-e364d528ae2c
+		sourceLineageTag: video_count
+		summarizeBy: none
+		sourceColumn: video_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column refreshed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 32edbffa-5d31-4664-bea6-afed366ddee5
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_dim_model_config = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_dim_model_config
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

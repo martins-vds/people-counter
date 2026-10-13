@@ -1,0 +1,51 @@
+table people_counter_reconciliation_findings
+	lineageTag: 405b7248-0ac6-429c-b17e-395c4f28021d
+	sourceLineageTag: [dbo].[people_counter_sjd_reconciliation_findings]
+
+	column finding_id
+		dataType: string
+		summarizeBy: none
+		sourceColumn: finding_id
+
+	column finding_type
+		dataType: string
+		summarizeBy: none
+		sourceColumn: finding_type
+
+	column severity
+		dataType: string
+		summarizeBy: none
+		sourceColumn: severity
+
+	column entity_key
+		dataType: string
+		summarizeBy: none
+		sourceColumn: entity_key
+
+	column details_json
+		dataType: string
+		summarizeBy: none
+		sourceColumn: details_json
+
+	column first_seen_at
+		dataType: double
+		summarizeBy: none
+		sourceColumn: first_seen_at
+
+	column last_seen_at
+		dataType: double
+		summarizeBy: none
+		sourceColumn: last_seen_at
+
+	column resolved_at
+		dataType: double
+		summarizeBy: none
+		sourceColumn: resolved_at
+
+	partition people_counter_reconciliation_findings = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_reconciliation_findings
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

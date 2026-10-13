@@ -1,0 +1,180 @@
+table people_counter_gold_dim_date
+	lineageTag: 1b011421-da06-4aa3-9e8e-38fcee2de7c9
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_dim_date]
+	dataCategory: Time
+
+	column date_key
+		dataType: dateTime
+		isKey
+		formatString: yyyy-MM-dd
+		lineageTag: c7446d74-df46-4550-b9af-58447bb679ef
+		sourceLineageTag: date_key
+		summarizeBy: none
+		sourceColumn: date_key
+
+		changedProperty = DataType
+
+		changedProperty = FormatString
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+		annotation PBI_FormatHint = {"isCustom":true}
+
+	column calendar_year
+		dataType: int64
+		formatString: 0
+		lineageTag: b1080b2d-39ea-46dc-a0b8-909d3571b424
+		sourceLineageTag: calendar_year
+		summarizeBy: sum
+		sourceColumn: calendar_year
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column calendar_quarter
+		dataType: int64
+		formatString: 0
+		lineageTag: 47b9c2a1-258a-46cd-a4b1-78523f3c8127
+		sourceLineageTag: calendar_quarter
+		summarizeBy: sum
+		sourceColumn: calendar_quarter
+
+		annotation SummarizationSetBy = Automatic
+
+	column calendar_month
+		dataType: int64
+		formatString: 0
+		lineageTag: 6cb0d84b-ef74-45bf-b90e-a4d8570459f8
+		sourceLineageTag: calendar_month
+		summarizeBy: sum
+		sourceColumn: calendar_month
+
+		annotation SummarizationSetBy = Automatic
+
+	column month_name
+		dataType: string
+		lineageTag: 7b358065-870c-4dc4-91c1-bc8d87915ef5
+		sourceLineageTag: month_name
+		summarizeBy: none
+		sourceColumn: month_name
+		sortByColumn: calendar_month
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column month_short_name
+		dataType: string
+		lineageTag: aedf8815-ad7d-4694-9cba-8a285dbdc692
+		sourceLineageTag: month_short_name
+		summarizeBy: none
+		sourceColumn: month_short_name
+		sortByColumn: calendar_month
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column year_month
+		dataType: string
+		lineageTag: 8fa33702-5048-488a-9f2f-0a90a198bd8e
+		sourceLineageTag: year_month
+		summarizeBy: none
+		sourceColumn: year_month
+
+		annotation SummarizationSetBy = Automatic
+
+	column day_of_month
+		dataType: int64
+		formatString: 0
+		lineageTag: 375c4cde-4af0-445a-ade6-3215a4ec8386
+		sourceLineageTag: day_of_month
+		summarizeBy: sum
+		sourceColumn: day_of_month
+
+		annotation SummarizationSetBy = Automatic
+
+	column iso_day_of_week
+		dataType: int64
+		formatString: 0
+		lineageTag: 9bbb12a3-5c15-4f5f-8e42-54b823d8d9e7
+		sourceLineageTag: iso_day_of_week
+		summarizeBy: sum
+		sourceColumn: iso_day_of_week
+
+		annotation SummarizationSetBy = Automatic
+
+	column iso_week_year
+		dataType: int64
+		formatString: 0
+		lineageTag: 60c53911-89c8-4b5a-a61d-303850df2af0
+		sourceLineageTag: iso_week_year
+		summarizeBy: sum
+		sourceColumn: iso_week_year
+
+		annotation SummarizationSetBy = Automatic
+
+	column iso_week_of_year
+		dataType: int64
+		formatString: 0
+		lineageTag: 7f49b340-ec68-4941-8a65-169a875d5c2c
+		sourceLineageTag: iso_week_of_year
+		summarizeBy: sum
+		sourceColumn: iso_week_of_year
+
+		annotation SummarizationSetBy = Automatic
+
+	column iso_year_week
+		dataType: string
+		lineageTag: 4eafeb7f-71bc-4514-a797-fab13baf4b48
+		sourceLineageTag: iso_year_week
+		summarizeBy: none
+		sourceColumn: iso_year_week
+
+		annotation SummarizationSetBy = Automatic
+
+	column day_name
+		dataType: string
+		lineageTag: d5019f83-a5dd-492f-8a6c-a2631a1bd0e9
+		sourceLineageTag: day_name
+		summarizeBy: none
+		sourceColumn: day_name
+		sortByColumn: iso_day_of_week
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column is_weekend
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 7cd801f2-f1e8-41dd-91c3-fe54d3a2fabb
+		sourceLineageTag: is_weekend
+		summarizeBy: none
+		sourceColumn: is_weekend
+
+		annotation SummarizationSetBy = Automatic
+
+	column refreshed_at
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: c5775b7c-ef63-4931-8696-042cf732d88c
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_dim_date = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_dim_date
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

@@ -1,0 +1,70 @@
+table people_counter_gold_dim_location
+	lineageTag: d61c62ec-7aa2-468b-a374-2a330fcc545f
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_dim_location]
+
+	column location_id
+		dataType: string
+		lineageTag: 0d16b29b-3836-4b6b-84eb-1ed35a66da10
+		sourceLineageTag: location_id
+		summarizeBy: none
+		sourceColumn: location_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column first_capture_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 1efc2c61-095a-4dba-8d87-7a6bc050731c
+		sourceLineageTag: first_capture_utc
+		summarizeBy: none
+		sourceColumn: first_capture_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_capture_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: d6fd8f2d-bfbb-464b-8b14-db2c523cac18
+		sourceLineageTag: last_capture_utc
+		summarizeBy: none
+		sourceColumn: last_capture_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column camera_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 1fefe37d-13e4-45ae-ae0d-1ebdc9820593
+		sourceLineageTag: camera_count
+		summarizeBy: sum
+		sourceColumn: camera_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column video_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 1db4ea2f-b713-4564-b7b9-c3cc95b26fe0
+		sourceLineageTag: video_count
+		summarizeBy: sum
+		sourceColumn: video_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column refreshed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: d0246e45-f18b-4894-afd9-9c0a1f5d5f85
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_dim_location = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_dim_location
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

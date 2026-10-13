@@ -1,0 +1,34 @@
+table 'Forecast Workload'
+	lineageTag: d4d67679-b8b0-5408-a0f8-ac2ea730dce1
+
+	measure 'Selected Video Hours' = SELECTEDVALUE('Forecast Workload'[Video Hours], 200000)
+		formatString: #,0
+		lineageTag: 9aa6b854-81ba-573f-bb6c-75715de0ac48
+
+	measure 'Bare Throughput Target' = DIVIDE([Selected Video Hours], 30 * 24)
+		formatString: 0.00
+		lineageTag: 23bb3e4d-006f-57df-9b99-c8aab60cbb1e
+
+	measure 'Planning Throughput Target' = DIVIDE([Bare Throughput Target] * 1.20, 0.80)
+		formatString: 0.00
+		lineageTag: ac5a6c6f-e0d8-54c7-951e-833597b05c5b
+
+	column 'Video Hours'
+		formatString: #,0
+		lineageTag: 5322307c-699b-5b25-bdbc-96345ff1dc1a
+		summarizeBy: none
+		sourceColumn: [Value]
+
+		extendedProperty ParameterMetadata =
+				{
+				  "version": 0
+				}
+
+		annotation SummarizationSetBy = User
+
+	partition 'Forecast Workload' = calculated
+		mode: import
+		source = GENERATESERIES(1000, 1000000, 1000)
+
+	annotation PBI_Id = 5075ad06b87d061c4920c8913ca468f9
+

@@ -1,0 +1,269 @@
+name: Fabric postconfiguration
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      working_directory:
+        required: true
+        type: string
+      enable_schedules:
+        required: false
+        type: boolean
+        default: false
+      ref:
+        description: Immutable repository commit being configured
+        required: true
+        type: string
+      phase:
+        description: Unique deployment phase used in retained evidence
+        required: false
+        type: string
+        default: initial
+    outputs:
+      status:
+        description: Postconfiguration evidence status
+        value: ${{ jobs.reconcile.outputs.status }}
+      evidence_artifact:
+        description: Name of the uploaded postconfiguration artifact
+        value: ${{ jobs.reconcile.outputs.evidence_artifact }}
+
+permissions: {}
+
+concurrency:
+  group: fabric-postconfigure-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile Fabric runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write # Exchanges the environment-scoped OIDC identity.
+      contents: read
+    outputs:
+      status: ${{ steps.reconcile.outputs.status }}
+      evidence_artifact: ${{ steps.metadata.outputs.artifact_name }}
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD_AUTH: "true"
+      TF_ENVIRONMENT: ${{ inputs.environment }}
+      TF_ROOT: ${{ inputs.working_directory }}
+      DEPLOY_REF: ${{ inputs.ref }}
+      DEPLOY_PHASE: ${{ inputs.phase }}
+      ENABLE_SCHEDULES: ${{ inputs.enable_schedules }}
+      ENABLE_REPORTING: ${{ vars.FABRIC_ENABLE_REPORTING || 'false' }}
+      ENABLE_ACTIVATOR: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
+      TF_BACKEND_RESOURCE_GROUP_NAME: ${{ vars.TF_BACKEND_RESOURCE_GROUP_NAME }}
+      TF_BACKEND_STORAGE_ACCOUNT_NAME: ${{ vars.TF_BACKEND_STORAGE_ACCOUNT_NAME }}
+      TF_BACKEND_CONTAINER_NAME: ${{ vars.TF_BACKEND_CONTAINER_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Validate immutable inputs
+        run: |
+          if [[ ! "${DEPLOY_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Deployment ref must be a full commit SHA"
+            exit 1
+          fi
+          case "${TF_ENVIRONMENT}" in
+            dev|test|prod) ;;
+            *)
+              echo "::error::Unsupported deployment environment"
+              exit 1
+              ;;
+          esac
+          if [ "${TF_ROOT}" != "infra/environments/${TF_ENVIRONMENT}" ]; then
+            echo "::error::Terraform root does not match the environment"
+            exit 1
+          fi
+          case "${DEPLOY_PHASE}" in
+            initial|repeat|final-gate) ;;
+            *)
+              echo "::error::Unsupported postconfiguration phase"
+              exit 1
+              ;;
+          esac
+          if [ "${DEPLOY_PHASE}" = "final-gate" ]; then
+            if [ "${TF_ENVIRONMENT}" != "prod" ] \
+              || [ "${ENABLE_SCHEDULES}" != "true" ]; then
+              echo "::error::Only the Production final gate may enable schedules"
+              exit 1
+            fi
+          elif [ "${ENABLE_SCHEDULES}" != "false" ]; then
+            echo "::error::Schedules must remain disabled before the final gate"
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "${DEPLOY_REF}"
+
+      - name: Prepare deployment evidence
+        id: metadata
+        run: |
+          artifact_name="fabric-evidence-${TF_ENVIRONMENT}-${DEPLOY_PHASE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+          mkdir -p "${RUNNER_TEMP}/fabric-evidence"
+          jq -n \
+            --arg commitSha "${DEPLOY_REF}" \
+            --arg environment "${TF_ENVIRONMENT}" \
+            --arg phase "${DEPLOY_PHASE}" \
+            --arg runId "${GITHUB_RUN_ID}" \
+            '{
+              schema: "people-counter-fabric-workflow-evidence-v1",
+              commitSha: $commitSha,
+              environment: $environment,
+              phase: $phase,
+              runId: $runId
+            }' > "${RUNNER_TEMP}/fabric-evidence/workflow-context.json"
+
+      - name: Azure login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          set -o pipefail
+          terraform init -input=false \
+            -backend-config="resource_group_name=${TF_BACKEND_RESOURCE_GROUP_NAME}" \
+            -backend-config="storage_account_name=${TF_BACKEND_STORAGE_ACCOUNT_NAME}" \
+            -backend-config="container_name=${TF_BACKEND_CONTAINER_NAME}" \
+            -backend-config="key=people-counter/${TF_ENVIRONMENT}.tfstate" \
+            -backend-config="use_azuread_auth=true" \
+            2>&1 | tee "${RUNNER_TEMP}/fabric-evidence/terraform-init.log"
+
+      - name: Export Terraform outputs
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          terraform output -json \
+            > "${RUNNER_TEMP}/fabric-evidence/terraform-output.json"
+          jq '{
+            workspace_id: .workspace_id.value,
+            lakehouse_id: .lakehouse_id.value,
+            onelake_shortcuts: .onelake_shortcuts.value,
+            environment_id: .environment_id.value,
+            spark_job_definition_ids: .spark_job_definition_ids.value,
+            semantic_model_ids: .semantic_model_ids.value,
+            report_ids: .report_ids.value,
+            eventhouse_id: .eventhouse_id.value,
+            kql_database_id: .kql_database_id.value,
+            kql_queryset_id: .kql_queryset_id.value,
+            kql_dashboard_id: .kql_dashboard_id.value,
+            activator_ids: .activator_ids.value
+          }' "${RUNNER_TEMP}/fabric-evidence/terraform-output.json" \
+            > "${RUNNER_TEMP}/fabric-evidence/deployment-outputs.json"
+
+      - name: Build deployment wheel
+        run: |
+          set -o pipefail
+          uv build --wheel --out-dir "${RUNNER_TEMP}/dist" \
+            2>&1 | tee "${RUNNER_TEMP}/fabric-evidence/wheel-build.log"
+
+      - name: Validate source-controlled definitions
+        run: >
+          uv run python scripts/validate_fabric_definitions.py fabric
+          --output "${RUNNER_TEMP}/fabric-evidence/fabric-definitions.json"
+
+      - name: Reconcile Fabric runtime
+        id: reconcile
+        env:
+          PEOPLE_COUNTER_DEPLOY_STAGE: ${{ inputs.environment }}
+          ACTIVATOR_ACTION_CHECKPOINT_JSON: ${{ secrets.FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON }}
+        run: |
+          wheel=$(find "${RUNNER_TEMP}/dist" -maxdepth 1 -name 'people_counter-*.whl' -print -quit)
+          test -n "${wheel}"
+          args=(
+            --manifest-path "src/people_counter/data/deploy/${TF_ENVIRONMENT}.json"
+            --runtime-contract-path "fabric/runtime/${TF_ENVIRONMENT}.json"
+            --stage "${TF_ENVIRONMENT}"
+            --terraform-output-path "${RUNNER_TEMP}/fabric-evidence/terraform-output.json"
+            --definition-evidence-path "${RUNNER_TEMP}/fabric-evidence/fabric-definitions.json"
+            --commit-sha "${DEPLOY_REF}"
+            --whl-path "${wheel}"
+            --bootstrap-lakehouse
+          )
+          if [ "${ENABLE_SCHEDULES}" = "true" ]; then
+            args+=(--enable-schedules)
+          fi
+          if [ "${ENABLE_REPORTING}" = "true" ]; then
+            args+=(--refresh-reporting)
+          fi
+          if [ "${ENABLE_ACTIVATOR}" = "true" ]; then
+            args+=(--enable-activator --activator-bundle-path fabric/activators/operations)
+            if [ -n "${ACTIVATOR_ACTION_CHECKPOINT_JSON}" ]; then
+              python -c 'import os, pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "activator-action-checkpoint.json").write_text(os.environ["ACTIVATOR_ACTION_CHECKPOINT_JSON"], encoding="utf-8")'
+              args+=(--activator-checkpoint-path "${RUNNER_TEMP}/activator-action-checkpoint.json")
+            fi
+          fi
+          set +e
+          set -o pipefail
+          uv run --frozen pc-reconcile-fabric-runtime "${args[@]}" \
+            | tee "${RUNNER_TEMP}/fabric-evidence/fabric-evidence.json"
+          exit_code=${PIPESTATUS[0]}
+          set -e
+          rm -f "${RUNNER_TEMP}/activator-action-checkpoint.json"
+          status=$(jq -r '.status // "invalid-evidence"' \
+            "${RUNNER_TEMP}/fabric-evidence/fabric-evidence.json" \
+            2>/dev/null || echo "invalid-evidence")
+          echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+
+      - name: Remove transient deployment inputs
+        if: always() && steps.metadata.conclusion == 'success'
+        run: |
+          rm -f \
+            "${RUNNER_TEMP}/activator-action-checkpoint.json" \
+            "${RUNNER_TEMP}/fabric-evidence/terraform-output.json"
+
+      - name: Upload deployment evidence
+        if: always() && steps.metadata.conclusion == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: ${{ runner.temp }}/fabric-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce postconfiguration gates
+        if: always()
+        env:
+          EVIDENCE_STATUS: ${{ steps.reconcile.outputs.status }}
+          RECONCILE_EXIT_CODE: ${{ steps.reconcile.outputs.exit_code }}
+        run: |
+          case "${EVIDENCE_STATUS}:${RECONCILE_EXIT_CODE}" in
+            succeeded:0)
+              ;;
+            operator_checkpoint_required:2)
+              echo "::error::An explicit operator checkpoint is required. Review the retained evidence; schedules were left disabled."
+              exit 1
+              ;;
+            *)
+              echo "::error::Fabric postconfiguration failed or produced invalid evidence."
+              exit 1
+              ;;
+          esac

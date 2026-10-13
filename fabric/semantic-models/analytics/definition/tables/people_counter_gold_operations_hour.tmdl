@@ -1,0 +1,300 @@
+table people_counter_gold_operations_hour
+	lineageTag: 5b1d3597-1f3f-411e-bd07-9c21fe56bf3d
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_operations_hour]
+
+	measure 'Queued Work' =
+			
+			SUM(people_counter_gold_operations_hour[queued])
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: 9c006d52-0efe-4568-85cb-3e70959284af
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Started Attempts' =
+			
+			SUM(people_counter_gold_operations_hour[started])
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: 4527abb6-c4c5-4414-9599-4b0661ed044f
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Succeeded Attempts' =
+			
+			SUM(people_counter_gold_operations_hour[succeeded])
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: 6c119979-41b6-43e8-bde9-a0ce09536491
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Failed Attempts' =
+			
+			SUM(people_counter_gold_operations_hour[failed])
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: 875e05a8-5030-44ce-a9f7-68573d444f6b
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Attempt Success Rate' =
+			
+			DIVIDE(
+			    [Succeeded Attempts],
+			    [Succeeded Attempts] + [Failed Attempts]
+			)
+		formatString: 0.00%;-0.00%;0.00%
+		displayFolder: Operations KPIs
+		lineageTag: cdb6a83a-8bac-4572-8f41-b14a58da392c
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		changedProperty = FormatString
+
+	measure 'Attempt Failure Rate' =
+			
+			DIVIDE(
+			    [Failed Attempts],
+			    [Succeeded Attempts] + [Failed Attempts]
+			)
+		formatString: 0.00%;-0.00%;0.00%
+		displayFolder: Operations KPIs
+		lineageTag: 853b5033-9700-4763-a1d7-c4bc3056a0d2
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		changedProperty = FormatString
+
+	measure 'Completed Video Hours' =
+			
+			SUM(
+			    people_counter_gold_operations_hour[video_hours_completed]
+			)
+		formatString: 0.00
+		displayFolder: Operations KPIs
+		lineageTag: 94434353-3cc8-4b78-bbb5-cf75bb24461e
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		changedProperty = FormatString
+
+	measure 'Flow Data Freshness Minutes' =
+			
+			VAR LatestRefresh =
+			    CALCULATE(
+			        MAX(people_counter_gold_flow_minute[refreshed_at]),
+			        REMOVEFILTERS()
+			    )
+			RETURN
+			    IF(
+			        ISBLANK(LatestRefresh),
+			        BLANK(),
+			        DATEDIFF(LatestRefresh, UTCNOW(), MINUTE)
+			    )
+		formatString: 0
+		displayFolder: Quality KPIs
+		lineageTag: 70c13b49-36e0-48ca-9d76-99a493dfb4e7
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Latest Video Completion Age Minutes' =
+			
+			VAR LatestCompletion =
+			    CALCULATE(
+			        MAX(people_counter_gold_video[completed_at]),
+			        REMOVEFILTERS()
+			    )
+			RETURN
+			    IF(
+			        ISBLANK(LatestCompletion),
+			        BLANK(),
+			        DATEDIFF(LatestCompletion, UTCNOW(), MINUTE)
+			    )
+		formatString: 0
+		displayFolder: Quality KPIs
+		lineageTag: 577a44c8-1778-40d9-818d-ecc8111ea951
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Operations Data Freshness Minutes' =
+			
+			VAR LatestRefresh =
+			    CALCULATE(
+			        MAX(
+			            people_counter_gold_operations_hour[refreshed_at]
+			        ),
+			        REMOVEFILTERS()
+			    )
+			RETURN
+			    IF(
+			        ISBLANK(LatestRefresh),
+			        BLANK(),
+			        DATEDIFF(LatestRefresh, UTCNOW(), MINUTE)
+			    )
+		formatString: 0
+		displayFolder: Quality KPIs
+		lineageTag: 54f1aa32-bd27-4e74-b41e-151aedcbe108
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Data Freshness Minutes' =
+			
+			MAX(
+			    [Flow Data Freshness Minutes],
+			    [Operations Data Freshness Minutes]
+			)
+		formatString: 0
+		displayFolder: Quality KPIs
+		lineageTag: 02607a64-2e53-4f6b-bcf3-9b8ced98f2e6
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	column hour_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 0680f47a-8f58-44ba-b21a-b346913d4e5e
+		sourceLineageTag: hour_utc
+		summarizeBy: none
+		sourceColumn: hour_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column queued
+		dataType: int64
+		formatString: 0
+		lineageTag: 5e9dc821-7187-4cfa-a6ec-b2071cefae0d
+		sourceLineageTag: queued
+		summarizeBy: sum
+		sourceColumn: queued
+
+		annotation SummarizationSetBy = Automatic
+
+	column started
+		dataType: int64
+		formatString: 0
+		lineageTag: 0c10126d-b889-4ed9-a008-16738357349a
+		sourceLineageTag: started
+		summarizeBy: sum
+		sourceColumn: started
+
+		annotation SummarizationSetBy = Automatic
+
+	column succeeded
+		dataType: int64
+		formatString: 0
+		lineageTag: c06bfa90-72a6-4544-91c7-5304a8caccbd
+		sourceLineageTag: succeeded
+		summarizeBy: sum
+		sourceColumn: succeeded
+
+		annotation SummarizationSetBy = Automatic
+
+	column failed
+		dataType: int64
+		formatString: 0
+		lineageTag: 4edc0367-5244-4327-a439-54298166f4d6
+		sourceLineageTag: failed
+		summarizeBy: sum
+		sourceColumn: failed
+
+		annotation SummarizationSetBy = Automatic
+
+	column video_hours_completed
+		dataType: double
+		lineageTag: f1f83d2b-d4d7-4741-8f70-2c56fdc16a8a
+		sourceLineageTag: video_hours_completed
+		summarizeBy: sum
+		sourceColumn: video_hours_completed
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column average_processing_seconds
+		dataType: double
+		lineageTag: d299835e-5376-4aac-935e-8dc5cddf0055
+		sourceLineageTag: average_processing_seconds
+		summarizeBy: sum
+		sourceColumn: average_processing_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column p95_processing_seconds
+		dataType: double
+		lineageTag: c08f48b4-e431-429b-bcbf-bc091204c7a1
+		sourceLineageTag: p95_processing_seconds
+		summarizeBy: sum
+		sourceColumn: p95_processing_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column refreshed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 094c258a-fcb3-4734-91ef-794cc77f661f
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column operation_date
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: 87647399-ae3f-417d-8882-5061aaa0e93f
+		sourceLineageTag: operation_date
+		summarizeBy: none
+		sourceColumn: operation_date
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column time_key
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 6eeb4aa3-f94e-40c0-9ea1-50f4934c2308
+		sourceLineageTag: time_key
+		summarizeBy: none
+		sourceColumn: time_key
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_operations_hour = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_operations_hour
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

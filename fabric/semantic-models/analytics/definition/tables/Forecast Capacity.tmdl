@@ -1,0 +1,49 @@
+table 'Forecast Capacity'
+	lineageTag: fc0c5521-d72f-5a92-93aa-cb5641006dae
+
+	measure 'Estimated Throughput' = 1.5899 * DIVIDE(SELECTEDVALUE('Forecast Capacity'[Capacity Units]), 64)
+		formatString: 0.00
+		lineageTag: d4a6cc42-b183-5296-b24f-8ccbe5517faa
+
+	measure 'Estimated Completion Days' = DIVIDE([Selected Video Hours], [Estimated Throughput] * 24)
+		formatString: #,0.0
+		lineageTag: c833a959-b7a7-5cb3-8cec-81151c54b1ea
+
+	column 'Capacity SKU'
+		lineageTag: 07efcdc3-b708-58bf-b94b-6439421d2c34
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Capacity SKU]
+		sortByColumn: 'Capacity Units'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Capacity Units'
+		formatString: 0
+		lineageTag: db555626-fce6-5130-976c-fed1dbe397d1
+		summarizeBy: none
+		isNameInferred
+		sourceColumn: [Capacity Units]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Forecast Capacity' = calculated
+		mode: import
+		source =
+				DATATABLE(
+					"Capacity SKU", STRING,
+					"Capacity Units", INTEGER,
+					{
+					{"F64", 64},
+					{"F128", 128},
+					{"F256", 256},
+					{"F512", 512},
+					{"F1024", 1024},
+					{"F2048", 2048},
+					{"F4096", 4096},
+					{"F8192", 8192}
+					}
+				)
+
+	annotation PBI_Id = eef29dc63c1a51b0f5047451ba5393f8
+

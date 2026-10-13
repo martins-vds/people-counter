@@ -1,0 +1,177 @@
+table people_counter_gold_flow_minute
+	lineageTag: 5c160998-fb8b-4185-8ba1-a618637e0868
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_flow_minute]
+
+	measure 'Total Entries' =
+			
+			SUM(people_counter_gold_flow_minute[entries])
+		formatString: 0
+		displayFolder: Traffic KPIs
+		lineageTag: 8e517d0b-365f-4eca-96b3-4818ff431c7d
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Total Exits' =
+			
+			SUM(people_counter_gold_flow_minute[exits])
+		formatString: 0
+		displayFolder: Traffic KPIs
+		lineageTag: 3156fb2e-4a7d-4400-9697-417a5ce524a5
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Net Flow' =
+			
+			[Total Entries] - [Total Exits]
+		formatString: 0
+		displayFolder: Traffic KPIs
+		lineageTag: 95420bdf-9b23-43a7-bcad-67bc182191a0
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Cumulative Net Flow' =
+			
+			VAR CurrentMinute =
+			    MAX(people_counter_gold_flow_minute[minute_utc])
+			RETURN
+			    CALCULATE(
+			        [Net Flow],
+			        FILTER(
+			            ALLSELECTED(
+			                people_counter_gold_flow_minute[minute_utc]
+			            ),
+			            people_counter_gold_flow_minute[minute_utc]
+			                <= CurrentMinute
+			        )
+			    )
+		formatString: 0
+		displayFolder: Traffic KPIs
+		lineageTag: 459843a4-6b13-4ee9-a493-da1cd7f78a7b
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	column minute_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 99ed304c-9ae7-41c0-854a-2ac490fd1cbf
+		sourceLineageTag: minute_utc
+		summarizeBy: none
+		sourceColumn: minute_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column camera_id
+		dataType: string
+		isHidden
+		lineageTag: bc1d28f2-24a8-412f-9e65-b78b2307b3d9
+		sourceLineageTag: camera_id
+		summarizeBy: none
+		sourceColumn: camera_id
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column location_id
+		dataType: string
+		isHidden
+		lineageTag: 52c9d3b0-a78c-4dbd-95c3-72e01a2d3292
+		sourceLineageTag: location_id
+		summarizeBy: none
+		sourceColumn: location_id
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column entries
+		dataType: int64
+		formatString: 0
+		lineageTag: 14a913cc-f184-4f21-8f16-8f1adb1e6950
+		sourceLineageTag: entries
+		summarizeBy: sum
+		sourceColumn: entries
+
+		annotation SummarizationSetBy = Automatic
+
+	column exits
+		dataType: int64
+		formatString: 0
+		lineageTag: a905eb7b-fb29-44a9-bcf1-4e90894ccd45
+		sourceLineageTag: exits
+		summarizeBy: sum
+		sourceColumn: exits
+
+		annotation SummarizationSetBy = Automatic
+
+	column net_flow
+		dataType: int64
+		formatString: 0
+		lineageTag: 284ba79b-cb28-453a-bda1-7a50f4b95677
+		sourceLineageTag: net_flow
+		summarizeBy: sum
+		sourceColumn: net_flow
+
+		annotation SummarizationSetBy = Automatic
+
+	column source_videos
+		dataType: int64
+		formatString: 0
+		lineageTag: c4f6805e-b797-4d55-b70c-05fa9479f282
+		sourceLineageTag: source_videos
+		summarizeBy: sum
+		sourceColumn: source_videos
+
+		annotation SummarizationSetBy = Automatic
+
+	column refreshed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: abdf998c-fe1b-44c7-87af-b11cc9a7be33
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column flow_date
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: 3d99957f-bf0a-40f4-94f2-30469c3ec816
+		sourceLineageTag: flow_date
+		summarizeBy: none
+		sourceColumn: flow_date
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column time_key
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 7351dc9c-d28d-4554-8360-1205c843dbc1
+		sourceLineageTag: time_key
+		summarizeBy: none
+		sourceColumn: time_key
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_flow_minute = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_flow_minute
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

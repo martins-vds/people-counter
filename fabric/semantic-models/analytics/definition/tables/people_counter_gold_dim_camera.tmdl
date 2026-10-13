@@ -1,0 +1,78 @@
+table people_counter_gold_dim_camera
+	lineageTag: 87899c09-3138-41f7-971d-6537bf37cff0
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_dim_camera]
+
+	column camera_id
+		dataType: string
+		lineageTag: 47a5300e-6350-45b3-88da-276504dcd613
+		sourceLineageTag: camera_id
+		summarizeBy: none
+		sourceColumn: camera_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column location_id
+		dataType: string
+		lineageTag: 9f5259f0-2c1f-4637-84fa-185a8976bd58
+		sourceLineageTag: location_id
+		summarizeBy: none
+		sourceColumn: location_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column camera_timezone
+		dataType: string
+		lineageTag: fc6705a1-6263-44db-b805-a8e731278921
+		sourceLineageTag: camera_timezone
+		summarizeBy: none
+		sourceColumn: camera_timezone
+
+		annotation SummarizationSetBy = Automatic
+
+	column first_capture_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 976ebff8-f273-4f7c-b6db-286cd75507a6
+		sourceLineageTag: first_capture_utc
+		summarizeBy: none
+		sourceColumn: first_capture_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_capture_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: ceb8a838-a645-4d88-b3a6-d9a1e1882325
+		sourceLineageTag: last_capture_utc
+		summarizeBy: none
+		sourceColumn: last_capture_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column video_count
+		dataType: int64
+		formatString: 0
+		lineageTag: e00ec8c9-499d-4ad3-875d-67903312f7ab
+		sourceLineageTag: video_count
+		summarizeBy: sum
+		sourceColumn: video_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column refreshed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 2030b2cb-b0d1-427b-bdb2-efa948d158b4
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_dim_camera = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_dim_camera
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

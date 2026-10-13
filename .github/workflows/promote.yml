@@ -1,0 +1,194 @@
+name: Promote Fabric Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - test
+          - prod
+      release_sha:
+        description: Full main-branch commit SHA previously deployed to Development
+        required: true
+        type: string
+      allow_protected_changes:
+        description: Allow reviewed delete/replace actions for protected resources
+        required: false
+        default: false
+        type: boolean
+      approve_shortcut_changes:
+        description: Approve reviewed OneLake shortcut changes
+        required: false
+        default: false
+        type: boolean
+      approve_workspace_identity_changes:
+        description: Approve reviewed workspace identity changes
+        required: false
+        default: false
+        type: boolean
+      approve_capacity_changes:
+        description: Approve reviewed capacity assignment or lifecycle changes
+        required: false
+        default: false
+        type: boolean
+      approve_production_deletions:
+        description: Approve reviewed Production Fabric item deletion or replacement
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  resolve:
+    name: Resolve immutable main release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read # Read retained deployment artifacts used by the promotion gate.
+      contents: read
+    outputs:
+      release_sha: ${{ steps.release.outputs.release_sha }}
+    steps:
+      - name: Validate release commit
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          TARGET_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Promotions must be dispatched from the main branch"
+            exit 1
+          fi
+          if [[ ! "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::release_sha must be a full commit SHA"
+            exit 1
+          fi
+          resolved=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_SHA}" --jq .sha)
+          if [ "${resolved}" != "${RELEASE_SHA}" ]; then
+            echo "::error::GitHub did not resolve the requested immutable commit"
+            exit 1
+          fi
+          comparison=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${RELEASE_SHA}...main" \
+            --jq .status)
+          case "${comparison}" in
+            ahead|identical) ;;
+            *)
+              echo "::error::release_sha is not reachable from main"
+              exit 1
+              ;;
+          esac
+
+          verify_promotion_evidence() {
+            local environment=$1
+            local workflow=$2
+            local require_head_sha=$3
+            local cutoff
+            cutoff=$(date -u -d '31 days ago' +'%Y-%m-%d')
+
+            while IFS=$'\t' read -r run_id run_attempt head_sha run_url; do
+              if [ "${require_head_sha}" = "true" ] \
+                && [ "${head_sha}" != "${RELEASE_SHA}" ]; then
+                continue
+              fi
+
+              local artifact_name
+              artifact_name="fabric-smoke-${environment}-${run_id}-${run_attempt}"
+              local artifact_ids=()
+              while IFS= read -r artifact_id; do
+                [ -n "${artifact_id}" ] && artifact_ids+=("${artifact_id}")
+              done < <(
+                gh api --paginate \
+                  "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+                  --jq ".artifacts[] | select(.name == \"${artifact_name}\" and (.expired | not)) | .id"
+              )
+              if [ "${#artifact_ids[@]}" -ne 1 ]; then
+                continue
+              fi
+
+              local evidence_dir
+              evidence_dir="${RUNNER_TEMP}/promotion-evidence/${environment}/${run_id}-${run_attempt}"
+              rm -rf "${evidence_dir}"
+              mkdir -p "${evidence_dir}"
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_ids[0]}/zip" \
+                > "${evidence_dir}/evidence.zip"
+              unzip -q "${evidence_dir}/evidence.zip" -d "${evidence_dir}"
+              rm -f "${evidence_dir}/evidence.zip"
+
+              local smoke_files=()
+              local cleanroom_files=()
+              while IFS= read -r path; do
+                [ -n "${path}" ] && smoke_files+=("${path}")
+              done < <(find "${evidence_dir}" -type f -name smoke.json -print)
+              while IFS= read -r path; do
+                [ -n "${path}" ] && cleanroom_files+=("${path}")
+              done < <(find "${evidence_dir}" -type f -name cleanroom.json -print)
+              if [ "${#smoke_files[@]}" -ne 1 ] \
+                || [ "${#cleanroom_files[@]}" -ne 1 ]; then
+                continue
+              fi
+
+              if jq -e \
+                --arg commit "${RELEASE_SHA}" \
+                --arg environment "${environment}" \
+                --arg run_id "${run_id}" \
+                '
+                  .schema == "people-counter-fabric-smoke-evidence-v1"
+                  and .status == "succeeded"
+                  and .commitSha == $commit
+                  and .environment == $environment
+                  and (.runId | tostring) == $run_id
+                ' "${smoke_files[0]}" >/dev/null \
+                && jq -e \
+                  --arg commit "${RELEASE_SHA}" \
+                  --arg environment "${environment}" \
+                  '
+                    .schema == "people-counter-fabric-cleanroom-evidence-v1"
+                    and .status == "succeeded"
+                    and .commitSha == $commit
+                    and .stage == $environment
+                  ' "${cleanroom_files[0]}" >/dev/null; then
+                echo "Verified immutable ${environment} evidence: ${run_url}"
+                return 0
+              fi
+            done < <(
+              gh api --paginate --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
+                -f status=success \
+                -f per_page=100 \
+                -f "created=>=${cutoff}" \
+                --jq '.workflow_runs[] | [.id, .run_attempt, .head_sha, .html_url] | @tsv'
+            )
+
+            echo "::error::No unambiguous, retained, successful ${environment} evidence matches ${RELEASE_SHA}"
+            return 1
+          }
+
+          verify_promotion_evidence dev deploy-dev.yml true
+          if [ "${TARGET_ENVIRONMENT}" = "prod" ]; then
+            verify_promotion_evidence test promote.yml false
+          fi
+          echo "release_sha=${RELEASE_SHA}" >> "${GITHUB_OUTPUT}"
+
+  deploy:
+    name: Promote immutable release
+    needs: resolve
+    permissions:
+      id-token: write # Passed to environment-scoped deployment jobs.
+      contents: read
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: ${{ inputs.environment }}
+      ref: ${{ needs.resolve.outputs.release_sha }}
+      allow_protected_changes: ${{ inputs.allow_protected_changes }}
+      approve_shortcut_changes: ${{ inputs.approve_shortcut_changes }}
+      approve_workspace_identity_changes: ${{ inputs.approve_workspace_identity_changes }}
+      approve_capacity_changes: ${{ inputs.approve_capacity_changes }}
+      approve_production_deletions: ${{ inputs.approve_production_deletions }}

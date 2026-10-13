@@ -1,0 +1,15 @@
+{
+  "schema": "people-counter-fabric-runtime-contract-v1",
+  "lakehouse": {
+    "folders": ["deployment-evidence", "releases"],
+    "verifyTables": true,
+    "publishReleaseManifest": true
+  },
+  "connections": [],
+  "powerBi": {},
+  "access": {
+    "deprecatedWorkspacePrincipals": [],
+    "deprecatedConnectionPrincipals": {},
+    "deprecatedItemAccess": []
+  }
+}

@@ -1,0 +1,90 @@
+table people_counter_gold_dim_time
+	lineageTag: 1fd4b050-91d9-4d54-82ab-9b886ddb14dd
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_dim_time]
+
+	column time_key
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 493adc17-45d3-4aa2-ae23-5c54f41fa041
+		sourceLineageTag: time_key
+		summarizeBy: none
+		sourceColumn: time_key
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column hour_24
+		dataType: int64
+		formatString: 0
+		lineageTag: d7041910-fc68-4c55-8f4c-d2c9a4543fe0
+		sourceLineageTag: hour_24
+		summarizeBy: sum
+		sourceColumn: hour_24
+
+		annotation SummarizationSetBy = Automatic
+
+	column minute_of_hour
+		dataType: int64
+		formatString: 0
+		lineageTag: 0576d244-3528-4747-b3d4-b82596f8bdfc
+		sourceLineageTag: minute_of_hour
+		summarizeBy: sum
+		sourceColumn: minute_of_hour
+
+		annotation SummarizationSetBy = Automatic
+
+	column time_label
+		dataType: string
+		lineageTag: e7b1eb80-e6f9-424c-a2a9-716e01251d7c
+		sourceLineageTag: time_label
+		summarizeBy: none
+		sourceColumn: time_label
+		sortByColumn: time_key
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column hour_label
+		dataType: string
+		lineageTag: e55d07b5-7fdc-487a-99b3-08263fcb5c18
+		sourceLineageTag: hour_label
+		summarizeBy: none
+		sourceColumn: hour_label
+		sortByColumn: hour_24
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column day_part
+		dataType: string
+		lineageTag: 715e7501-d997-4de4-bcab-1b3a597db615
+		sourceLineageTag: day_part
+		summarizeBy: none
+		sourceColumn: day_part
+
+		annotation SummarizationSetBy = Automatic
+
+	column refreshed_at
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: c11c6fe4-aa91-450c-a4d3-87e38bde8489
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_dim_time = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_dim_time
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

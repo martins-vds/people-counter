@@ -1,0 +1,292 @@
+{
+  "items": [
+    {
+      "destination": "semantic-models/analytics",
+      "format": "TMDL",
+      "itemIdOutput": [
+        "semantic_model_ids",
+        "analytics"
+      ],
+      "itemType": "SemanticModel",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "output": [
+            "workspace_id"
+          ]
+        },
+        {
+          "name": "TargetLakehouseId",
+          "output": [
+            "lakehouse_id"
+          ]
+        },
+        {
+          "name": "TargetLakehouseName",
+          "output": [
+            "definition_display_names",
+            "lakehouse"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "semantic-models/operational",
+      "format": "TMDL",
+      "itemIdOutput": [
+        "semantic_model_ids",
+        "operational"
+      ],
+      "itemType": "SemanticModel",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "output": [
+            "workspace_id"
+          ]
+        },
+        {
+          "name": "TargetLakehouseId",
+          "output": [
+            "lakehouse_id"
+          ]
+        },
+        {
+          "name": "TargetLakehouseName",
+          "output": [
+            "definition_display_names",
+            "lakehouse"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "reports/analytics",
+      "format": "PBIR-Legacy",
+      "itemIdOutput": [
+        "report_ids",
+        "analytics"
+      ],
+      "itemType": "Report",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetSemanticModelId",
+          "output": [
+            "semantic_model_ids",
+            "analytics"
+          ]
+        },
+        {
+          "name": "TargetSemanticModelName",
+          "output": [
+            "definition_display_names",
+            "semanticModels",
+            "analytics"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "reports/operational",
+      "format": "PBIR-Legacy",
+      "itemIdOutput": [
+        "report_ids",
+        "operational"
+      ],
+      "itemType": "Report",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetSemanticModelId",
+          "output": [
+            "semantic_model_ids",
+            "operational"
+          ]
+        },
+        {
+          "name": "TargetSemanticModelName",
+          "output": [
+            "definition_display_names",
+            "semanticModels",
+            "operational"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "rti/eventhouse",
+      "itemIdOutput": [
+        "eventhouse_id"
+      ],
+      "itemType": "Eventhouse",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "output": [
+            "workspace_id"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "rti/kql-database",
+      "itemIdOutput": [
+        "kql_database_id"
+      ],
+      "itemType": "KQLDatabase",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetEventhouseId",
+          "output": [
+            "eventhouse_id"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "rti/queryset",
+      "itemIdOutput": [
+        "kql_queryset_id"
+      ],
+      "itemType": "KQLQueryset",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetKqlDatabaseId",
+          "output": [
+            "kql_database_id"
+          ]
+        },
+        {
+          "name": "TargetKqlQueryServiceUri",
+          "output": [
+            "kql_query_service_uri"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "rti/dashboard",
+      "itemIdOutput": [
+        "kql_dashboard_id"
+      ],
+      "itemType": "KQLDashboard",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetKqlDatabaseId",
+          "output": [
+            "kql_database_id"
+          ]
+        },
+        {
+          "name": "TargetKqlQueryServiceUri",
+          "output": [
+            "kql_query_service_uri"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "activators/operations",
+      "itemIdOutput": [
+        "activator_ids",
+        "operations"
+      ],
+      "itemType": "Reflex",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "output": [
+            "workspace_id"
+          ]
+        },
+        {
+          "name": "TargetEventhouseId",
+          "output": [
+            "eventhouse_id"
+          ]
+        },
+        {
+          "name": "TargetKqlDatabaseId",
+          "output": [
+            "kql_database_id"
+          ]
+        },
+        {
+          "name": "TargetKqlQuerysetId",
+          "output": [
+            "kql_queryset_id"
+          ]
+        },
+        {
+          "name": "TargetKqlDashboardId",
+          "output": [
+            "kql_dashboard_id"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "activators/manifest-arrival",
+      "itemIdOutput": [
+        "activator_ids",
+        "manifest_arrival"
+      ],
+      "itemType": "Reflex",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "output": [
+            "workspace_id"
+          ]
+        },
+        {
+          "name": "TargetKqlDatabaseId",
+          "output": [
+            "kql_database_id"
+          ]
+        },
+        {
+          "name": "TargetKqlDashboardId",
+          "output": [
+            "kql_dashboard_id"
+          ]
+        }
+      ]
+    },
+    {
+      "destination": "variable-libraries/environment",
+      "itemIdOutput": [
+        "variable_library_id"
+      ],
+      "itemType": "VariableLibrary",
+      "optional": true,
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "output": [
+            "workspace_id"
+          ]
+        },
+        {
+          "name": "TargetLakehouseId",
+          "output": [
+            "lakehouse_id"
+          ]
+        }
+      ]
+    }
+  ],
+  "schema": "people-counter-fabric-definition-drift-v1",
+  "workspaceIdOutput": [
+    "workspace_id"
+  ]
+}

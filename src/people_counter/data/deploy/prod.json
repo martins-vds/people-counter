@@ -1,0 +1,32 @@
+{
+  "schema": "people-counter-deployment-manifest-v1",
+  "stage": "prod",
+  "workspace_id": "c31ee864-230d-4005-8fd5-7c7130ebf774",
+  "fabric_environment_id": "3e580f48-9ff7-4bc6-af2e-a59158029ada",
+  "fabric_runtime": "2.0",
+  "lakehouse": {
+    "lakehouse_id": "883cff91-eaa8-40be-870f-6e9716303cb2",
+    "table_prefix": "people_counter_sjd_",
+    "files_root": "Files/people-counter/sjd/v1/"
+  },
+  "roles": {
+    "control": {"display_name": "pc-sjd-control", "item_id": null, "schedule": {"interval_minutes": 5, "enabled": false}},
+    "dispatcher": {"display_name": "pc-sjd-dispatcher", "item_id": null, "schedule": {"interval_minutes": 5, "enabled": false}},
+    "process": {"display_name": "pc-sjd-process", "item_id": null, "schedule": null},
+    "refresh": {"display_name": "pc-sjd-refresh", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
+    "reconciliation": {"display_name": "pc-sjd-reconciliation", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
+    "gold": {"display_name": "pc-sjd-gold", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
+    "cutover": {"display_name": "pc-sjd-cutover", "item_id": null, "schedule": null}
+  },
+  "analytics_reporting": {
+    "semantic_model": {"source_item_id": "5dbaf3d1-9f86-4bcd-a590-f32c7fbea08c", "source_name": "pc_analytics_model", "target_name": "pc_sjd_analytics_model"},
+    "report": {"source_item_id": "133a8648-ca75-409e-9154-1b89d67f3917", "source_name": "pc_analytics_report", "target_name": "pc_sjd_analytics_report"}
+  },
+  "operational_reporting": {
+    "semantic_model": {"source_item_id": "b108e56f-8559-4f84-8ae1-70ba58075353", "source_name": "pc_operations_model", "target_name": "pc_sjd_operations_model"},
+    "report": {"source_item_id": "8b81cc28-cf18-4707-a245-afb98a8acbcc", "source_name": "pc_operations_report", "target_name": "pc_sjd_operations_report"}
+  },
+  "real_time_intelligence": {"eventhouse_id": null, "kql_database_id": null, "queryset_id": null},
+  "activator": {"reflex_id": null, "trigger_name": null},
+  "release": {"require_identity": true, "identity_schema": "people-counter-sjd-release-identity-v1"}
+}

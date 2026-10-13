@@ -1,0 +1,221 @@
+table people_counter_gold_operations_hour
+	lineageTag: fc61ccee-2ae9-4fea-86fe-3af12deec81f
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_operations_hour]
+
+	measure 'Forecast Completion UTC' =
+			
+			VAR RatePerHour = [Average Video Hours Per Wall Hour]
+			VAR RemainingHours = [Remaining Video Hours]
+			RETURN
+			    IF(
+			        RatePerHour > 0,
+			        UTCNOW() + DIVIDE(RemainingHours, RatePerHour * 24.0),
+			        BLANK()
+			    )
+		formatString: General Date
+		displayFolder: Backfill KPIs
+		lineageTag: 7efec254-e5ed-4d60-a98f-789beea75f93
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Average Video Hours Per Wall Hour' =
+			
+			VAR StartedAt = [Backfill Start UTC]
+			VAR ElapsedHours =
+			    IF(
+			        ISBLANK(StartedAt),
+			        BLANK(),
+			        MAX(1, DATEDIFF(StartedAt, UTCNOW(), HOUR))
+			    )
+			RETURN
+			    DIVIDE([Backfill Completed Video Hours], ElapsedHours)
+		displayFolder: Backfill KPIs
+		lineageTag: 394ea369-f0a9-4224-86dd-041d526265cc
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	measure 'Backfill Completed Video Hours' =
+			
+			CALCULATE(
+			    [Completed Video Hours],
+			    REMOVEFILTERS(people_counter_gold_operations_hour)
+			)
+		formatString: 0.00
+		displayFolder: Backfill KPIs
+		lineageTag: df2cdd8d-c9dc-444b-b2f5-2ce5a3bd3770
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		changedProperty = FormatString
+
+	measure 'Backfill Start UTC' =
+			
+			CALCULATE(
+			    MIN(people_counter_gold_operations_hour[hour_utc]),
+			    REMOVEFILTERS(people_counter_gold_operations_hour)
+			)
+		formatString: General Date
+		displayFolder: Backfill KPIs
+		lineageTag: 8a34b5de-4087-4b05-9bac-25db2bd216e4
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Backfill Target Video Hours' =
+			
+			200000.0
+		displayFolder: Backfill KPIs
+		lineageTag: e49f3a10-951e-49f9-ba8c-4e680ad3049c
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	measure 'Remaining Video Hours' =
+			
+			MAX(
+			    0.0,
+			    [Backfill Target Video Hours]
+			        - [Backfill Completed Video Hours]
+			)
+		formatString: 0.00
+		displayFolder: Backfill KPIs
+		lineageTag: 9caf6f76-a437-4be1-a012-fcaa63ca7255
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		changedProperty = FormatString
+
+	column hour_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 2618fa42-8dee-42ec-b289-9411b20e480a
+		sourceLineageTag: hour_utc
+		summarizeBy: none
+		sourceColumn: hour_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column queued
+		dataType: int64
+		formatString: 0
+		lineageTag: da04099e-8550-4ee0-a8f5-7b247849b826
+		sourceLineageTag: queued
+		summarizeBy: sum
+		sourceColumn: queued
+
+		annotation SummarizationSetBy = Automatic
+
+	column started
+		dataType: int64
+		formatString: 0
+		lineageTag: 17683a88-840f-40af-8dd2-bfa8dea62fed
+		sourceLineageTag: started
+		summarizeBy: sum
+		sourceColumn: started
+
+		annotation SummarizationSetBy = Automatic
+
+	column succeeded
+		dataType: int64
+		formatString: 0
+		lineageTag: 955df462-fc12-4419-b345-52457b42ea80
+		sourceLineageTag: succeeded
+		summarizeBy: sum
+		sourceColumn: succeeded
+
+		annotation SummarizationSetBy = Automatic
+
+	column failed
+		dataType: int64
+		formatString: 0
+		lineageTag: 300849c4-fdbb-459c-aabb-205be6cb8dbf
+		sourceLineageTag: failed
+		summarizeBy: sum
+		sourceColumn: failed
+
+		annotation SummarizationSetBy = Automatic
+
+	column video_hours_completed
+		dataType: double
+		lineageTag: 28e5c876-3ea0-48e2-a978-03ef7523df77
+		sourceLineageTag: video_hours_completed
+		summarizeBy: sum
+		sourceColumn: video_hours_completed
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column average_processing_seconds
+		dataType: double
+		lineageTag: c9827875-83ff-41bd-bf14-8dbda39bb14a
+		sourceLineageTag: average_processing_seconds
+		summarizeBy: sum
+		sourceColumn: average_processing_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column p95_processing_seconds
+		dataType: double
+		lineageTag: 45d62b97-c8fe-4033-9e99-e275098b3960
+		sourceLineageTag: p95_processing_seconds
+		summarizeBy: sum
+		sourceColumn: p95_processing_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column refreshed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 019a9e9a-692c-44a4-a76b-016b2a147130
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column operation_date
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 9a73b1f6-ee78-41d0-b186-33ba0f607153
+		sourceLineageTag: operation_date
+		summarizeBy: none
+		sourceColumn: operation_date
+
+		annotation SummarizationSetBy = Automatic
+
+	column time_key
+		dataType: int64
+		formatString: 0
+		lineageTag: 83ffdea5-e04a-4aaf-ae53-e49f12bc7751
+		sourceLineageTag: time_key
+		summarizeBy: sum
+		sourceColumn: time_key
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_operations_hour = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_operations_hour
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

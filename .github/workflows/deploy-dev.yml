@@ -1,0 +1,66 @@
+name: Deploy Development
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "fabric/**"
+      - "infra/**"
+      - "scripts/**"
+      - "src/people_counter/**"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+    inputs:
+      allow_protected_changes:
+        description: Allow reviewed delete/replace actions for protected resources
+        required: false
+        default: false
+        type: boolean
+      approve_shortcut_changes:
+        description: Approve reviewed OneLake shortcut changes
+        required: false
+        default: false
+        type: boolean
+      approve_workspace_identity_changes:
+        description: Approve reviewed workspace identity changes
+        required: false
+        default: false
+        type: boolean
+      approve_capacity_changes:
+        description: Approve reviewed capacity assignment or lifecycle changes
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  authorize:
+    name: Require main branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Reject non-main manual dispatches
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Development deployments must run from main"
+            exit 1
+          fi
+
+  deploy:
+    name: Deploy immutable commit to Development
+    needs: authorize
+    permissions:
+      id-token: write # Passed to environment-scoped deployment jobs.
+      contents: read
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: dev
+      ref: ${{ github.sha }}
+      allow_protected_changes: ${{ inputs.allow_protected_changes || false }}
+      approve_shortcut_changes: ${{ inputs.approve_shortcut_changes || false }}
+      approve_workspace_identity_changes: ${{ inputs.approve_workspace_identity_changes || false }}
+      approve_capacity_changes: ${{ inputs.approve_capacity_changes || false }}

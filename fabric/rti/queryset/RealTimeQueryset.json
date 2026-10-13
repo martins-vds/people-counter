@@ -1,0 +1,22 @@
+{
+  "queryset": {
+    "version": "1.0.0",
+    "dataSources": [
+      {
+        "id": "7275837f-8677-431c-b548-b1220f285701",
+        "clusterUri": "https://trd-yra0yjh9babcz6tktr.z0.kusto.fabric.microsoft.com",
+        "type": "Fabric",
+        "databaseItemId": "{{ .TargetKqlDatabaseId }}"
+      }
+    ],
+    "tabs": [
+      {
+        "id": "31eb4b0a-9413-47a8-94e9-b2deb4988f4c",
+        "content": "   ItemJobEventLogs\n   | where isnotempty(JobStatus)\n   | summarize Events = count() by JobStatus\n   | order by JobStatus asc",
+        "title": "Tab",
+        "dataSourceId": "7275837f-8677-431c-b548-b1220f285701"
+      }
+    ],
+    "querysetType": "Standalone"
+  }
+}

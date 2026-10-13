@@ -1,0 +1,63 @@
+name: Authorized PR Terraform plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Same-repository pull request number to plan
+        required: true
+        type: number
+      environment:
+        description: Protected environment and state to plan against
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+
+permissions: {}
+
+jobs:
+  resolve:
+    name: Resolve trusted PR commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # Resolves repository ownership and immutable head SHA.
+    outputs:
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+    steps:
+      - name: Resolve and validate pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pull_request_number }}
+        run: |
+          pr_json=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+          test "$(jq -r .state <<<"${pr_json}")" = "open"
+          test "$(jq -r .base.ref <<<"${pr_json}")" = "main"
+          if [ "$(jq -r .head.repo.full_name <<<"${pr_json}")" != "${GITHUB_REPOSITORY}" ]; then
+            echo "::error::Authorized cloud plans do not execute fork code"
+            exit 1
+          fi
+          head_sha=$(jq -r .head.sha <<<"${pr_json}")
+          if [[ ! "${head_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::GitHub returned an invalid PR head SHA"
+            exit 1
+          fi
+          echo "head_sha=${head_sha}" >> "${GITHUB_OUTPUT}"
+
+  plan:
+    name: Plan reviewed PR
+    needs: resolve
+    permissions:
+      contents: read
+      id-token: write # Passed only to the environment-protected reusable plan.
+    uses: ./.github/workflows/_terraform-pr-plan.yml
+    with:
+      environment: ${{ inputs.environment }}
+      working_directory: infra/environments/${{ inputs.environment }}
+      ref: ${{ needs.resolve.outputs.head_sha }}
+      pull_request_number: ${{ inputs.pull_request_number }}

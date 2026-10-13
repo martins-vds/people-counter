@@ -1,0 +1,4 @@
+relationship a1e6497d-1a72-4f9b-f118-4170018ed277
+	fromColumn: people_counter_video_attempts.work_id
+	toColumn: people_counter_video_work.work_id
+

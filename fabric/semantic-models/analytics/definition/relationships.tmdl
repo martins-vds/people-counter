@@ -1,0 +1,66 @@
+relationship dfd605cd-582d-797e-e183-dae09f35b609
+	fromColumn: people_counter_gold_flow_minute.flow_date
+	toColumn: people_counter_gold_dim_date.date_key
+
+relationship fc1162df-9892-a147-10e7-976945cea711
+	fromColumn: people_counter_gold_flow_hour.flow_date
+	toColumn: people_counter_gold_dim_date.date_key
+
+relationship 002885c8-ae54-dd92-e758-7790f723bf44
+	fromColumn: people_counter_gold_video.capture_date
+	toColumn: people_counter_gold_dim_date.date_key
+
+relationship c60ade6a-b051-ae92-7e4c-6564eb47dd01
+	fromColumn: people_counter_gold_operations_hour.operation_date
+	toColumn: people_counter_gold_dim_date.date_key
+
+relationship fac1480f-a68d-aec2-ac13-4e190c7ab590
+	fromColumn: people_counter_gold_flow_minute.time_key
+	toColumn: people_counter_gold_dim_time.time_key
+
+relationship cfa62266-86f1-25a6-ea93-02e1965a4875
+	fromColumn: people_counter_gold_flow_hour.time_key
+	toColumn: people_counter_gold_dim_time.time_key
+
+relationship 99bde0f0-2417-5ab4-3f50-ac42576a0b94
+	fromColumn: people_counter_gold_video.time_key
+	toColumn: people_counter_gold_dim_time.time_key
+
+relationship db2e28e7-7e6a-bb46-287d-08c469f6cf96
+	fromColumn: people_counter_gold_operations_hour.time_key
+	toColumn: people_counter_gold_dim_time.time_key
+
+relationship 8e3cf2c6-72cc-330a-35f5-2bacd6f2a7fa
+	fromColumn: people_counter_gold_flow_minute.camera_id
+	toColumn: people_counter_gold_dim_camera.camera_id
+
+relationship 51dd59a0-b2df-c650-d00b-3f78e7d3ea69
+	fromColumn: people_counter_gold_flow_hour.camera_id
+	toColumn: people_counter_gold_dim_camera.camera_id
+
+relationship 76a62ed1-41e8-1680-1bb0-2392981dc46b
+	fromColumn: people_counter_gold_video.camera_id
+	toColumn: people_counter_gold_dim_camera.camera_id
+
+relationship dbd1a872-70b0-b0e5-c468-ab2a95945d6b
+	fromColumn: people_counter_gold_flow_minute.location_id
+	toColumn: people_counter_gold_dim_location.location_id
+
+relationship f2246edf-2aed-dfe8-35be-41f2fb6e6744
+	fromColumn: people_counter_gold_flow_hour.location_id
+	toColumn: people_counter_gold_dim_location.location_id
+
+relationship 9763b451-8691-0cac-e701-f08716d05aae
+	fromColumn: people_counter_gold_video.location_id
+	toColumn: people_counter_gold_dim_location.location_id
+
+relationship 0cb43289-7aed-68fd-e248-7cfef02b8d56
+	fromColumn: people_counter_gold_video.config_sha256
+	toColumn: people_counter_gold_dim_model_config.config_sha256
+
+relationship cf0cdfab-fc4d-065e-2273-c591956aaf4e
+	crossFilteringBehavior: bothDirections
+	fromCardinality: one
+	fromColumn: people_counter_gold_video.work_id
+	toColumn: people_counter_gold_dim_video.work_id
+

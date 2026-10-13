@@ -1,0 +1,121 @@
+table people_counter_gold_flow_hour
+	lineageTag: 3e639cd6-8ffe-4de3-b2ee-688ff7c1c05a
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_flow_hour]
+
+	column hour_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 4d0341fd-04f7-4b20-a3ec-af9d248a5bc7
+		sourceLineageTag: hour_utc
+		summarizeBy: none
+		sourceColumn: hour_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column camera_id
+		dataType: string
+		isHidden
+		lineageTag: d1419517-3e82-4bdf-84e9-c2ae44d162ba
+		sourceLineageTag: camera_id
+		summarizeBy: none
+		sourceColumn: camera_id
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column location_id
+		dataType: string
+		isHidden
+		lineageTag: 6e0f339b-4e7a-4b4d-b9a2-17acb5c90499
+		sourceLineageTag: location_id
+		summarizeBy: none
+		sourceColumn: location_id
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column entries
+		dataType: int64
+		formatString: 0
+		lineageTag: 99e605a6-ba78-4d52-ae23-11c376e678a6
+		sourceLineageTag: entries
+		summarizeBy: sum
+		sourceColumn: entries
+
+		annotation SummarizationSetBy = Automatic
+
+	column exits
+		dataType: int64
+		formatString: 0
+		lineageTag: 4ae3f156-e086-4684-8875-ad36ef262994
+		sourceLineageTag: exits
+		summarizeBy: sum
+		sourceColumn: exits
+
+		annotation SummarizationSetBy = Automatic
+
+	column net_flow
+		dataType: int64
+		formatString: 0
+		lineageTag: 0c3ca42f-8fc0-45ad-a829-2724f19f4422
+		sourceLineageTag: net_flow
+		summarizeBy: sum
+		sourceColumn: net_flow
+
+		annotation SummarizationSetBy = Automatic
+
+	column source_videos
+		dataType: int64
+		formatString: 0
+		lineageTag: 49b65670-fd1f-45de-af1d-016944520c8c
+		sourceLineageTag: source_videos
+		summarizeBy: sum
+		sourceColumn: source_videos
+
+		annotation SummarizationSetBy = Automatic
+
+	column refreshed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 47336ca0-131a-457d-ac78-b9cd3f75ecca
+		sourceLineageTag: refreshed_at
+		summarizeBy: none
+		sourceColumn: refreshed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column flow_date
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: bd799c73-6487-4c6b-a3ec-d33a276487b2
+		sourceLineageTag: flow_date
+		summarizeBy: none
+		sourceColumn: flow_date
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column time_key
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: 5b7c7287-1aaa-46e4-af2d-50e1945ac3a2
+		sourceLineageTag: time_key
+		summarizeBy: none
+		sourceColumn: time_key
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_flow_hour = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_flow_hour
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

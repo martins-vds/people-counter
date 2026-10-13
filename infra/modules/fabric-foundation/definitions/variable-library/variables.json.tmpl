@@ -1,0 +1,91 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/variables/1.0.0/schema.json",
+  "variables": [
+    {
+      "name": "DeploymentStage",
+      "note": "Git-authoritative deployment stage.",
+      "type": "String",
+      "value": "{{ .DeploymentStage }}"
+    },
+    {
+      "name": "WorkspaceId",
+      "note": "Managed Fabric workspace ID.",
+      "type": "String",
+      "value": "{{ .WorkspaceId }}"
+    },
+    {
+      "name": "Lakehouse",
+      "note": "Managed schema-enabled Lakehouse.",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .LakehouseId }}"
+      }
+    },
+    {
+      "name": "Environment",
+      "note": "Managed Spark Environment.",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .EnvironmentId }}"
+      }
+    },
+    {
+      "name": "ControlSparkJob",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .SparkJobControlId }}"
+      }
+    },
+    {
+      "name": "DispatcherSparkJob",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .SparkJobDispatcherId }}"
+      }
+    },
+    {
+      "name": "ProcessSparkJob",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .SparkJobProcessId }}"
+      }
+    },
+    {
+      "name": "RefreshSparkJob",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .SparkJobRefreshId }}"
+      }
+    },
+    {
+      "name": "ReconciliationSparkJob",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .SparkJobReconciliationId }}"
+      }
+    },
+    {
+      "name": "GoldSparkJob",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .SparkJobGoldId }}"
+      }
+    },
+    {
+      "name": "CutoverSparkJob",
+      "type": "ItemReference",
+      "value": {
+        "workspaceId": "{{ .WorkspaceId }}",
+        "itemId": "{{ .SparkJobCutoverId }}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+subscription_id     = "00000000-0000-0000-0000-000000000000"
+tenant_id           = "11111111-1111-1111-1111-111111111111"
+location            = "westeurope"
+resource_group_name = "rg-people-counter-bootstrap"
+
+state_storage_account_name     = "stpeoplecounterboot01"
+state_storage_replication_type = "ZRS"
+state_container_name           = "tfstate"
+
+github_repository = "martins-vds/people-counter"
+environments       = ["dev", "test", "prod"]
+
+fabric_capacity_sku_by_environment = {
+  dev  = "F2"
+  test = "F4"
+  prod = "F64"
+}
+
+fabric_admin_members = []

@@ -1,0 +1,475 @@
+table people_counter_video_work
+	lineageTag: 67f7257b-f9f6-459b-98ef-5752863fd04e
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_work_operations]
+
+	measure 'Queue Depth' =
+			
+			CALCULATE(
+			    COUNTROWS(people_counter_video_work),
+			    people_counter_video_work[status] IN {"QUEUED", "RETRY_WAIT"}
+			)
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: 49b4c940-131b-4f7d-9b5b-6ab7976c5fab
+
+		changedProperty = Name
+
+		changedProperty = IsHidden
+
+		changedProperty = DisplayFolder
+
+	measure 'Open Reconciliation Errors' =
+			
+			CALCULATE(
+			    COUNTROWS(people_counter_reconciliation_findings),
+			    people_counter_reconciliation_findings[severity] = "ERROR",
+			    ISBLANK(people_counter_reconciliation_findings[resolved_at])
+			)
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: 8e432aa2-5f64-4ead-b2c4-ecda3a09dafb
+
+		changedProperty = Name
+
+		changedProperty = IsHidden
+
+		changedProperty = DisplayFolder
+
+	measure 'Oldest Queue Age Minutes' =
+			
+			VAR OldestQueueEntry =
+			    MINX(
+			        FILTER(
+			            people_counter_video_work,
+			            people_counter_video_work[status]
+			                IN {"QUEUED", "RETRY_WAIT"}
+			        ),
+			        people_counter_video_work[queue_entered_at]
+			    )
+			RETURN
+			    IF(
+			        ISBLANK(OldestQueueEntry),
+			        BLANK(),
+			        DATEDIFF(OldestQueueEntry, UTCNOW(), MINUTE)
+			    )
+		displayFolder: Operations KPIs
+		lineageTag: f15dd3c4-83a8-4c12-8dc4-e5d910acd915
+
+		changedProperty = Name
+
+		changedProperty = IsHidden
+
+		changedProperty = DisplayFolder
+
+	measure 'Failed Work Count' =
+			
+			CALCULATE(
+			    COUNTROWS(people_counter_video_work),
+			    people_counter_video_work[status]
+			        IN {"TERMINAL_FAILED", "DEAD_LETTERED"}
+			)
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: ba5dfdf6-60c1-4ce7-b27a-f8cbc620aef7
+
+		changedProperty = Name
+
+		changedProperty = IsHidden
+
+		changedProperty = DisplayFolder
+
+	measure 'Dead Letter Count' =
+			
+			CALCULATE(
+			    COUNTROWS(people_counter_video_work),
+			    people_counter_video_work[status] = "DEAD_LETTERED"
+			)
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: 9f3b6ffb-e165-4f92-b437-bbaa40cf83ce
+
+		changedProperty = Name
+
+		changedProperty = IsHidden
+
+		changedProperty = DisplayFolder
+
+	measure 'Completed Video Hours' =
+			
+			SUM(people_counter_gold_operations_hour[video_hours_completed])
+		displayFolder: Operations KPIs
+		lineageTag: f794898d-c5e6-4e94-8868-df05e30d1392
+
+		changedProperty = Name
+
+		changedProperty = IsHidden
+
+		changedProperty = DisplayFolder
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	measure 'Active Leases' =
+			
+			CALCULATE(
+			    COUNTROWS(people_counter_video_work),
+			    people_counter_video_work[status]
+			        IN {"LEASED", "STAGING", "RUNNING", "WRITING"}
+			)
+		formatString: 0
+		displayFolder: Operations KPIs
+		lineageTag: c076bb49-e6da-4b70-9dab-cad2fb92d397
+
+		changedProperty = Name
+
+		changedProperty = IsHidden
+
+		changedProperty = DisplayFolder
+
+	column work_id
+		dataType: string
+		lineageTag: 0b1ddc49-2af8-49b5-9ae8-e4b3dc80ef34
+		sourceLineageTag: work_id
+		summarizeBy: none
+		sourceColumn: work_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column asset_id
+		dataType: string
+		lineageTag: 7d5a29b4-9497-4a07-b75f-cf3e1692dbc8
+		sourceLineageTag: asset_id
+		summarizeBy: none
+		sourceColumn: asset_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column asset_version
+		dataType: string
+		lineageTag: 5a04a77a-4bc9-4901-a50b-b6759f804f0d
+		sourceLineageTag: asset_version
+		summarizeBy: none
+		sourceColumn: asset_version
+
+		annotation SummarizationSetBy = Automatic
+
+	column source_uri
+		dataType: string
+		lineageTag: f03f48c0-24bd-44a5-8920-4400a2ca91a6
+		sourceLineageTag: source_uri
+		summarizeBy: none
+		sourceColumn: source_uri
+
+		annotation SummarizationSetBy = Automatic
+
+	column manifest_uri
+		dataType: string
+		lineageTag: cfaa4f61-7df6-458d-8bf5-3d071118e3e7
+		sourceLineageTag: manifest_uri
+		summarizeBy: none
+		sourceColumn: manifest_uri
+
+		annotation SummarizationSetBy = Automatic
+
+	column source_etag
+		dataType: string
+		lineageTag: 07e84eb9-ba6f-4701-85ef-da4a1f740df5
+		sourceLineageTag: source_etag
+		summarizeBy: none
+		sourceColumn: source_etag
+
+		annotation SummarizationSetBy = Automatic
+
+	column expected_size_bytes
+		dataType: int64
+		formatString: 0
+		lineageTag: 0452c708-0dc7-4384-a93a-e790a116b329
+		sourceLineageTag: expected_size_bytes
+		summarizeBy: sum
+		sourceColumn: expected_size_bytes
+
+		annotation SummarizationSetBy = Automatic
+
+	column expected_sha256
+		dataType: string
+		lineageTag: 49efd890-0f4d-4134-8ca5-909b36e94cf2
+		sourceLineageTag: expected_sha256
+		summarizeBy: none
+		sourceColumn: expected_sha256
+
+		annotation SummarizationSetBy = Automatic
+
+	column camera_id
+		dataType: string
+		lineageTag: 105da2f9-433c-495d-a35a-94f71126a9c4
+		sourceLineageTag: camera_id
+		summarizeBy: none
+		sourceColumn: camera_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column location_id
+		dataType: string
+		lineageTag: c1e4d0fa-ae0f-45b2-807f-905d13f4fce6
+		sourceLineageTag: location_id
+		summarizeBy: none
+		sourceColumn: location_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column captured_at_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 87f095f2-c1ee-487a-8662-248208a22168
+		sourceLineageTag: captured_at_utc
+		summarizeBy: none
+		sourceColumn: captured_at_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column camera_timezone
+		dataType: string
+		lineageTag: 599a488e-806e-452d-ac47-a3870ff423dc
+		sourceLineageTag: camera_timezone
+		summarizeBy: none
+		sourceColumn: camera_timezone
+
+		annotation SummarizationSetBy = Automatic
+
+	column duration_seconds
+		dataType: double
+		lineageTag: 33c14e2f-4b85-4c16-b3fe-6b6733c0750f
+		sourceLineageTag: duration_seconds
+		summarizeBy: sum
+		sourceColumn: duration_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column priority
+		dataType: int64
+		formatString: 0
+		lineageTag: 27129258-556c-4ca0-989a-cb362fb72d8f
+		sourceLineageTag: priority
+		summarizeBy: sum
+		sourceColumn: priority
+
+		annotation SummarizationSetBy = Automatic
+
+	column status
+		dataType: string
+		lineageTag: b09dc153-03f4-4e56-805e-28ad9f0230a5
+		sourceLineageTag: status
+		summarizeBy: none
+		sourceColumn: status
+
+		annotation SummarizationSetBy = Automatic
+
+	column received_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: f2c3ce25-52b0-4270-9af0-d9b2da05fcdb
+		sourceLineageTag: received_at
+		summarizeBy: none
+		sourceColumn: received_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column queued_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 20de9833-c1db-46a8-b8f6-36f4ad107c66
+		sourceLineageTag: queued_at
+		summarizeBy: none
+		sourceColumn: queued_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column not_before_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: ff9ee564-6bdb-4bf3-aa9d-3c071090be68
+		sourceLineageTag: not_before_at
+		summarizeBy: none
+		sourceColumn: not_before_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column attempt_count
+		dataType: int64
+		formatString: 0
+		lineageTag: ed54d35c-9c7c-4b37-aaaa-81c52537fd96
+		sourceLineageTag: attempt_count
+		summarizeBy: sum
+		sourceColumn: attempt_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column max_attempts
+		dataType: int64
+		formatString: 0
+		lineageTag: d2330300-cffe-44ba-b656-b0adc173cb61
+		sourceLineageTag: max_attempts
+		summarizeBy: sum
+		sourceColumn: max_attempts
+
+		annotation SummarizationSetBy = Automatic
+
+	column lease_owner_attempt_id
+		dataType: string
+		lineageTag: 20a3c23b-ef4b-4642-8f6f-1ffe29ec9b13
+		sourceLineageTag: lease_owner_attempt_id
+		summarizeBy: none
+		sourceColumn: lease_owner_attempt_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column lease_dispatcher_id
+		dataType: string
+		lineageTag: 2bcb7873-03ee-470d-b578-6f0c870cd48f
+		sourceLineageTag: lease_dispatcher_id
+		summarizeBy: none
+		sourceColumn: lease_dispatcher_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column lease_acquired_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: fd9178a1-e5ca-4334-a0fb-d139daf9844e
+		sourceLineageTag: lease_acquired_at
+		summarizeBy: none
+		sourceColumn: lease_acquired_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column lease_expires_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: d4fe8cbd-9c71-4e52-8b33-d3d6be7fc742
+		sourceLineageTag: lease_expires_at
+		summarizeBy: none
+		sourceColumn: lease_expires_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_heartbeat_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: cedb7982-7e73-41de-9793-8671d202cee4
+		sourceLineageTag: last_heartbeat_at
+		summarizeBy: none
+		sourceColumn: last_heartbeat_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column committed_attempt_id
+		dataType: string
+		lineageTag: e602666c-5990-4145-b9ec-a5b879e6a762
+		sourceLineageTag: committed_attempt_id
+		summarizeBy: none
+		sourceColumn: committed_attempt_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column completed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 6daa47a8-283d-475d-8557-480845ce72cc
+		sourceLineageTag: completed_at
+		summarizeBy: none
+		sourceColumn: completed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_error_category
+		dataType: string
+		lineageTag: ce1cd619-fdcb-4216-8249-a7c67440e2e3
+		sourceLineageTag: last_error_category
+		summarizeBy: none
+		sourceColumn: last_error_category
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_error_type
+		dataType: string
+		lineageTag: 04c6c759-bb2d-4915-808a-e1dd3ea0f851
+		sourceLineageTag: last_error_type
+		summarizeBy: none
+		sourceColumn: last_error_type
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_error_message
+		dataType: string
+		lineageTag: e90632f8-06de-4b3c-8cda-5faf6d5dc7bd
+		sourceLineageTag: last_error_message
+		summarizeBy: none
+		sourceColumn: last_error_message
+
+		annotation SummarizationSetBy = Automatic
+
+	column config_json
+		dataType: string
+		lineageTag: 959063d1-e4e1-4930-9134-d551400b930d
+		sourceLineageTag: config_json
+		summarizeBy: none
+		sourceColumn: config_json
+
+		annotation SummarizationSetBy = Automatic
+
+	column config_sha256
+		dataType: string
+		lineageTag: 4046cc51-01e5-4e8e-9c11-6b6db420e420
+		sourceLineageTag: config_sha256
+		summarizeBy: none
+		sourceColumn: config_sha256
+
+		annotation SummarizationSetBy = Automatic
+
+	column capture_date
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: aa5eed1d-6feb-4626-b375-5a6419333c85
+		sourceLineageTag: capture_date
+		summarizeBy: none
+		sourceColumn: capture_date
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_replay_id
+		dataType: string
+		lineageTag: 93acaa26-5e60-4ecc-84c6-36677c9df265
+		sourceLineageTag: last_replay_id
+		summarizeBy: none
+		sourceColumn: last_replay_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column replay_generation
+		dataType: int64
+		formatString: 0
+		lineageTag: c3952ed8-a300-4514-b7e6-c34dcd75eeea
+		sourceLineageTag: replay_generation
+		summarizeBy: sum
+		sourceColumn: replay_generation
+
+		annotation SummarizationSetBy = Automatic
+
+	column queue_entered_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: 73e5d2e9-d8b5-4081-be51-1ee5bcdfd3d5
+		sourceLineageTag: queue_entered_at
+		summarizeBy: none
+		sourceColumn: queue_entered_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_video_work = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_work_operations
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

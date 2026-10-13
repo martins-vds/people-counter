@@ -1,0 +1,378 @@
+[
+  {
+    "uniqueIdentifier": "7f068d38-246f-4539-9082-3343980c582f",
+    "payload": {
+      "name": "pc-dispatcher-00",
+      "description": "Container Description",
+      "type": "rthSubscriptions"
+    },
+    "type": "container-v1"
+  },
+  {
+    "uniqueIdentifier": "b71f8089-dacf-4137-99c1-08afb8a5286b",
+    "payload": {
+      "name": "people-counter-dev event",
+      "connection": {
+        "scope": "Artifact",
+        "tenantId": "b8005d83-0703-4f94-8749-5c3e02f07bba",
+        "workspaceId": "{{ .TargetWorkspaceId }}",
+        "artifactId": "12e33015-5c82-4ea0-a54e-fe145694ad02",
+        "eventGroupType": "Microsoft.Fabric.JobEvents"
+      },
+      "filterSettings": {
+        "eventTypes": [
+          {
+            "name": "Microsoft.Fabric.JobEvents.ItemJobFailed"
+          }
+        ],
+        "filters": []
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "7f068d38-246f-4539-9082-3343980c582f"
+      }
+    },
+    "type": "realTimeHubSource-v1"
+  },
+  {
+    "uniqueIdentifier": "e109201d-6980-4976-8196-f71fecd55939",
+    "payload": {
+      "name": "people-counter-dev event",
+      "parentContainer": {
+        "targetUniqueIdentifier": "7f068d38-246f-4539-9082-3343980c582f"
+      },
+      "definition": {
+        "type": "Event",
+        "instance": "{\"steps\":[{\"id\":\"15c14c58-498a-414a-b9cd-e8d7492d1ae7\",\"name\":\"SourceEventStep\",\"rows\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"b71f8089-dacf-4137-99c1-08afb8a5286b\"}],\"kind\":\"SourceReference\",\"name\":\"SourceSelector\"}]}],\"templateId\":\"SourceEvent\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "6959420f-3fc0-4e95-ac21-6cb04abda554",
+    "payload": {
+      "name": "alert_pc-dispatcher-00_failed",
+      "parentContainer": {
+        "targetUniqueIdentifier": "7f068d38-246f-4539-9082-3343980c582f"
+      },
+      "definition": {
+        "type": "Rule",
+        "instance": "{\"templateId\":\"EventTrigger\",\"templateVersion\":\"1.3.0\",\"steps\":[{\"name\":\"FieldsDefaultsStep\",\"id\":\"348124a2-9ff2-4b45-b429-2ebd9859f1a9\",\"rows\":[{\"name\":\"EventSelector\",\"kind\":\"Event\",\"arguments\":[{\"kind\":\"EventReference\",\"type\":\"complex\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"e109201d-6980-4976-8196-f71fecd55939\"}],\"name\":\"event\"}]}]},{\"name\":\"EventDetectStep\",\"id\":\"4bab2ebf-054d-4bb8-979a-81865a9d77e3\",\"rows\":[{\"name\":\"EventFieldSelector\",\"kind\":\"EventField\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"___type\"}]},{\"name\":\"TextValueCondition\",\"kind\":\"TextValueCondition\",\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"IsEqualTo\"},{\"kind\":\"EventFieldReference\",\"type\":\"complex\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"Microsoft.Fabric.JobEvents.ItemJobFailed\"}],\"name\":\"value\"}]}]},{\"name\":\"ActStep\",\"id\":\"5337c825-4428-452e-a6f7-5a33bff44901\",\"rows\":[{\"name\":\"TeamsBinding\",\"kind\":\"TeamsMessage\",\"arguments\":[{\"name\":\"messageLocale\",\"type\":\"string\",\"value\":\"en-us\"},{\"name\":\"recipients\",\"type\":\"array\",\"values\":[{\"type\":\"string\",\"value\":\"admin@MngEnvMCAP472664.onmicrosoft.com\"}]},{\"name\":\"headline\",\"type\":\"array\",\"values\":[{\"type\":\"string\",\"value\":\"[Fabric][people-counter-dev] pc-dispatch-00 failed\"}]},{\"name\":\"optionalMessage\",\"type\":\"array\",\"values\":[{\"type\":\"string\",\"value\":\"The condition has been met\"}]},{\"name\":\"additionalInformation\",\"type\":\"array\",\"values\":[{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"itemName\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"itemName\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"itemKind\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"itemKind\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"workspaceName\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"workspaceName\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"jobInstanceId\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"jobInstanceId\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"jobStatus\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"jobStatus\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"jobType\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"jobType\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"jobInvokeType\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"jobInvokeType\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"jobStartTime\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"jobStartTime\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"jobEndTime\"},{\"kind\":\"EventFieldReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"jobEndTime\"}],\"name\":\"reference\"}]}]}]}]}]}",
+        "settings": {
+          "shouldRun": true,
+          "shouldApplyRuleOnUpdate": false
+        }
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd",
+    "payload": {
+      "name": "pc_operations_dashboard",
+      "description": "Container Description",
+      "type": "kqlQueries"
+    },
+    "type": "container-v1"
+  },
+  {
+    "uniqueIdentifier": "e6e52903-b746-4373-b6c7-eeaa781d999d",
+    "payload": {
+      "name": "workspace_monitoring event",
+      "runSettings": {
+        "isStopped": false,
+        "executionIntervalInSeconds": 300
+      },
+      "query": {
+        "queryString": "ItemJobEventLogs\r\n| where ItemName in (\"pc-event-intake\", \"01_register_event\")\r\n| summarize arg_max(Timestamp, *) by JobInstanceId\r\n| where JobStatus in (\"NotStarted\", \"InProgress\")\r\n| extend ReferenceTime =\r\n    iff(\r\n        JobStatus == \"NotStarted\",\r\n        coalesce(JobScheduleTime, Timestamp),\r\n        coalesce(JobStartTime, Timestamp)\r\n    )\r\n| extend ElapsedMinutes =\r\n    datetime_diff(\"minute\", now(), ReferenceTime)\r\n| where ElapsedMinutes >= 20\r\n| extend AlertTimestamp = now()\r\n| project\r\n    AlertTimestamp,\r\n    JobInstanceId,\r\n    ItemName,\r\n    JobType,\r\n    JobStatus,\r\n    ElapsedMinutes,\r\n    JobScheduleTime,\r\n    JobStartTime,\r\n    WorkspaceName,\r\n    CapacityId\r\n| order by ElapsedMinutes desc"
+      },
+      "eventhouseItem": {
+        "itemId": "{{ .TargetKqlDatabaseId }}",
+        "workspaceId": "{{ .TargetWorkspaceId }}",
+        "itemType": "KustoDatabase"
+      },
+      "eventTimeSettings": {
+        "ingestionDelayInSeconds": 0,
+        "timeFieldName": "AlertTimestamp"
+      },
+      "queryParameters": [],
+      "metadata": {
+        "workspaceId": "{{ .TargetWorkspaceId }}",
+        "dashboardId": "{{ .TargetKqlDashboardId }}",
+        "visualId": "185f8e93-6e1f-4d30-bc0b-581fbd0dcb28"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      }
+    },
+    "type": "kqlSource-v1"
+  },
+  {
+    "uniqueIdentifier": "549a649c-ce29-4a39-9a36-31d070263cc9",
+    "payload": {
+      "name": "workspace_monitoring event",
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Event",
+        "instance": "{\"steps\":[{\"id\":\"b24c546a-c1d9-4d0b-86fb-2850f96ae157\",\"name\":\"SourceEventStep\",\"rows\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"e6e52903-b746-4373-b6c7-eeaa781d999d\"}],\"kind\":\"SourceReference\",\"name\":\"SourceSelector\"}]}],\"templateId\":\"SourceEvent\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f",
+    "payload": {
+      "name": "JobInstanceId",
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Object"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "262ebc2a-bde7-427c-95e6-8be4010d3aaf",
+    "payload": {
+      "name": "JobInstanceId",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"f1606f59-6691-4e95-8246-5f3aa5fe6d11\",\"name\":\"IdPartStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"IdentityPartAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "46c544ea-57ff-4099-99eb-77df4700004c",
+    "payload": {
+      "name": "JobInstanceId",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"79ca405e-a259-4e24-97ff-5721cf92d515\",\"name\":\"IdStructureStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"262ebc2a-bde7-427c-95e6-8be4010d3aaf\"}],\"kind\":\"AttributeReference\",\"name\":\"idPart\",\"type\":\"complex\"}],\"kind\":\"IdPart\",\"name\":\"IdPart\"}]}],\"templateId\":\"IdentityTupleAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "d547ce89-5108-4e18-900d-cb50dc602472",
+    "payload": {
+      "name": "workspace_monitoring event",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Event",
+        "instance": "{\"steps\":[{\"id\":\"e7754053-8858-4ec8-8a04-d06405519bf0\",\"name\":\"SplitEventStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"549a649c-ce29-4a39-9a36-31d070263cc9\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"JobInstanceId\"},{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"262ebc2a-bde7-427c-95e6-8be4010d3aaf\"}],\"kind\":\"AttributeReference\",\"name\":\"idPart\",\"type\":\"complex\"}],\"kind\":\"FieldIdMapping\",\"name\":\"FieldIdMapping\"},{\"arguments\":[{\"name\":\"isAuthoritative\",\"type\":\"boolean\",\"value\":true}],\"kind\":\"EventOptions\",\"name\":\"SplitEventOptions\"}]}],\"templateId\":\"SplitEvent\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "7ddd77e0-b107-41b8-8402-9da65857e857",
+    "payload": {
+      "name": "ElapsedMinutes",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"7dfe2e07-1c12-4640-8e32-0e16d43f44d4\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"ElapsedMinutes\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"b48e7485-23d3-4de9-a614-ece1b553b613\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "04c2ffe9-e457-4ba6-9eba-59b4eb4d0bc0",
+    "payload": {
+      "name": "JobInstanceId",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"f4badca5-12f4-4595-b551-51c63136089e\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"JobInstanceId\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"5869e017-b429-47da-8c65-dc21fd3f93cb\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "f0f9b399-21d0-4453-8117-c6c574ed71b3",
+    "payload": {
+      "name": "ItemName",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"700a0c8d-1757-4569-bc6f-8a203f08dd99\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"ItemName\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"a95c8fad-6353-48f3-bdaa-fb27aa3eebff\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "2b66d1f0-f469-4fdb-b860-2748ef14c875",
+    "payload": {
+      "name": "JobType",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"8a63a26c-418f-4bd0-988c-213f2286aeb9\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"JobType\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"acbc3398-0ae3-49fa-a3a7-3cd6c4a91657\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "539305d2-0173-4b21-817f-f77dda95533b",
+    "payload": {
+      "name": "JobStatus",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"61af3ae2-4de7-43a3-a82f-0639838adb4c\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"JobStatus\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"10c942ad-647c-4ede-956c-d913710bdf62\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "7346e654-8d7d-4162-a7ec-da0e8df67976",
+    "payload": {
+      "name": "ElapsedMinutes",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"01725b28-64f7-4e31-bd53-7149d8f40abd\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"ElapsedMinutes\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"7b3dc31f-ac15-49fa-a13d-0132d43d23b4\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "6a97f7dd-0a38-4be3-a9ef-a817933b4f24",
+    "payload": {
+      "name": "JobScheduleTime",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"53f953c3-5cc7-4a2d-bda4-2c96a6691222\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"JobScheduleTime\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"3c216ea0-5985-4fc6-9dfd-24d869859d88\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "2dc65544-4c98-481e-896d-8ca15a58e14d",
+    "payload": {
+      "name": "JobStartTime",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"a9f8f9f9-8721-4ae7-8596-613f8feb409b\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"JobStartTime\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"95ff5421-1a46-4252-b6e4-c0b7b746dd51\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "97b1a356-9940-4d4f-81cd-433402765ad7",
+    "payload": {
+      "name": "WorkspaceName",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"c83d4a23-671e-4f3d-a029-9bb9e4e037a0\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"WorkspaceName\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"56155b45-125f-48cb-a1e1-08eac43a5b3d\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "33001f8a-a6dc-4839-a2df-cb47679123e7",
+    "payload": {
+      "name": "CapacityId",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Attribute",
+        "instance": "{\"steps\":[{\"id\":\"859973dd-c3da-43f7-ae53-2d8eabc709d3\",\"name\":\"EventSelectStep\",\"rows\":[{\"arguments\":[{\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"d547ce89-5108-4e18-900d-cb50dc602472\"}],\"kind\":\"EventReference\",\"name\":\"event\",\"type\":\"complex\"}],\"kind\":\"Event\",\"name\":\"EventSelector\"},{\"arguments\":[{\"name\":\"fieldName\",\"type\":\"string\",\"value\":\"CapacityId\"}],\"kind\":\"EventField\",\"name\":\"EventFieldSelector\"}]},{\"id\":\"929c01bb-9252-40e1-b7bf-b27de4f40ce4\",\"name\":\"EventComputeStep\",\"rows\":[{\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"Text\"},{\"name\":\"format\",\"type\":\"string\",\"value\":\"\"}],\"kind\":\"TypeAssertion\",\"name\":\"TypeAssertion\"}]}],\"templateId\":\"BasicEventAttribute\",\"templateVersion\":\"1.3.0\"}"
+      }
+    },
+    "type": "timeSeriesView-v1"
+  },
+  {
+    "uniqueIdentifier": "1a14e875-c513-4c2a-8497-98beb3c52b68",
+    "payload": {
+      "name": "alert_pc_event_intake_duration_20m",
+      "parentObject": {
+        "targetUniqueIdentifier": "3b58c98b-e220-4959-aa43-bdf03026a93f"
+      },
+      "parentContainer": {
+        "targetUniqueIdentifier": "5e423215-4d0a-4f9f-b2c3-b76aa9c3e0bd"
+      },
+      "definition": {
+        "type": "Rule",
+        "instance": "{\"templateId\":\"AttributeTrigger\",\"templateVersion\":\"1.3.0\",\"steps\":[{\"name\":\"ScalarSelectStep\",\"id\":\"7ca30440-da48-496f-8eea-8c324ec7c5ca\",\"rows\":[{\"name\":\"AttributeSelector\",\"kind\":\"Attribute\",\"arguments\":[{\"kind\":\"AttributeReference\",\"type\":\"complex\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"7ddd77e0-b107-41b8-8402-9da65857e857\"}],\"name\":\"attribute\"}]}]},{\"name\":\"ScalarDetectStep\",\"id\":\"12b8c882-4ae5-4d34-8a66-f6f2a2410177\",\"rows\":[{\"name\":\"NumberValueCondition\",\"kind\":\"NumberValueCondition\",\"arguments\":[{\"name\":\"op\",\"type\":\"string\",\"value\":\"IsGreaterThanOrEqualTo\"},{\"name\":\"threshold\",\"type\":\"number\",\"value\":20.0}]},{\"name\":\"OccurrenceOption\",\"kind\":\"EachTime\",\"arguments\":[]}]},{\"name\":\"ActStep\",\"id\":\"561d9fc3-eb59-4e03-a115-9650e3db2e90\",\"rows\":[{\"name\":\"TeamsBinding\",\"kind\":\"TeamsMessage\",\"arguments\":[{\"name\":\"messageLocale\",\"type\":\"string\",\"value\":\"en-us\"},{\"name\":\"recipients\",\"type\":\"array\",\"values\":[{\"type\":\"string\",\"value\":\"admin@MngEnvMCAP472664.onmicrosoft.com\"}]},{\"name\":\"headline\",\"type\":\"array\",\"values\":[{\"type\":\"string\",\"value\":\"Fabric intake job exceeded 20 minutes\"}]},{\"name\":\"optionalMessage\",\"type\":\"array\",\"values\":[{\"type\":\"string\",\"value\":\"The condition has been met\"}]},{\"name\":\"additionalInformation\",\"type\":\"array\",\"values\":[{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"JobInstanceId\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"04c2ffe9-e457-4ba6-9eba-59b4eb4d0bc0\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"ItemName\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"f0f9b399-21d0-4453-8117-c6c574ed71b3\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"JobType\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"2b66d1f0-f469-4fdb-b860-2748ef14c875\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"JobStatus\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"539305d2-0173-4b21-817f-f77dda95533b\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"ElapsedMinutes\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"7346e654-8d7d-4162-a7ec-da0e8df67976\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"JobScheduleTime\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"6a97f7dd-0a38-4be3-a9ef-a817933b4f24\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"JobStartTime\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"2dc65544-4c98-481e-896d-8ca15a58e14d\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"WorkspaceName\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"97b1a356-9940-4d4f-81cd-433402765ad7\"}],\"name\":\"reference\"}]},{\"kind\":\"NameReferencePair\",\"type\":\"complex\",\"arguments\":[{\"name\":\"name\",\"type\":\"string\",\"value\":\"CapacityId\"},{\"kind\":\"AttributeReference\",\"type\":\"complexReference\",\"arguments\":[{\"name\":\"entityId\",\"type\":\"string\",\"value\":\"33001f8a-a6dc-4839-a2df-cb47679123e7\"}],\"name\":\"reference\"}]}]}]}]}]}",
+        "settings": {
+          "shouldRun": true,
+          "shouldApplyRuleOnUpdate": false
+        }
+      }
+    },
+    "type": "timeSeriesView-v1"
+  }
+]

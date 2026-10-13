@@ -1,0 +1,278 @@
+table people_counter_gold_video
+	lineageTag: f675187e-585d-44b7-bb4b-4abc151beb28
+	sourceLineageTag: [dbo].[people_counter_sjd_gold_video]
+
+	measure 'Videos Processed' =
+			
+			DISTINCTCOUNT(people_counter_gold_video[work_id])
+		formatString: 0
+		displayFolder: Video KPIs
+		lineageTag: d84097af-4c6f-436c-a0b8-c0d7a68dff83
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Video Hours Processed' =
+			
+			DIVIDE(
+			    SUM(people_counter_gold_video[video_duration_seconds]),
+			    3600.0
+			)
+		formatString: 0.00
+		displayFolder: Video KPIs
+		lineageTag: e30a5bf5-7a4a-4fc9-95a2-f66bc782381c
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		changedProperty = FormatString
+
+	measure 'Distinct Tracks per Video' =
+			
+			AVERAGE(people_counter_gold_video[distinct_people])
+		formatString: 0.00
+		displayFolder: Video KPIs
+		lineageTag: c27a214e-a661-4979-a9af-392be095b063
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		changedProperty = FormatString
+
+	measure 'Processing Speed x Real Time' =
+			
+			DIVIDE(
+			    SUM(people_counter_gold_video[video_duration_seconds]),
+			    SUM(people_counter_gold_video[processing_seconds])
+			)
+		displayFolder: Video KPIs
+		lineageTag: a7fdc14a-ee1b-4d6a-a6a4-b727f41a0ddf
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	measure 'Videos Missing Required Metrics' =
+			
+			CALCULATE(
+			    DISTINCTCOUNT(people_counter_gold_video[work_id]),
+			    FILTER(
+			        people_counter_gold_video,
+			        ISBLANK(
+			            people_counter_gold_video[video_duration_seconds]
+			        )
+			            || ISBLANK(
+			                people_counter_gold_video[processing_seconds]
+			            )
+			            || ISBLANK(
+			                people_counter_gold_video[distinct_people]
+			            )
+			    )
+			)
+		formatString: 0
+		displayFolder: Video KPIs
+		lineageTag: aaf70c89-2887-47be-ac51-e37e7d08caa3
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	measure 'Missing Required Metrics Flag' =
+			
+			VAR MissingDuration =
+			    ISBLANK(
+			        MAX(
+			            people_counter_gold_video[video_duration_seconds]
+			        )
+			    )
+			VAR MissingProcessing =
+			    ISBLANK(
+			        MAX(people_counter_gold_video[processing_seconds])
+			    )
+			VAR MissingTracks =
+			    ISBLANK(
+			        MAX(people_counter_gold_video[distinct_people])
+			    )
+			RETURN
+			    IF(
+			        MissingDuration || MissingProcessing || MissingTracks,
+			        1,
+			        0
+			    )
+		formatString: 0
+		displayFolder: Video KPIs
+		lineageTag: d95b4887-cc7f-40e6-b401-bab7e1a432ae
+
+		changedProperty = Name
+
+		changedProperty = DisplayFolder
+
+	column work_id
+		dataType: string
+		isHidden
+		lineageTag: 4af90499-38bd-4f08-8276-204e4af1e807
+		sourceLineageTag: work_id
+		summarizeBy: none
+		sourceColumn: work_id
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column captured_at_utc
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: b60c4d53-599d-49fe-bdc7-5ec5a3c8716f
+		sourceLineageTag: captured_at_utc
+		summarizeBy: none
+		sourceColumn: captured_at_utc
+
+		annotation SummarizationSetBy = Automatic
+
+	column camera_id
+		dataType: string
+		isHidden
+		lineageTag: eebf977a-ee4e-40ad-af48-23387b29ae36
+		sourceLineageTag: camera_id
+		summarizeBy: none
+		sourceColumn: camera_id
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column location_id
+		dataType: string
+		isHidden
+		lineageTag: 3f2260dc-2c6f-4591-95a9-454e494edb76
+		sourceLineageTag: location_id
+		summarizeBy: none
+		sourceColumn: location_id
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column video_duration_seconds
+		dataType: double
+		lineageTag: 4dc805fb-b710-48da-a8fc-9a0b14891413
+		sourceLineageTag: video_duration_seconds
+		summarizeBy: sum
+		sourceColumn: video_duration_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column processing_seconds
+		dataType: double
+		lineageTag: 1aa685b5-7ee2-42a1-ba3d-1969e62c05ae
+		sourceLineageTag: processing_seconds
+		summarizeBy: sum
+		sourceColumn: processing_seconds
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column speed_x_realtime
+		dataType: double
+		lineageTag: 5a673526-132b-4e44-9402-6871ef4e9f60
+		sourceLineageTag: speed_x_realtime
+		summarizeBy: sum
+		sourceColumn: speed_x_realtime
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column distinct_people
+		dataType: int64
+		formatString: 0
+		lineageTag: 257b753a-2c36-4775-8316-34f30091effb
+		sourceLineageTag: distinct_people
+		summarizeBy: sum
+		sourceColumn: distinct_people
+
+		annotation SummarizationSetBy = Automatic
+
+	column line_in_count
+		dataType: int64
+		formatString: 0
+		lineageTag: f70c0a85-2a71-46ea-b8b6-58d86f420216
+		sourceLineageTag: line_in_count
+		summarizeBy: sum
+		sourceColumn: line_in_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column line_out_count
+		dataType: int64
+		formatString: 0
+		lineageTag: 67fb292c-e236-4bf9-bd18-29ab2489c5f7
+		sourceLineageTag: line_out_count
+		summarizeBy: sum
+		sourceColumn: line_out_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column completed_at
+		dataType: dateTime
+		formatString: General Date
+		lineageTag: a21fe6dd-ce81-4bd0-933f-092b7e7f2ac1
+		sourceLineageTag: completed_at
+		summarizeBy: none
+		sourceColumn: completed_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column capture_date
+		dataType: dateTime
+		isHidden
+		formatString: General Date
+		lineageTag: 859d3015-020f-4029-af56-b7da9df40197
+		sourceLineageTag: capture_date
+		summarizeBy: none
+		sourceColumn: capture_date
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column time_key
+		dataType: int64
+		isHidden
+		formatString: 0
+		lineageTag: bd2cc5fb-b82a-47bd-8773-d7fba4418675
+		sourceLineageTag: time_key
+		summarizeBy: none
+		sourceColumn: time_key
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	column config_sha256
+		dataType: string
+		isHidden
+		lineageTag: 71990518-79e9-43c7-bf0d-87d8babf0268
+		sourceLineageTag: config_sha256
+		summarizeBy: none
+		sourceColumn: config_sha256
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition people_counter_gold_video = entity
+		mode: directLake
+		source
+			entityName: people_counter_sjd_gold_video
+			schemaName: dbo
+			expressionSource: 'DirectLake - {{ .TargetLakehouseName }}'
+

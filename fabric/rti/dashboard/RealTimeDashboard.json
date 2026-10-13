@@ -1,0 +1,702 @@
+{
+  "schema_version": 84,
+  "flavor": "RTDashboard_Regular",
+  "changeDetection": {
+    "kind": "liveUpdates",
+    "fallbackRefreshRate": "5m",
+    "minRefreshRate": "30s"
+  },
+  "tiles": [
+    {
+      "id": "a6d99469-a737-4876-8fab-2827afcdd987",
+      "title": "Jobs by status",
+      "visualType": "bar",
+      "pageId": "718d8aba-55c0-4c92-b1e7-97bf3e58f133",
+      "layout": {
+        "x": 0,
+        "y": 4,
+        "width": 12,
+        "height": 7
+      },
+      "queryRef": {
+        "kind": "query",
+        "queryId": "4009350e-18c6-4382-89e6-f90521908c13"
+      },
+      "visualOptions": {
+        "multipleYAxes": {
+          "base": {
+            "id": "-1",
+            "label": "",
+            "columns": [],
+            "yAxisMaximumValue": null,
+            "yAxisMinimumValue": null,
+            "yAxisScale": "linear",
+            "horizontalLines": []
+          },
+          "additional": [],
+          "showMultiplePanels": false
+        },
+        "seriesColors": {},
+        "hideLegend": false,
+        "legendLocation": "bottom",
+        "xColumnTitle": "",
+        "xColumn": null,
+        "yColumns": null,
+        "seriesColumns": null,
+        "xAxisScale": "linear",
+        "verticalLine": "",
+        "crossFilterDisabled": false,
+        "drillthroughDisabled": false,
+        "forceAxisTicks": false,
+        "crossFilter": [],
+        "drillthrough": []
+      }
+    },
+    {
+      "id": "f95cfb70-a5d1-4473-9a44-552f654bf010",
+      "title": "Running Jobs",
+      "visualType": "kpi",
+      "pageId": "718d8aba-55c0-4c92-b1e7-97bf3e58f133",
+      "layout": {
+        "x": 0,
+        "y": 0,
+        "width": 4,
+        "height": 4
+      },
+      "queryRef": {
+        "kind": "query",
+        "queryId": "65399e02-d054-4dac-b822-e6d5f6f3b6b5"
+      },
+      "visualOptions": {
+        "kpi__valueColumn": null,
+        "kpi__visualType": "gauge",
+        "kpi__minValue": 0,
+        "kpi__maxValue": 100,
+        "kpi__showMinMaxLabels": true,
+        "kpi__conditionalFormattingEnabled": true,
+        "kpi__valueFormat": {
+          "format": "automatic",
+          "maxDecimalPlaces": 2,
+          "showUnitLabel": true,
+          "unit": "%"
+        },
+        "kpi__conditionalFormatting": {
+          "showBadges": false,
+          "showZoneMarks": true,
+          "zone1": {
+            "range": [
+              0,
+              33
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "OK"
+            }
+          },
+          "zone2": {
+            "range": [
+              33,
+              67
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "Warning"
+            }
+          },
+          "zone3": {
+            "range": [
+              67,
+              100
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "Danger"
+            }
+          }
+        },
+        "kpi__referenceLines": {
+          "showLabels": false,
+          "lines": []
+        },
+        "kpi__styling": {
+          "arcAngle": 220,
+          "arcThickness": 0.3,
+          "capStyle": "rounded",
+          "gradientFill": false
+        }
+      }
+    },
+    {
+      "id": "7643042f-9e35-4b36-956f-5418eb2b3cd3",
+      "title": "Not-started Jobs",
+      "visualType": "kpi",
+      "pageId": "718d8aba-55c0-4c92-b1e7-97bf3e58f133",
+      "layout": {
+        "x": 4,
+        "y": 0,
+        "width": 4,
+        "height": 4
+      },
+      "queryRef": {
+        "kind": "query",
+        "queryId": "ae500a4c-7790-4a00-9832-b58085afd1e1"
+      },
+      "visualOptions": {
+        "kpi__valueColumn": null,
+        "kpi__visualType": "gauge",
+        "kpi__minValue": 0,
+        "kpi__maxValue": 100,
+        "kpi__showMinMaxLabels": true,
+        "kpi__conditionalFormattingEnabled": true,
+        "kpi__valueFormat": {
+          "format": "automatic",
+          "maxDecimalPlaces": 2,
+          "showUnitLabel": true,
+          "unit": "%"
+        },
+        "kpi__conditionalFormatting": {
+          "showBadges": false,
+          "showZoneMarks": true,
+          "zone1": {
+            "range": [
+              0,
+              33
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "OK"
+            }
+          },
+          "zone2": {
+            "range": [
+              33,
+              67
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "Warning"
+            }
+          },
+          "zone3": {
+            "range": [
+              67,
+              100
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "Danger"
+            }
+          }
+        },
+        "kpi__referenceLines": {
+          "showLabels": false,
+          "lines": []
+        },
+        "kpi__styling": {
+          "arcAngle": 220,
+          "arcThickness": 0.3,
+          "capStyle": "rounded",
+          "gradientFill": false
+        }
+      }
+    },
+    {
+      "id": "b7543e99-4555-4b01-bc84-b855633bbd59",
+      "title": "Oldest not-started age",
+      "visualType": "kpi",
+      "pageId": "718d8aba-55c0-4c92-b1e7-97bf3e58f133",
+      "layout": {
+        "x": 8,
+        "y": 0,
+        "width": 4,
+        "height": 4
+      },
+      "queryRef": {
+        "kind": "query",
+        "queryId": "4db8b4ba-f4d8-418e-865f-af5c86f3d28b"
+      },
+      "visualOptions": {
+        "kpi__valueColumn": null,
+        "kpi__visualType": "gauge",
+        "kpi__minValue": 0,
+        "kpi__maxValue": 100,
+        "kpi__showMinMaxLabels": true,
+        "kpi__conditionalFormattingEnabled": true,
+        "kpi__valueFormat": {
+          "format": "automatic",
+          "maxDecimalPlaces": 2,
+          "showUnitLabel": true,
+          "unit": "%"
+        },
+        "kpi__conditionalFormatting": {
+          "showBadges": false,
+          "showZoneMarks": true,
+          "zone1": {
+            "range": [
+              0,
+              33
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "OK"
+            }
+          },
+          "zone2": {
+            "range": [
+              33,
+              67
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "Warning"
+            }
+          },
+          "zone3": {
+            "range": [
+              67,
+              100
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "Danger"
+            }
+          }
+        },
+        "kpi__referenceLines": {
+          "showLabels": false,
+          "lines": []
+        },
+        "kpi__styling": {
+          "arcAngle": 220,
+          "arcThickness": 0.3,
+          "capStyle": "rounded",
+          "gradientFill": false
+        }
+      }
+    },
+    {
+      "id": "d88cdc77-2a3d-4aa0-b451-87d35d0c5413",
+      "title": "P95 terminal duration",
+      "visualType": "kpi",
+      "pageId": "718d8aba-55c0-4c92-b1e7-97bf3e58f133",
+      "layout": {
+        "x": 12,
+        "y": 0,
+        "width": 4,
+        "height": 4
+      },
+      "queryRef": {
+        "kind": "query",
+        "queryId": "e84b5185-6602-4241-844b-5a6852058a22"
+      },
+      "visualOptions": {
+        "kpi__valueColumn": null,
+        "kpi__visualType": "gauge",
+        "kpi__minValue": 0,
+        "kpi__maxValue": 100,
+        "kpi__showMinMaxLabels": true,
+        "kpi__conditionalFormattingEnabled": true,
+        "kpi__valueFormat": {
+          "format": "automatic",
+          "maxDecimalPlaces": 2,
+          "showUnitLabel": true,
+          "unit": "%"
+        },
+        "kpi__conditionalFormatting": {
+          "showBadges": false,
+          "showZoneMarks": true,
+          "zone1": {
+            "range": [
+              0,
+              33
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "OK"
+            }
+          },
+          "zone2": {
+            "range": [
+              33,
+              67
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "Warning"
+            }
+          },
+          "zone3": {
+            "range": [
+              67,
+              100
+            ],
+            "indicator": {
+              "icon": "recommended",
+              "label": "Danger"
+            }
+          }
+        },
+        "kpi__referenceLines": {
+          "showLabels": false,
+          "lines": []
+        },
+        "kpi__styling": {
+          "arcAngle": 220,
+          "arcThickness": 0.3,
+          "capStyle": "rounded",
+          "gradientFill": false
+        }
+      }
+    },
+    {
+      "id": "358c9e34-7d3e-48ac-8a8f-6221267483b6",
+      "title": "Recent failures",
+      "visualType": "table",
+      "pageId": "718d8aba-55c0-4c92-b1e7-97bf3e58f133",
+      "layout": {
+        "x": 0,
+        "y": 11,
+        "width": 24,
+        "height": 7
+      },
+      "queryRef": {
+        "kind": "query",
+        "queryId": "d406714a-6881-4fa1-93b5-173c9f16c093"
+      },
+      "visualOptions": {
+        "table__enableRenderLinks": true,
+        "colorRulesDisabled": true,
+        "crossFilterDisabled": false,
+        "drillthroughDisabled": false,
+        "crossFilter": [],
+        "drillthrough": [],
+        "table__renderLinks": [],
+        "colorRules": []
+      }
+    },
+    {
+      "id": "dc7136d2-e2f9-4ffa-95d1-6e0907ecc662",
+      "title": "Terminal job trend",
+      "visualType": "timechart",
+      "pageId": "718d8aba-55c0-4c92-b1e7-97bf3e58f133",
+      "layout": {
+        "x": 12,
+        "y": 4,
+        "width": 12,
+        "height": 7
+      },
+      "queryRef": {
+        "kind": "query",
+        "queryId": "823ff8dd-2588-4fd1-a3db-27e21ab79930"
+      },
+      "visualOptions": {
+        "multipleYAxes": {
+          "base": {
+            "id": "-1",
+            "label": "",
+            "columns": [],
+            "yAxisMaximumValue": null,
+            "yAxisMinimumValue": null,
+            "yAxisScale": "linear",
+            "horizontalLines": []
+          },
+          "additional": [],
+          "showMultiplePanels": false
+        },
+        "seriesColors": {
+          "JobStatus:Completed:Jobs": "color--(20)",
+          "JobStatus:Failed:Jobs": "color--(25)",
+          "JobStatus:Cancelled:Jobs": "color--(23)"
+        },
+        "hideLegend": false,
+        "legendLocation": "bottom",
+        "xColumnTitle": "",
+        "xColumn": null,
+        "yColumns": null,
+        "seriesColumns": null,
+        "xAxisScale": "linear",
+        "verticalLine": "",
+        "crossFilterDisabled": false,
+        "drillthroughDisabled": false,
+        "forceAxisTicks": false,
+        "crossFilter": [],
+        "drillthrough": []
+      }
+    },
+    {
+      "id": "185f8e93-6e1f-4d30-bc0b-581fbd0dcb28",
+      "title": "Intake jobs at or above 20 minutes",
+      "visualType": "table",
+      "pageId": "718d8aba-55c0-4c92-b1e7-97bf3e58f133",
+      "layout": {
+        "x": 0,
+        "y": 18,
+        "width": 24,
+        "height": 7
+      },
+      "queryRef": {
+        "kind": "query",
+        "queryId": "b86c01f4-cedb-4d9e-84c3-0456f783417c"
+      },
+      "visualOptions": {
+        "table__enableRenderLinks": true,
+        "colorRulesDisabled": true,
+        "crossFilterDisabled": false,
+        "drillthroughDisabled": false,
+        "crossFilter": [],
+        "drillthrough": [],
+        "table__renderLinks": [],
+        "colorRules": []
+      }
+    }
+  ],
+  "baseQueries": [],
+  "parameters": [
+    {
+      "kind": "duration",
+      "id": "0ddb20d6-2efa-474b-b75b-819f17a07959",
+      "displayName": "Time range",
+      "description": "",
+      "beginVariableName": "_startTime",
+      "endVariableName": "_endTime",
+      "defaultValue": {
+        "kind": "dynamic",
+        "count": 24,
+        "unit": "hours"
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    },
+    {
+      "kind": "string",
+      "id": "45df7f67-90f1-4eeb-b15e-d21076418a86",
+      "displayName": "Item",
+      "description": "",
+      "variableName": "_itemName",
+      "selectionType": "array",
+      "includeAllOption": true,
+      "defaultValue": {
+        "kind": "all"
+      },
+      "dataSource": {
+        "kind": "query",
+        "columns": {
+          "value": "ItemName"
+        },
+        "queryRef": {
+          "kind": "query",
+          "queryId": "37b3f3f7-1c36-43a7-b224-626d268ca778"
+        }
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    },
+    {
+      "kind": "string",
+      "id": "cea2f946-c488-4aa7-9dfa-36a89754aa3f",
+      "displayName": "Job type",
+      "description": "",
+      "variableName": "_jobType",
+      "selectionType": "array",
+      "includeAllOption": true,
+      "defaultValue": {
+        "kind": "all"
+      },
+      "dataSource": {
+        "kind": "query",
+        "columns": {
+          "value": "JobType"
+        },
+        "queryRef": {
+          "kind": "query",
+          "queryId": "1303ca2f-21ce-4fd4-9d39-d63f3f1e39a8"
+        }
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    },
+    {
+      "kind": "string",
+      "id": "c5f4aeb7-44ef-4662-8d90-42325bd5b662",
+      "displayName": "Status",
+      "description": "",
+      "variableName": "_jobStatus",
+      "selectionType": "array",
+      "includeAllOption": true,
+      "defaultValue": {
+        "kind": "all"
+      },
+      "dataSource": {
+        "kind": "query",
+        "columns": {
+          "value": "JobStatus"
+        },
+        "queryRef": {
+          "kind": "query",
+          "queryId": "72b9af7a-9e38-482c-b2db-a27bb96a5211"
+        }
+      },
+      "showOnPages": {
+        "kind": "all"
+      }
+    }
+  ],
+  "dataSources": [
+    {
+      "kind": "kusto-trident",
+      "name": "workspace_monitoring",
+      "clusterUri": "https://trd-yra0yjh9babcz6tktr.z0.kusto.fabric.microsoft.com",
+      "databaseArtifactId": "{{ .TargetKqlDatabaseId }}",
+      "database": "{{ .TargetKqlDatabaseId }}",
+      "workspace": "00000000-0000-0000-0000-000000000000",
+      "id": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+    }
+  ],
+  "pages": [
+    {
+      "name": "Page 1",
+      "id": "718d8aba-55c0-4c92-b1e7-97bf3e58f133"
+    }
+  ],
+  "queries": [
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "let CurrentJobs =\r\n    ItemJobEventLogs\r\n    | where Timestamp between (_startTime .. _endTime)\r\n    | where isempty(_itemName) or ItemName in (_itemName)\r\n    | where isempty(_jobType) or JobType in (_jobType)\r\n    | summarize arg_max(Timestamp, *) by JobInstanceId;\r\nCurrentJobs\r\n| where isempty(_jobStatus) or JobStatus in (_jobStatus)\r\n| summarize Jobs = count() by JobStatus\r\n| order by JobStatus asc",
+      "id": "4009350e-18c6-4382-89e6-f90521908c13",
+      "usedVariables": [
+        "_endTime",
+        "_itemName",
+        "_jobStatus",
+        "_jobType",
+        "_startTime"
+      ]
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs\r\n| where Timestamp between (_startTime .. _endTime)\r\n| where isempty(_itemName) or ItemName in (_itemName)\r\n| where isempty(_jobType) or JobType in (_jobType)\r\n| summarize arg_max(Timestamp, *) by JobInstanceId\r\n| where JobStatus == \"InProgress\"\r\n| summarize RunningJobs = count()\r\n",
+      "id": "65399e02-d054-4dac-b822-e6d5f6f3b6b5",
+      "usedVariables": [
+        "_endTime",
+        "_itemName",
+        "_jobType",
+        "_startTime"
+      ]
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs\r\n| where Timestamp between (_startTime .. _endTime)\r\n| where isempty(_itemName) or ItemName in (_itemName)\r\n| where isempty(_jobType) or JobType in (_jobType)\r\n| summarize arg_max(Timestamp, *) by JobInstanceId\r\n| where JobStatus == \"NotStarted\"\r\n| summarize NotStartedJobs = count()\r\n",
+      "id": "ae500a4c-7790-4a00-9832-b58085afd1e1",
+      "usedVariables": [
+        "_endTime",
+        "_itemName",
+        "_jobType",
+        "_startTime"
+      ]
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs\r\n| where Timestamp between (_startTime .. _endTime)\r\n| where isempty(_itemName) or ItemName in (_itemName)\r\n| where isempty(_jobType) or JobType in (_jobType)\r\n| summarize arg_max(Timestamp, *) by JobInstanceId\r\n| where JobStatus == \"NotStarted\"\r\n| extend QueueReferenceTime = coalesce(JobScheduleTime, Timestamp)\r\n| summarize OldestQueueAgeMinutes =\r\n    max(datetime_diff(\"minute\", now(), QueueReferenceTime))\r\n",
+      "id": "4db8b4ba-f4d8-418e-865f-af5c86f3d28b",
+      "usedVariables": [
+        "_endTime",
+        "_itemName",
+        "_jobType",
+        "_startTime"
+      ]
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs\r\n| where Timestamp between (_startTime .. _endTime)\r\n| where isempty(_itemName) or ItemName in (_itemName)\r\n| where isempty(_jobType) or JobType in (_jobType)\r\n| summarize arg_max(Timestamp, *) by JobInstanceId\r\n| where JobStatus in (\"Completed\", \"Failed\", \"Cancelled\")\r\n| summarize P95DurationMinutes =\r\n    percentile(todouble(DurationMs), 95) / 60000.0\r\n",
+      "id": "e84b5185-6602-4241-844b-5a6852058a22",
+      "usedVariables": [
+        "_endTime",
+        "_itemName",
+        "_jobType",
+        "_startTime"
+      ]
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs\r\n| where Timestamp between (_startTime .. _endTime)\r\n| where isempty(_itemName) or ItemName in (_itemName)\r\n| where isempty(_jobType) or JobType in (_jobType)\r\n| summarize arg_max(Timestamp, *) by JobInstanceId\r\n| where JobStatus == \"Failed\"\r\n| project\r\n    Timestamp,\r\n    WorkspaceName,\r\n    ItemKind,\r\n    ItemName,\r\n    JobType,\r\n    JobInstanceId,\r\n    JobInvokeType,\r\n    DurationMinutes = todouble(DurationMs) / 60000.0,\r\n    CapacityId\r\n| top 50 by Timestamp desc\r\n",
+      "id": "d406714a-6881-4fa1-93b5-173c9f16c093",
+      "usedVariables": [
+        "_endTime",
+        "_itemName",
+        "_jobType",
+        "_startTime"
+      ]
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs\r\n| where Timestamp between (_startTime .. _endTime)\r\n| where isempty(_itemName) or ItemName in (_itemName)\r\n| where isempty(_jobType) or JobType in (_jobType)\r\n| where JobStatus in (\"Completed\", \"Failed\", \"Cancelled\")\r\n| summarize Jobs = dcount(JobInstanceId)\r\n    by Hour = bin(Timestamp, 1h), JobStatus\r\n| order by Hour asc\r\n",
+      "id": "823ff8dd-2588-4fd1-a3db-27e21ab79930",
+      "usedVariables": [
+        "_endTime",
+        "_itemName",
+        "_jobType",
+        "_startTime"
+      ]
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs\r\n| where ItemName in (\"pc-event-intake\", \"01_register_event\")\r\n| summarize arg_max(Timestamp, *) by JobInstanceId\r\n| where JobStatus in (\"NotStarted\", \"InProgress\")\r\n| extend ReferenceTime =\r\n    iff(\r\n        JobStatus == \"NotStarted\",\r\n        coalesce(JobScheduleTime, Timestamp),\r\n        coalesce(JobStartTime, Timestamp)\r\n    )\r\n| extend ElapsedMinutes =\r\n    datetime_diff(\"minute\", now(), ReferenceTime)\r\n| where ElapsedMinutes >= 20\r\n| extend AlertTimestamp = now()\r\n| project\r\n    AlertTimestamp,\r\n    JobInstanceId,\r\n    ItemName,\r\n    JobType,\r\n    JobStatus,\r\n    ElapsedMinutes,\r\n    JobScheduleTime,\r\n    JobStartTime,\r\n    WorkspaceName,\r\n    CapacityId\r\n| order by ElapsedMinutes desc\r\n",
+      "id": "b86c01f4-cedb-4d9e-84c3-0456f783417c",
+      "usedVariables": []
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs | distinct ItemName | order by ItemName asc;",
+      "id": "37b3f3f7-1c36-43a7-b224-626d268ca778",
+      "usedVariables": []
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs | distinct JobType | order by JobType asc",
+      "id": "1303ca2f-21ce-4fd4-9d39-d63f3f1e39a8",
+      "usedVariables": []
+    },
+    {
+      "dataSource": {
+        "kind": "inline",
+        "dataSourceId": "68f2b829-3e60-4fd3-8a1b-a9b07978cad0"
+      },
+      "text": "ItemJobEventLogs | \nwhere isnotempty(JobStatus) |\ndistinct JobStatus | \norder by JobStatus asc",
+      "id": "72b9af7a-9e38-482c-b2db-a27bb96a5211",
+      "usedVariables": []
+    }
+  ],
+  "embeddedApps": []
+}

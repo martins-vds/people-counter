@@ -1,0 +1,130 @@
+name: Fabric deployment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Protected GitHub Environment to deploy
+        required: true
+        type: string
+      ref:
+        description: Immutable repository commit to deploy
+        required: true
+        type: string
+      allow_protected_changes:
+        description: Allow approved delete/replace actions for protected resources
+        required: false
+        type: boolean
+        default: false
+      approve_shortcut_changes:
+        description: Approve reviewed OneLake shortcut changes
+        required: false
+        type: boolean
+        default: false
+      approve_workspace_identity_changes:
+        description: Approve reviewed workspace identity changes
+        required: false
+        type: boolean
+        default: false
+      approve_capacity_changes:
+        description: Approve reviewed capacity assignment or lifecycle changes
+        required: false
+        type: boolean
+        default: false
+      approve_production_deletions:
+        description: Approve reviewed Production Fabric item deletion or replacement
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      terraform_has_changes:
+        description: Whether the applied Terraform plan contained changes
+        value: ${{ jobs.terraform.outputs.has_changes }}
+      postconfigure_status:
+        description: Fabric postconfiguration evidence status
+        value: ${{ jobs.postconfigure.outputs.status }}
+      smoke_status:
+        description: Fabric smoke-test evidence status
+        value: ${{ jobs.smoke.outputs.status }}
+
+permissions: {}
+
+concurrency:
+  group: fabric-deployment-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: Terraform apply
+    permissions:
+      contents: read
+      id-token: write # Passed to the environment-scoped Terraform workflow.
+    uses: ./.github/workflows/_terraform.yml
+    with:
+      environment: ${{ inputs.environment }}
+      working_directory: infra/environments/${{ inputs.environment }}
+      terraform_action: apply
+      allow_protected_changes: ${{ inputs.allow_protected_changes }}
+      approve_shortcut_changes: ${{ inputs.approve_shortcut_changes }}
+      approve_workspace_identity_changes: ${{ inputs.approve_workspace_identity_changes }}
+      approve_capacity_changes: ${{ inputs.approve_capacity_changes }}
+      approve_production_deletions: ${{ inputs.approve_production_deletions }}
+      ref: ${{ inputs.ref }}
+
+  postconfigure:
+    name: Fabric postconfiguration (safe state)
+    needs: terraform
+    permissions:
+      contents: read
+      id-token: write # Passed to the environment-scoped Fabric workflow.
+    uses: ./.github/workflows/_postconfigure.yml
+    with:
+      environment: ${{ inputs.environment }}
+      working_directory: infra/environments/${{ inputs.environment }}
+      enable_schedules: false
+      phase: initial
+      ref: ${{ inputs.ref }}
+
+  postconfigure-repeat:
+    name: Repeat postconfiguration
+    needs: postconfigure
+    permissions:
+      contents: read
+      id-token: write # Passed to the environment-scoped Fabric workflow.
+    uses: ./.github/workflows/_postconfigure.yml
+    with:
+      environment: ${{ inputs.environment }}
+      working_directory: infra/environments/${{ inputs.environment }}
+      enable_schedules: false
+      phase: repeat
+      ref: ${{ inputs.ref }}
+
+  smoke:
+    name: Clean-room acceptance
+    needs: [postconfigure, postconfigure-repeat]
+    permissions:
+      contents: read
+      id-token: write # Passed to the environment-scoped smoke workflow.
+    uses: ./.github/workflows/_smoke.yml
+    with:
+      environment: ${{ inputs.environment }}
+      working_directory: infra/environments/${{ inputs.environment }}
+      expect_schedules_enabled: false
+      initial_evidence_artifact: ${{ needs.postconfigure.outputs.evidence_artifact }}
+      repeat_evidence_artifact: ${{ needs.postconfigure-repeat.outputs.evidence_artifact }}
+      ref: ${{ inputs.ref }}
+
+  final-gate:
+    name: Production schedule enablement gate
+    if: inputs.environment == 'prod'
+    needs: smoke
+    permissions:
+      contents: read
+      id-token: write # Passed to the environment-scoped Fabric workflow.
+    uses: ./.github/workflows/_postconfigure.yml
+    with:
+      environment: ${{ inputs.environment }}
+      working_directory: infra/environments/${{ inputs.environment }}
+      enable_schedules: true
+      phase: final-gate
+      ref: ${{ inputs.ref }}

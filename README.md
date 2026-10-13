@@ -13,7 +13,23 @@ production-shadow code, and one-time migration controllers have been retired
 from this repository.
 
 - [Fabric SJD operations](notebooks/fabric/README.md)
+- [GitHub/Terraform deployment](docs/github-deployment.md)
+- [Source-controlled Fabric definitions](fabric/README.md)
 - [Getting-started tutorial](notebooks/fabric/18_sjd_getting_started_demo_tutorial.md)
+
+Fabric is deployed from an immutable `main` commit through protected GitHub
+Environments. Do not copy workspace or item GUIDs into deployment commands:
+Terraform outputs feed postconfiguration and acceptance automatically. A merge
+deploys Development; `promote.yml` promotes the same 40-character commit to
+Test only after retained successful Development evidence exists, and to
+Production only after retained successful evidence exists for that exact SHA
+in both Development and Test. The gate reads immutable workflow artifacts and
+fails closed when evidence is missing or ambiguous. Deployments reconcile
+twice with schedules disabled, require zero Terraform drift and live clean-room
+acceptance evidence, and enable Production schedules only through the final
+gate. Start with the
+[deployment bootstrap and clean-room runbook](docs/github-deployment.md).
+
 - [Local Spark development](docs/local-spark-development.md)
 
 The local end-to-end contract can be exercised without a model:

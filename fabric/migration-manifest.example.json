@@ -1,0 +1,172 @@
+{
+  "items": [
+    {
+      "destination": "semantic-models/analytics",
+      "format": "TMDL",
+      "itemIdEnv": "FABRIC_SOURCE_ANALYTICS_MODEL_ID",
+      "itemType": "SemanticModel",
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "valueEnv": "FABRIC_SOURCE_WORKSPACE_ID"
+        },
+        {
+          "name": "TargetLakehouseId",
+          "valueEnv": "FABRIC_SOURCE_LAKEHOUSE_ID"
+        },
+        {
+          "name": "TargetLakehouseName",
+          "valueEnv": "FABRIC_SOURCE_LAKEHOUSE_NAME"
+        }
+      ]
+    },
+    {
+      "destination": "semantic-models/operational",
+      "format": "TMDL",
+      "itemIdEnv": "FABRIC_SOURCE_OPERATIONAL_MODEL_ID",
+      "itemType": "SemanticModel",
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "valueEnv": "FABRIC_SOURCE_WORKSPACE_ID"
+        },
+        {
+          "name": "TargetLakehouseId",
+          "valueEnv": "FABRIC_SOURCE_LAKEHOUSE_ID"
+        },
+        {
+          "name": "TargetLakehouseName",
+          "valueEnv": "FABRIC_SOURCE_LAKEHOUSE_NAME"
+        }
+      ]
+    },
+    {
+      "destination": "reports/analytics",
+      "format": "PBIR",
+      "itemIdEnv": "FABRIC_SOURCE_ANALYTICS_REPORT_ID",
+      "itemType": "Report",
+      "tokens": [
+        {
+          "name": "TargetSemanticModelId",
+          "valueEnv": "FABRIC_SOURCE_ANALYTICS_MODEL_ID"
+        },
+        {
+          "name": "TargetSemanticModelName",
+          "valueEnv": "FABRIC_SOURCE_ANALYTICS_MODEL_NAME"
+        }
+      ]
+    },
+    {
+      "destination": "reports/operational",
+      "format": "PBIR",
+      "itemIdEnv": "FABRIC_SOURCE_OPERATIONAL_REPORT_ID",
+      "itemType": "Report",
+      "tokens": [
+        {
+          "name": "TargetSemanticModelId",
+          "valueEnv": "FABRIC_SOURCE_OPERATIONAL_MODEL_ID"
+        },
+        {
+          "name": "TargetSemanticModelName",
+          "valueEnv": "FABRIC_SOURCE_OPERATIONAL_MODEL_NAME"
+        }
+      ]
+    },
+    {
+      "destination": "rti/eventhouse",
+      "itemIdEnv": "FABRIC_SOURCE_EVENTHOUSE_ID",
+      "itemType": "Eventhouse",
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "valueEnv": "FABRIC_SOURCE_WORKSPACE_ID"
+        }
+      ]
+    },
+    {
+      "destination": "rti/kql-database",
+      "itemIdEnv": "FABRIC_SOURCE_KQL_DATABASE_ID",
+      "itemType": "KQLDatabase",
+      "tokens": [
+        {
+          "name": "TargetEventhouseId",
+          "valueEnv": "FABRIC_SOURCE_EVENTHOUSE_ID"
+        }
+      ]
+    },
+    {
+      "destination": "rti/queryset",
+      "itemIdEnv": "FABRIC_SOURCE_KQL_QUERYSET_ID",
+      "itemType": "KQLQueryset",
+      "tokens": [
+        {
+          "name": "TargetKqlDatabaseId",
+          "valueEnv": "FABRIC_SOURCE_KQL_DATABASE_ID"
+        },
+        {
+          "name": "TargetKqlQueryServiceUri",
+          "valueEnv": "FABRIC_SOURCE_KQL_QUERY_SERVICE_URI"
+        }
+      ]
+    },
+    {
+      "destination": "rti/dashboard",
+      "itemIdEnv": "FABRIC_SOURCE_KQL_DASHBOARD_ID",
+      "itemType": "KQLDashboard",
+      "tokens": [
+        {
+          "name": "TargetKqlDatabaseId",
+          "valueEnv": "FABRIC_SOURCE_KQL_DATABASE_ID"
+        },
+        {
+          "name": "TargetKqlQueryServiceUri",
+          "valueEnv": "FABRIC_SOURCE_KQL_QUERY_SERVICE_URI"
+        }
+      ]
+    },
+    {
+      "destination": "activators/operations",
+      "itemIdEnv": "FABRIC_SOURCE_ACTIVATOR_ID",
+      "itemType": "Reflex",
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "valueEnv": "FABRIC_SOURCE_WORKSPACE_ID"
+        },
+        {
+          "name": "TargetEventhouseId",
+          "valueEnv": "FABRIC_SOURCE_EVENTHOUSE_ID"
+        },
+        {
+          "name": "TargetKqlDatabaseId",
+          "valueEnv": "FABRIC_SOURCE_KQL_DATABASE_ID"
+        },
+        {
+          "name": "TargetKqlQuerysetId",
+          "valueEnv": "FABRIC_SOURCE_KQL_QUERYSET_ID"
+        },
+        {
+          "name": "TargetKqlDashboardId",
+          "valueEnv": "FABRIC_SOURCE_KQL_DASHBOARD_ID"
+        }
+      ]
+    },
+    {
+      "destination": "variable-libraries/environment",
+      "itemIdEnv": "FABRIC_SOURCE_VARIABLE_LIBRARY_ID",
+      "itemType": "VariableLibrary",
+      "tokens": [
+        {
+          "name": "TargetWorkspaceId",
+          "valueEnv": "FABRIC_SOURCE_WORKSPACE_ID"
+        },
+        {
+          "name": "TargetLakehouseId",
+          "valueEnv": "FABRIC_SOURCE_LAKEHOUSE_ID"
+        }
+      ]
+    }
+  ],
+  "schema": "people-counter-fabric-definition-migration-v1",
+  "workspaceIdEnv": "FABRIC_SOURCE_WORKSPACE_ID"
+}
