@@ -54,27 +54,12 @@ terraform output -raw subscription_id
 IDs. The environment stack's `capacity_id` requires the Fabric API capacity
 UUID, so do not pass the bootstrap output directly as `FABRIC_CAPACITY_ID`.
 
-To obtain the required UUID from the Fabric portal:
-
-1. Open Microsoft Fabric and select **Settings** > **Admin portal**.
-2. In the Admin portal, select **Capacity settings**.
-3. Select the Fabric capacity created by this bootstrap stack. Match its name
-   to the final segment of the corresponding
-   `fabric_capacity_ids_by_environment` Azure resource ID.
-4. In the capacity's **Settings** panel, copy the UUID shown under
-   **Capacity ID**.
-5. Save that UUID, without the surrounding Azure resource path, as the
-   `FABRIC_CAPACITY_ID` variable in the matching GitHub Environment.
-
-For example, do not use an Azure resource ID such as
-`/subscriptions/.../providers/Microsoft.Fabric/capacities/fabpcdev...`.
-Use the UUID displayed as **Capacity ID**, such as
-`00000000-0000-0000-0000-000000000000`.
-
-Repeat this handoff for every deployed stage and verify the capacity name, SKU,
-region, and GitHub Environment before saving the value. The API-based lookup
-and full output mapping are documented in the
-[deployment runbook](../../docs/github-deployment.md#github-environments-and-variables).
+Stop here after recording the bootstrap outputs. Continue with the canonical
+[GitHub Environment handoff procedure](../../docs/github-deployment.md#github-environments-and-variables),
+which covers environment protection, every required variable, and both the
+recommended Fabric Admin portal lookup and the API alternative for resolving
+`FABRIC_CAPACITY_ID`. Do not configure GitHub Environments from this bootstrap
+README alone.
 
 Configure downstream environment stacks from
 `backend_config_by_environment`, using an `azurerm` backend with
@@ -87,6 +72,5 @@ the bootstrap outputs. The generated federated subjects are exactly
 in jobs that declare the matching GitHub Environment. Workflows request
 `id-token: write`; no client secret is created or required.
 
-The full output-to-variable mapping, environment protection rules, capacity
-UUID handoff, fallback-secret policy, and live completion procedure are in the
+The fallback-secret policy and live completion procedure are also in the
 [GitHub deployment runbook](../../docs/github-deployment.md).

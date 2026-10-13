@@ -101,8 +101,34 @@ map shape is:
 
 The bootstrap `fabric_capacity_ids_by_environment` output is an Azure Resource
 Manager ID, while the Fabric provider variable validates a UUID. Resolve the
-matching Fabric API UUID once during environment handoff. This is a bootstrap
-diagnostic, not a deployment command:
+matching Fabric capacity UUID once during environment handoff. Do not save an
+Azure resource ID such as
+`/subscriptions/.../providers/Microsoft.Fabric/capacities/fabpcdev...` as
+`FABRIC_CAPACITY_ID`.
+
+### Recommended: copy the Capacity ID from the Fabric Admin portal
+
+For each deployed stage:
+
+1. Open Microsoft Fabric and select **Settings** > **Admin portal**.
+2. Select **Capacity settings**.
+3. Select the capacity created by the bootstrap stack. Match its capacity name
+   to the final segment of that stage's
+   `fabric_capacity_ids_by_environment` Azure resource ID.
+4. In the capacity's **Settings** panel, copy the UUID shown under
+   **Capacity ID**.
+5. Verify the capacity name, SKU, region, and target stage.
+6. Save the copied UUID as `FABRIC_CAPACITY_ID` in the matching GitHub
+   Environment.
+
+The required value is only the UUID displayed as **Capacity ID**, for example
+`00000000-0000-0000-0000-000000000000`.
+
+### Alternative: resolve the Capacity ID through the Fabric API
+
+An operator whose Fabric API identity can list capacities may resolve the same
+UUID with the following bootstrap diagnostic. This is not a deployment
+command:
 
 ```bash
 stage=test
@@ -131,8 +157,9 @@ unset fabric_token
 printf '%s\n' "${FABRIC_CAPACITY_ID}"
 ```
 
-Verify the display name, tenant, subscription, and stage before saving the
-value as an environment variable.
+If the API returns no matching capacity or an authorization error, use the
+Fabric Admin portal method above. Verify the display name, tenant,
+subscription, and stage before saving the value as an environment variable.
 
 Optional environment variables are:
 
