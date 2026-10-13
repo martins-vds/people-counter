@@ -19,7 +19,8 @@ a green changed-test baseline and complete results for every test-associated
 mutant. Surviving mutants and functions with no associated tests are reported
 as advisory evidence. Unchecked mutants, suspicious results, timeouts,
 segfaults, execution failures, or a selection with no active test-associated
-mutants block the pull request.
+mutants block the pull request. Mutants that time out under the initial
+four-worker run are retried once serially before the timeout gate is evaluated.
 
 One pre-existing type issue is isolated in
 `.github/scripts/validate-python-quality.sh`: the Fabric reconciler's mutable

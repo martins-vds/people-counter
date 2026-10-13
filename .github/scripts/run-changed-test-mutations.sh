@@ -90,28 +90,44 @@ fi
 
 uv run mutmut run --max-children 4 "${targets[@]}" \
   2>&1 | tee "${evidence_dir}/mutmut-run.txt"
-uv run mutmut results --all true > "${evidence_dir}/mutmut-results.txt"
+
+all_results="${evidence_dir}/mutmut-results.txt"
+selected_results="${evidence_dir}/selected-results.txt"
+select_results() {
+  : > "${selected_results}"
+  for target in "${targets[@]}"; do
+    prefix="${target%\*}"
+    awk -v prefix="${prefix}" '
+      {
+        line = $0
+        sub(/^[[:space:]]+/, "", line)
+        if (index(line, prefix) == 1) {
+          print line
+        }
+      }
+    ' "${all_results}" >> "${selected_results}"
+  done
+  sort -u -o "${selected_results}" "${selected_results}"
+}
+
+uv run mutmut results --all true > "${all_results}"
+select_results
+mapfile -t timed_out < <(
+  sed -nE 's/^(.*): timeout$/\1/p' "${selected_results}"
+)
+if ((${#timed_out[@]} > 0)); then
+  printf '%s\n' "${timed_out[@]}" > "${evidence_dir}/retried-timeouts.txt"
+  uv run mutmut run --max-children 1 "${timed_out[@]}" \
+    2>&1 | tee "${evidence_dir}/mutmut-timeout-retry.txt"
+  uv run mutmut results --all true > "${all_results}"
+  select_results
+fi
+
 uv run mutmut export-cicd-stats \
   2>&1 | tee "${evidence_dir}/mutmut-export.txt"
 if [[ -f mutants/mutmut-cicd-stats.json ]]; then
   cp mutants/mutmut-cicd-stats.json "${evidence_dir}/mutmut-cicd-stats.json"
 fi
-
-selected_results="${evidence_dir}/selected-results.txt"
-: > "${selected_results}"
-for target in "${targets[@]}"; do
-  prefix="${target%\*}"
-  awk -v prefix="${prefix}" '
-    {
-      line = $0
-      sub(/^[[:space:]]+/, "", line)
-      if (index(line, prefix) == 1) {
-        print line
-      }
-    }
-  ' "${evidence_dir}/mutmut-results.txt" >> "${selected_results}"
-done
-sort -u -o "${selected_results}" "${selected_results}"
 
 if [[ ! -s "${selected_results}" ]]; then
   echo "::error::mutmut produced no results for the selected targets."
