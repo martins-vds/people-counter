@@ -277,32 +277,25 @@ The deployment has four ownership boundaries:
 | Bootstrap Terraform | Azure resource group, state storage, Entra applications, service principals, OIDC trust, state RBAC, Fabric capacities, and configured ADLS accounts |
 | Environment Terraform | Target workspace, workspace roles, Lakehouse, Environment, seven SJDs, Variable Library, configured shortcuts, and optional Fabric items |
 | Runtime automation | Lakehouse tables, `Files/` directories, release manifest, model refreshes, supported service settings, and schedules |
-| Operator or external system | Tenant settings, GitHub configuration, approvals, shortcut source items, Activator action evidence, and unsupported integrations |
+| Operator or external system | Tenant settings, GitHub configuration, approvals, existing ADLS containers, Activator action evidence, and unsupported integrations |
 
 Do not create the target workspace, Lakehouse, Environment, SJD, semantic
 model, report, RTI item, Activator, or shortcut manually. Environment Terraform
 creates these resources.
 
-### Destination IDs and shortcut source IDs
+### Destination IDs and the ADLS source
 
 Terraform creates the destination workspace and Lakehouse. It passes their IDs
 directly to the Fabric provider. An operator does not enter these destination
 IDs.
 
-A OneLake shortcut points from the new Lakehouse to an existing OneLake item.
-The shortcut configuration therefore requires two source IDs:
-
-- `target_workspace_id` identifies the existing source workspace.
-- `target_item_id` identifies the existing source item, usually a Lakehouse.
-
-The source item can belong to another Terraform environment or another team.
-The source item must exist before shortcut creation. If you need no shortcut,
-set `FABRIC_ONELAKE_SHORTCUTS` to `{}`.
-
 An ADLS Gen2 shortcut points to a container in the configured storage account.
 Bootstrap can create the storage account or reference an existing account.
 Environment Terraform creates the workspace identity, connection, RBAC, and
 shortcut. It can also create the configured container.
+
+This architecture does not use OneLake-to-OneLake shortcuts. Do not create the
+`FABRIC_ONELAKE_SHORTCUTS` GitHub Environment variable.
 
 ### Definition bundles and target IDs
 
@@ -327,8 +320,8 @@ Complete these steps after the bootstrap apply:
 4. Add the eight required variables to each GitHub Environment.
 5. Set each `FABRIC_CAPACITY_ID` to the Fabric capacity UUID.
 6. Set `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` for each environment.
-7. Leave `FABRIC_ONELAKE_SHORTCUTS` unset unless you need a OneLake shortcut.
-8. Set the two ADLS variables when the environment needs ADLS shortcuts.
+7. Set `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` from the bootstrap output.
+8. Set `FABRIC_ADLS_SHORTCUTS` with the required ADLS shortcut configuration.
 9. Review each optional definition bundle.
 10. Set the Reporting, RTI, and Activator flags.
 11. Add the Activator checkpoint secret when you enable Activator.
@@ -338,13 +331,17 @@ Complete these steps after the bootstrap apply:
 Terraform creates the target Fabric resources after step 13. Operators approve
 Test and Production promotion through the protected GitHub Environments.
 
-Optional environment variables are:
+Configure these shortcut variables in every GitHub Environment:
 
 | Variable | Accepted value and behavior |
 |---|---|
-| `FABRIC_ONELAKE_SHORTCUTS` | Set this variable only for OneLake-to-OneLake shortcuts. Leave it unset to create no OneLake shortcuts. |
-| `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` | Value from `adls_storage_account_ids_by_environment[stage]`. Set it when `FABRIC_ADLS_SHORTCUTS` is not `{}`. |
-| `FABRIC_ADLS_SHORTCUTS` | JSON object described under [ADLS Gen2 shortcut configuration](#adls-gen2-shortcut-configuration). Omit it or use `{}` to create no ADLS shortcuts. |
+| `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` | Required. Use `adls_storage_account_ids_by_environment[stage]` from bootstrap. |
+| `FABRIC_ADLS_SHORTCUTS` | Required. Use the JSON object described under [ADLS Gen2 shortcut configuration](#adls-gen2-shortcut-configuration). Include at least one shortcut. |
+
+Other optional environment variables are:
+
+| Variable | Accepted value and behavior |
+|---|---|
 | `FABRIC_ENABLE_REPORTING` | String `true` or `false`. The default is `false`. `true` requires both reporting bundles and verifies both semantic models and reports. |
 | `FABRIC_ENABLE_RTI` | String `true` or `false`. The default is `false`. `true` requires and verifies the Eventhouse, KQL database, queryset, and dashboard. |
 | `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates both Reflex items and requires definition and action evidence. |
@@ -354,88 +351,10 @@ until every bundle named in
 [Definition bundles and target IDs](#definition-bundles-and-target-ids) is
 reviewed. Activator requires both bundles and its flag.
 
-### OneLake shortcut configuration
-
-Do not set `FABRIC_ONELAKE_SHORTCUTS` for the ADLS Gen2 shortcut described in
-this runbook. `FABRIC_ADLS_SHORTCUTS` configures that shortcut.
-
-Set `FABRIC_ONELAKE_SHORTCUTS` only when the managed Lakehouse must read data
-from an existing OneLake item. The pipeline passes `{}` to Terraform when the
-GitHub Environment variable is absent. Therefore, both of these configurations
-create no OneLake shortcuts:
-
-- `FABRIC_ONELAKE_SHORTCUTS` does not exist.
-- `FABRIC_ONELAKE_SHORTCUTS` contains `{}`.
-
-Leaving the variable unset is the recommended configuration when you use only
-ADLS Gen2 shortcuts.
-
-The repository manages the destination Lakehouse and the shortcut resource.
-It does not automatically select or create the source OneLake item. A OneLake
-shortcut always requires the UUID of an existing source workspace and source
-item.
-
-The pipeline does not copy source UUIDs from another Terraform state. If
-another environment in this repository owns the source item, copy its
-`workspace_id` and `lakehouse_id` outputs into this variable. Otherwise,
-request the source UUIDs from the team that owns the source item.
-
-`FABRIC_ONELAKE_SHORTCUTS` contains JSON text. Its top level is an object, not
-an array. Each top-level key is a stable Terraform label for one shortcut.
-
-Every shortcut value requires:
-
-- `name`: non-empty leaf name of the shortcut. The managed Lakehouse exposes
-  it at `<path>/<name>`.
-- `path`: parent path inside the destination Lakehouse managed by this
-  deployment. It must start with `Files/` or `Tables/` and must not start with
-  `/`.
-- `target_workspace_id`: UUID of the workspace containing the source OneLake
-  item.
-- `target_item_id`: UUID of the source OneLake item, typically a Lakehouse.
-- `target_path`: source path inside that item. It must start with `Files/` or
-  `Tables/` and must not start with `/`.
-
-For example, this creates
-`Files/input/incoming_videos` and
-`Tables/shared/shared_dimensions` inside the stage's managed Lakehouse:
-
-```json
-{
-  "incoming_videos": {
-    "name": "incoming_videos",
-    "path": "Files/input",
-    "target_workspace_id": "<source-workspace-uuid>",
-    "target_item_id": "<source-lakehouse-uuid>",
-    "target_path": "Files/videos"
-  },
-  "shared_dimensions": {
-    "name": "shared_dimensions",
-    "path": "Tables/shared",
-    "target_workspace_id": "<source-workspace-uuid>",
-    "target_item_id": "<source-lakehouse-uuid>",
-    "target_path": "Tables/dimensions"
-  }
-}
-```
-
-Paste the JSON object directly as the GitHub variable value. Do not wrap the
-entire value in another pair of quotes. Compact single-line and formatted
-multiline JSON are equivalent. Use separate values per GitHub Environment
-when Dev, Test, and Production point at different source workspaces or items.
-
-The deployment identity must have access to the configured source workspace
-and source item.
-
-If Terraform already manages OneLake shortcuts and you remove this variable,
-the next plan proposes deletion of those shortcuts. Review that plan before
-apply.
-
-Terraform uses conflict policy `Abort`. Deployment fails when another object
-uses `<path>/<name>`. Remove the conflict or choose another destination.
-Keep each stable map label unchanged after deployment.
-
 ### ADLS Gen2 shortcut configuration
+
+Do not create `FABRIC_ONELAKE_SHORTCUTS`. This architecture supports only ADLS
+Gen2 shortcuts through the two variables in this section.
 
 Set `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` to the bootstrap output for the
 same stage. Use the complete Azure resource ID. Do not use the account name or
@@ -482,8 +401,12 @@ The `archive` container must already exist.
 ```
 
 Paste the object directly as the GitHub variable value. Do not add quotes
-around the complete object. Use `{}` when the environment needs no ADLS
-shortcut.
+around the complete object. Do not use `{}` for a standard environment
+deployment. An empty object disables ADLS shortcut creation.
+
+Terraform uses conflict policy `Abort`. Deployment fails when another object
+uses `<path>/<name>`. Remove the conflict or choose another destination.
+Keep each stable map label unchanged after deployment.
 
 Environment Terraform enables the workspace identity. It grants that identity
 `Storage Blob Data Contributor` on the storage account. It then creates one
