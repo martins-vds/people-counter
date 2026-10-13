@@ -237,19 +237,78 @@ subscription, and stage before saving the value as an environment variable.
 
 Optional environment variables are:
 
-| Variable | Default and effect |
+| Variable | Accepted value and behavior |
 |---|---|
-| `FABRIC_ONELAKE_SHORTCUTS` | `{}`; Terraform JSON map matching `onelake_shortcuts` |
-| `FABRIC_ENABLE_REPORTING` | `false`; when `true`, postconfiguration refreshes both models and clean-room acceptance requires reporting |
-| `FABRIC_ENABLE_RTI` | `false`; when `true`, clean-room acceptance requires Eventhouse, KQL database, queryset, and dashboard |
-| `FABRIC_ENABLE_ACTIVATOR` | `false`; when `true`, Terraform creates both reviewed Reflex items and both runtime gates require them |
+| `FABRIC_ONELAKE_SHORTCUTS` | JSON object described under [OneLake shortcut configuration](#onelake-shortcut-configuration). Omit it or use `{}` to create no shortcuts. |
+| `FABRIC_ENABLE_REPORTING` | String `true` or `false`; default `false`. `true` requires both reporting bundles, refreshes both semantic models during postconfiguration, and makes reporting clean-room checks mandatory. |
+| `FABRIC_ENABLE_RTI` | String `true` or `false`; default `false`. `true` requires the Eventhouse, KQL database, queryset, and dashboard outputs and their clean-room definition checks. |
+| `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`; default `false`. `true` creates both reviewed Reflex items and requires definition and action-execution evidence. |
 
 Reporting and RTI item creation is driven by committed bundles, not by their
 acceptance flags. Do not set a flag until every bundle named in
 [the source-definition section](#4-source-definitions-and-live-export) is
-reviewed. Activator requires both bundles and its flag. Shortcut values must
-match the exact object type in
-`infra/environments/<stage>/variables.tf`; use `{}` rather than an empty string.
+reviewed. Activator requires both bundles and its flag.
+
+### OneLake shortcut configuration
+
+`FABRIC_ONELAKE_SHORTCUTS` is a GitHub Environment variable containing JSON
+text. Its top level is an **object/map, not an array**. Each top-level key is a
+caller-chosen stable Terraform label for one shortcut. Use `{}` rather than an
+empty string when the environment needs no shortcuts.
+
+Every shortcut value requires:
+
+- `name`: non-empty leaf name of the shortcut. The managed Lakehouse exposes
+  it at `<path>/<name>`.
+- `path`: parent path inside the destination Lakehouse managed by this
+  deployment. It must start with `Files/` or `Tables/` and must not start with
+  `/`.
+- `target_workspace_id`: UUID of the workspace containing the source OneLake
+  item.
+- `target_item_id`: UUID of the source OneLake item, typically a Lakehouse.
+- `target_path`: source path inside that item. It must start with `Files/` or
+  `Tables/` and must not start with `/`.
+
+For example, this creates
+`Files/input/incoming_videos` and
+`Tables/shared/shared_dimensions` inside the stage's managed Lakehouse:
+
+```json
+{
+  "incoming_videos": {
+    "name": "incoming_videos",
+    "path": "Files/input",
+    "target_workspace_id": "<source-workspace-uuid>",
+    "target_item_id": "<source-lakehouse-uuid>",
+    "target_path": "Files/videos"
+  },
+  "shared_dimensions": {
+    "name": "shared_dimensions",
+    "path": "Tables/shared",
+    "target_workspace_id": "<source-workspace-uuid>",
+    "target_item_id": "<source-lakehouse-uuid>",
+    "target_path": "Tables/dimensions"
+  }
+}
+```
+
+Paste the JSON object directly as the GitHub variable value; do not wrap the
+entire value in another pair of quotes. Compact single-line and formatted
+multiline JSON are equivalent. Use separate values per GitHub Environment
+when Dev, Test, and Production point at different source workspaces or items.
+
+Obtain the source workspace and item UUIDs from the source environment's
+Terraform outputs when it is managed by this repository, or by listing the
+workspace and its items through the Fabric API. Verify that the deployment
+identity has the Fabric and OneLake permissions required to access the target.
+
+This input supports only OneLake-to-OneLake shortcuts. It does not configure
+external ADLS, S3, Dataverse, or other credential-bearing shortcut types.
+Terraform uses conflict policy `Abort`: if the destination already contains a
+different object at `<path>/<name>`, deployment fails instead of replacing it.
+Import an existing matching shortcut before enabling it, or choose a
+non-conflicting destination. Keep each stable map label unchanged after
+deployment unless intentionally replacing that Terraform-managed shortcut.
 
 ### Fallback secret exception policy
 
