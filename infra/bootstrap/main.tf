@@ -80,7 +80,7 @@ resource "azurerm_storage_account" "adls" {
   allow_nested_items_to_be_public = false
 
   blob_properties {
-    versioning_enabled = true
+    versioning_enabled = false
 
     delete_retention_policy {
       days = 30
