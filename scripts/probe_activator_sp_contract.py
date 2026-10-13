@@ -8,8 +8,12 @@ from people_counter.fabric_activator import (
     ActivatorAutomationError,
     probe_service_principal_crud_contract,
 )
-from people_counter.fabric_automation import FabricApiError, FabricAutomationClient
-from people_counter.fabric_rest import AzureCliTokenProvider, UrllibTransport
+from people_counter.fabric_automation import (
+    AzureCliResourceTokenProvider,
+    FabricApiError,
+    FabricAutomationClient,
+)
+from people_counter.fabric_rest import UrllibTransport
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -25,7 +29,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv)
     client = FabricAutomationClient(
-        AzureCliTokenProvider(),
+        AzureCliResourceTokenProvider("https://api.fabric.microsoft.com"),
         transport=UrllibTransport(),
         api_root=arguments.api_root,
     )

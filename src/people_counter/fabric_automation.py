@@ -103,6 +103,17 @@ class HTTPResponse:
     body: bytes = b""
 
 
+class HTTPResponseLike(Protocol):
+    @property
+    def status(self) -> int: ...
+
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+    @property
+    def body(self) -> bytes: ...
+
+
 class HTTPTransport(Protocol):
     def request(
         self,
@@ -112,7 +123,7 @@ class HTTPTransport(Protocol):
         headers: Mapping[str, str],
         body: bytes | None,
         timeout: float,
-    ) -> HTTPResponse: ...
+    ) -> HTTPResponseLike: ...
 
 
 def _canonical_bytes(value: object) -> bytes:
