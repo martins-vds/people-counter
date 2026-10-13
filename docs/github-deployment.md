@@ -7,9 +7,17 @@ Routine deployment never accepts a workspace or item GUID as a workflow input.
 
 ## Organizational bootstrap and tenant settings
 
-An approved bootstrap operator needs the permissions listed in
-[`infra/bootstrap/README.md`](../infra/bootstrap/README.md). Before applying
-that stack:
+The bootstrap operator needs:
+
+- Microsoft Entra **Application Administrator** or **Cloud Application
+  Administrator**;
+- Azure **Contributor** plus **User Access Administrator** or **Role Based
+  Access Control Administrator** on the target subscription;
+- permission under the tenant's Fabric capacity-creation policy; and
+- local Azure CLI and Terraform authentication for the target tenant and
+  subscription.
+
+Before applying the bootstrap stack:
 
 1. register the Azure `Microsoft.Fabric` resource provider;
 2. confirm the subscription and region can create the configured Fabric SKUs;
@@ -45,6 +53,24 @@ Bootstrap state is local, access-restricted, and never committed. It creates
 the state backend, one OIDC application/service principal per environment,
 environment-scoped federated credentials, state-container RBAC, and Fabric
 capacities. It does not create a client secret.
+
+Record the bootstrap outputs immediately:
+
+```bash
+terraform -chdir=infra/bootstrap output -json \
+  backend_config_by_environment
+terraform -chdir=infra/bootstrap output -json github_oidc_client_ids
+terraform -chdir=infra/bootstrap output -json \
+  github_oidc_service_principal_object_ids
+terraform -chdir=infra/bootstrap output -json \
+  fabric_capacity_ids_by_environment
+terraform -chdir=infra/bootstrap output -raw tenant_id
+terraform -chdir=infra/bootstrap output -raw subscription_id
+```
+
+Configure each downstream environment's `azurerm` backend from
+`backend_config_by_environment` with `use_azuread_auth = true`. The bootstrap
+stack cannot use the backend it creates, so retain its local state securely.
 
 ## OIDC trust
 
