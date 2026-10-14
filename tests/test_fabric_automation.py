@@ -513,6 +513,57 @@ def test_list_pages_supports_endpoint_specific_value_key() -> None:
     ]
 
 
+def test_list_pages_maps_explicit_empty_error_code_to_empty_list() -> None:
+    client, transport = _client(
+        [
+            HTTPResponse(
+                404,
+                {},
+                b'{"errorCode":"EnvironmentLibrariesNotFound"}',
+            )
+        ]
+    )
+
+    assert client.list_pages(
+        "/libraries",
+        value_key="libraries",
+        empty_error_codes=("EnvironmentLibrariesNotFound",),
+    ) == []
+    assert transport.requests[0]["method"] == "GET"
+
+
+def test_list_pages_rejects_unexpected_error_code() -> None:
+    client, _ = _client(
+        [HTTPResponse(404, {}, b'{"errorCode":"WorkspaceNotFound"}')]
+    )
+
+    with pytest.raises(
+        FabricApiError,
+        match=(
+            "Fabric list returned HTTP 404 with unexpected error code "
+            "'WorkspaceNotFound'"
+        ),
+    ):
+        client.list_pages(
+            "/libraries",
+            value_key="libraries",
+            empty_error_codes=("EnvironmentLibrariesNotFound",),
+        )
+
+
+def test_list_pages_with_empty_error_codes_preserves_success_response() -> None:
+    client, transport = _client(
+        [HTTPResponse(200, {}, b'{"libraries":[{"name":"current.whl"}]}')]
+    )
+
+    assert client.list_pages(
+        "/libraries",
+        value_key="libraries",
+        empty_error_codes=("EnvironmentLibrariesNotFound",),
+    ) == [{"name": "current.whl"}]
+    assert transport.requests[0]["method"] == "GET"
+
+
 def test_synchronous_created_location_is_not_treated_as_lro() -> None:
     client, transport = _client(
         [

@@ -436,11 +436,28 @@ class FabricAutomationClient:
         path: str,
         *,
         value_key: str = "value",
+        empty_error_codes: Sequence[str] = (),
     ) -> list[Mapping[str, Any]]:
         result: list[Mapping[str, Any]] = []
         next_path: str | None = path
         while next_path is not None:
-            page = self.request_json("GET", next_path)
+            if empty_error_codes:
+                status, _, body = self._request(
+                    "GET",
+                    next_path,
+                    expected=(200, 404),
+                )
+                page = _response_mapping(body, "Fabric response")
+                if status == 404:
+                    error_code = page.get("errorCode")
+                    if error_code in empty_error_codes:
+                        return result
+                    raise FabricApiError(
+                        "Fabric list returned HTTP 404 with unexpected error "
+                        f"code {error_code!r}"
+                    )
+            else:
+                page = self.request_json("GET", next_path)
             result.extend(
                 _object_list(
                     page.get(value_key),
