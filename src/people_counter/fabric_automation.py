@@ -121,14 +121,17 @@ class GitHubOidcResourceTokenProvider:
         resource = urlsplit(self.resource)
         request_url = urlsplit(self.request_url)
         request_hostname = request_url.hostname or ""
+        is_github_oidc_host = (
+            request_hostname == f"vstoken{_GITHUB_OIDC_HOST_SUFFIX}"
+            or (
+                request_hostname.startswith("pipelines")
+                and request_hostname.endswith(_GITHUB_OIDC_HOST_SUFFIX)
+                and request_hostname.count(".") == 3
+            )
+        )
         if resource.scheme != "https" or not resource.netloc:
             raise ValueError("token resource must be an HTTPS origin")
-        if (
-            request_url.scheme != "https"
-            or not request_hostname.startswith("pipelines")
-            or not request_hostname.endswith(_GITHUB_OIDC_HOST_SUFFIX)
-            or request_hostname.count(".") != 3
-        ):
+        if request_url.scheme != "https" or not is_github_oidc_host:
             raise ValueError("GitHub OIDC request URL has an unsupported origin")
         if _GUID.fullmatch(self.client_id) is None:
             raise ValueError("Azure client ID must be a UUID")
