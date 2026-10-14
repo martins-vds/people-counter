@@ -436,7 +436,10 @@ def test_request_json_rejects_invalid_json() -> None:
 def test_request_redacts_token_from_error_body() -> None:
     client, _ = _client([HTTPResponse(403, {}, b"denied secret-token")])
 
-    with pytest.raises(FabricApiError, match="Fabric HTTP 403") as captured:
+    with pytest.raises(
+        FabricApiError,
+        match=r"Fabric GET /v1/items returned HTTP 403",
+    ) as captured:
         client.request_json("GET", "/items")
 
     assert "secret-token" not in str(captured.value)
@@ -491,7 +494,10 @@ def test_request_retries_on_503_with_default_retry_after() -> None:
 def test_request_does_not_retry_non_retryable_status() -> None:
     client, transport = _client([HTTPResponse(404, {}, b"missing")])
 
-    with pytest.raises(FabricApiError, match="Fabric HTTP 404"):
+    with pytest.raises(
+        FabricApiError,
+        match=r"Fabric GET /v1/items returned HTTP 404",
+    ):
         client.request_json("GET", "/items")
 
     assert len(transport.requests) == 1
