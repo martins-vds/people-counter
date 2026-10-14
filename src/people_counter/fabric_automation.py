@@ -132,7 +132,10 @@ class GitHubOidcResourceTokenProvider:
         if resource.scheme != "https" or not resource.netloc:
             raise ValueError("token resource must be an HTTPS origin")
         if request_url.scheme != "https" or not is_github_oidc_host:
-            raise ValueError("GitHub OIDC request URL has an unsupported origin")
+            raise ValueError(
+                "GitHub OIDC request URL has an unsupported origin "
+                f"(scheme={request_url.scheme!r}, host={request_hostname!r})"
+            )
         if _GUID.fullmatch(self.client_id) is None:
             raise ValueError("Azure client ID must be a UUID")
         if _GUID.fullmatch(self.tenant_id) is None:
