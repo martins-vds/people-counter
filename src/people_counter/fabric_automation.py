@@ -65,14 +65,15 @@ class AzureCliResourceTokenProvider:
             raise ValueError("token resource must be an HTTPS origin")
 
     def get_token(self) -> str:
+        scope = f"{self.resource.rstrip('/')}/.default"
         try:
             process = subprocess.run(
                 [
                     "az",
                     "account",
                     "get-access-token",
-                    "--resource",
-                    self.resource,
+                    "--scope",
+                    scope,
                     "--query",
                     "accessToken",
                     "--output",

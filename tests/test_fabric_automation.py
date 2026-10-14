@@ -198,14 +198,37 @@ def test_resource_token_provider_validates_resource_and_redacts_repr(
 ) -> None:
     with pytest.raises(ValueError, match="HTTPS origin"):
         AzureCliResourceTokenProvider("not-a-resource")
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def run(*args: object, **kwargs: object) -> SimpleNamespace:
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout="access-token\n")
+
     monkeypatch.setattr(
         fabric_automation.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(stdout="access-token\n"),
+        run,
     )
     provider = AzureCliResourceTokenProvider("https://storage.azure.com/")
 
     assert provider.get_token() == "access-token"
+    assert calls[0][0][0] == [
+        "az",
+        "account",
+        "get-access-token",
+        "--scope",
+        "https://storage.azure.com/.default",
+        "--query",
+        "accessToken",
+        "--output",
+        "tsv",
+    ]
+    assert calls[0][1] == {
+        "capture_output": True,
+        "check": True,
+        "text": True,
+        "timeout": 60,
+    }
     assert "access-token" not in repr(provider)
 
 
