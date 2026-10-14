@@ -50,7 +50,7 @@ _GUID = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 _GITHUB_OIDC_AUDIENCE = "api://AzureADTokenExchange"
-_GITHUB_OIDC_HOST = "token.actions.githubusercontent.com"
+_GITHUB_OIDC_HOST_SUFFIX = ".actions.githubusercontent.com"
 
 
 class FabricApiError(RuntimeError):
@@ -120,11 +120,14 @@ class GitHubOidcResourceTokenProvider:
     def __post_init__(self) -> None:
         resource = urlsplit(self.resource)
         request_url = urlsplit(self.request_url)
+        request_hostname = request_url.hostname or ""
         if resource.scheme != "https" or not resource.netloc:
             raise ValueError("token resource must be an HTTPS origin")
         if (
             request_url.scheme != "https"
-            or request_url.hostname != _GITHUB_OIDC_HOST
+            or not request_hostname.startswith("pipelines")
+            or not request_hostname.endswith(_GITHUB_OIDC_HOST_SUFFIX)
+            or request_hostname.count(".") != 3
         ):
             raise ValueError("GitHub OIDC request URL has an unsupported origin")
         if _GUID.fullmatch(self.client_id) is None:

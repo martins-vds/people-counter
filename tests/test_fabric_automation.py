@@ -270,7 +270,8 @@ def test_resource_token_provider_uses_github_oidc_and_caches_access_token(
         "https://storage.azure.com/",
         env={
             "ACTIONS_ID_TOKEN_REQUEST_URL": (
-                "https://token.actions.githubusercontent.com/oidc?api-version=2.0"
+                "https://pipelinesghubeus2.actions.githubusercontent.com/"
+                "oidc?api-version=2.0"
             ),
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "github-request-token",
             "ARM_CLIENT_ID": "88fb936a-6e03-42f2-9ca9-6a0869e1523e",
@@ -304,6 +305,27 @@ def test_resource_token_provider_uses_github_oidc_and_caches_access_token(
     assert "azure-access-token" not in repr(provider)
 
 
+@pytest.mark.parametrize(
+    "request_url",
+    [
+        "https://token.actions.githubusercontent.com/oidc",
+        "https://pipelines.evil.actions.githubusercontent.com/oidc",
+        "https://pipelines.actions.githubusercontent.com.evil.example/oidc",
+    ],
+)
+def test_resource_token_provider_rejects_non_pipeline_origins(
+    request_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="unsupported origin"):
+        GitHubOidcResourceTokenProvider(
+            resource="https://storage.azure.com/",
+            client_id="88fb936a-6e03-42f2-9ca9-6a0869e1523e",
+            tenant_id="b8005d83-0703-4f94-8749-5c3e02f07bba",
+            request_url=request_url,
+            request_token="github-request-token",
+        )
+
+
 def test_resource_token_provider_falls_back_and_rejects_partial_oidc() -> None:
     assert isinstance(
         make_resource_token_provider("https://storage.azure.com/", env={}),
@@ -319,7 +341,7 @@ def test_resource_token_provider_falls_back_and_rejects_partial_oidc() -> None:
             "https://storage.azure.com/",
             env={
                 "ACTIONS_ID_TOKEN_REQUEST_URL": (
-                    "https://token.actions.githubusercontent.com/oidc"
+                    "https://pipelines.actions.githubusercontent.com/oidc"
                 ),
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "token",
             },
