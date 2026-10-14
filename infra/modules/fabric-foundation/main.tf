@@ -487,6 +487,7 @@ resource "fabric_semantic_model" "this" {
         TargetLakehouseName = fabric_lakehouse.this.display_name
       }
     }
+    if part.path != ".platform"
   }
 
   lifecycle {
@@ -620,6 +621,7 @@ resource "fabric_kql_queryset" "operations" {
         )
       }
     }
+    if part.path != ".platform"
   }
 
   lifecycle {
@@ -649,6 +651,7 @@ resource "fabric_kql_dashboard" "operations" {
         )
       }
     }
+    if part.path != ".platform"
   }
 
   lifecycle {
