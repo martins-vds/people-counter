@@ -211,7 +211,8 @@ def test_reconcile_reporting_refresh_validates_items_and_refreshes_models() -> N
         document[key]["report"]["target_item_id"] = _uid(f"{name}-report")
     manifest = parse_deployment_manifest(document, DeploymentEnvironment.DEV)
     location = "/job-instances/job-1"
-    get_results = {location: []}
+    get_results: dict[str, list[Mapping[str, Any]]] = {}
+    refresh_results = {location: []}
     for name, bundle in (
         ("analytics", manifest.analytics_reporting),
         ("operational", manifest.operational_reporting),
@@ -223,23 +224,55 @@ def test_reconcile_reporting_refresh_validates_items_and_refreshes_models() -> N
         get_results[
             f"/workspaces/{manifest.workspace_id}/items/{bundle.report.target_item_id}"
         ] = [{"type": "Report"}]
-        get_results[location].append({"id": f"{name}-refresh", "status": "Completed"})
+        refresh_results[location].append(
+            {"requestId": f"{name}-refresh", "status": "Completed"}
+        )
     client = _FakeClient(get_results=get_results)
+    power_bi_client = _FakeClient(get_results=refresh_results)
 
-    evidence = reconcilers.reconcile_reporting_refresh(client, manifest)
+    evidence = reconcilers.reconcile_reporting_refresh(
+        client,
+        power_bi_client,
+        manifest,
+    )
 
     assert set(evidence) == {"analytics", "operational"}
     assert all(item.status == "succeeded" for item in evidence.values())
-    assert any(
-        call[1].endswith("/jobs/Refresh/instances")
-        for call in client.calls
-        if call[0] == "POST"
+    refresh_submissions = [
+        call for call in power_bi_client.calls if call[0] == "POST"
+    ]
+    assert len(refresh_submissions) == 2
+    assert {call[1] for call in refresh_submissions} == {
+        (
+            f"/groups/{manifest.workspace_id}/datasets/"
+            f"{bundle.semantic_model.target_item_id}/refreshes"
+        )
+        for bundle in (
+            manifest.analytics_reporting,
+            manifest.operational_reporting,
+        )
+    }
+    assert all(
+        call[2]
+        == {
+            "applyRefreshPolicy": False,
+            "commitMode": "transactional",
+            "retryCount": 2,
+            "type": "Full",
+        }
+        for call in refresh_submissions
     )
 
     document["analytics_reporting"]["report"]["target_item_id"] = None
     unresolved = parse_deployment_manifest(document, DeploymentEnvironment.DEV)
     with pytest.raises(reconcilers.ReconcileError, match="unresolved"):
-        reconcilers.reconcile_reporting_refresh(_FakeClient(), unresolved)
+        reconcilers.reconcile_reporting_refresh(
+            _FakeClient(),
+            _FakeClient(),
+            unresolved,
+        )
+    with pytest.raises(reconcilers.ReconcileError, match="Power BI client"):
+        reconcilers.reconcile_reporting_refresh(client, None, manifest)
     for role, interval in (("control", None), ("process", 5)):
         with pytest.raises(reconcilers.ReconcileError, match="scheduled/on-demand"):
             reconcilers.reconcile_role_schedule(

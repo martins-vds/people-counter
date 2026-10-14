@@ -948,7 +948,7 @@ def run_item_job(
     *,
     submission_path: str,
     action: str,
-    execution_data: Mapping[str, Any] | None = None,
+    submission_value: Mapping[str, Any] | None = None,
     sleep=time.sleep,
     monotonic=time.monotonic,
     poll_seconds: float = 15.0,
@@ -957,7 +957,7 @@ def run_item_job(
     _, headers, _ = client.request_response(
         "POST",
         submission_path,
-        value={"executionData": dict(execution_data)} if execution_data else None,
+        value=dict(submission_value) if submission_value else None,
         expected=(202,),
     )
     location = next(
@@ -1025,7 +1025,9 @@ def run_spark_job(
             f"/workspaces/{ws}/sparkJobDefinitions/{item_id}/jobs/"
             f"{JOB_TYPE}/instances"
         ),
-        execution_data={"commandLineArguments": command_line_arguments},
+        submission_value={
+            "executionData": {"commandLineArguments": command_line_arguments}
+        },
         sleep=sleep,
         monotonic=monotonic,
         poll_seconds=poll_seconds,
@@ -1035,6 +1037,7 @@ def run_spark_job(
 
 def reconcile_reporting_refresh(
     client: Any,
+    power_bi_client: Any | None,
     manifest: DeploymentManifest,
     *,
     sleep=time.sleep,
@@ -1042,6 +1045,8 @@ def reconcile_reporting_refresh(
 ) -> dict[str, DeploymentEvidence]:
     if manifest.workspace_id is None:
         raise ReconcileError("reporting refresh requires a workspace ID")
+    if power_bi_client is None:
+        raise ReconcileError("reporting refresh requires a Power BI client")
     bundles = {
         "analytics": manifest.analytics_reporting,
         "operational": manifest.operational_reporting,
@@ -1074,12 +1079,17 @@ def reconcile_reporting_refresh(
         if model.get("type") != "SemanticModel" or report.get("type") != "Report":
             raise ReconcileError(f"{name} reporting item types are invalid")
         refreshed = run_item_job(
-            client,
+            power_bi_client,
             submission_path=(
-                f"/workspaces/{manifest.workspace_id}/items/{model_id}/"
-                "jobs/Refresh/instances"
+                f"/groups/{manifest.workspace_id}/datasets/{model_id}/refreshes"
             ),
             action=f"semantic_model_refresh:{name}",
+            submission_value={
+                "applyRefreshPolicy": False,
+                "commitMode": "transactional",
+                "retryCount": 2,
+                "type": "Full",
+            },
             sleep=sleep,
             monotonic=monotonic,
         )
@@ -1590,6 +1600,7 @@ def reconcile_runtime(
     reporting = (
         reconcile_reporting_refresh(
             client,
+            power_bi_client,
             manifest,
             sleep=sleep,
             monotonic=monotonic,
