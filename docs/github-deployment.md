@@ -21,12 +21,21 @@ Before applying the bootstrap stack:
 
 1. Register the Azure `Microsoft.Fabric` resource provider.
 2. Confirm that the subscription and region support the configured Fabric SKUs.
-3. have a Fabric administrator prepare a least-privilege security group for
+3. Get the immutable GitHub OIDC subject prefix:
+
+   ```bash
+   gh api repos/<owner>/<repository>/actions/oidc/customization/sub \
+     --jq .sub_claim_prefix
+   ```
+
+4. Save that value as `github_oidc_subject_prefix` in the local
+   `terraform.tfvars`.
+5. Have a Fabric administrator prepare a least-privilege security group for
    the generated deployment service principals.
-4. in the Fabric admin portal, scope the tenant settings that allow service
+6. In the Fabric admin portal, scope the tenant settings that allow service
    principals to use Fabric public APIs and to create workspaces, connections,
    and deployment pipelines to that group.
-5. enable preview tenant settings only when reviewed configuration sets
+7. Enable preview tenant settings only when reviewed configuration sets
    `enable_preview_features=true`.
 
 Tenant settings are an external administrative gate. Do not broaden them to
@@ -60,6 +69,7 @@ adls_storage_by_environment = {
   dev = {
     mode                 = "create"
     storage_account_name = "peoplecounterdev"
+    container_name       = "people-counter"
   }
 }
 ```
@@ -71,13 +81,17 @@ adls_storage_by_environment = {
   prod = {
     mode                        = "existing"
     storage_account_resource_id = "/subscriptions/<subscription-uuid>/resourceGroups/<resource-group>/providers/Microsoft.Storage/storageAccounts/<account-name>"
+    container_name              = "people-counter"
   }
 }
 ```
 
 The `create` mode creates a StorageV2 account with hierarchical namespace
-enabled. The `existing` mode does not change the account. The existing account
-must have hierarchical namespace enabled.
+enabled. The `existing` mode does not change the account settings. The existing
+account must have hierarchical namespace enabled.
+
+Bootstrap creates the configured private container in both modes. If the
+container exists, import it into bootstrap state before the bootstrap plan.
 
 Bootstrap state is local, access-restricted, and never committed. It creates
 the state backend, one OIDC application/service principal per environment,
@@ -96,7 +110,7 @@ terraform -chdir=infra/bootstrap output -json \
 terraform -chdir=infra/bootstrap output -json \
   fabric_capacity_ids_by_environment
 terraform -chdir=infra/bootstrap output -json \
-  adls_storage_account_ids_by_environment
+  adls_shortcut_source_by_environment
 terraform -chdir=infra/bootstrap output -raw tenant_id
 terraform -chdir=infra/bootstrap output -raw subscription_id
 ```
@@ -112,13 +126,13 @@ For each stage, the generated federated credential is:
 ```text
 issuer:   https://token.actions.githubusercontent.com
 audience: api://AzureADTokenExchange
-subject:  repo:<owner>/<repository>:environment:<stage>
+subject:  <github_oidc_subject_prefix>:environment:<stage>
 ```
 
-The `<owner>/<repository>` value comes from bootstrap
-`github_repository`. `<stage>` is `dev`, `test`, or `prod`. A spelling or case
-mismatch between that value and the GitHub Environment prevents token
-exchange. All cloud jobs declare an environment, request only
+The prefix contains immutable GitHub owner and repository IDs. Get it from the
+repository OIDC customization API before bootstrap. `<stage>` is `dev`, `test`,
+or `prod`. A prefix or stage mismatch prevents token exchange. All cloud jobs
+declare an environment, request only
 `contents: read` and `id-token: write`, and use `azure/login`. Repository-level
 permissions are empty by default.
 
@@ -277,7 +291,7 @@ The deployment has four ownership boundaries:
 | Bootstrap Terraform | Azure resource group, state storage, Entra applications, service principals, OIDC trust, state RBAC, Fabric capacities, and configured ADLS accounts |
 | Environment Terraform | Target workspace, workspace roles, Lakehouse, Environment, seven SJDs, Variable Library, configured shortcuts, and optional Fabric items |
 | Runtime automation | Lakehouse tables, `Files/` directories, release manifest, model refreshes, supported service settings, and schedules |
-| Operator or external system | Tenant settings, GitHub configuration, approvals, existing ADLS containers, Activator action evidence, and unsupported integrations |
+| Operator or external system | Tenant settings, GitHub configuration, approvals, Activator action evidence, and unsupported integrations |
 
 Do not create the target workspace, Lakehouse, Environment, SJD, semantic
 model, report, RTI item, Activator, or shortcut manually. Environment Terraform
@@ -290,9 +304,9 @@ directly to the Fabric provider. An operator does not enter these destination
 IDs.
 
 An ADLS Gen2 shortcut points to a container in the configured storage account.
-Bootstrap can create the storage account or reference an existing account.
-Environment Terraform creates the workspace identity, connection, RBAC, and
-shortcut. It can also create the configured container.
+Bootstrap creates the container and can create or reference its storage
+account. Environment Terraform creates the workspace identity, connection,
+RBAC, and shortcut.
 
 ### Definition bundles and target IDs
 
@@ -317,8 +331,8 @@ Complete these steps after the bootstrap apply:
 4. Add the eight required variables to each GitHub Environment.
 5. Set each `FABRIC_CAPACITY_ID` to the Fabric capacity UUID.
 6. Set `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` for each environment.
-7. Set `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` from the bootstrap output.
-8. Set `FABRIC_ADLS_SHORTCUTS` with the required ADLS shortcut configuration.
+7. Copy the ADLS account ID and container from the bootstrap output.
+8. Set the three shortcut name and path variables.
 9. Review each optional definition bundle.
 10. Set the Reporting, RTI, and Activator flags.
 11. Add the Activator checkpoint secret when you enable Activator.
@@ -332,8 +346,11 @@ Configure these shortcut variables in every GitHub Environment:
 
 | Variable | Accepted value and behavior |
 |---|---|
-| `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` | Required. Use `adls_storage_account_ids_by_environment[stage]` from bootstrap. |
-| `FABRIC_ADLS_SHORTCUTS` | Required. Use the JSON object described under [ADLS Gen2 shortcut configuration](#adls-gen2-shortcut-configuration). Include at least one shortcut. |
+| `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` | Required. Use `adls_shortcut_source_by_environment[stage].storage_account_resource_id` from bootstrap. |
+| `FABRIC_ADLS_SHORTCUT_CONTAINER` | Required. Use `adls_shortcut_source_by_environment[stage].container_name` from bootstrap. |
+| `FABRIC_ADLS_SHORTCUT_NAME` | Required. Shortcut leaf name in the managed Lakehouse. |
+| `FABRIC_ADLS_SHORTCUT_PATH` | Required. Parent path in the managed Lakehouse. Start with `Files/` or `Tables/`. |
+| `FABRIC_ADLS_SHORTCUT_TARGET_PATH` | Required. Relative source path inside the container. Use an empty value for the container root. |
 
 Other optional environment variables are:
 
@@ -354,49 +371,23 @@ Set `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` to the bootstrap output for the
 same stage. Use the complete Azure resource ID. Do not use the account name or
 DFS URL.
 
-`FABRIC_ADLS_SHORTCUTS` is a GitHub Environment variable containing JSON text.
-Its top level is an object, not an array. Each top-level key is a stable
-Terraform label for one shortcut.
+Set `FABRIC_ADLS_SHORTCUT_CONTAINER` to the container name from the same
+bootstrap output. Bootstrap creates this container. Environment Terraform does
+not create it.
 
-Every shortcut value requires:
+Set `FABRIC_ADLS_SHORTCUT_NAME` to the shortcut leaf name. For example, use
+`incoming_videos`.
 
-- `name`: leaf name of the shortcut in the managed Lakehouse.
-- `path`: parent path in the managed Lakehouse. Start it with `Files/` or
-  `Tables/`.
-- `container`: ADLS Gen2 container name.
-- `target_path`: source path inside the container. Use `""` for the container
-  root.
-- `create_container`: boolean value. Use `true` to create the container.
+Set `FABRIC_ADLS_SHORTCUT_PATH` to the parent path in the managed Lakehouse.
+For example, use `Files/input`.
 
-Use `create_container = false` when the container already exists. Terraform
-does not create or change that container. The deployment fails if Fabric
-cannot access it.
+Set `FABRIC_ADLS_SHORTCUT_TARGET_PATH` to the relative source path inside the
+container. For example, use `videos`. Use an empty value for the container
+root.
 
-This example creates two shortcuts. Terraform creates the `incoming` container.
-The `archive` container must already exist.
-
-```json
-{
-  "incoming_videos": {
-    "name": "incoming_videos",
-    "path": "Files/input",
-    "container": "incoming",
-    "target_path": "videos",
-    "create_container": true
-  },
-  "archive": {
-    "name": "archive",
-    "path": "Files/history",
-    "container": "archive",
-    "target_path": "",
-    "create_container": false
-  }
-}
-```
-
-Paste the object directly as the GitHub variable value. Do not add quotes
-around the complete object. Do not use `{}` for a standard environment
-deployment. An empty object disables ADLS shortcut creation.
+These values create one shortcut at
+`Files/input/incoming_videos`. Its ADLS source path is
+`<container>/videos`.
 
 Terraform uses conflict policy `Abort`. Deployment fails when another object
 uses `<path>/<name>`. Remove the conflict or choose another destination.
@@ -404,11 +395,10 @@ Keep each stable map label unchanged after deployment.
 
 Environment Terraform enables the workspace identity. It grants that identity
 `Storage Blob Data Contributor` on the storage account. It then creates one
-WorkspaceIdentity Fabric connection and all configured shortcuts.
+WorkspaceIdentity Fabric connection and one shortcut.
 
-Bootstrap grants the deployment principal `Storage Blob Data Contributor`.
-This role permits container creation. Bootstrap also grants
-`Reader` so Terraform can verify the account. Bootstrap grants
+Bootstrap grants the deployment principal `Reader` so Terraform can verify the
+account. Bootstrap also grants
 `User Access Administrator` for the workspace identity role assignment.
 
 The storage account must use ADLS Gen2 hierarchical namespace. Fabric must be

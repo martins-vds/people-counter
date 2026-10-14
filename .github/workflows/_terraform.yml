@@ -100,9 +100,11 @@ jobs:
       TF_VAR_capacity_id: ${{ vars.FABRIC_CAPACITY_ID }}
       TF_VAR_workspace_role_assignments: ${{ vars.FABRIC_WORKSPACE_ROLE_ASSIGNMENTS }}
       TF_VAR_enable_activator: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
-      TF_VAR_onelake_shortcuts: ${{ vars.FABRIC_ONELAKE_SHORTCUTS || '{}' }}
       TF_VAR_adls_storage_account_resource_id: ${{ vars.FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID }}
-      TF_VAR_adls_shortcuts: ${{ vars.FABRIC_ADLS_SHORTCUTS || '{}' }}
+      TF_VAR_adls_shortcut_name: ${{ vars.FABRIC_ADLS_SHORTCUT_NAME }}
+      TF_VAR_adls_shortcut_path: ${{ vars.FABRIC_ADLS_SHORTCUT_PATH }}
+      TF_VAR_adls_shortcut_container: ${{ vars.FABRIC_ADLS_SHORTCUT_CONTAINER }}
+      TF_VAR_adls_shortcut_target_path: ${{ vars.FABRIC_ADLS_SHORTCUT_TARGET_PATH }}
       TF_ENVIRONMENT: ${{ inputs.environment }}
       TF_ROOT: ${{ inputs.working_directory }}
       DEPLOY_REF: ${{ inputs.ref || github.sha }}

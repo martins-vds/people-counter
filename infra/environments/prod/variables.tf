@@ -24,31 +24,24 @@ variable "enable_activator" {
   default = false
 }
 
-variable "onelake_shortcuts" {
-  type = map(object({
-    name                = string
-    path                = string
-    target_workspace_id = string
-    target_item_id      = string
-    target_path         = string
-  }))
-  default = {}
-}
-
 variable "adls_storage_account_resource_id" {
-  type    = string
-  default = ""
+  type = string
 }
 
-variable "adls_shortcuts" {
-  type = map(object({
-    name             = string
-    path             = string
-    container        = string
-    target_path      = string
-    create_container = bool
-  }))
-  default = {}
+variable "adls_shortcut_name" {
+  type = string
+}
+
+variable "adls_shortcut_path" {
+  type = string
+}
+
+variable "adls_shortcut_container" {
+  type = string
+}
+
+variable "adls_shortcut_target_path" {
+  type = string
 }
 
 variable "enable_preview_features" {

@@ -42,13 +42,16 @@ variable "state_container_name" {
   default     = "tfstate"
 }
 
-variable "github_repository" {
-  description = "GitHub repository in owner/repo form."
+variable "github_oidc_subject_prefix" {
+  description = "Immutable GitHub OIDC subject prefix returned by the repository OIDC customization API."
   type        = string
 
   validation {
-    condition     = can(regex("^[^/]+/[^/]+$", var.github_repository))
-    error_message = "github_repository must be in owner/repo form."
+    condition = can(regex(
+      "^repo:[^/@]+@[0-9]+/[^/@]+@[0-9]+$",
+      var.github_oidc_subject_prefix,
+    ))
+    error_message = "github_oidc_subject_prefix must use repo:owner@owner-id/repository@repository-id format."
   }
 }
 
@@ -81,6 +84,7 @@ variable "adls_storage_by_environment" {
     storage_account_name             = optional(string)
     storage_account_resource_id      = optional(string)
     storage_account_replication_type = optional(string, "ZRS")
+    container_name                   = string
   }))
   default = {}
 
@@ -89,6 +93,10 @@ variable "adls_storage_by_environment" {
       for environment, storage in var.adls_storage_by_environment :
       contains(var.environments, environment)
       && contains(["create", "existing"], storage.mode)
+      && can(regex(
+        "^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$",
+        storage.container_name,
+      ))
       && (
         storage.mode == "create"
         ? (
@@ -106,7 +114,7 @@ variable "adls_storage_by_environment" {
         )
       )
     ])
-    error_message = "Each ADLS entry must select create with a valid account name or existing with a storage account resource ID."
+    error_message = "Each ADLS entry requires a valid container name and must select create with an account name or existing with a resource ID."
   }
 }
 
