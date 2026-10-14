@@ -274,29 +274,46 @@ def publish_immutable_onelake_json(
 def verify_lakehouse_tables(
     client: Any,
     manifest: DeploymentManifest,
+    *,
+    sleep=time.sleep,
+    monotonic=time.monotonic,
 ) -> DeploymentEvidence:
-    if manifest.workspace_id is None or manifest.lakehouse.lakehouse_id is None:
-        raise ReconcileError("Lakehouse table verification requires provisioned IDs")
-    tables = client.list_pages(
-        f"/workspaces/{manifest.workspace_id}/lakehouses/"
-        f"{manifest.lakehouse.lakehouse_id}/tables",
-        value_key="data",
-    )
-    observed = {
-        str(table.get("name"))
-        for table in tables
-        if table.get("format") == "Delta"
-    }
-    expected = {manifest.lakehouse.table(suffix) for suffix in TABLE_SUFFIXES}
-    missing = sorted(expected - observed)
-    if missing:
+    control_id = manifest.role("control").item_id
+    if (
+        manifest.workspace_id is None
+        or manifest.lakehouse.lakehouse_id is None
+        or control_id is None
+    ):
         raise ReconcileError(
-            f"Lakehouse bootstrap omitted expected Delta tables: {missing!r}"
+            "Lakehouse table verification requires provisioned workspace, "
+            "Lakehouse, and control SJD IDs"
         )
+    verification = run_spark_job(
+        client,
+        ws=manifest.workspace_id,
+        item_id=control_id,
+        command_line_arguments="bootstrap",
+        sleep=sleep,
+        monotonic=monotonic,
+    )
+    if verification.status != "succeeded":
+        raise ReconcileError(
+            "Schema-aware Lakehouse table verification failed: "
+            f"{verification.error}"
+        )
+    expected = sorted(
+        manifest.lakehouse.table(suffix) for suffix in TABLE_SUFFIXES
+    )
     return DeploymentEvidence(
         action="verify_lakehouse_tables",
         status="succeeded",
-        resource={"expected": sorted(expected), "observed": sorted(expected & observed)},
+        operation_id=verification.operation_id,
+        resource={
+            "expected": expected,
+            "method": "control-sjd-bootstrap",
+            "job": dict(verification.resource or {}),
+        },
+        attempts=verification.attempts,
     )
 
 
@@ -1197,6 +1214,9 @@ def _reconcile_lakehouse_runtime(
     onelake_client: Any | None,
     manifest: DeploymentManifest,
     contract: Mapping[str, Any],
+    *,
+    sleep: Any,
+    monotonic: Any,
 ) -> tuple[DeploymentEvidence | None, dict[str, DeploymentEvidence]]:
     _require_keys(
         contract,
@@ -1204,7 +1224,12 @@ def _reconcile_lakehouse_runtime(
         allowed={"folders", "verifyTables", "publishReleaseManifest"},
     )
     table_verification = (
-        verify_lakehouse_tables(client, manifest)
+        verify_lakehouse_tables(
+            client,
+            manifest,
+            sleep=sleep,
+            monotonic=monotonic,
+        )
         if contract.get("verifyTables", False)
         else None
     )
@@ -1552,6 +1577,8 @@ def reconcile_runtime(
         onelake_client,
         manifest,
         lakehouse_contract,
+        sleep=sleep,
+        monotonic=monotonic,
     )
     connections, access, power_bi, checkpoints = _reconcile_external_runtime(
         client,

@@ -522,24 +522,49 @@ def test_onelake_release_manifest_conflict_fails_closed() -> None:
         )
 
 
-def test_table_readback_requires_every_namespaced_delta_table() -> None:
+def test_table_readback_uses_schema_aware_control_job() -> None:
     manifest = _resolved_manifest()
-    path = (
-        f"/workspaces/{manifest.workspace_id}/lakehouses/"
-        f"{manifest.lakehouse.lakehouse_id}/tables"
+    client = _FakeClient(
+        get_results={
+            "/job-instances/job-1": [
+                {"id": "job-1", "status": "Completed"},
+            ]
+        }
     )
-    expected = [
-        {"name": manifest.lakehouse.table(suffix), "format": "Delta"}
-        for suffix in reconcilers.TABLE_SUFFIXES
-    ]
     evidence = reconcilers.verify_lakehouse_tables(
-        _FakeClient(list_pages_results={path: expected}), manifest
+        client,
+        manifest,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: 0.0,
     )
     assert evidence.status == "succeeded"
+    assert evidence.action == "verify_lakehouse_tables"
+    assert evidence.operation_id == "job-1"
+    assert evidence.attempts == 1
+    assert evidence.resource["method"] == "control-sjd-bootstrap"
+    assert evidence.resource["expected"] == sorted(
+        manifest.lakehouse.table(suffix)
+        for suffix in reconcilers.TABLE_SUFFIXES
+    )
+    submission = next(call for call in client.calls if call[0] == "POST")
+    assert submission[2] == {"executionData": {"commandLineArguments": "bootstrap"}}
 
-    with pytest.raises(reconcilers.ReconcileError, match="omitted"):
+    failing = _FakeClient(
+        get_results={
+            "/job-instances/job-1": [
+                {"id": "job-1", "status": "Failed"},
+            ]
+        }
+    )
+    with pytest.raises(
+        reconcilers.ReconcileError,
+        match="Schema-aware Lakehouse table verification failed",
+    ):
         reconcilers.verify_lakehouse_tables(
-            _FakeClient(list_pages_results={path: expected[:-1]}), manifest
+            failing,
+            manifest,
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
         )
 
 
