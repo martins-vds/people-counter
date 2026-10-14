@@ -35,8 +35,8 @@ Before applying the bootstrap stack:
 6. In the Fabric admin portal, scope the tenant settings that allow service
    principals to use Fabric public APIs and to create workspaces, connections,
    and deployment pipelines to that group.
-7. Enable preview tenant settings only when reviewed configuration sets
-   `enable_preview_features=true`.
+7. Enable the required preview tenant settings only when reviewed configuration
+   enables preview features or Activator.
 
 Tenant settings are an external administrative gate. Do not broaden them to
 the entire tenant merely to make a workflow pass. Add each generated service
@@ -358,7 +358,7 @@ Other optional environment variables are:
 |---|---|
 | `FABRIC_ENABLE_REPORTING` | String `true` or `false`. The default is `false`. `true` requires both reporting bundles and verifies both semantic models and reports. |
 | `FABRIC_ENABLE_RTI` | String `true` or `false`. The default is `false`. `true` requires and verifies the Eventhouse, KQL database, queryset, and dashboard. |
-| `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates both Reflex items and requires definition and action evidence. |
+| `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` enables Fabric provider preview mode, creates both Reflex items, and requires definition and action evidence. |
 
 Committed bundles control Reporting and RTI item creation. Do not set a flag
 until every bundle named in

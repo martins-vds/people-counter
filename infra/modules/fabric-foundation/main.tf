@@ -341,7 +341,7 @@ resource "fabric_connection" "adls_workspace_identity" {
 
   credential_details = {
     credential_type       = "WorkspaceIdentity"
-    connection_encryption = "Encrypted"
+    connection_encryption = "NotEncrypted"
     single_sign_on_type   = "None"
     skip_test_connection  = true
   }
@@ -514,6 +514,7 @@ resource "fabric_report" "this" {
         TargetSemanticModelName = fabric_semantic_model.this[each.key].display_name
       }
     }
+    if part.path != ".platform"
   }
 
   lifecycle {
@@ -692,6 +693,7 @@ resource "fabric_activator" "this" {
         }
       )
     }
+    if part.path != ".platform"
   }
 
   lifecycle {
