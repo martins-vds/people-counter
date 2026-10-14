@@ -182,6 +182,9 @@ def test_run_spark_job_polls_job_instance_and_surfaces_failure() -> None:
     assert evidence.status == "succeeded"
     assert evidence.operation_id == "job-1"
     assert sleeps == [0.0]
+    assert client.calls[0][1] == (
+        "/workspaces/ws/sparkJobDefinitions/control/jobs/sparkjob/instances"
+    )
 
     failed = _FakeClient(
         get_results={
@@ -227,6 +230,11 @@ def test_reconcile_reporting_refresh_validates_items_and_refreshes_models() -> N
 
     assert set(evidence) == {"analytics", "operational"}
     assert all(item.status == "succeeded" for item in evidence.values())
+    assert any(
+        call[1].endswith("/jobs/instances?jobType=Refresh")
+        for call in client.calls
+        if call[0] == "POST"
+    )
 
     document["analytics_reporting"]["report"]["target_item_id"] = None
     unresolved = parse_deployment_manifest(document, DeploymentEnvironment.DEV)

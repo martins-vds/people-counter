@@ -946,9 +946,7 @@ def reconcile_role_schedule(
 def run_item_job(
     client: Any,
     *,
-    ws: str,
-    item_id: str,
-    job_type: str,
+    submission_path: str,
     action: str,
     execution_data: Mapping[str, Any] | None = None,
     sleep=time.sleep,
@@ -956,10 +954,9 @@ def run_item_job(
     poll_seconds: float = 15.0,
     timeout_seconds: float = 1800.0,
 ) -> DeploymentEvidence:
-    path = f"/workspaces/{ws}/items/{item_id}/jobs/instances?jobType={job_type}"
     _, headers, _ = client.request_response(
         "POST",
-        path,
+        submission_path,
         value={"executionData": dict(execution_data)} if execution_data else None,
         expected=(202,),
     )
@@ -1023,10 +1020,11 @@ def run_spark_job(
 ) -> DeploymentEvidence:
     return run_item_job(
         client,
-        ws=ws,
-        item_id=item_id,
-        job_type=JOB_TYPE,
         action=f"spark_job:{command_line_arguments}",
+        submission_path=(
+            f"/workspaces/{ws}/sparkJobDefinitions/{item_id}/jobs/"
+            f"{JOB_TYPE}/instances"
+        ),
         execution_data={"commandLineArguments": command_line_arguments},
         sleep=sleep,
         monotonic=monotonic,
@@ -1077,9 +1075,10 @@ def reconcile_reporting_refresh(
             raise ReconcileError(f"{name} reporting item types are invalid")
         refreshed = run_item_job(
             client,
-            ws=manifest.workspace_id,
-            item_id=model_id,
-            job_type="Refresh",
+            submission_path=(
+                f"/workspaces/{manifest.workspace_id}/items/{model_id}/"
+                "jobs/instances?jobType=Refresh"
+            ),
             action=f"semantic_model_refresh:{name}",
             sleep=sleep,
             monotonic=monotonic,
