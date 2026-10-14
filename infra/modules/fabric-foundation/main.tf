@@ -194,7 +194,7 @@ resource "fabric_domain_role_assignments" "this" {
 }
 
 resource "fabric_domain_workspace_assignments" "this" {
-  count = var.domain != null && var.domain.assign_workspace ? 1 : 0
+  count = var.domain == null ? 0 : (var.domain.assign_workspace ? 1 : 0)
 
   domain_id     = fabric_domain.this[0].id
   workspace_ids = [fabric_workspace.this.id]
