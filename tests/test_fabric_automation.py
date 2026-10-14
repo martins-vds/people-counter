@@ -270,7 +270,7 @@ def test_resource_token_provider_uses_github_oidc_and_caches_access_token(
         "https://storage.azure.com/",
         env={
             "ACTIONS_ID_TOKEN_REQUEST_URL": (
-                "https://pipelinesghubeus2.actions.githubusercontent.com/"
+                "https://vstoken.actions.githubusercontent.com/"
                 "oidc?api-version=2.0"
             ),
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "github-request-token",
@@ -303,6 +303,21 @@ def test_resource_token_provider_uses_github_oidc_and_caches_access_token(
     }
     assert "github-request-token" not in repr(provider)
     assert "azure-access-token" not in repr(provider)
+
+
+def test_resource_token_provider_accepts_regional_pipeline_origin() -> None:
+    provider = GitHubOidcResourceTokenProvider(
+        resource="https://storage.azure.com/",
+        client_id="88fb936a-6e03-42f2-9ca9-6a0869e1523e",
+        tenant_id="b8005d83-0703-4f94-8749-5c3e02f07bba",
+        request_url=(
+            "https://pipelinesghubeus2.actions.githubusercontent.com/"
+            "oidc?api-version=2.0"
+        ),
+        request_token="github-request-token",
+    )
+
+    assert provider.request_url.startswith("https://pipelinesghubeus2.")
 
 
 @pytest.mark.parametrize(
