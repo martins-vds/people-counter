@@ -1077,7 +1077,7 @@ def reconcile_reporting_refresh(
             client,
             submission_path=(
                 f"/workspaces/{manifest.workspace_id}/items/{model_id}/"
-                "jobs/instances?jobType=Refresh"
+                "jobs/Refresh/instances"
             ),
             action=f"semantic_model_refresh:{name}",
             sleep=sleep,

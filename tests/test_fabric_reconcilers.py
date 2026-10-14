@@ -231,7 +231,7 @@ def test_reconcile_reporting_refresh_validates_items_and_refreshes_models() -> N
     assert set(evidence) == {"analytics", "operational"}
     assert all(item.status == "succeeded" for item in evidence.values())
     assert any(
-        call[1].endswith("/jobs/instances?jobType=Refresh")
+        call[1].endswith("/jobs/Refresh/instances")
         for call in client.calls
         if call[0] == "POST"
     )
