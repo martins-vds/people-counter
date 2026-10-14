@@ -467,6 +467,7 @@ class FabricAutomationClient:
         lro_timeout: float = 1800.0,
         max_retries: int = DEFAULT_MAX_RETRIES,
         default_headers: Mapping[str, str] | None = None,
+        trusted_redirect_host_suffixes: Sequence[str] = (),
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -483,6 +484,20 @@ class FabricAutomationClient:
         self.default_headers = dict(default_headers or {})
         if any(key.lower() == "authorization" for key in self.default_headers):
             raise ValueError("default headers cannot override Authorization")
+        if any(
+            re.fullmatch(
+                r"\.[a-z0-9-]+(?:\.[a-z0-9-]+){2,}",
+                suffix.lower(),
+            )
+            is None
+            for suffix in trusted_redirect_host_suffixes
+        ):
+            raise ValueError(
+                "trusted redirect host suffixes must be dotted DNS suffixes"
+            )
+        self.trusted_redirect_host_suffixes = tuple(
+            suffix.lower() for suffix in trusted_redirect_host_suffixes
+        )
         self.sleep = sleep
         self.monotonic = monotonic
         root = urlsplit(self.api_root)
@@ -491,9 +506,16 @@ class FabricAutomationClient:
     def _url(self, path_or_url: str) -> str:
         if path_or_url.startswith("https://"):
             target = urlsplit(path_or_url)
-            if (target.scheme.lower(), target.netloc.lower()) != self._api_origin:
+            target_origin = (target.scheme.lower(), target.netloc.lower())
+            target_hostname = (target.hostname or "").lower()
+            trusted_redirect = any(
+                target_hostname.endswith(suffix)
+                for suffix in self.trusted_redirect_host_suffixes
+            )
+            if target_origin != self._api_origin and not trusted_redirect:
                 raise FabricApiError(
-                    "refusing to send an access token to a different API origin"
+                    "refusing to send an access token to a different API origin "
+                    f"(scheme={target.scheme!r}, host={target_hostname!r})"
                 )
             return path_or_url
         if "://" in path_or_url:

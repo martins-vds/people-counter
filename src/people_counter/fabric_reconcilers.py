@@ -1766,6 +1766,7 @@ def _execute(arguments: argparse.Namespace) -> tuple[DeploymentEnvironment, dict
         ),
         transport=transport,
         api_root=arguments.power_bi_api_root,
+        trusted_redirect_host_suffixes=(".analysis.windows.net",),
     )
     result = reconcile_runtime(
         client,
