@@ -74,6 +74,42 @@ variable "fabric_admin_members" {
   default     = []
 }
 
+variable "adls_storage_by_environment" {
+  description = "New or existing ADLS Gen2 storage account configuration per environment."
+  type = map(object({
+    mode                             = string
+    storage_account_name             = optional(string)
+    storage_account_resource_id      = optional(string)
+    storage_account_replication_type = optional(string, "ZRS")
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for environment, storage in var.adls_storage_by_environment :
+      contains(var.environments, environment)
+      && contains(["create", "existing"], storage.mode)
+      && (
+        storage.mode == "create"
+        ? (
+          storage.storage_account_name != null
+          && can(regex("^[a-z0-9]{3,24}$", storage.storage_account_name))
+          && storage.storage_account_resource_id == null
+        )
+        : (
+          storage.storage_account_name == null
+          && storage.storage_account_resource_id != null
+          && can(regex(
+            "(?i)^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/Microsoft\\.Storage/storageAccounts/[a-z0-9]{3,24}$",
+            storage.storage_account_resource_id,
+          ))
+        )
+      )
+    ])
+    error_message = "Each ADLS entry must select create with a valid account name or existing with a storage account resource ID."
+  }
+}
+
 variable "tags" {
   description = "Common resource tags."
   type        = map(string)

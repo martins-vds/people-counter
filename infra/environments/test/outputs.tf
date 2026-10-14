@@ -22,6 +22,22 @@ output "onelake_shortcuts" {
   value = module.fabric_foundation.onelake_shortcuts
 }
 
+output "adls_shortcut_ids" {
+  value = module.fabric_foundation.adls_shortcut_ids
+}
+
+output "adls_shortcuts" {
+  value = module.fabric_foundation.adls_shortcuts
+}
+
+output "managed_shortcuts" {
+  value = module.fabric_foundation.managed_shortcuts
+}
+
+output "adls_connection_id" {
+  value = module.fabric_foundation.adls_connection_id
+}
+
 output "environment_id" {
   value = module.fabric_foundation.environment_id
 }

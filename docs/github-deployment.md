@@ -49,10 +49,41 @@ terraform -chdir=infra/bootstrap apply bootstrap.tfplan
 terraform -chdir=infra/bootstrap output -json
 ```
 
+Before the bootstrap plan, configure `adls_storage_by_environment` in the
+local `terraform.tfvars`. Use one entry for each environment that needs ADLS
+shortcuts.
+
+Use `mode = "create"` to create an ADLS Gen2 account:
+
+```hcl
+adls_storage_by_environment = {
+  dev = {
+    mode                 = "create"
+    storage_account_name = "peoplecounterdev"
+  }
+}
+```
+
+Use `mode = "existing"` to use an existing ADLS Gen2 account:
+
+```hcl
+adls_storage_by_environment = {
+  prod = {
+    mode                        = "existing"
+    storage_account_resource_id = "/subscriptions/<subscription-uuid>/resourceGroups/<resource-group>/providers/Microsoft.Storage/storageAccounts/<account-name>"
+  }
+}
+```
+
+The `create` mode creates a StorageV2 account with hierarchical namespace
+enabled. The `existing` mode does not change the account. The existing account
+must have hierarchical namespace enabled.
+
 Bootstrap state is local, access-restricted, and never committed. It creates
 the state backend, one OIDC application/service principal per environment,
 environment-scoped federated credentials, state-container RBAC, and Fabric
-capacities. It does not create a client secret.
+capacities. It also creates configured ADLS accounts and ADLS role
+assignments. It does not create a client secret.
 
 Record the bootstrap outputs immediately:
 
@@ -64,6 +95,8 @@ terraform -chdir=infra/bootstrap output -json \
   github_oidc_service_principal_object_ids
 terraform -chdir=infra/bootstrap output -json \
   fabric_capacity_ids_by_environment
+terraform -chdir=infra/bootstrap output -json \
+  adls_storage_account_ids_by_environment
 terraform -chdir=infra/bootstrap output -raw tenant_id
 terraform -chdir=infra/bootstrap output -raw subscription_id
 ```
@@ -235,77 +268,152 @@ If the API returns no matching capacity or an authorization error, use the
 Fabric Admin portal method above. Verify the display name, tenant,
 subscription, and stage before saving the value as an environment variable.
 
-Optional environment variables are:
+## Resource ownership and deployment order
+
+The deployment has four ownership boundaries:
+
+| Owner | Resources and actions |
+|---|---|
+| Bootstrap Terraform | Azure resource group, state storage, Entra applications, service principals, OIDC trust, state RBAC, Fabric capacities, and configured ADLS accounts |
+| Environment Terraform | Target workspace, workspace roles, Lakehouse, Environment, seven SJDs, Variable Library, configured shortcuts, and optional Fabric items |
+| Runtime automation | Lakehouse tables, `Files/` directories, release manifest, model refreshes, supported service settings, and schedules |
+| Operator or external system | Tenant settings, GitHub configuration, approvals, existing ADLS containers, Activator action evidence, and unsupported integrations |
+
+Do not create the target workspace, Lakehouse, Environment, SJD, semantic
+model, report, RTI item, Activator, or shortcut manually. Environment Terraform
+creates these resources.
+
+### Destination IDs and the ADLS source
+
+Terraform creates the destination workspace and Lakehouse. It passes their IDs
+directly to the Fabric provider. An operator does not enter these destination
+IDs.
+
+An ADLS Gen2 shortcut points to a container in the configured storage account.
+Bootstrap can create the storage account or reference an existing account.
+Environment Terraform creates the workspace identity, connection, RBAC, and
+shortcut. It can also create the configured container.
+
+### Definition bundles and target IDs
+
+Definition bundles are files in Git. They are not target Fabric resources.
+Terraform creates the target resources from these committed files.
+
+During apply, Terraform injects the new target IDs into the bundles. This
+includes workspace, Lakehouse, Environment, semantic model, Eventhouse, and KQL
+database IDs.
+
+The repository already contains the required deployment bundles. A normal
+environment deployment does not require a source authoring workspace. Use the
+definition export process only when you change a committed bundle.
+
+### Required steps after bootstrap
+
+Complete these steps after the bootstrap apply:
+
+1. Add each generated service principal to the approved tenant-settings group.
+2. Create GitHub Environments named `dev`, `test`, and `prod`.
+3. Configure branch restrictions and required reviewers.
+4. Add the eight required variables to each GitHub Environment.
+5. Set each `FABRIC_CAPACITY_ID` to the Fabric capacity UUID.
+6. Set `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS` for each environment.
+7. Set `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` from the bootstrap output.
+8. Set `FABRIC_ADLS_SHORTCUTS` with the required ADLS shortcut configuration.
+9. Review each optional definition bundle.
+10. Set the Reporting, RTI, and Activator flags.
+11. Add the Activator checkpoint secret when you enable Activator.
+12. Run an authorized protected Terraform plan to verify OIDC and access.
+13. Merge the reviewed commit to deploy Development.
+
+Terraform creates the target Fabric resources after step 13. Operators approve
+Test and Production promotion through the protected GitHub Environments.
+
+Configure these shortcut variables in every GitHub Environment:
 
 | Variable | Accepted value and behavior |
 |---|---|
-| `FABRIC_ONELAKE_SHORTCUTS` | JSON object described under [OneLake shortcut configuration](#onelake-shortcut-configuration). Omit it or use `{}` to create no shortcuts. |
+| `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` | Required. Use `adls_storage_account_ids_by_environment[stage]` from bootstrap. |
+| `FABRIC_ADLS_SHORTCUTS` | Required. Use the JSON object described under [ADLS Gen2 shortcut configuration](#adls-gen2-shortcut-configuration). Include at least one shortcut. |
+
+Other optional environment variables are:
+
+| Variable | Accepted value and behavior |
+|---|---|
 | `FABRIC_ENABLE_REPORTING` | String `true` or `false`. The default is `false`. `true` requires both reporting bundles and verifies both semantic models and reports. |
 | `FABRIC_ENABLE_RTI` | String `true` or `false`. The default is `false`. `true` requires and verifies the Eventhouse, KQL database, queryset, and dashboard. |
 | `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates both Reflex items and requires definition and action evidence. |
 
 Committed bundles control Reporting and RTI item creation. Do not set a flag
 until every bundle named in
-[the source-definition section](#source-definitions-and-live-export) is
+[Definition bundles and target IDs](#definition-bundles-and-target-ids) is
 reviewed. Activator requires both bundles and its flag.
 
-### OneLake shortcut configuration
+### ADLS Gen2 shortcut configuration
 
-`FABRIC_ONELAKE_SHORTCUTS` is a GitHub Environment variable containing JSON
-text. Its top level is an **object/map, not an array**. Each top-level key is a
-caller-chosen stable Terraform label for one shortcut. Use `{}` rather than an
-empty string when the environment needs no shortcuts.
+Set `FABRIC_ADLS_STORAGE_ACCOUNT_RESOURCE_ID` to the bootstrap output for the
+same stage. Use the complete Azure resource ID. Do not use the account name or
+DFS URL.
+
+`FABRIC_ADLS_SHORTCUTS` is a GitHub Environment variable containing JSON text.
+Its top level is an object, not an array. Each top-level key is a stable
+Terraform label for one shortcut.
 
 Every shortcut value requires:
 
-- `name`: non-empty leaf name of the shortcut. The managed Lakehouse exposes
-  it at `<path>/<name>`.
-- `path`: parent path inside the destination Lakehouse managed by this
-  deployment. It must start with `Files/` or `Tables/` and must not start with
-  `/`.
-- `target_workspace_id`: UUID of the workspace containing the source OneLake
-  item.
-- `target_item_id`: UUID of the source OneLake item, typically a Lakehouse.
-- `target_path`: source path inside that item. It must start with `Files/` or
-  `Tables/` and must not start with `/`.
+- `name`: leaf name of the shortcut in the managed Lakehouse.
+- `path`: parent path in the managed Lakehouse. Start it with `Files/` or
+  `Tables/`.
+- `container`: ADLS Gen2 container name.
+- `target_path`: source path inside the container. Use `""` for the container
+  root.
+- `create_container`: boolean value. Use `true` to create the container.
 
-For example, this creates
-`Files/input/incoming_videos` and
-`Tables/shared/shared_dimensions` inside the stage's managed Lakehouse:
+Use `create_container = false` when the container already exists. Terraform
+does not create or change that container. The deployment fails if Fabric
+cannot access it.
+
+This example creates two shortcuts. Terraform creates the `incoming` container.
+The `archive` container must already exist.
 
 ```json
 {
   "incoming_videos": {
     "name": "incoming_videos",
     "path": "Files/input",
-    "target_workspace_id": "<source-workspace-uuid>",
-    "target_item_id": "<source-lakehouse-uuid>",
-    "target_path": "Files/videos"
+    "container": "incoming",
+    "target_path": "videos",
+    "create_container": true
   },
-  "shared_dimensions": {
-    "name": "shared_dimensions",
-    "path": "Tables/shared",
-    "target_workspace_id": "<source-workspace-uuid>",
-    "target_item_id": "<source-lakehouse-uuid>",
-    "target_path": "Tables/dimensions"
+  "archive": {
+    "name": "archive",
+    "path": "Files/history",
+    "container": "archive",
+    "target_path": "",
+    "create_container": false
   }
 }
 ```
 
-Paste the JSON object directly as the GitHub variable value. Do not wrap the
-entire value in another pair of quotes. Compact single-line and formatted
-multiline JSON are equivalent. Use separate values per GitHub Environment
-when Dev, Test, and Production point at different source workspaces or items.
+Paste the object directly as the GitHub variable value. Do not add quotes
+around the complete object. Do not use `{}` for a standard environment
+deployment. An empty object disables ADLS shortcut creation.
 
-If this repository manages the source, use its Terraform outputs. Otherwise,
-list the workspace and items through the Fabric API. Confirm that the
-deployment identity can access the source through Fabric and OneLake.
-
-This input supports only OneLake-to-OneLake shortcuts. It does not configure
-external ADLS, S3, Dataverse, or other credential-bearing shortcut types.
 Terraform uses conflict policy `Abort`. Deployment fails when another object
 uses `<path>/<name>`. Remove the conflict or choose another destination.
 Keep each stable map label unchanged after deployment.
+
+Environment Terraform enables the workspace identity. It grants that identity
+`Storage Blob Data Contributor` on the storage account. It then creates one
+WorkspaceIdentity Fabric connection and all configured shortcuts.
+
+Bootstrap grants the deployment principal `Storage Blob Data Contributor`.
+This role permits container creation. Bootstrap also grants
+`Reader` so Terraform can verify the account. Bootstrap grants
+`User Access Administrator` for the workspace identity role assignment.
+
+The storage account must use ADLS Gen2 hierarchical namespace. Fabric must be
+able to reach its DFS endpoint. This implementation does not support S3,
+Dataverse, storage keys, SAS tokens, or client secrets.
 
 ### Fallback secret exception policy
 
@@ -342,9 +450,11 @@ the Fabric provider's Go-template definition tokens.
 
 Semantic model, report, RTI, Activator, Variable Library, and other supported
 workspace definitions follow the deterministic definition export process in
-[`fabric/README.md`](../fabric/README.md). Pull requests validate each committed
-part against its schema, size, and SHA-256 evidence. The repository does not
-manufacture definitions when source-workspace credentials are unavailable.
+[`fabric/README.md`](../fabric/README.md). Normal deployment reads the committed
+bundles. It does not access the authoring workspace.
+
+Use the definition export process only when you change a bundle. Pull requests
+validate each committed part against its schema, size, and SHA-256 evidence.
 
 Required bundle locations are:
 
@@ -374,7 +484,7 @@ on failure after evidence initialization. Authorized PR plan artifacts are
 retained for 14 days. Plans that
 delete or replace protected Fabric resources fail before apply unless a
 protected-environment dispatch explicitly enables `allow_protected_changes`.
-OneLake shortcut changes, workspace identity changes, capacity changes, and
+Managed shortcut changes, workspace identity changes, capacity changes, and
 Production Fabric item deletions/replacements each have a separate approval
 checkbox. A change in more than one category requires every applicable
 checkbox. The job still waits for the target GitHub Environment reviewer. A dispatcher

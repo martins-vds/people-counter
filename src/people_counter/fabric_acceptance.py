@@ -334,26 +334,54 @@ def _onelake_path(manifest: DeploymentManifest, relative: str) -> str:
 
 def _live_shortcut_identity(value: Mapping[str, Any]) -> tuple[str, ...]:
     target = _mapping(value.get("target"), "live shortcut target")
-    onelake = _mapping(target.get("oneLake"), "live shortcut OneLake target")
-    return (
+    common = (
         str(value.get("path")),
         str(value.get("name")),
-        str(onelake.get("workspaceId")),
-        str(onelake.get("itemId")),
-        str(onelake.get("path")),
     )
+    if "oneLake" in target:
+        onelake = _mapping(target.get("oneLake"), "live shortcut OneLake target")
+        return common + (
+            "OneLake",
+            str(onelake.get("workspaceId")),
+            str(onelake.get("itemId")),
+            str(onelake.get("path")),
+        )
+    if "adlsGen2" in target:
+        adls = _mapping(target.get("adlsGen2"), "live shortcut ADLS Gen2 target")
+        return common + (
+            "AdlsGen2",
+            str(adls.get("location")),
+            str(adls.get("subpath")),
+            str(adls.get("connectionId")),
+        )
+    raise CleanroomAcceptanceError("live shortcut target type is unsupported")
 
 
 def _expected_shortcut_identity(
     key: str, value: object
 ) -> tuple[str, ...]:
-    shortcut = _mapping(value, f"onelake_shortcuts.{key}")
-    return (
+    shortcut = _mapping(value, f"managed_shortcuts.{key}")
+    common = (
         str(shortcut.get("path")),
         str(shortcut.get("name")),
-        str(shortcut.get("target_workspace_id")),
-        str(shortcut.get("target_item_id")),
-        str(shortcut.get("target_path")),
+    )
+    target_type = shortcut.get("target_type")
+    if target_type == "OneLake":
+        return common + (
+            target_type,
+            str(shortcut.get("target_workspace_id")),
+            str(shortcut.get("target_item_id")),
+            str(shortcut.get("target_path")),
+        )
+    if target_type == "AdlsGen2":
+        return common + (
+            target_type,
+            str(shortcut.get("location")),
+            str(shortcut.get("subpath")),
+            str(shortcut.get("connection_id")),
+        )
+    raise CleanroomAcceptanceError(
+        f"managed_shortcuts.{key}.target_type is unsupported"
     )
 
 
@@ -404,7 +432,7 @@ def _verify_lakehouse(
         f"/workspaces/{manifest.workspace_id}/items/"
         f"{manifest.lakehouse.lakehouse_id}/shortcuts"
     )
-    shortcut_outputs = _required_mapping(outputs, "onelake_shortcuts")
+    shortcut_outputs = _required_mapping(outputs, "managed_shortcuts")
     expected_shortcuts = Counter(
         _expected_shortcut_identity(str(key), value)
         for key, value in shortcut_outputs.items()

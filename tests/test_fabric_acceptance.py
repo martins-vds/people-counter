@@ -54,6 +54,7 @@ def _outputs() -> dict[str, Any]:
         "kql_dashboard_id": {"value": None},
         "onelake_shortcut_ids": {"value": {}},
         "onelake_shortcuts": {"value": {}},
+        "managed_shortcuts": {"value": {}},
         "spark_job_definition_ids": {
             "value": {role: _uid(role) for role in SJD_ROLES}
         },
@@ -354,14 +355,24 @@ def test_duplicate_item_acceptance_rejects_same_managed_type_and_name() -> None:
 def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() -> None:
     manifest = _manifest()
     outputs = _outputs()
-    outputs["onelake_shortcuts"]["value"] = {
+    outputs["managed_shortcuts"]["value"] = {
         "source": {
             "id": _uid("shortcut"),
             "name": "source",
             "path": "Files/input",
+            "target_type": "OneLake",
             "target_item_id": _uid("target-lakehouse"),
             "target_path": "Files/source",
             "target_workspace_id": _uid("target-workspace"),
+        },
+        "archive": {
+            "id": _uid("archive-shortcut"),
+            "name": "archive",
+            "path": "Files/archive",
+            "target_type": "AdlsGen2",
+            "location": "https://peoplecounterdev.dfs.core.windows.net",
+            "subpath": "/archive/source",
+            "connection_id": _uid("adls-connection"),
         }
     }
     table_path = (
@@ -397,7 +408,20 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
                             "path": "Files/source",
                         }
                     },
-                }
+                },
+                {
+                    "name": "archive",
+                    "path": "Files/archive",
+                    "target": {
+                        "adlsGen2": {
+                            "location": (
+                                "https://peoplecounterdev.dfs.core.windows.net"
+                            ),
+                            "subpath": "/archive/source",
+                            "connectionId": _uid("adls-connection"),
+                        }
+                    },
+                },
             ],
         },
     )
@@ -420,7 +444,7 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
     )
 
     assert result["folderCount"] == 2
-    assert result["shortcutCount"] == 1
+    assert result["shortcutCount"] == 2
     assert result["tableCount"] == len(acceptance.TABLE_SUFFIXES)
     with pytest.raises(acceptance.CleanroomAcceptanceError, match="folder"):
         acceptance._verify_lakehouse(
@@ -432,6 +456,52 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
             commit_sha=_COMMIT,
             terraform_sha=terraform_sha,
         )
+
+
+@pytest.mark.parametrize(
+    ("function", "arguments", "message"),
+    [
+        (
+            acceptance._live_shortcut_identity,
+            ({"target": []},),
+            "live shortcut target must be an object",
+        ),
+        (
+            acceptance._live_shortcut_identity,
+            ({"target": {"oneLake": []}},),
+            "live shortcut OneLake target must be an object",
+        ),
+        (
+            acceptance._live_shortcut_identity,
+            ({"target": {"adlsGen2": []}},),
+            "live shortcut ADLS Gen2 target must be an object",
+        ),
+        (
+            acceptance._live_shortcut_identity,
+            ({"target": {}},),
+            "live shortcut target type is unsupported",
+        ),
+        (
+            acceptance._expected_shortcut_identity,
+            ("source", []),
+            "managed_shortcuts.source must be an object",
+        ),
+        (
+            acceptance._expected_shortcut_identity,
+            ("source", {"target_type": "S3"}),
+            "managed_shortcuts.source.target_type is unsupported",
+        ),
+    ],
+)
+def test_shortcut_identity_rejects_invalid_targets(
+    function: Any,
+    arguments: tuple[object, ...],
+    message: str,
+) -> None:
+    with pytest.raises(acceptance.CleanroomAcceptanceError) as captured:
+        function(*arguments)
+
+    assert str(captured.value) == message
 
 
 def test_rti_and_activator_acceptance_require_live_assets_and_action_evidence() -> None:

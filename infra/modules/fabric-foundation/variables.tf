@@ -262,6 +262,62 @@ variable "onelake_shortcuts" {
   }
 }
 
+variable "adls_storage_account_resource_id" {
+  description = "ADLS Gen2 storage account resource ID used by ADLS shortcuts."
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      trimspace(var.adls_storage_account_resource_id) == ""
+      || can(regex(
+        "(?i)^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/Microsoft\\.Storage/storageAccounts/[a-z0-9]{3,24}$",
+        var.adls_storage_account_resource_id,
+      ))
+    )
+    error_message = "adls_storage_account_resource_id must be a storage account resource ID."
+  }
+}
+
+variable "adls_shortcuts" {
+  description = "ADLS Gen2 shortcuts created inside the managed Lakehouse."
+  type = map(object({
+    name             = string
+    path             = string
+    container        = string
+    target_path      = string
+    create_container = bool
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for shortcut in var.adls_shortcuts :
+      length(trimspace(shortcut.name)) > 0
+      && !startswith(shortcut.path, "/")
+      && (
+        startswith(shortcut.path, "Files/")
+        || startswith(shortcut.path, "Tables/")
+      )
+      && can(regex(
+        "^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$",
+        shortcut.container,
+      ))
+      && !startswith(shortcut.target_path, "/")
+      && !strcontains(shortcut.target_path, "..")
+    ])
+    error_message = "ADLS shortcut names, Lakehouse paths, containers, and target paths are invalid."
+  }
+
+  validation {
+    condition = (
+      length(var.adls_shortcuts) == 0
+      || trimspace(var.adls_storage_account_resource_id) != ""
+    )
+    error_message = "ADLS shortcuts require adls_storage_account_resource_id."
+  }
+}
+
 variable "enable_preview_features" {
   description = "Permit resources that provider 1.14 marks as preview."
   type        = bool

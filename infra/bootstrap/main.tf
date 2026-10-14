@@ -1,5 +1,24 @@
 data "azuread_client_config" "current" {}
 
+locals {
+  new_adls_storage = {
+    for environment, storage in var.adls_storage_by_environment :
+    environment => storage
+    if storage.mode == "create"
+  }
+  adls_storage_account_ids = merge(
+    {
+      for environment, storage in azurerm_storage_account.adls :
+      environment => storage.id
+    },
+    {
+      for environment, storage in var.adls_storage_by_environment :
+      environment => storage.storage_account_resource_id
+      if storage.mode == "existing"
+    },
+  )
+}
+
 resource "random_id" "fabric_suffix" {
   byte_length = 2
 }
@@ -44,6 +63,40 @@ resource "azurerm_storage_container" "state" {
   container_access_type = "private"
 }
 
+resource "azurerm_storage_account" "adls" {
+  for_each = local.new_adls_storage
+
+  name                = each.value.storage_account_name
+  resource_group_name = azurerm_resource_group.bootstrap.name
+  location            = azurerm_resource_group.bootstrap.location
+
+  account_kind                    = "StorageV2"
+  account_tier                    = "Standard"
+  account_replication_type        = each.value.storage_account_replication_type
+  is_hns_enabled                  = true
+  min_tls_version                 = "TLS1_2"
+  public_network_access           = "Enabled"
+  shared_access_key_enabled       = false
+  allow_nested_items_to_be_public = false
+
+  blob_properties {
+    versioning_enabled = false
+
+    delete_retention_policy {
+      days = 30
+    }
+
+    container_delete_retention_policy {
+      days = 30
+    }
+  }
+
+  tags = merge(var.tags, {
+    environment = each.key
+    purpose     = "people-counter-adls"
+  })
+}
+
 resource "azuread_application" "github_oidc" {
   for_each = toset(var.environments)
 
@@ -75,6 +128,30 @@ resource "azurerm_role_assignment" "state_blob_data_contributor" {
   scope                = azurerm_storage_container.state.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = each.value.object_id
+}
+
+resource "azurerm_role_assignment" "adls_blob_data_contributor" {
+  for_each = local.adls_storage_account_ids
+
+  scope                = each.value
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azuread_service_principal.github_oidc[each.key].object_id
+}
+
+resource "azurerm_role_assignment" "adls_reader" {
+  for_each = local.adls_storage_account_ids
+
+  scope                = each.value
+  role_definition_name = "Reader"
+  principal_id         = azuread_service_principal.github_oidc[each.key].object_id
+}
+
+resource "azurerm_role_assignment" "adls_user_access_administrator" {
+  for_each = local.adls_storage_account_ids
+
+  scope                = each.value
+  role_definition_name = "User Access Administrator"
+  principal_id         = azuread_service_principal.github_oidc[each.key].object_id
 }
 
 resource "azurerm_fabric_capacity" "environment" {

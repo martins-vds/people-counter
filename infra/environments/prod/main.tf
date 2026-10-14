@@ -35,16 +35,18 @@ module "fabric_foundation" {
   environment_display_name = "pc_prod_environment"
   environment_description  = "People Counter production Spark Environment"
 
-  spark_job_definitions     = local.spark_job_definitions
-  reporting_items           = local.reporting_items
-  enable_activator          = var.enable_activator
-  onelake_shortcuts         = var.onelake_shortcuts
-  enable_preview_features   = var.enable_preview_features
-  workspace_folders         = var.workspace_folders
-  non_secret_connections    = var.non_secret_connections
-  domain                    = var.domain
-  governance_tags           = var.governance_tags
-  onelake_data_access_roles = var.onelake_data_access_roles
+  spark_job_definitions            = local.spark_job_definitions
+  reporting_items                  = local.reporting_items
+  enable_activator                 = var.enable_activator
+  onelake_shortcuts                = var.onelake_shortcuts
+  adls_storage_account_resource_id = var.adls_storage_account_resource_id
+  adls_shortcuts                   = var.adls_shortcuts
+  enable_preview_features          = var.enable_preview_features
+  workspace_folders                = var.workspace_folders
+  non_secret_connections           = var.non_secret_connections
+  domain                           = var.domain
+  governance_tags                  = var.governance_tags
+  onelake_data_access_roles        = var.onelake_data_access_roles
 
   variable_library = {
     display_name     = "pc_prod_variables"
