@@ -122,12 +122,8 @@ class GitHubOidcResourceTokenProvider:
         request_url = urlsplit(self.request_url)
         request_hostname = request_url.hostname or ""
         is_github_oidc_host = (
-            request_hostname == f"vstoken{_GITHUB_OIDC_HOST_SUFFIX}"
-            or (
-                request_hostname.startswith("pipelines")
-                and request_hostname.endswith(_GITHUB_OIDC_HOST_SUFFIX)
-                and request_hostname.count(".") == 3
-            )
+            request_hostname.endswith(_GITHUB_OIDC_HOST_SUFFIX)
+            and request_hostname.count(".") == 3
         )
         if resource.scheme != "https" or not resource.netloc:
             raise ValueError("token resource must be an HTTPS origin")
