@@ -27,6 +27,6 @@
     "report": {"source_item_id": null, "source_name": "pc_operations_report", "target_name": "pc_sjd_dev_operations_report"}
   },
   "real_time_intelligence": {"eventhouse_id": null, "kql_database_id": null, "queryset_id": null},
-  "activator": {"reflex_id": null, "trigger_name": null},
+  "activator": {"reflex_id": null, "trigger_name": "alert_pc_event_intake_duration_20m"},
   "release": {"require_identity": false, "identity_schema": "people-counter-sjd-release-identity-v1"}
 }

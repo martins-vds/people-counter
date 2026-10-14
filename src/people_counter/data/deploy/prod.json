@@ -27,6 +27,6 @@
     "report": {"source_item_id": "8b81cc28-cf18-4707-a245-afb98a8acbcc", "source_name": "pc_operations_report", "target_name": "pc_sjd_operations_report"}
   },
   "real_time_intelligence": {"eventhouse_id": null, "kql_database_id": null, "queryset_id": null},
-  "activator": {"reflex_id": null, "trigger_name": null},
+  "activator": {"reflex_id": null, "trigger_name": "alert_pc_event_intake_duration_20m"},
   "release": {"require_identity": true, "identity_schema": "people-counter-sjd-release-identity-v1"}
 }
