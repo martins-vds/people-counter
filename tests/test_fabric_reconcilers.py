@@ -36,7 +36,7 @@ class _FakeClient:
         return self.list_pages_results.get(path, [])
 
     def request_json(self, method, path, *, value=None, expected=(200,), content_type="application/json"):
-        self.calls.append((method, path, value, content_type))
+        self.calls.append((method, path, value, content_type, expected))
         if method == "GET":
             return self.get_results[path].pop(0)
         if method in {"POST", "PATCH", "PUT", "DELETE"}:
@@ -184,6 +184,11 @@ def test_run_spark_job_polls_job_instance_and_surfaces_failure() -> None:
     assert sleeps == [0.0]
     assert client.calls[0][1] == (
         "/workspaces/ws/sparkJobDefinitions/control/jobs/sparkjob/instances"
+    )
+    assert all(
+        call[4] == (200, 202)
+        for call in client.calls
+        if call[0] == "GET" and call[1] == location
     )
 
     failed = _FakeClient(
