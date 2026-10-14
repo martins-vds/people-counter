@@ -16,7 +16,7 @@
         "scope": "Artifact",
         "tenantId": "b8005d83-0703-4f94-8749-5c3e02f07bba",
         "workspaceId": "{{ .TargetWorkspaceId }}",
-        "artifactId": "12e33015-5c82-4ea0-a54e-fe145694ad02",
+        "artifactId": "{{ .TargetSparkJobDispatcherId }}",
         "eventGroupType": "Microsoft.Fabric.JobEvents"
       },
       "filterSettings": {

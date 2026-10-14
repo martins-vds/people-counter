@@ -63,8 +63,8 @@ operational Eventhouse and read/write KQL database, then deploy both
 definitions against those target resources. Exported Eventhouse or KQL
 database definitions are optional because Fabric may deny definition readback
 for managed monitoring resources. Activator remains disabled by default and
-requires reviewed `fabric/activators/{operations,manifest-arrival}` bundles
-plus `enable_activator = true`.
+requires the reviewed `fabric/activators/operations` bundle plus
+`enable_activator = true`.
 
 The scalar `adls_shortcut_*` inputs manage one ADLS Gen2 shortcut. Bootstrap
 owns the storage account and container. This module owns the workspace

@@ -495,10 +495,7 @@ def test_rti_and_activator_acceptance_require_live_assets_and_action_evidence() 
             {"id": item_id, "type": item_type, "displayName": output_name}
         )
         definitions[item_id] = _definition(str(manifest.workspace_id))
-    activator_ids = {
-        "manifest_arrival": _uid("manifest-arrival-activator"),
-        "operations": _uid("operations-activator"),
-    }
+    activator_ids = {"operations": _uid("operations-activator")}
     outputs["activator_ids"]["value"] = activator_ids
     items.extend(
         {
@@ -541,19 +538,19 @@ def test_rti_and_activator_acceptance_require_live_assets_and_action_evidence() 
         )
 
     evidence["activator"]["status"] = "succeeded"
-    outputs["activator_ids"]["value"]["manifest_arrival"] = True
+    outputs["activator_ids"]["value"]["operations"] = True
     with pytest.raises(
         acceptance.CleanroomAcceptanceError,
-        match="manifest_arrival Activator output is unresolved",
+        match="operations Activator output is unresolved",
     ):
         acceptance._verify_activator(
             client, manifest, outputs, [evidence, evidence]
         )
 
-    del outputs["activator_ids"]["value"]["manifest_arrival"]
+    del outputs["activator_ids"]["value"]["operations"]
     with pytest.raises(
         acceptance.CleanroomAcceptanceError,
-        match="manifest_arrival Activator output is unresolved",
+        match="operations Activator output is unresolved",
     ):
         acceptance._verify_activator(
             client, manifest, outputs, [evidence, evidence]

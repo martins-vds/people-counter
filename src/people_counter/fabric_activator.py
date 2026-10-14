@@ -141,10 +141,10 @@ def _decode_definition_parts(
     value: Mapping[str, Any],
 ) -> tuple[str, dict[str, bytes]]:
     definition = _mapping(value.get("definition"), "Reflex definition")
-    format_name = definition.get("format", "json")
-    if not isinstance(format_name, str) or format_name.lower() != "json":
+    format_name = definition.get("format", "Default")
+    if format_name != "Default":
         raise ActivatorAutomationError(
-            f"Reflex definition format must be 'json', got {format_name!r}"
+            f"Reflex definition format must be 'Default', got {format_name!r}"
         )
     parts: dict[str, bytes] = {}
     for index, raw_part in enumerate(

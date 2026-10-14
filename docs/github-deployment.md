@@ -169,25 +169,21 @@ label to track that assignment. It is not a Fabric role or principal name.
 Each assignment value must contain these required fields:
 
 - `principal_id`: the Microsoft Entra **object ID** of a user, group, service
-  principal, or service-principal profile. For the deployment identity, use
-  `github_oidc_service_principal_object_ids[stage]`, not
-  `github_oidc_client_ids[stage]`.
+  principal, or service-principal profile.
 - `principal_type`: one of `User`, `Group`, `ServicePrincipal`, or
   `ServicePrincipalProfile`.
 - `role`: one of `Admin`, `Contributor`, `Member`, or `Viewer`.
 
-At minimum, grant the stage's generated deployment service principal `Admin`
-so Terraform and postconfiguration can manage the workspace. For one
-assignment, paste this JSON object directly as the GitHub variable value:
+When Terraform creates the workspace, Fabric automatically grants the
+deployment service principal the `Admin` role as the workspace creator. Do not
+add that principal to `FABRIC_WORKSPACE_ROLE_ASSIGNMENTS`. Fabric rejects the
+duplicate assignment with `PrincipalAlreadyHasWorkspaceRolePermissions`.
+
+Use this variable only for additional operators or service identities. If no
+additional assignment is required, set its value to an empty JSON object:
 
 ```json
-{
-  "deployment": {
-    "principal_id": "<github_oidc_service_principal_object_ids[stage]>",
-    "principal_type": "ServicePrincipal",
-    "role": "Admin"
-  }
-}
+{}
 ```
 
 Do not wrap the entire JSON value in another pair of quotes. Compact,
@@ -198,11 +194,6 @@ top-level object. Do not convert it to an array:
 
 ```json
 {
-  "deployment": {
-    "principal_id": "<github_oidc_service_principal_object_ids[stage]>",
-    "principal_type": "ServicePrincipal",
-    "role": "Admin"
-  },
   "platform_operators": {
     "principal_id": "<operators-group-object-id>",
     "principal_type": "Group",
@@ -216,10 +207,9 @@ top-level object. Do not convert it to an array:
 }
 ```
 
-Use a separate JSON value for each GitHub Environment so its `deployment`
-entry references that stage's generated service-principal object ID. Keep
-stable labels unchanged after deployment unless intentionally replacing the
-corresponding Terraform-managed role assignment.
+Use a separate JSON value for each GitHub Environment. Keep stable labels
+unchanged after deployment unless intentionally replacing the corresponding
+Terraform-managed role assignment.
 
 The bootstrap `fabric_capacity_ids_by_environment` output is an Azure Resource
 Manager ID, while the Fabric provider variable validates a UUID. Resolve the
@@ -359,12 +349,12 @@ Other optional environment variables are:
 |---|---|
 | `FABRIC_ENABLE_REPORTING` | String `true` or `false`. The default is `false`. `true` requires both reporting bundles and verifies both semantic models and reports. |
 | `FABRIC_ENABLE_RTI` | String `true` or `false`. The default is `false`. `true` requires and verifies the Eventhouse, KQL database, queryset, and dashboard. |
-| `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates both Reflex items and requires definition and action evidence. |
+| `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates the operations Reflex item and requires definition and action evidence. |
 
 Committed bundles control Reporting and RTI item creation. Do not set a flag
 until every bundle named in
 [Definition bundles and target IDs](#definition-bundles-and-target-ids) is
-reviewed. Activator requires both bundles and its flag.
+reviewed. Activator requires its operations bundle and its flag.
 
 ### ADLS Gen2 shortcut configuration
 
@@ -453,7 +443,7 @@ Required bundle locations are:
   `fabric/semantic-models/{analytics,operational}` and
   `fabric/reports/{analytics,operational}`.
 - RTI: `fabric/rti/{queryset,dashboard}`.
-- Activator: `fabric/activators/{operations,manifest-arrival}`.
+- Activator: `fabric/activators/operations`.
 
 When `FABRIC_ENABLE_RTI=true`, Terraform creates the target Eventhouse and
 read/write KQL database. Their definition bundles are optional because Fabric can
@@ -601,7 +591,7 @@ settings make their verification gates mandatory. Reporting requires bundles at
 `fabric/reports/{analytics,operational}`. RTI requires committed bundles at
 `fabric/rti/{queryset,dashboard}`. Terraform creates the target Eventhouse and
 read/write KQL database without requiring their source definitions. Activator
-requires `fabric/activators/{operations,manifest-arrival}` plus the
+requires `fabric/activators/operations` plus the
 `FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON` secret described below. These are
 source definitions, not live item IDs.
 

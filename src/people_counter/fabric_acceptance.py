@@ -571,7 +571,7 @@ def _verify_activator(
     if manifest.workspace_id is None:
         raise CleanroomAcceptanceError("Activator verification requires a workspace ID")
     activators = _required_mapping(outputs, "activator_ids")
-    required_activators = ("manifest_arrival", "operations")
+    required_activators = ("operations",)
     resolved: dict[str, str] = {}
     for name in required_activators:
         activator_id = activators.get(name)

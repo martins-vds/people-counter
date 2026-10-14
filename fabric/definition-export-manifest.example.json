@@ -148,6 +148,10 @@
         {
           "name": "TargetKqlDashboardId",
           "valueEnv": "FABRIC_SOURCE_KQL_DASHBOARD_ID"
+        },
+        {
+          "name": "TargetSparkJobDispatcherId",
+          "valueEnv": "FABRIC_SOURCE_SJD_DISPATCHER_ID"
         }
       ]
     },
