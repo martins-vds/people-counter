@@ -127,7 +127,7 @@ resource "azuread_application_federated_identity_credential" "github_environment
   description    = "GitHub Actions OIDC trust for ${each.key}"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:${var.github_repository}:environment:${each.key}"
+  subject        = "${var.github_oidc_subject_prefix}:environment:${each.key}"
 }
 
 resource "azurerm_role_assignment" "state_blob_data_contributor" {

@@ -21,12 +21,21 @@ Before applying the bootstrap stack:
 
 1. Register the Azure `Microsoft.Fabric` resource provider.
 2. Confirm that the subscription and region support the configured Fabric SKUs.
-3. have a Fabric administrator prepare a least-privilege security group for
+3. Get the immutable GitHub OIDC subject prefix:
+
+   ```bash
+   gh api repos/<owner>/<repository>/actions/oidc/customization/sub \
+     --jq .sub_claim_prefix
+   ```
+
+4. Save that value as `github_oidc_subject_prefix` in the local
+   `terraform.tfvars`.
+5. Have a Fabric administrator prepare a least-privilege security group for
    the generated deployment service principals.
-4. in the Fabric admin portal, scope the tenant settings that allow service
+6. In the Fabric admin portal, scope the tenant settings that allow service
    principals to use Fabric public APIs and to create workspaces, connections,
    and deployment pipelines to that group.
-5. enable preview tenant settings only when reviewed configuration sets
+7. Enable preview tenant settings only when reviewed configuration sets
    `enable_preview_features=true`.
 
 Tenant settings are an external administrative gate. Do not broaden them to
@@ -117,13 +126,13 @@ For each stage, the generated federated credential is:
 ```text
 issuer:   https://token.actions.githubusercontent.com
 audience: api://AzureADTokenExchange
-subject:  repo:<owner>/<repository>:environment:<stage>
+subject:  <github_oidc_subject_prefix>:environment:<stage>
 ```
 
-The `<owner>/<repository>` value comes from bootstrap
-`github_repository`. `<stage>` is `dev`, `test`, or `prod`. A spelling or case
-mismatch between that value and the GitHub Environment prevents token
-exchange. All cloud jobs declare an environment, request only
+The prefix contains immutable GitHub owner and repository IDs. Get it from the
+repository OIDC customization API before bootstrap. `<stage>` is `dev`, `test`,
+or `prod`. A prefix or stage mismatch prevents token exchange. All cloud jobs
+declare an environment, request only
 `contents: read` and `id-token: write`, and use `azure/login`. Repository-level
 permissions are empty by default.
 

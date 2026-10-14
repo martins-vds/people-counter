@@ -42,13 +42,16 @@ variable "state_container_name" {
   default     = "tfstate"
 }
 
-variable "github_repository" {
-  description = "GitHub repository in owner/repo form."
+variable "github_oidc_subject_prefix" {
+  description = "Immutable GitHub OIDC subject prefix returned by the repository OIDC customization API."
   type        = string
 
   validation {
-    condition     = can(regex("^[^/]+/[^/]+$", var.github_repository))
-    error_message = "github_repository must be in owner/repo form."
+    condition = can(regex(
+      "^repo:[^/@]+@[0-9]+/[^/@]+@[0-9]+$",
+      var.github_oidc_subject_prefix,
+    ))
+    error_message = "github_oidc_subject_prefix must use repo:owner@owner-id/repository@repository-id format."
   }
 }
 

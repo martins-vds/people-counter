@@ -7,8 +7,8 @@ state_storage_account_name     = "stpeoplecounterboot01"
 state_storage_replication_type = "ZRS"
 state_container_name           = "tfstate"
 
-github_repository = "martins-vds/people-counter"
-environments       = ["dev", "test", "prod"]
+github_oidc_subject_prefix = "repo:<owner>@<owner-id>/<repository>@<repository-id>"
+environments               = ["dev", "test", "prod"]
 
 fabric_capacity_sku_by_environment = {
   dev  = "F2"
