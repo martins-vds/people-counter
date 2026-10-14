@@ -31,8 +31,8 @@ class _FakeClient:
         default_factory=lambda: {"Location": "/job-instances/job-1"}
     )
 
-    def list_pages(self, path, *, value_key="value"):
-        self.calls.append(("LIST", path, value_key))
+    def list_pages(self, path, *, value_key="value", empty_error_codes=()):
+        self.calls.append(("LIST", path, value_key, empty_error_codes))
         return self.list_pages_results.get(path, [])
 
     def request_json(self, method, path, *, value=None, expected=(200,), content_type="application/json"):
@@ -78,6 +78,7 @@ def test_reconcile_environment_library_uploads_removes_stale_and_rejects_bad_nam
     )
     evidence = reconcilers.reconcile_environment_library(client, ws="ws", env_id="env", whl_path=whl)
     assert evidence.resource["removed"] == ["people_counter-0.9.56-py3-none-any.whl"]
+    assert client.calls[0][3] == ("EnvironmentLibrariesNotFound",)
     deletes = [c for c in client.calls if c[0] == "DELETE"]
     uploads = [c for c in client.calls if c[0] == "POST"]
     assert deletes[0][1].endswith("0.9.56-py3-none-any.whl")

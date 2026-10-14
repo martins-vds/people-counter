@@ -824,6 +824,7 @@ def reconcile_environment_library(client: Any, *, ws: str, env_id: str, whl_path
     staged = client.list_pages(
         _env_path(ws, env_id, f"/staging/libraries?{_BETA_OFF}"),
         value_key="libraries",
+        empty_error_codes=("EnvironmentLibrariesNotFound",),
     )
     stale = sorted(
         str(item.get("name"))
