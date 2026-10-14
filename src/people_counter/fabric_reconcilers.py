@@ -20,9 +20,9 @@ from people_counter.fabric_activator import (
     verify_activator_runtime,
 )
 from people_counter.fabric_automation import (
-    AzureCliResourceTokenProvider,
     DeploymentEvidence,
     FabricApiError,
+    make_resource_token_provider,
     redact_evidence,
 )
 from people_counter.fabric_deployment_manifest import (
@@ -1740,18 +1740,18 @@ def _execute(arguments: argparse.Namespace) -> tuple[DeploymentEnvironment, dict
     manifest = parse_deployment_manifest(document, stage)
     transport = UrllibTransport()
     client = FabricAutomationClient(
-        AzureCliResourceTokenProvider("https://api.fabric.microsoft.com"),
+        make_resource_token_provider("https://api.fabric.microsoft.com"),
         transport=transport,
         api_root=arguments.api_root,
     )
     onelake_client = FabricAutomationClient(
-        AzureCliResourceTokenProvider("https://storage.azure.com/"),
+        make_resource_token_provider("https://storage.azure.com/"),
         transport=transport,
         api_root=arguments.onelake_api_root,
         default_headers={"x-ms-version": "2023-11-03"},
     )
     power_bi_client = FabricAutomationClient(
-        AzureCliResourceTokenProvider(
+        make_resource_token_provider(
             "https://analysis.windows.net/powerbi/api"
         ),
         transport=transport,

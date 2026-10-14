@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from urllib.parse import parse_qs
+from urllib.request import Request
 
 import pytest
 
@@ -13,8 +15,10 @@ from people_counter.fabric_automation import (
     DeploymentEvidence,
     FabricApiError,
     FabricAutomationClient,
+    GitHubOidcResourceTokenProvider,
     HTTPResponse,
     OperationHandle,
+    make_resource_token_provider,
     redact_evidence,
 )
 from people_counter.fabric_rest import AzureCliTokenProvider
@@ -67,6 +71,20 @@ class _Clock:
 
     def monotonic(self) -> float:
         return self.now
+
+
+@dataclass
+class _UrlResponse:
+    body: bytes
+
+    def read(self) -> bytes:
+        return self.body
+
+    def __enter__(self) -> _UrlResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
 
 
 def _client(
@@ -230,6 +248,82 @@ def test_resource_token_provider_validates_resource_and_redacts_repr(
         "timeout": 60,
     }
     assert "access-token" not in repr(provider)
+
+
+def test_resource_token_provider_uses_github_oidc_and_caches_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[Request] = []
+    responses = [
+        _UrlResponse(b'{"value":"github-assertion"}'),
+        _UrlResponse(b'{"access_token":"azure-access-token","expires_in":3600}'),
+    ]
+
+    def open_url(request: Request, *, timeout: int) -> _UrlResponse:
+        assert timeout == 60
+        requests.append(request)
+        return responses.pop(0)
+
+    monkeypatch.setattr(fabric_automation, "urlopen", open_url)
+    monkeypatch.setattr(fabric_automation.time, "time", lambda: 1000.0)
+    provider = make_resource_token_provider(
+        "https://storage.azure.com/",
+        env={
+            "ACTIONS_ID_TOKEN_REQUEST_URL": (
+                "https://token.actions.githubusercontent.com/oidc?api-version=2.0"
+            ),
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "github-request-token",
+            "ARM_CLIENT_ID": "88fb936a-6e03-42f2-9ca9-6a0869e1523e",
+            "ARM_TENANT_ID": "b8005d83-0703-4f94-8749-5c3e02f07bba",
+        },
+    )
+
+    assert isinstance(provider, GitHubOidcResourceTokenProvider)
+    assert provider.get_token() == "azure-access-token"
+    assert provider.get_token() == "azure-access-token"
+    assert len(requests) == 2
+    assertion_request = requests[0]
+    assert assertion_request.get_header("Authorization") == (
+        "Bearer github-request-token"
+    )
+    assert assertion_request.full_url.endswith(
+        "audience=api%3A%2F%2FAzureADTokenExchange"
+    )
+    token_request = requests[1]
+    token_form = parse_qs(token_request.data.decode())
+    assert token_form == {
+        "client_assertion": ["github-assertion"],
+        "client_assertion_type": [
+            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        ],
+        "client_id": ["88fb936a-6e03-42f2-9ca9-6a0869e1523e"],
+        "grant_type": ["client_credentials"],
+        "scope": ["https://storage.azure.com/.default"],
+    }
+    assert "github-request-token" not in repr(provider)
+    assert "azure-access-token" not in repr(provider)
+
+
+def test_resource_token_provider_falls_back_and_rejects_partial_oidc() -> None:
+    assert isinstance(
+        make_resource_token_provider("https://storage.azure.com/", env={}),
+        AzureCliResourceTokenProvider,
+    )
+    with pytest.raises(FabricApiError, match="GitHub OIDC environment"):
+        make_resource_token_provider(
+            "https://storage.azure.com/",
+            env={"ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.invalid"},
+        )
+    with pytest.raises(FabricApiError, match="Azure workload identity"):
+        make_resource_token_provider(
+            "https://storage.azure.com/",
+            env={
+                "ACTIONS_ID_TOKEN_REQUEST_URL": (
+                    "https://token.actions.githubusercontent.com/oidc"
+                ),
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "token",
+            },
+        )
 
 
 # --- TokenProvider structural compatibility --------------------------------

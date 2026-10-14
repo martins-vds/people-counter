@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import email.utils
 import json
+import os
 import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
+from urllib.request import Request, urlopen
 
 DEFAULT_API_ROOT = "https://api.fabric.microsoft.com/v1"
 DEFAULT_MAX_RETRIES = 5
@@ -43,6 +45,12 @@ _SENSITIVE_KEY = re.compile(
 _SENSITIVE_TEXT = re.compile(
     r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+"
 )
+_GUID = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_GITHUB_OIDC_AUDIENCE = "api://AzureADTokenExchange"
+_GITHUB_OIDC_HOST = "token.actions.githubusercontent.com"
 
 
 class FabricApiError(RuntimeError):
@@ -95,6 +103,139 @@ class AzureCliResourceTokenProvider:
 
     def __repr__(self) -> str:
         return f"AzureCliResourceTokenProvider(resource={self.resource!r})"
+
+
+@dataclass
+class GitHubOidcResourceTokenProvider:
+    """Exchange a GitHub Actions OIDC assertion for one Azure resource token."""
+
+    resource: str
+    client_id: str
+    tenant_id: str
+    request_url: str
+    request_token: str = field(repr=False)
+    _access_token: str | None = field(default=None, init=False, repr=False)
+    _expires_at: float = field(default=0.0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        resource = urlsplit(self.resource)
+        request_url = urlsplit(self.request_url)
+        if resource.scheme != "https" or not resource.netloc:
+            raise ValueError("token resource must be an HTTPS origin")
+        if (
+            request_url.scheme != "https"
+            or request_url.hostname != _GITHUB_OIDC_HOST
+        ):
+            raise ValueError("GitHub OIDC request URL has an unsupported origin")
+        if _GUID.fullmatch(self.client_id) is None:
+            raise ValueError("Azure client ID must be a UUID")
+        if _GUID.fullmatch(self.tenant_id) is None:
+            raise ValueError("Azure tenant ID must be a UUID")
+        if not self.request_token:
+            raise ValueError("GitHub OIDC request token is required")
+
+    @staticmethod
+    def _response_json(response: Any, label: str) -> Mapping[str, Any]:
+        try:
+            body = response.read()
+        except OSError as error:
+            raise FabricApiError(f"{label} response could not be read") from error
+        return _response_mapping(body, label)
+
+    def _github_assertion(self) -> str:
+        separator = "&" if "?" in self.request_url else "?"
+        assertion_url = (
+            f"{self.request_url}{separator}"
+            f"{urlencode({'audience': _GITHUB_OIDC_AUDIENCE})}"
+        )
+        request = Request(
+            assertion_url,
+            headers={"Authorization": f"Bearer {self.request_token}"},
+        )
+        try:
+            with urlopen(request, timeout=60) as response:
+                payload = self._response_json(response, "GitHub OIDC")
+        except OSError as error:
+            raise FabricApiError("GitHub OIDC assertion request failed") from error
+        assertion = payload.get("value")
+        if not isinstance(assertion, str) or not assertion:
+            raise FabricApiError("GitHub OIDC response omitted the assertion")
+        return assertion
+
+    def get_token(self) -> str:
+        now = time.time()
+        if self._access_token is not None and now < self._expires_at - 60:
+            return self._access_token
+        assertion = self._github_assertion()
+        scope = f"{self.resource.rstrip('/')}/.default"
+        form = urlencode(
+            {
+                "client_assertion": assertion,
+                "client_assertion_type": (
+                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                ),
+                "client_id": self.client_id,
+                "grant_type": "client_credentials",
+                "scope": scope,
+            }
+        ).encode()
+        request = Request(
+            f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token",
+            data=form,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=60) as response:
+                payload = self._response_json(response, "Microsoft Entra token")
+        except OSError as error:
+            raise FabricApiError("Microsoft Entra token exchange failed") from error
+        token = payload.get("access_token")
+        expires_in = payload.get("expires_in")
+        if not isinstance(token, str) or not token:
+            raise FabricApiError("Microsoft Entra response omitted the access token")
+        if (
+            not isinstance(expires_in, int)
+            or isinstance(expires_in, bool)
+            or expires_in <= 60
+        ):
+            raise FabricApiError("Microsoft Entra token lifetime is invalid")
+        self._access_token = token
+        self._expires_at = now + expires_in
+        return token
+
+    def __repr__(self) -> str:
+        return (
+            "GitHubOidcResourceTokenProvider("
+            f"resource={self.resource!r}, client_id={self.client_id!r}, "
+            f"tenant_id={self.tenant_id!r})"
+        )
+
+
+def make_resource_token_provider(
+    resource: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> TokenProvider:
+    """Use GitHub OIDC in CI and Azure CLI in an interactive environment."""
+    selected = os.environ if env is None else env
+    request_url = selected.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+    request_token = selected.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    if request_url is None and request_token is None:
+        return AzureCliResourceTokenProvider(resource)
+    if request_url is None or request_token is None:
+        raise FabricApiError("GitHub OIDC environment is incomplete")
+    client_id = selected.get("ARM_CLIENT_ID")
+    tenant_id = selected.get("ARM_TENANT_ID")
+    if not client_id or not tenant_id:
+        raise FabricApiError("Azure workload identity environment is incomplete")
+    return GitHubOidcResourceTokenProvider(
+        resource=resource,
+        client_id=client_id,
+        tenant_id=tenant_id,
+        request_url=request_url,
+        request_token=request_token,
+    )
 
 
 @dataclass(frozen=True)
