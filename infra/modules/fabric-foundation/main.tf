@@ -164,13 +164,6 @@ resource "fabric_folder" "this" {
 
   display_name = each.value.display_name
   workspace_id = fabric_workspace.this.id
-
-  lifecycle {
-    precondition {
-      condition     = var.enable_preview_features
-      error_message = "workspace_folders require enable_preview_features=true and provider preview mode."
-    }
-  }
 }
 
 resource "fabric_domain" "this" {
@@ -198,13 +191,6 @@ resource "fabric_domain_workspace_assignments" "this" {
 
   domain_id     = fabric_domain.this[0].id
   workspace_ids = [fabric_workspace.this.id]
-
-  lifecycle {
-    precondition {
-      condition     = var.enable_preview_features
-      error_message = "Domain workspace assignment requires enable_preview_features=true and provider preview mode."
-    }
-  }
 }
 
 resource "fabric_tag" "this" {
@@ -333,17 +319,23 @@ resource "fabric_connection" "adls_workspace_identity" {
   connection_details = {
     type            = "AzureDataLakeStorage"
     creation_method = "AzureDataLakeStorage"
-    parameters = [{
-      name  = "server"
-      value = local.adls_location
-    }]
+    parameters = [
+      {
+        name  = "server"
+        value = local.adls_location
+      },
+      {
+        name  = "path"
+        value = local.adls_subpath
+      },
+    ]
   }
 
   credential_details = {
     credential_type       = "WorkspaceIdentity"
-    connection_encryption = "Encrypted"
+    connection_encryption = "NotEncrypted"
     single_sign_on_type   = "None"
-    skip_test_connection  = true
+    skip_test_connection  = false
   }
 
   depends_on = [azurerm_role_assignment.adls_workspace_identity]
@@ -458,13 +450,6 @@ resource "fabric_onelake_data_access_security" "this" {
   role_name      = each.value.role_name
   members        = each.value.members
   decision_rules = each.value.decision_rules
-
-  lifecycle {
-    precondition {
-      condition     = var.enable_preview_features
-      error_message = "OneLake data access roles require enable_preview_features=true and provider preview mode."
-    }
-  }
 }
 
 resource "fabric_semantic_model" "this" {
@@ -514,6 +499,7 @@ resource "fabric_report" "this" {
         TargetSemanticModelName = fabric_semantic_model.this[each.key].display_name
       }
     }
+    if part.path != ".platform"
   }
 
   lifecycle {
@@ -692,6 +678,7 @@ resource "fabric_activator" "this" {
         }
       )
     }
+    if part.path != ".platform"
   }
 
   lifecycle {

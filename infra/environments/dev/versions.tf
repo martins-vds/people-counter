@@ -16,7 +16,7 @@ terraform {
 }
 
 provider "fabric" {
-  preview = var.enable_preview_features
+  preview = true
 }
 
 provider "azurerm" {

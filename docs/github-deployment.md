@@ -35,8 +35,9 @@ Before applying the bootstrap stack:
 6. In the Fabric admin portal, scope the tenant settings that allow service
    principals to use Fabric public APIs and to create workspaces, connections,
    and deployment pipelines to that group.
-7. Enable preview tenant settings only when reviewed configuration sets
-   `enable_preview_features=true`.
+7. Enable the required preview tenant settings before the first plan.
+   Environment roots always enable Fabric provider preview mode because this
+   architecture supports Activator.
 
 Tenant settings are an external administrative gate. Do not broaden them to
 the entire tenant merely to make a workflow pass. Add each generated service

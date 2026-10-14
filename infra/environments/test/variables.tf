@@ -44,11 +44,6 @@ variable "adls_shortcut_target_path" {
   type = string
 }
 
-variable "enable_preview_features" {
-  type    = bool
-  default = false
-}
-
 variable "workspace_folders" {
   type = map(object({
     display_name = string

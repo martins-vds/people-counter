@@ -281,12 +281,6 @@ variable "adls_shortcut_target_path" {
   }
 }
 
-variable "enable_preview_features" {
-  description = "Permit resources that provider 1.14 marks as preview."
-  type        = bool
-  default     = false
-}
-
 variable "workspace_folders" {
   description = "Optional root-level workspace folders. Requires provider preview mode."
   type = map(object({
