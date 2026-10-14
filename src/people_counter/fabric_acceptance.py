@@ -334,54 +334,32 @@ def _onelake_path(manifest: DeploymentManifest, relative: str) -> str:
 
 def _live_shortcut_identity(value: Mapping[str, Any]) -> tuple[str, ...]:
     target = _mapping(value.get("target"), "live shortcut target")
-    common = (
+    adls = _mapping(target.get("adlsGen2"), "live shortcut ADLS Gen2 target")
+    return (
         str(value.get("path")),
         str(value.get("name")),
+        "AdlsGen2",
+        str(adls.get("location")),
+        str(adls.get("subpath")),
+        str(adls.get("connectionId")),
     )
-    if "oneLake" in target:
-        onelake = _mapping(target.get("oneLake"), "live shortcut OneLake target")
-        return common + (
-            "OneLake",
-            str(onelake.get("workspaceId")),
-            str(onelake.get("itemId")),
-            str(onelake.get("path")),
-        )
-    if "adlsGen2" in target:
-        adls = _mapping(target.get("adlsGen2"), "live shortcut ADLS Gen2 target")
-        return common + (
-            "AdlsGen2",
-            str(adls.get("location")),
-            str(adls.get("subpath")),
-            str(adls.get("connectionId")),
-        )
-    raise CleanroomAcceptanceError("live shortcut target type is unsupported")
 
 
 def _expected_shortcut_identity(
     key: str, value: object
 ) -> tuple[str, ...]:
     shortcut = _mapping(value, f"managed_shortcuts.{key}")
-    common = (
+    if shortcut.get("target_type") != "AdlsGen2":
+        raise CleanroomAcceptanceError(
+            f"managed_shortcuts.{key}.target_type must be AdlsGen2"
+        )
+    return (
         str(shortcut.get("path")),
         str(shortcut.get("name")),
-    )
-    target_type = shortcut.get("target_type")
-    if target_type == "OneLake":
-        return common + (
-            target_type,
-            str(shortcut.get("target_workspace_id")),
-            str(shortcut.get("target_item_id")),
-            str(shortcut.get("target_path")),
-        )
-    if target_type == "AdlsGen2":
-        return common + (
-            target_type,
-            str(shortcut.get("location")),
-            str(shortcut.get("subpath")),
-            str(shortcut.get("connection_id")),
-        )
-    raise CleanroomAcceptanceError(
-        f"managed_shortcuts.{key}.target_type is unsupported"
+        "AdlsGen2",
+        str(shortcut.get("location")),
+        str(shortcut.get("subpath")),
+        str(shortcut.get("connection_id")),
     )
 
 

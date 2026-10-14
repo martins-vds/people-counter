@@ -14,20 +14,12 @@ output "lakehouse_id" {
   value = module.fabric_foundation.lakehouse_id
 }
 
-output "onelake_shortcut_ids" {
-  value = module.fabric_foundation.onelake_shortcut_ids
+output "adls_shortcut_id" {
+  value = module.fabric_foundation.adls_shortcut_id
 }
 
-output "onelake_shortcuts" {
-  value = module.fabric_foundation.onelake_shortcuts
-}
-
-output "adls_shortcut_ids" {
-  value = module.fabric_foundation.adls_shortcut_ids
-}
-
-output "adls_shortcuts" {
-  value = module.fabric_foundation.adls_shortcuts
+output "adls_shortcut" {
+  value = module.fabric_foundation.adls_shortcut
 }
 
 output "managed_shortcuts" {

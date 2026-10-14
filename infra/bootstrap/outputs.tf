@@ -43,9 +43,15 @@ output "fabric_capacity_ids_by_environment" {
   }
 }
 
-output "adls_storage_account_ids_by_environment" {
-  description = "New or existing ADLS Gen2 storage account resource IDs."
-  value       = local.adls_storage_account_ids
+output "adls_shortcut_source_by_environment" {
+  description = "ADLS Gen2 storage account and container for each environment."
+  value = {
+    for environment, container in azurerm_storage_container.adls :
+    environment => {
+      storage_account_resource_id = local.adls_storage_account_ids[environment]
+      container_name              = container.name
+    }
+  }
 }
 
 output "tenant_id" {

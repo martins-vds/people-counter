@@ -3,37 +3,15 @@ locals {
   spark_job_definitions_root  = "${path.module}/../../../fabric/spark-job-definitions"
   fabric_content_root         = "${path.module}/../../../fabric"
   variable_library_root       = "${path.module}/definitions/variable-library"
-  adls_storage_account_resource_id = (
-    trimspace(var.adls_storage_account_resource_id) == ""
-    ? null
-    : var.adls_storage_account_resource_id
+  adls_storage_account_name   = basename(var.adls_storage_account_resource_id)
+  adls_location               = "https://${local.adls_storage_account_name}.dfs.core.windows.net"
+  adls_subpath = format(
+    "/%s",
+    join("/", compact([
+      var.adls_shortcut_container,
+      trim(var.adls_shortcut_target_path, "/"),
+    ])),
   )
-  adls_storage_account_name = (
-    local.adls_storage_account_resource_id == null
-    ? null
-    : basename(local.adls_storage_account_resource_id)
-  )
-  adls_location = (
-    local.adls_storage_account_name == null
-    ? null
-    : "https://${local.adls_storage_account_name}.dfs.core.windows.net"
-  )
-  adls_containers_to_create = toset([
-    for shortcut in var.adls_shortcuts : shortcut.container
-    if shortcut.create_container
-  ])
-  adls_shortcut_targets = {
-    for key, shortcut in var.adls_shortcuts : key => {
-      location = local.adls_location
-      subpath = format(
-        "/%s",
-        join("/", compact([
-          shortcut.container,
-          trim(shortcut.target_path, "/"),
-        ])),
-      )
-    }
-  }
 
   connection_role_assignments = {
     for assignment in flatten([
@@ -320,30 +298,9 @@ resource "fabric_lakehouse" "this" {
   }
 }
 
-resource "fabric_shortcut" "onelake" {
-  for_each = var.onelake_shortcuts
-
-  workspace_id = fabric_workspace.this.id
-  item_id      = fabric_lakehouse.this.id
-  name         = each.value.name
-  path         = each.value.path
-
-  target = {
-    onelake = {
-      workspace_id = each.value.target_workspace_id
-      item_id      = each.value.target_item_id
-      path         = each.value.target_path
-    }
-  }
-
-  shortcut_conflict_policy = "Abort"
-}
-
 data "azurerm_storage_account" "adls" {
-  count = length(var.adls_shortcuts) == 0 ? 0 : 1
-
   name                = local.adls_storage_account_name
-  resource_group_name = split("/", local.adls_storage_account_resource_id)[4]
+  resource_group_name = split("/", var.adls_storage_account_resource_id)[4]
 
   lifecycle {
     postcondition {
@@ -353,36 +310,15 @@ data "azurerm_storage_account" "adls" {
   }
 }
 
-resource "azurerm_storage_data_lake_gen2_filesystem" "adls_shortcut" {
-  for_each = local.adls_containers_to_create
-
-  name               = each.value
-  storage_account_id = local.adls_storage_account_resource_id
-
-  lifecycle {
-    precondition {
-      condition     = local.adls_storage_account_resource_id != null
-      error_message = "ADLS shortcut container creation requires a storage account resource ID."
-    }
-  }
-
-  depends_on = [data.azurerm_storage_account.adls]
-}
-
 resource "azurerm_role_assignment" "adls_workspace_identity" {
-  count = length(var.adls_shortcuts) == 0 ? 0 : 1
-
-  scope                = local.adls_storage_account_resource_id
+  scope                = var.adls_storage_account_resource_id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = fabric_workspace.this.identity.service_principal_id
 
   lifecycle {
     precondition {
-      condition = (
-        var.enable_workspace_identity
-        && local.adls_storage_account_resource_id != null
-      )
-      error_message = "ADLS shortcuts require a storage account resource ID and workspace identity."
+      condition     = var.enable_workspace_identity
+      error_message = "The ADLS shortcut requires workspace identity."
     }
   }
 
@@ -390,8 +326,6 @@ resource "azurerm_role_assignment" "adls_workspace_identity" {
 }
 
 resource "fabric_connection" "adls_workspace_identity" {
-  count = length(var.adls_shortcuts) == 0 ? 0 : 1
-
   display_name      = "${var.workspace_display_name}-adls"
   connectivity_type = "ShareableCloud"
   privacy_level     = "Organizational"
@@ -416,34 +350,20 @@ resource "fabric_connection" "adls_workspace_identity" {
 }
 
 resource "fabric_shortcut" "adls" {
-  for_each = var.adls_shortcuts
-
   workspace_id = fabric_workspace.this.id
   item_id      = fabric_lakehouse.this.id
-  name         = each.value.name
-  path         = each.value.path
+  name         = var.adls_shortcut_name
+  path         = var.adls_shortcut_path
 
   target = {
     adls_gen2 = {
-      location      = local.adls_shortcut_targets[each.key].location
-      subpath       = local.adls_shortcut_targets[each.key].subpath
-      connection_id = fabric_connection.adls_workspace_identity[0].id
+      location      = local.adls_location
+      subpath       = local.adls_subpath
+      connection_id = fabric_connection.adls_workspace_identity.id
     }
   }
 
   shortcut_conflict_policy = "Abort"
-
-  lifecycle {
-    precondition {
-      condition = alltrue([
-        for shortcut in var.onelake_shortcuts :
-        shortcut.path != each.value.path || shortcut.name != each.value.name
-      ])
-      error_message = "ADLS and OneLake shortcuts must not use the same path and name."
-    }
-  }
-
-  depends_on = [azurerm_storage_data_lake_gen2_filesystem.adls_shortcut]
 }
 
 resource "fabric_environment" "this" {

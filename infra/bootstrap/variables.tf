@@ -81,6 +81,7 @@ variable "adls_storage_by_environment" {
     storage_account_name             = optional(string)
     storage_account_resource_id      = optional(string)
     storage_account_replication_type = optional(string, "ZRS")
+    container_name                   = string
   }))
   default = {}
 
@@ -89,6 +90,10 @@ variable "adls_storage_by_environment" {
       for environment, storage in var.adls_storage_by_environment :
       contains(var.environments, environment)
       && contains(["create", "existing"], storage.mode)
+      && can(regex(
+        "^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$",
+        storage.container_name,
+      ))
       && (
         storage.mode == "create"
         ? (
@@ -106,7 +111,7 @@ variable "adls_storage_by_environment" {
         )
       )
     ])
-    error_message = "Each ADLS entry must select create with a valid account name or existing with a storage account resource ID."
+    error_message = "Each ADLS entry requires a valid container name and must select create with an account name or existing with a resource ID."
   }
 }
 

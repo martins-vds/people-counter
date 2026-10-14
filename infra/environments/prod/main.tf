@@ -38,9 +38,11 @@ module "fabric_foundation" {
   spark_job_definitions            = local.spark_job_definitions
   reporting_items                  = local.reporting_items
   enable_activator                 = var.enable_activator
-  onelake_shortcuts                = var.onelake_shortcuts
   adls_storage_account_resource_id = var.adls_storage_account_resource_id
-  adls_shortcuts                   = var.adls_shortcuts
+  adls_shortcut_name               = var.adls_shortcut_name
+  adls_shortcut_path               = var.adls_shortcut_path
+  adls_shortcut_container          = var.adls_shortcut_container
+  adls_shortcut_target_path        = var.adls_shortcut_target_path
   enable_preview_features          = var.enable_preview_features
   workspace_folders                = var.workspace_folders
   non_secret_connections           = var.non_secret_connections

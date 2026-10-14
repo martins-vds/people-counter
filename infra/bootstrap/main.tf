@@ -97,6 +97,14 @@ resource "azurerm_storage_account" "adls" {
   })
 }
 
+resource "azurerm_storage_container" "adls" {
+  for_each = local.adls_storage_account_ids
+
+  name                  = var.adls_storage_by_environment[each.key].container_name
+  storage_account_id    = each.value
+  container_access_type = "private"
+}
+
 resource "azuread_application" "github_oidc" {
   for_each = toset(var.environments)
 
@@ -128,14 +136,6 @@ resource "azurerm_role_assignment" "state_blob_data_contributor" {
   scope                = azurerm_storage_container.state.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = each.value.object_id
-}
-
-resource "azurerm_role_assignment" "adls_blob_data_contributor" {
-  for_each = local.adls_storage_account_ids
-
-  scope                = each.value
-  role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azuread_service_principal.github_oidc[each.key].object_id
 }
 
 resource "azurerm_role_assignment" "adls_reader" {
