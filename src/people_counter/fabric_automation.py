@@ -519,6 +519,7 @@ class FabricAutomationClient:
             body = value if isinstance(value, bytes) else _canonical_bytes(value)
 
         url = self._url(path)
+        request_path = urlsplit(url).path
         request_secrets = _secret_values(value)
         attempts = 0
         while True:
@@ -543,7 +544,8 @@ class FabricAutomationClient:
                 (token, *request_secrets),
             )
             raise FabricApiError(
-                f"Fabric HTTP {response.status} after {attempts} attempt(s): {detail}"
+                f"Fabric {method.upper()} {request_path} returned HTTP "
+                f"{response.status} after {attempts} attempt(s): {detail}"
             )
 
     def request_json(
