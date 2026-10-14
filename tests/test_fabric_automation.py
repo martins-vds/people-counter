@@ -155,6 +155,36 @@ def test_client_rejects_cross_origin_urls_before_acquiring_a_token() -> None:
     assert transport.requests == []
 
 
+def test_client_allows_only_configured_redirect_host_suffixes() -> None:
+    client, transport = _client(
+        [HTTPResponse(200, {}, b"{}")],
+        trusted_redirect_host_suffixes=(".analysis.windows.net",),
+    )
+
+    client.request_json(
+        "GET",
+        "https://wabi-eastus.analysis.windows.net/refreshes/refresh-1",
+    )
+
+    assert transport.requests[0]["url"] == (
+        "https://wabi-eastus.analysis.windows.net/refreshes/refresh-1"
+    )
+    with pytest.raises(FabricApiError, match="different API origin"):
+        client.request_json(
+            "GET",
+            "https://analysis.windows.net.attacker.example/collect",
+        )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["analysis.windows.net", ".windows.net", "https://analysis.windows.net"],
+)
+def test_client_rejects_invalid_redirect_host_suffixes(suffix: str) -> None:
+    with pytest.raises(ValueError, match="dotted DNS suffixes"):
+        _client([], trusted_redirect_host_suffixes=(suffix,))
+
+
 def test_client_rejects_non_https_absolute_syntax() -> None:
     client, _ = _client([])
 
