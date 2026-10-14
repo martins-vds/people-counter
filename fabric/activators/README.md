@@ -16,6 +16,7 @@ Supported definition tokens are:
 - `TargetKqlDatabaseId`
 - `TargetKqlQuerysetId`
 - `TargetKqlDashboardId`
+- `TargetSparkJobDispatcherId`
 
 Definition deployment does not prove that every configured action can execute.
 The post-deployment Activator contract test remains a required production gate.
@@ -32,7 +33,7 @@ uv run python scripts/validate_activator_definition.py \
   --output activator-definition-evidence.json
 ```
 
-Validation requires the documented `json` format, `ReflexEntities.json`, an
+Validation requires the documented `Default` format, `ReflexEntities.json`, an
 optional valid `.platform`, supported entity/source types, valid rule template
 JSON, and the documented `TeamsMessage`, `EmailMessage`, or
 `FabricItemInvocation` action kinds. It rejects unknown entity/action kinds and

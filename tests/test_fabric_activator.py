@@ -115,7 +115,7 @@ def _entities(
 def _definition(
     entities: list[dict[str, Any]] | None = None,
     *,
-    format_name: str = "json",
+    format_name: str = "Default",
     extra_parts: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     parts = {
@@ -143,7 +143,7 @@ def _definition(
 def _bundle(tmp_path: Path, entities: list[dict[str, Any]] | None = None) -> Path:
     path = tmp_path / "operations"
     write_definition_bundle(
-        _definition(entities), path, item_type="Reflex", expected_format="json"
+        _definition(entities), path, item_type="Reflex", expected_format="Default"
     )
     return path
 
@@ -200,7 +200,7 @@ def test_reflex_validator_rejects_unsupported_sources_and_actions(
         (
             {
                 "definition": {
-                    "format": "json",
+                    "format": "Default",
                     "parts": [
                         {
                             "path": "ReflexEntities.json",

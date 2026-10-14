@@ -39,6 +39,7 @@ export FABRIC_SOURCE_KQL_DATABASE_ID="<source-kql-database-uuid>"
 export FABRIC_SOURCE_KQL_QUERYSET_ID="<source-queryset-uuid>"
 export FABRIC_SOURCE_KQL_DASHBOARD_ID="<source-dashboard-uuid>"
 export FABRIC_SOURCE_KQL_QUERY_SERVICE_URI="<source-query-service-uri>"
+export FABRIC_SOURCE_SJD_DISPATCHER_ID="<source-dispatcher-sjd-uuid>"
 export FABRIC_SOURCE_ACTIVATOR_ID="<source-activator-uuid>"
 export FABRIC_SOURCE_VARIABLE_LIBRARY_ID="<source-variable-library-uuid>"
 

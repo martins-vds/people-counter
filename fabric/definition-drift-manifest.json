@@ -230,34 +230,12 @@
           "output": [
             "kql_dashboard_id"
           ]
-        }
-      ]
-    },
-    {
-      "destination": "activators/manifest-arrival",
-      "itemIdOutput": [
-        "activator_ids",
-        "manifest_arrival"
-      ],
-      "itemType": "Reflex",
-      "optional": true,
-      "tokens": [
-        {
-          "name": "TargetWorkspaceId",
-          "output": [
-            "workspace_id"
-          ]
         },
         {
-          "name": "TargetKqlDatabaseId",
+          "name": "TargetSparkJobDispatcherId",
           "output": [
-            "kql_database_id"
-          ]
-        },
-        {
-          "name": "TargetKqlDashboardId",
-          "output": [
-            "kql_dashboard_id"
+            "spark_job_definition_ids",
+            "dispatcher"
           ]
         }
       ]

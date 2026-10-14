@@ -113,11 +113,6 @@ locals {
       description     = "People Counter operational event rules"
       definition_root = "${local.fabric_content_root}/activators/operations"
     }
-    manifest_arrival = {
-      display_name    = "pc_manifest_arrival_activator"
-      description     = "People Counter manifest arrival event rules"
-      definition_root = "${local.fabric_content_root}/activators/manifest-arrival"
-    }
   }
   activators = var.enable_activator ? {
     for key, activator in local.activator_candidates :
@@ -675,6 +670,9 @@ resource "fabric_activator" "this" {
         },
         local.kql_dashboard_definition == null ? {} : {
           TargetKqlDashboardId = fabric_kql_dashboard.operations["operations"].id
+        },
+        {
+          TargetSparkJobDispatcherId = fabric_spark_job_definition.this["dispatcher"].id
         }
       )
     }
