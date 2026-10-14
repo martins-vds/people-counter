@@ -567,6 +567,8 @@ def _verify_activator(
     manifest: DeploymentManifest,
     outputs: Mapping[str, Any],
     postconfigure: Sequence[Mapping[str, Any]],
+    *,
+    require_action_checkpoint: bool = True,
 ) -> dict[str, Any]:
     if manifest.workspace_id is None:
         raise CleanroomAcceptanceError("Activator verification requires a workspace ID")
@@ -592,9 +594,18 @@ def _verify_activator(
                 f"Activator definition/action verification failed on run {index + 1}"
             )
         resource = activator.get("resource")
-        if not isinstance(resource, Mapping) or resource.get(
-            "actionExecutionVerified"
-        ) is not True:
+        if not isinstance(resource, Mapping):
+            raise CleanroomAcceptanceError(
+                f"Activator action evidence is absent on run {index + 1}"
+            )
+        if require_action_checkpoint:
+            accepted = resource.get("actionExecutionVerified") is True
+        else:
+            accepted = (
+                resource.get("actionExecutionVerified") is True
+                or resource.get("actionExecutionRequired") is False
+            )
+        if not accepted:
             raise CleanroomAcceptanceError(
                 f"Activator action evidence is absent on run {index + 1}"
             )
@@ -721,6 +732,7 @@ def validate_cleanroom(
     require_reporting: bool,
     require_rti: bool,
     require_activator: bool,
+    require_activator_action_checkpoint: bool = True,
 ) -> dict[str, Any]:
     """Validate a repeated deployment and return durable acceptance evidence."""
     if _COMMIT.fullmatch(commit_sha) is None:
@@ -791,7 +803,11 @@ def validate_cleanroom(
         checks["realTimeIntelligence"] = {"status": "not-required"}
     if require_activator:
         checks["activator"] = _verify_activator(
-            client, manifest, terraform_output, postconfigure_evidence
+            client,
+            manifest,
+            terraform_output,
+            postconfigure_evidence,
+            require_action_checkpoint=require_activator_action_checkpoint,
         )
     else:
         checks["activator"] = {"status": "not-required"}
@@ -832,6 +848,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--require-reporting", action="store_true")
     parser.add_argument("--require-rti", action="store_true")
     parser.add_argument("--require-activator", action="store_true")
+    parser.add_argument(
+        "--allow-unverified-activator-actions",
+        action="store_true",
+        help=(
+            "accept definition/topology verification when action execution "
+            "evidence is deferred by deployment policy"
+        ),
+    )
     parser.add_argument("--api-root", default="https://api.fabric.microsoft.com/v1")
     parser.add_argument(
         "--onelake-api-root",
@@ -884,6 +908,9 @@ def _execute(arguments: argparse.Namespace) -> dict[str, Any]:
         require_reporting=arguments.require_reporting,
         require_rti=arguments.require_rti,
         require_activator=arguments.require_activator,
+        require_activator_action_checkpoint=not (
+            arguments.allow_unverified_activator_actions
+        ),
     )
 
 

@@ -60,6 +60,7 @@ jobs:
       EXPECT_REPORTING: ${{ vars.FABRIC_ENABLE_REPORTING || 'false' }}
       EXPECT_RTI: ${{ vars.FABRIC_ENABLE_RTI || 'false' }}
       EXPECT_ACTIVATOR: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
+      REQUIRE_ACTIVATOR_ACTION_CHECKPOINT: ${{ vars.FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT || 'true' }}
       TF_VAR_capacity_id: ${{ vars.FABRIC_CAPACITY_ID }}
       TF_VAR_workspace_role_assignments: ${{ vars.FABRIC_WORKSPACE_ROLE_ASSIGNMENTS }}
       TF_VAR_enable_activator: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
@@ -103,6 +104,13 @@ jobs:
             echo "::error::Deployment verification requires disabled schedules"
             exit 1
           fi
+          case "${REQUIRE_ACTIVATOR_ACTION_CHECKPOINT}" in
+            true|false) ;;
+            *)
+              echo "::error::FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT must be true or false"
+              exit 1
+              ;;
+          esac
           test "$(git rev-parse HEAD)" = "${DEPLOY_REF}"
 
       - name: Set up uv
@@ -224,6 +232,9 @@ jobs:
           [ "${EXPECT_REPORTING}" = "true" ] && args+=(--require-reporting)
           [ "${EXPECT_RTI}" = "true" ] && args+=(--require-rti)
           [ "${EXPECT_ACTIVATOR}" = "true" ] && args+=(--require-activator)
+          if [ "${REQUIRE_ACTIVATOR_ACTION_CHECKPOINT}" = "false" ]; then
+            args+=(--allow-unverified-activator-actions)
+          fi
           set -o pipefail
           uv run --frozen pc-validate-fabric-deployment "${args[@]}" \
             | tee "${RUNNER_TEMP}/smoke-evidence/deployment-verification.json"

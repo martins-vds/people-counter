@@ -78,10 +78,10 @@ the source-controlled/live action topology, and verifies referenced Fabric
 item targets. These checks prove configuration, not execution.
 
 Fabric publishes no generic API that can force an arbitrary Activator rule and
-prove its downstream side effect. Without a current operator checkpoint, the
-runtime verifier returns `operator_checkpoint_required`; the reconciler fails
-and never reports enablement as successful. The failure evidence prints the
-exact checkpoint contract. It binds:
+prove its downstream side effect. By default, without a current operator
+checkpoint, the runtime verifier returns `operator_checkpoint_required`; the
+reconciler fails and never reports enablement as successful. The failure
+evidence prints the exact checkpoint contract. It binds:
 
 - workspace, Reflex, trigger, and the live `ReflexEntities.json` SHA-256;
 - every live action ID and kind;
@@ -91,3 +91,11 @@ exact checkpoint contract. It binds:
 Use a short expiry and link immutable evidence from a controlled test event,
 the Activator run/monitoring view, and the observable downstream result. A
 definition or action change invalidates the checkpoint automatically.
+
+Set the GitHub Environment variable
+`FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT=false` to defer only the action
+execution gate. The deployment still verifies the live Reflex identity,
+definition readback, enabled rule, action topology, and referenced targets. It
+records the live definition hash and `actionExecutionRequired: false` with the
+deferral in retained evidence. The default is `true`; re-enable it before
+accepting action delivery.

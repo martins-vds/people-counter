@@ -276,6 +276,22 @@ def test_runtime_verification_requires_then_accepts_bound_operator_checkpoint(
         "POST",
         f"/workspaces/{_WS}/reflexes/{_REFLEX}/getDefinition",
     ) in client.calls
+
+    deferred = verify_activator_runtime(
+        client,
+        _manifest(),  # type: ignore[arg-type]
+        bundle_path=bundle,
+        require_action_checkpoint=False,
+        now=_NOW,
+    )
+    assert deferred.action == "verify_activator"
+    assert deferred.status == "succeeded"
+    assert deferred.resource is not None
+    assert deferred.resource["actionExecutionRequired"] is False
+    assert deferred.resource["actionExecutionVerified"] is False
+    assert "not enforced" in deferred.resource["actionExecutionDeferral"]
+    assert "operatorCheckpointRequired" not in deferred.resource
+
     requirement = pending.resource["operatorCheckpointRequired"]
     assert requirement["schema"] == ACTIVATOR_CHECKPOINT_SCHEMA
     checkpoint_path = tmp_path / "checkpoint.json"

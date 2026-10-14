@@ -1302,6 +1302,7 @@ def _reconcile_activator_gate(
     enabled: bool,
     bundle_path: Path | None,
     checkpoint_path: Path | None,
+    require_action_checkpoint: bool,
     now: datetime | None,
 ) -> tuple[Any | None, list[dict[str, Any]]]:
     if not enabled:
@@ -1316,6 +1317,7 @@ def _reconcile_activator_gate(
             manifest,
             bundle_path=bundle_path,
             checkpoint_path=checkpoint_path,
+            require_action_checkpoint=require_action_checkpoint,
             now=now,
         )
     except ActivatorAutomationError as error:
@@ -1537,6 +1539,7 @@ def reconcile_runtime(
     bootstrap_lakehouse: bool = False,
     refresh_reporting: bool = False,
     enable_activator: bool = False,
+    require_activator_action_checkpoint: bool = True,
     activator_bundle_path: Path | None = None,
     activator_checkpoint_path: Path | None = None,
     runtime_contract: Mapping[str, Any] | None = None,
@@ -1614,6 +1617,7 @@ def reconcile_runtime(
         enabled=enable_activator,
         bundle_path=activator_bundle_path,
         checkpoint_path=activator_checkpoint_path,
+        require_action_checkpoint=require_activator_action_checkpoint,
         now=now,
     )
     checkpoints.extend(activator_checkpoints)
@@ -1701,6 +1705,14 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-lakehouse", action="store_true")
     parser.add_argument("--refresh-reporting", action="store_true")
     parser.add_argument("--enable-activator", action="store_true")
+    parser.add_argument(
+        "--allow-unverified-activator-actions",
+        action="store_true",
+        help=(
+            "verify the live Activator definition and topology without requiring "
+            "operator evidence that its actions executed"
+        ),
+    )
     parser.add_argument("--activator-bundle-path", type=Path)
     parser.add_argument("--activator-checkpoint-path", type=Path)
     parser.add_argument("--runtime-contract-path", type=Path)
@@ -1776,6 +1788,9 @@ def _execute(arguments: argparse.Namespace) -> tuple[DeploymentEnvironment, dict
         bootstrap_lakehouse=arguments.bootstrap_lakehouse,
         refresh_reporting=arguments.refresh_reporting,
         enable_activator=arguments.enable_activator,
+        require_activator_action_checkpoint=not (
+            arguments.allow_unverified_activator_actions
+        ),
         activator_bundle_path=arguments.activator_bundle_path,
         activator_checkpoint_path=arguments.activator_checkpoint_path,
         runtime_contract=runtime_contract,
