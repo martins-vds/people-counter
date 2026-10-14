@@ -975,7 +975,7 @@ def run_item_job(
     attempts = 0
     while True:
         attempts += 1
-        instance = client.request_json("GET", location)
+        instance = client.request_json("GET", location, expected=(200, 202))
         status = str(instance.get("status", "")).lower()
         instance_id = instance.get("id")
         if status in _JOB_SUCCESS:
