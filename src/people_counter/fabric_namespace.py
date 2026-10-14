@@ -84,6 +84,8 @@ _TABLE_SUFFIXES = frozenset(
         "gold_flow_hour",
         "gold_video",
         "gold_operations_hour",
+        "gold_work_operations",
+        "gold_attempt_operations",
         "gold_dim_date",
         "gold_dim_time",
         "gold_dim_camera",

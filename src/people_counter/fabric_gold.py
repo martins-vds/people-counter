@@ -12,6 +12,8 @@ from people_counter.fabric_namespace import FabricNamespaceConfig
 from people_counter.fabric_control import ControlWriter
 from people_counter.sjd_gold import (
     CommittedOutput,
+    DIMENSION_TABLES,
+    FACT_TARGET_TABLES,
     GoldSourceError,
     GoldValidationError,
     LocalGoldJob,
@@ -20,7 +22,6 @@ from people_counter.sjd_gold import (
     _jsonable_spark_row,
     _records_output_document,
     _optional_datetime,
-    _required_datetime,
     _spark_row,
     _spark_schema,
     _split_output_document,
@@ -265,6 +266,19 @@ class FabricGoldStoreImpl:
         self.writer = ControlWriter(
             spark_session, self.config.table("locks")
         )
+
+    def bootstrap(self) -> None:
+        for name in FACT_TARGET_TABLES + DIMENSION_TABLES:
+            table = self._table(name)
+            if self.spark.catalog.tableExists(table):
+                continue
+            frame = self.spark.createDataFrame(
+                [],
+                schema=_spark_schema(name),
+            )
+            frame.write.format("delta").mode("errorifexists").saveAsTable(
+                table
+            )
 
     def read_table(self, name: str) -> list[dict[str, Any]]:
         table = self._table(name)

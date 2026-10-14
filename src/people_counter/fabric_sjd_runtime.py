@@ -1217,6 +1217,13 @@ def _control_dispatch(
     """Execute one parsed control command; isolated so the diagnostic
     wrapper in ``control_main`` always sees command failures."""
     if arguments.command == "bootstrap":
+        from people_counter.fabric_gold import (
+            FabricGoldState,
+            FabricGoldStoreImpl,
+        )
+
+        FabricGoldStoreImpl(store.spark, config=selected).bootstrap()
+        FabricGoldState(store.spark, config=selected)
         result: object = {"bootstrapped": True}
     elif arguments.command == "register":
         encoded = arguments.payload_json

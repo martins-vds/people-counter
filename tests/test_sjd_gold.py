@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+import people_counter.fabric_gold as fabric_gold
+from people_counter.fabric_gold import FabricGoldStoreImpl
+from people_counter.fabric_sjd_runtime import _control_dispatch
 from people_counter.sjd_control import SQLiteControlStore
 from people_counter.sjd_gold import (
     CommittedOutput,
@@ -37,6 +40,77 @@ from people_counter.sjd_gold import (
     _sha256_json,
     main,
 )
+
+
+def test_fabric_gold_store_bootstrap_creates_missing_typed_tables() -> None:
+    spark = MagicMock()
+    config = MagicMock()
+    config.table.side_effect = lambda name: f"pc_{name}"
+    existing = "pc_gold_video"
+    spark.catalog.tableExists.side_effect = lambda table: table == existing
+    store = FabricGoldStoreImpl(spark, config=config)
+
+    store.bootstrap()
+
+    expected = {
+        f"pc_{name}"
+        for name in FACT_TABLES + OPERATIONAL_TABLES + DIMENSION_TABLES
+    }
+    writer = (
+        spark.createDataFrame.return_value.write.format.return_value
+        .mode.return_value
+    )
+    created = {item.args[0] for item in writer.saveAsTable.call_args_list}
+    assert created == expected - {existing}
+    assert spark.createDataFrame.call_count == len(created)
+    assert all(
+        item.args[0] == [] for item in spark.createDataFrame.call_args_list
+    )
+    assert all(
+        item.kwargs["schema"] is not None
+        for item in spark.createDataFrame.call_args_list
+    )
+    frame = spark.createDataFrame.return_value
+    assert frame.write.format.call_args_list == [call("delta")] * len(created)
+    assert frame.write.format.return_value.mode.call_args_list == [
+        call("errorifexists")
+    ] * len(created)
+
+
+def test_control_bootstrap_creates_gold_tables_and_state(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spark = object()
+    store = MagicMock(spark=spark)
+    config = MagicMock()
+    gold_store = MagicMock()
+    gold_store_factory = MagicMock(return_value=gold_store)
+    gold_state_factory = MagicMock()
+    monkeypatch.setattr(
+        fabric_gold,
+        "FabricGoldStoreImpl",
+        gold_store_factory,
+    )
+    monkeypatch.setattr(
+        fabric_gold,
+        "FabricGoldState",
+        gold_state_factory,
+    )
+
+    assert (
+        _control_dispatch(
+            types.SimpleNamespace(command="bootstrap"),
+            store,
+            config,
+        )
+        == 0
+    )
+
+    assert json.loads(capsys.readouterr().out) == {"bootstrapped": True}
+    gold_store_factory.assert_called_once_with(spark, config=config)
+    gold_store.bootstrap.assert_called_once_with()
+    gold_state_factory.assert_called_once_with(spark, config=config)
 
 
 NOW = datetime(2026, 10, 2, 17, 0, tzinfo=timezone.utc)
