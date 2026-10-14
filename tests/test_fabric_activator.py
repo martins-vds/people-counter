@@ -272,6 +272,10 @@ def test_runtime_verification_requires_then_accepts_bound_operator_checkpoint(
     assert pending.status == "operator_checkpoint_required"
     assert pending.resource is not None
     assert pending.resource["actionExecutionVerified"] is False
+    assert (
+        "POST",
+        f"/workspaces/{_WS}/reflexes/{_REFLEX}/getDefinition",
+    ) in client.calls
     requirement = pending.resource["operatorCheckpointRequired"]
     assert requirement["schema"] == ACTIVATOR_CHECKPOINT_SCHEMA
     checkpoint_path = tmp_path / "checkpoint.json"

@@ -607,7 +607,7 @@ def verify_activator_runtime(
         )
     readback = client.run_operation(
         "POST",
-        f"/workspaces/{workspace_id}/reflexes/{reflex_id}/getDefinition?format=json",
+        f"/workspaces/{workspace_id}/reflexes/{reflex_id}/getDefinition",
         action="get_activator_definition",
         accepted=(200, 202),
     )
