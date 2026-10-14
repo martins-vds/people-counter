@@ -26,7 +26,9 @@ uvx --from ruff==0.14.1 ruff check \
   2>&1 | tee "${evidence_dir}/ruff.txt"
 
 readonly -a type_debt=(
+  "src/people_counter/fabric_gold.py"
   "src/people_counter/fabric_reconcilers.py"
+  "src/people_counter/fabric_sjd_runtime.py"
 )
 type_targets=()
 for path in "${changed_python[@]}"; do
