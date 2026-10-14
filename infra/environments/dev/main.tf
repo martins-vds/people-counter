@@ -44,7 +44,6 @@ module "fabric_foundation" {
   adls_shortcut_path               = var.adls_shortcut_path
   adls_shortcut_container          = var.adls_shortcut_container
   adls_shortcut_target_path        = var.adls_shortcut_target_path
-  enable_preview_features          = var.enable_preview_features
   workspace_folders                = var.workspace_folders
   non_secret_connections           = var.non_secret_connections
   domain                           = var.domain

@@ -45,9 +45,9 @@ values. Nested configuration supports connection role assignments.
 
 Domain creation requires the deployment principal to be a Fabric
 administrator. Workspace folder creation, domain-to-workspace assignment, and
-OneLake data-access security are provider-preview resources. To use any of
-them, set `enable_preview_features = true`. Environment roots pass that value
-to both the provider and module. Preview resources default to disabled.
+OneLake data-access security are provider-preview resources. Environment roots
+always enable Fabric provider preview mode because this architecture supports
+Activator.
 
 The module applies managed tags to each item that supports provider tags. You
 can also supply tag IDs through `tags`.
@@ -64,8 +64,7 @@ definitions against those target resources. Exported Eventhouse or KQL
 database definitions are optional because Fabric may deny definition readback
 for managed monitoring resources. Activator remains disabled by default and
 requires reviewed `fabric/activators/{operations,manifest-arrival}` bundles
-plus `enable_activator = true`. Environment roots enable Fabric provider
-preview mode automatically when Activator is enabled.
+plus `enable_activator = true`.
 
 The scalar `adls_shortcut_*` inputs manage one ADLS Gen2 shortcut. Bootstrap
 owns the storage account and container. This module owns the workspace
@@ -83,8 +82,6 @@ verification, approvals, and recovery, use the
 ## Optional configuration example
 
 ```hcl
-enable_preview_features = true
-
 workspace_folders = {
   governance = { display_name = "Governance" }
 }
