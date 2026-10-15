@@ -588,16 +588,28 @@ def _verify_rti(
             expected_type=item_type,
             label=item_type,
         )
-        if item_type != "Eventhouse":
-            text = _get_definition(
-                client,
-                workspace_id=manifest.workspace_id,
-                item_id=item_id,
-                item_type=item_type,
-                label=item_type,
-            )
-            _assert_contains(text, (manifest.workspace_id,), item_type)
         result[output_name] = item_id
+    expected_references = {
+        "kql_database_id": (result["eventhouse_id"],),
+        "kql_queryset_id": (
+            manifest.workspace_id,
+            result["kql_database_id"],
+        ),
+        "kql_dashboard_id": (
+            manifest.workspace_id,
+            result["kql_database_id"],
+        ),
+    }
+    for output_name, references in expected_references.items():
+        item_type = specifications[output_name]
+        text = _get_definition(
+            client,
+            workspace_id=manifest.workspace_id,
+            item_id=result[output_name],
+            item_type=item_type,
+            label=item_type,
+        )
+        _assert_contains(text, references, item_type)
     return result
 
 
