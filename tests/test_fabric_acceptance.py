@@ -527,7 +527,25 @@ def test_rti_and_activator_acceptance_require_live_assets_and_action_evidence() 
             client, manifest, outputs, [evidence, evidence]
         )
 
+    evidence["activator"]["resource"]["actionExecutionRequired"] = False
+    assert acceptance._verify_activator(
+        client,
+        manifest,
+        outputs,
+        [evidence, evidence],
+        require_action_checkpoint=False,
+    )["actionRuns"] == 2
+
     evidence["activator"]["resource"]["actionExecutionVerified"] = True
+    del evidence["activator"]["resource"]["actionExecutionRequired"]
+    assert acceptance._verify_activator(
+        client,
+        manifest,
+        outputs,
+        [evidence, evidence],
+        require_action_checkpoint=False,
+    )["actionRuns"] == 2
+
     evidence["activator"]["status"] = "failed"
     with pytest.raises(
         acceptance.CleanroomAcceptanceError,

@@ -61,6 +61,7 @@ jobs:
       ENABLE_SCHEDULES: ${{ inputs.enable_schedules }}
       ENABLE_REPORTING: ${{ vars.FABRIC_ENABLE_REPORTING || 'false' }}
       ENABLE_ACTIVATOR: ${{ vars.FABRIC_ENABLE_ACTIVATOR || 'false' }}
+      REQUIRE_ACTIVATOR_ACTION_CHECKPOINT: ${{ vars.FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT || 'true' }}
       TF_BACKEND_RESOURCE_GROUP_NAME: ${{ vars.TF_BACKEND_RESOURCE_GROUP_NAME }}
       TF_BACKEND_STORAGE_ACCOUNT_NAME: ${{ vars.TF_BACKEND_STORAGE_ACCOUNT_NAME }}
       TF_BACKEND_CONTAINER_NAME: ${{ vars.TF_BACKEND_CONTAINER_NAME }}
@@ -105,6 +106,13 @@ jobs:
             echo "::error::Schedules must remain disabled before the final gate"
             exit 1
           fi
+          case "${REQUIRE_ACTIVATOR_ACTION_CHECKPOINT}" in
+            true|false) ;;
+            *)
+              echo "::error::FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT must be true or false"
+              exit 1
+              ;;
+          esac
           test "$(git rev-parse HEAD)" = "${DEPLOY_REF}"
 
       - name: Prepare deployment evidence
@@ -215,6 +223,9 @@ jobs:
           fi
           if [ "${ENABLE_ACTIVATOR}" = "true" ]; then
             args+=(--enable-activator --activator-bundle-path fabric/activators/operations)
+            if [ "${REQUIRE_ACTIVATOR_ACTION_CHECKPOINT}" = "false" ]; then
+              args+=(--allow-unverified-activator-actions)
+            fi
             if [ -n "${ACTIVATOR_ACTION_CHECKPOINT_JSON}" ]; then
               python -c 'import os, pathlib; pathlib.Path(os.environ["RUNNER_TEMP"], "activator-action-checkpoint.json").write_text(os.environ["ACTIVATOR_ACTION_CHECKPOINT_JSON"], encoding="utf-8")'
               args+=(--activator-checkpoint-path "${RUNNER_TEMP}/activator-action-checkpoint.json")

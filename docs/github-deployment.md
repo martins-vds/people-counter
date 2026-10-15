@@ -349,7 +349,8 @@ Other optional environment variables are:
 |---|---|
 | `FABRIC_ENABLE_REPORTING` | String `true` or `false`. The default is `false`. `true` requires both reporting bundles and verifies both semantic models and reports. |
 | `FABRIC_ENABLE_RTI` | String `true` or `false`. The default is `false`. `true` requires and verifies the Eventhouse, KQL database, queryset, and dashboard. |
-| `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates the operations Reflex item and requires definition and action evidence. |
+| `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates the operations Reflex item and requires live definition, enabled-rule, topology, and target verification. |
+| `FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT` | String `true` or `false`. The default is `true`. `true` requires current operator evidence that every configured Activator action executed. `false` records action execution as deferred without skipping live Activator configuration verification. |
 
 Committed bundles control Reporting and RTI item creation. Do not set a flag
 until every bundle named in
@@ -579,8 +580,9 @@ validates:
   workspace/Lakehouse bindings, and each PBIR report's semantic-model reference.
 - Eventhouse, KQL database, queryset, and dashboard assets when
   `FABRIC_ENABLE_RTI=true`.
-- Activator definition readback and unexpired per-action execution evidence
-  when `FABRIC_ENABLE_ACTIVATOR=true`.
+- Activator definition readback when `FABRIC_ENABLE_ACTIVATOR=true`, plus
+  unexpired per-action execution evidence when
+  `FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT=true`.
 - commit, definition-hash, Terraform-output, resource-ID, and zero-drift
   provenance.
 
@@ -591,9 +593,9 @@ settings make their verification gates mandatory. Reporting requires bundles at
 `fabric/reports/{analytics,operational}`. RTI requires committed bundles at
 `fabric/rti/{queryset,dashboard}`. Terraform creates the target Eventhouse and
 read/write KQL database without requiring their source definitions. Activator
-requires `fabric/activators/operations` plus the
-`FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON` secret described below. These are
-source definitions, not live item IDs.
+requires `fabric/activators/operations`. With action-checkpoint enforcement
+enabled, it also requires the `FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON` secret
+described below. These are source definitions, not live item IDs.
 
 ### Reporting, RTI, and Activator gates
 
@@ -603,17 +605,23 @@ source definitions, not live item IDs.
 - With `FABRIC_ENABLE_RTI=true`, verification requires all four RTI outputs and
   definition readback. The flag does not create missing bundles.
 - With `FABRIC_ENABLE_ACTIVATOR=true`, Terraform and runtime both require the
-  `operations` bundle. Store a current, time-bounded action checkpoint as the
+  `operations` bundle and verify its live definition, enabled rule, action
+  topology, and referenced targets.
+- With `FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT=true`, store a current,
+  time-bounded action checkpoint as the
   `FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON` environment secret. A missing,
   expired, or topology-mismatched checkpoint blocks every postconfiguration
-  pass, including Production schedule enablement.
+  pass, including Production schedule enablement. Set the variable to `false`
+  only when action execution must be deferred; deployment evidence records the
+  deferral. Re-enable it before treating Activator action delivery as accepted.
 
 The checkpoint binds the workspace, Reflex, trigger, live definition hash,
 action IDs/kinds, verification time/expiry/operator, and durable evidence for
 each action. See [`fabric/activators/README.md`](../fabric/activators/README.md)
 for its contract and service-principal CRUD probe.
 
-Reporting, Activator, and operator checkpoints are hard gates. Unsupported
+Reporting, configured Activator checks, and operator checkpoints are hard
+gates. Unsupported
 credentials, Direct Lake rewrites, gateway encryption, interactive consent,
 item-share removal, or Activator actions produce
 `operator_checkpoint_required`. The workflow uploads evidence, exits

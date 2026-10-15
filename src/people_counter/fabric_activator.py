@@ -581,6 +581,7 @@ def verify_activator_runtime(
     *,
     bundle_path: Path,
     checkpoint_path: Path | None = None,
+    require_action_checkpoint: bool = True,
     action_target_probe: Callable[[ActivatorAction], DeploymentEvidence] | None = None,
     now: datetime | None = None,
 ) -> DeploymentEvidence:
@@ -670,14 +671,25 @@ def verify_activator_runtime(
         actions=actions,
     )
     resource = {
+        "actionExecutionRequired": require_action_checkpoint,
         "actionExecutionVerified": False,
         "definition": live.to_dict(),
         "item": dict(item),
-        "operatorCheckpointRequired": requirement,
         "sourceBundle": expected.to_dict(),
         "targetVerification": target_evidence,
     }
     if checkpoint_path is None:
+        if not require_action_checkpoint:
+            resource["actionExecutionDeferral"] = (
+                "Activator action execution evidence is not enforced by "
+                "deployment policy"
+            )
+            return DeploymentEvidence(
+                action="verify_activator",
+                status="succeeded",
+                resource=resource,
+            )
+        resource["operatorCheckpointRequired"] = requirement
         return DeploymentEvidence(
             action="verify_activator",
             status="operator_checkpoint_required",
@@ -705,7 +717,6 @@ def verify_activator_runtime(
     )
     resource["actionExecutionVerified"] = True
     resource["operatorCheckpoint"] = verification
-    resource.pop("operatorCheckpointRequired")
     return DeploymentEvidence(
         action="verify_activator",
         status="succeeded",

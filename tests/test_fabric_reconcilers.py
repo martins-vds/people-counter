@@ -898,6 +898,45 @@ def test_runtime_checkpoint_disables_schedules_and_emits_machine_evidence(
     assert created and all(call[2]["enabled"] is False for call in created)
 
 
+def test_activator_action_checkpoint_policy_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def verify(
+        _client: object,
+        _manifest: object,
+        *,
+        require_action_checkpoint: bool,
+        **_kwargs: object,
+    ) -> DeploymentEvidence:
+        captured["required"] = require_action_checkpoint
+        return DeploymentEvidence(
+            action="verify_activator",
+            status="succeeded",
+            resource={"actionExecutionRequired": require_action_checkpoint},
+        )
+
+    monkeypatch.setattr(reconcilers, "verify_activator_runtime", verify)
+
+    evidence, checkpoints = reconcilers._reconcile_activator_gate(
+        object(),
+        _resolved_manifest(),
+        enabled=True,
+        bundle_path=tmp_path / "operations",
+        checkpoint_path=None,
+        require_action_checkpoint=False,
+        now=_NOW,
+    )
+
+    assert evidence is not None
+    assert evidence.status == "succeeded"
+    assert evidence.resource == {"actionExecutionRequired": False}
+    assert checkpoints == []
+    assert captured == {"required": False}
+
+
 def test_runtime_evidence_and_cli_fail_closed_on_failed_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
