@@ -125,21 +125,28 @@ output "report_ids" {
 }
 
 output "eventhouse_id" {
-  value = local.rti_enabled ? fabric_eventhouse.operations[0].id : null
+  description = "Workspace Monitoring Eventhouse item ID used by RTI definitions."
+  value = (
+    local.rti_enabled
+    ? data.fabric_kql_database.workspace_monitoring[0].properties.eventhouse_id
+    : null
+  )
 }
 
 output "kql_database_id" {
+  description = "Workspace Monitoring KQL database item ID used by RTI definitions."
   value = (
     local.rti_enabled
-    ? fabric_kql_database.operations["operations"].id
+    ? data.fabric_kql_database.workspace_monitoring[0].id
     : null
   )
 }
 
 output "kql_query_service_uri" {
+  description = "Workspace Monitoring KQL query service URI used by RTI definitions."
   value = (
     local.rti_enabled
-    ? fabric_kql_database.operations["operations"].properties.query_service_uri
+    ? data.fabric_kql_database.workspace_monitoring[0].properties.query_service_uri
     : null
   )
 }

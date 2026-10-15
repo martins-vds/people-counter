@@ -4,7 +4,7 @@
     "dataSources": [
       {
         "id": "7275837f-8677-431c-b548-b1220f285701",
-        "clusterUri": "https://trd-yra0yjh9babcz6tktr.z0.kusto.fabric.microsoft.com",
+        "clusterUri": "{{ .TargetKqlQueryServiceUri }}",
         "type": "Fabric",
         "databaseItemId": "{{ .TargetKqlDatabaseId }}"
       }
