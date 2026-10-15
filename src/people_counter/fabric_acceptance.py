@@ -361,9 +361,49 @@ def _expected_shortcut_identity(
     )
 
 
+def _list_lakehouse_tables(
+    client: Any,
+    *,
+    workspace_id: str,
+    lakehouse_id: str,
+) -> list[Mapping[str, Any]]:
+    base_path = (
+        f"/{workspace_id}/{lakehouse_id}/api/2.1/unity-catalog/tables"
+        f"?catalog_name={lakehouse_id}&schema_name=dbo"
+    )
+    path = base_path
+    seen_tokens: set[str] = set()
+    tables: list[Mapping[str, Any]] = []
+    while True:
+        page = client.request_json("GET", path)
+        values = page.get("tables")
+        if not isinstance(values, list) or any(
+            not isinstance(value, Mapping) for value in values
+        ):
+            raise CleanroomAcceptanceError(
+                "OneLake Delta table response must contain a tables array"
+            )
+        tables.extend(values)
+        token = page.get("next_page_token")
+        if token is None:
+            return tables
+        if not isinstance(token, str) or not token or token in seen_tokens:
+            raise CleanroomAcceptanceError(
+                "OneLake Delta table pagination token is invalid"
+            )
+        seen_tokens.add(token)
+        next_path = f"{base_path}&page_token={quote(token, safe='')}"
+        if next_path == path:
+            raise CleanroomAcceptanceError(
+                "OneLake Delta table pagination token is invalid"
+            )
+        path = next_path
+
+
 def _verify_lakehouse(
     client: Any,
     onelake_client: Any,
+    onelake_table_client: Any,
     manifest: DeploymentManifest,
     outputs: Mapping[str, Any],
     runtime_contract: Mapping[str, Any],
@@ -380,9 +420,10 @@ def _verify_lakehouse(
         expected_type="Lakehouse",
         label="Lakehouse",
     )
-    tables = client.list_pages(
-        f"/workspaces/{manifest.workspace_id}/lakehouses/"
-        f"{manifest.lakehouse.lakehouse_id}/tables"
+    tables = _list_lakehouse_tables(
+        onelake_table_client,
+        workspace_id=manifest.workspace_id,
+        lakehouse_id=manifest.lakehouse.lakehouse_id,
     )
     expected_tables = {
         manifest.lakehouse.table(suffix) for suffix in TABLE_SUFFIXES
@@ -719,6 +760,7 @@ def _verify_no_duplicate_items(
 def validate_cleanroom(
     client: Any,
     onelake_client: Any,
+    onelake_table_client: Any,
     manifest: DeploymentManifest,
     *,
     terraform_output: Mapping[str, Any],
@@ -778,6 +820,7 @@ def validate_cleanroom(
             "lakehouse": _verify_lakehouse(
                 client,
                 onelake_client,
+                onelake_table_client,
                 manifest,
                 terraform_output,
                 runtime_contract,
@@ -859,6 +902,10 @@ def _parser() -> argparse.ArgumentParser:
         "--onelake-api-root",
         default="https://onelake.dfs.fabric.microsoft.com",
     )
+    parser.add_argument(
+        "--onelake-table-api-root",
+        default="https://onelake.table.fabric.microsoft.com/delta",
+    )
     return parser
 
 
@@ -880,15 +927,24 @@ def _execute(arguments: argparse.Namespace) -> dict[str, Any]:
         transport=transport,
         api_root=arguments.api_root,
     )
+    onelake_token_provider = make_resource_token_provider(
+        "https://storage.azure.com/"
+    )
     onelake_client = FabricAutomationClient(
-        make_resource_token_provider("https://storage.azure.com/"),
+        onelake_token_provider,
         transport=transport,
         api_root=arguments.onelake_api_root,
         default_headers={"x-ms-version": "2023-11-03"},
     )
+    onelake_table_client = FabricAutomationClient(
+        onelake_token_provider,
+        transport=transport,
+        api_root=arguments.onelake_table_api_root,
+    )
     return validate_cleanroom(
         client,
         onelake_client,
+        onelake_table_client,
         manifest,
         terraform_output=terraform_output,
         runtime_contract=_load_json(

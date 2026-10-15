@@ -156,6 +156,108 @@ class _OneLakeClient:
         raise AssertionError((method, path))
 
 
+@dataclass
+class _OneLakeTableClient:
+    pages: dict[str, dict[str, Any]]
+    calls: list[tuple[str, str]] = field(default_factory=list)
+
+    def request_json(self, method: str, path: str, **_: object):
+        self.calls.append((method, path))
+        return self.pages[path]
+
+
+def test_onelake_table_listing_paginates_and_validates_responses() -> None:
+    manifest = _manifest()
+    workspace_id = manifest.workspace_id
+    lakehouse_id = manifest.lakehouse.lakehouse_id
+    assert workspace_id is not None
+    assert lakehouse_id is not None
+    base_path = (
+        f"/{workspace_id}/{lakehouse_id}/api/2.1/unity-catalog/tables"
+        f"?catalog_name={lakehouse_id}&schema_name=dbo"
+    )
+    next_path = f"{base_path}&page_token=page%2F2%2B"
+    client = _OneLakeTableClient(
+        pages={
+            base_path: {
+                "tables": [{"name": "first"}],
+                "next_page_token": "page/2+",
+            },
+            next_path: {
+                "tables": [{"name": "second"}],
+                "next_page_token": None,
+            },
+        }
+    )
+
+    result = acceptance._list_lakehouse_tables(
+        client,
+        workspace_id=workspace_id,
+        lakehouse_id=lakehouse_id,
+    )
+
+    assert [table["name"] for table in result] == ["first", "second"]
+    assert client.calls == [("GET", base_path), ("GET", next_path)]
+
+    for tables in (None, {}, [None]):
+        malformed = _OneLakeTableClient(
+            pages={
+                base_path: {
+                    "tables": tables,
+                    "next_page_token": None,
+                }
+            }
+        )
+        with pytest.raises(
+            acceptance.CleanroomAcceptanceError,
+            match="^OneLake Delta table response must contain a tables array$",
+        ):
+            acceptance._list_lakehouse_tables(
+                malformed,
+                workspace_id=workspace_id,
+                lakehouse_id=lakehouse_id,
+            )
+
+    for token in (1, ""):
+        malformed = _OneLakeTableClient(
+            pages={
+                base_path: {
+                    "tables": [],
+                    "next_page_token": token,
+                }
+            }
+        )
+        with pytest.raises(
+            acceptance.CleanroomAcceptanceError,
+            match="^OneLake Delta table pagination token is invalid$",
+        ):
+            acceptance._list_lakehouse_tables(
+                malformed,
+                workspace_id=workspace_id,
+                lakehouse_id=lakehouse_id,
+            )
+
+    repeated_token_path = f"{base_path}&page_token=repeat"
+    repeated = _OneLakeTableClient(
+        pages={
+            base_path: {"tables": [], "next_page_token": "repeat"},
+            repeated_token_path: {
+                "tables": [],
+                "next_page_token": "repeat",
+            },
+        }
+    )
+    with pytest.raises(
+        acceptance.CleanroomAcceptanceError,
+        match="^OneLake Delta table pagination token is invalid$",
+    ):
+        acceptance._list_lakehouse_tables(
+            repeated,
+            workspace_id=workspace_id,
+            lakehouse_id=lakehouse_id,
+        )
+
+
 def _postconfigure(manifest, outputs):
     return {
         "schema": "people-counter-fabric-postconfigure-evidence-v1",
@@ -374,8 +476,9 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
         }
     }
     table_path = (
-        f"/workspaces/{manifest.workspace_id}/lakehouses/"
-        f"{manifest.lakehouse.lakehouse_id}/tables"
+        f"/{manifest.workspace_id}/{manifest.lakehouse.lakehouse_id}"
+        "/api/2.1/unity-catalog/tables"
+        f"?catalog_name={manifest.lakehouse.lakehouse_id}&schema_name=dbo"
     )
     shortcut_path = (
         f"/workspaces/{manifest.workspace_id}/items/"
@@ -391,10 +494,6 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
     client = _Client(
         items=items,
         lists={
-            table_path: [
-                {"name": manifest.lakehouse.table(suffix)}
-                for suffix in acceptance.TABLE_SUFFIXES
-            ],
             shortcut_path: [
                 {
                     "name": "archive",
@@ -412,6 +511,17 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
             ],
         },
     )
+    table_client = _OneLakeTableClient(
+        pages={
+            table_path: {
+                "tables": [
+                    {"name": manifest.lakehouse.table(suffix)}
+                    for suffix in acceptance.TABLE_SUFFIXES
+                ],
+                "next_page_token": None,
+            }
+        }
+    )
     terraform_sha = acceptance._sha256(outputs)
     release = {
         "schema": acceptance.RELEASE_MANIFEST_SCHEMA,
@@ -423,6 +533,7 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
     result = acceptance._verify_lakehouse(
         client,
         _OneLakeClient(release),
+        table_client,
         manifest,
         outputs,
         {"lakehouse": {"folders": ["deployment-evidence", "releases"]}},
@@ -433,10 +544,12 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
     assert result["folderCount"] == 2
     assert result["shortcutCount"] == 1
     assert result["tableCount"] == len(acceptance.TABLE_SUFFIXES)
+    assert table_client.calls == [("GET", table_path)]
     with pytest.raises(acceptance.CleanroomAcceptanceError, match="folder"):
         acceptance._verify_lakehouse(
             client,
             _OneLakeClient(release, missing_folder=True),
+            table_client,
             manifest,
             outputs,
             {"lakehouse": {"folders": ["releases"]}},
@@ -614,6 +727,7 @@ def test_cleanroom_orchestrator_requires_zero_drift_and_matching_provenance(
     result = acceptance.validate_cleanroom(
         object(),
         object(),
+        object(),
         manifest,
         terraform_output=outputs,
         runtime_contract={"schema": acceptance.RUNTIME_CONTRACT_SCHEMA},
@@ -630,6 +744,7 @@ def test_cleanroom_orchestrator_requires_zero_drift_and_matching_provenance(
     assert result["checks"]["terraform"]["driftExitCode"] == 0
     with pytest.raises(acceptance.CleanroomAcceptanceError, match="zero drift"):
         acceptance.validate_cleanroom(
+            object(),
             object(),
             object(),
             manifest,
