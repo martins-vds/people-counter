@@ -616,7 +616,13 @@ def test_rti_and_activator_acceptance_require_live_assets_and_action_evidence() 
         items.append(
             {"id": item_id, "type": item_type, "displayName": output_name}
         )
-        definitions[item_id] = _definition(str(manifest.workspace_id))
+    definitions[outputs["kql_database_id"]["value"]] = _definition(
+        outputs["eventhouse_id"]["value"]
+    )
+    for output_name in ("kql_queryset_id", "kql_dashboard_id"):
+        definitions[outputs[output_name]["value"]] = _definition(
+            f"{manifest.workspace_id} {outputs['kql_database_id']['value']}"
+        )
     activator_ids = {"operations": _uid("operations-activator")}
     outputs["activator_ids"]["value"] = activator_ids
     items.extend(
@@ -635,6 +641,14 @@ def test_rti_and_activator_acceptance_require_live_assets_and_action_evidence() 
     client = _Client(items=items, definitions=definitions)
 
     assert set(acceptance._verify_rti(client, manifest, outputs)) == set(rti)
+    definitions[outputs["kql_database_id"]["value"]] = _definition(
+        str(manifest.workspace_id)
+    )
+    with pytest.raises(
+        acceptance.CleanroomAcceptanceError,
+        match="KQLDatabase definition is missing references",
+    ):
+        acceptance._verify_rti(client, manifest, outputs)
     assert acceptance._verify_activator(
         client, manifest, outputs, [evidence, evidence]
     ) == {
