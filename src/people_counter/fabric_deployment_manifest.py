@@ -478,9 +478,9 @@ def parse_deployment_manifest(
             raise ManifestValidationError(
                 f"production deployment identity is fixed: {mismatches!r}"
             )
-    elif table_prefix == TABLE_PREFIX or files_root == FILES_ROOT:
+    elif files_root == FILES_ROOT:
         raise ManifestValidationError(
-            f"{stage.value} must not reuse the production Lakehouse namespace"
+            f"{stage.value} must not reuse the production OneLake files namespace"
         )
 
     roles_document = _mapping(document.get("roles"), "roles")

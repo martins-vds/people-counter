@@ -6,7 +6,7 @@
   "fabric_runtime": "2.0",
   "lakehouse": {
     "lakehouse_id": null,
-    "table_prefix": "people_counter_dev_",
+    "table_prefix": "people_counter_sjd_",
     "files_root": "Files/people-counter/dev/v1/"
   },
   "roles": {

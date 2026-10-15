@@ -28,7 +28,7 @@ from people_counter.fabric_automation import (
 from people_counter.fabric_deployment_manifest import (
     DeploymentEnvironment, DeploymentManifest, SCHEDULED_ROLES, SJD_ROLES, parse_deployment_manifest,
 )
-from people_counter.fabric_sjd import TABLE_SUFFIXES
+from people_counter.fabric_sjd import BOOTSTRAP_TABLE_SUFFIXES
 
 JOB_TYPE = "sparkjob"
 _BETA_OFF = "beta=false"
@@ -302,7 +302,7 @@ def verify_lakehouse_tables(
             f"{verification.error}"
         )
     expected = sorted(
-        manifest.lakehouse.table(suffix) for suffix in TABLE_SUFFIXES
+        manifest.lakehouse.table(suffix) for suffix in BOOTSTRAP_TABLE_SUFFIXES
     )
     return DeploymentEvidence(
         action="verify_lakehouse_tables",

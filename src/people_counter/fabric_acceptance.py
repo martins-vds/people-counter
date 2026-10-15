@@ -36,7 +36,7 @@ from people_counter.fabric_reconcilers import (
     RUNTIME_CONTRACT_SCHEMA,
     merge_terraform_output,
 )
-from people_counter.fabric_sjd import TABLE_SUFFIXES
+from people_counter.fabric_sjd import BOOTSTRAP_TABLE_SUFFIXES
 
 ACCEPTANCE_EVIDENCE_SCHEMA = "people-counter-fabric-deployment-verification-v1"
 _SJD_DEFINITION_ROOT = (
@@ -426,7 +426,7 @@ def _verify_lakehouse(
         lakehouse_id=manifest.lakehouse.lakehouse_id,
     )
     expected_tables = {
-        manifest.lakehouse.table(suffix) for suffix in TABLE_SUFFIXES
+        manifest.lakehouse.table(suffix) for suffix in BOOTSTRAP_TABLE_SUFFIXES
     }
     actual_tables = {str(table.get("name")) for table in tables}
     if expected_tables - actual_tables:

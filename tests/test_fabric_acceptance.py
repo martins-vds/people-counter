@@ -516,7 +516,7 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
             table_path: {
                 "tables": [
                     {"name": manifest.lakehouse.table(suffix)}
-                    for suffix in acceptance.TABLE_SUFFIXES
+                    for suffix in acceptance.BOOTSTRAP_TABLE_SUFFIXES
                 ],
                 "next_page_token": None,
             }
@@ -543,7 +543,7 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
 
     assert result["folderCount"] == 2
     assert result["shortcutCount"] == 1
-    assert result["tableCount"] == len(acceptance.TABLE_SUFFIXES)
+    assert result["tableCount"] == len(acceptance.BOOTSTRAP_TABLE_SUFFIXES)
     assert table_client.calls == [("GET", table_path)]
     with pytest.raises(acceptance.CleanroomAcceptanceError, match="folder"):
         acceptance._verify_lakehouse(

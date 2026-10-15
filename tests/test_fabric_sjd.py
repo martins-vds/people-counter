@@ -6,6 +6,8 @@ from unittest.mock import patch
 import pytest
 
 from people_counter.fabric_sjd import (
+    BOOTSTRAP_TABLE_SUFFIXES,
+    CUTOVER_TABLE_SUFFIXES,
     FILES_ROOT,
     TABLE_PREFIX,
     TABLE_SUFFIXES,
@@ -31,6 +33,12 @@ def test_stable_config_is_fixed_and_contains_no_candidate_or_shadow_tables() -> 
     assert config.files_root == "Files/people-counter/sjd/v1/"
     assert "routing_allowlist" not in TABLE_SUFFIXES
     assert "shadow_audit" not in TABLE_SUFFIXES
+    assert BOOTSTRAP_TABLE_SUFFIXES | CUTOVER_TABLE_SUFFIXES == TABLE_SUFFIXES
+    assert not BOOTSTRAP_TABLE_SUFFIXES & CUTOVER_TABLE_SUFFIXES
+    assert CUTOVER_TABLE_SUFFIXES == {
+        "migration_journal",
+        "retirement_journal",
+    }
     assert "candidate" not in TABLE_PREFIX
     assert "candidate" not in FILES_ROOT
     assert config.table("work") == "people_counter_sjd_work"

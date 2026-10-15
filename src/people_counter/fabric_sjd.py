@@ -43,6 +43,13 @@ TABLE_SUFFIXES = frozenset(
         "gold_dim_model_config",
     }
 )
+CUTOVER_TABLE_SUFFIXES = frozenset(
+    {
+        "migration_journal",
+        "retirement_journal",
+    }
+)
+BOOTSTRAP_TABLE_SUFFIXES = TABLE_SUFFIXES - CUTOVER_TABLE_SUFFIXES
 _SAFE_PATH_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._=-]*\Z")
 
 
