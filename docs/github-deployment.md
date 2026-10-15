@@ -574,8 +574,9 @@ validates:
   references.
 - exactly one disabled schedule for each recurring role and no schedules for
   Process or Cutover before the final gate.
-- namespaced Lakehouse tables, configured OneLake folders, the exact Terraform
-  shortcut set, and the immutable commit-addressed release manifest.
+- namespaced Lakehouse tables through the schema-aware OneLake Delta metadata
+  API, configured OneLake folders, the exact Terraform shortcut set, and the
+  immutable commit-addressed release manifest.
 - both semantic-model refreshes on both deployment passes, Direct Lake
   workspace/Lakehouse bindings, and each PBIR report's semantic-model reference.
 - Eventhouse, KQL database, queryset, and dashboard assets when
