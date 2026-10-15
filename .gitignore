@@ -20,7 +20,7 @@ manifest-package/
 offline-models/
 local-data/
 .env
-.env.deploy-dev.local
+.env.deploy-*.local
 
 .people-counter*
 
