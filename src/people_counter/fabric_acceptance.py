@@ -182,13 +182,12 @@ def _get_definition_parts(
     *,
     workspace_id: str,
     item_id: str,
-    item_type: str,
     label: str,
 ) -> dict[str, bytes]:
-    route = _DEFINITION_ROUTES[item_type]
     evidence = client.run_operation(
         "POST",
-        f"/workspaces/{workspace_id}/{route}/{item_id}/getDefinition",
+        f"/workspaces/{workspace_id}/sparkJobDefinitions/{item_id}/getDefinition"
+        "?format=SparkJobDefinitionV2",
         action=f"acceptance_get_definition:{label}",
         accepted=(200, 202),
     )
@@ -254,7 +253,6 @@ def _verify_sjds(
             client,
             workspace_id=manifest.workspace_id,
             item_id=item_id,
-            item_type="SparkJobDefinition",
             label=f"SJD {role}",
         )
         source = parts.get("Main/main.py")
