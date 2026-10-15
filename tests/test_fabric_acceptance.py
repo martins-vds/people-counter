@@ -120,6 +120,7 @@ class _Client:
     items: list[dict[str, Any]] = field(default_factory=list)
     definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
     lists: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    definition_calls: list[tuple[str, str]] = field(default_factory=list)
 
     def list_pages(self, path: str):
         if path in self.lists:
@@ -135,6 +136,7 @@ class _Client:
         return next(item for item in self.items if item["id"] == item_id)
 
     def run_operation(self, method: str, path: str, **_: object):
+        self.definition_calls.append((method, path))
         item_id = path.split("/")[-2]
         return DeploymentEvidence(
             action="read", status="succeeded", resource=self.definitions[item_id]
@@ -250,12 +252,19 @@ def test_sjd_acceptance_verifies_all_roles_and_runtime_references() -> None:
         for role, item_id in outputs["spark_job_definition_ids"]["value"].items()
     }
 
-    result = acceptance._verify_sjds(
-        _Client(items=items, definitions=definitions), manifest, outputs
-    )
+    client = _Client(items=items, definitions=definitions)
+    result = acceptance._verify_sjds(client, manifest, outputs)
 
     assert set(result) == SJD_ROLES
     assert all(len(item["sourceSha256"]) == 64 for item in result.values())
+    assert set(client.definition_calls) == {
+        (
+            "POST",
+            f"/workspaces/{manifest.workspace_id}/sparkJobDefinitions/"
+            f"{item_id}/getDefinition?format=SparkJobDefinitionV2",
+        )
+        for item_id in outputs["spark_job_definition_ids"]["value"].values()
+    }
     definitions[_uid("control")]["definition"]["parts"][0]["payload"] = (
         base64.b64encode(b"from wrong import main\n").decode()
     )
