@@ -616,9 +616,6 @@ def test_rti_and_activator_acceptance_require_live_assets_and_action_evidence() 
         items.append(
             {"id": item_id, "type": item_type, "displayName": output_name}
         )
-    definitions[outputs["kql_database_id"]["value"]] = _definition(
-        outputs["eventhouse_id"]["value"]
-    )
     for output_name in ("kql_queryset_id", "kql_dashboard_id"):
         definitions[outputs[output_name]["value"]] = _definition(
             outputs["kql_database_id"]["value"]
@@ -642,7 +639,6 @@ def test_rti_and_activator_acceptance_require_live_assets_and_action_evidence() 
 
     assert set(acceptance._verify_rti(client, manifest, outputs)) == set(rti)
     for output_name, item_type in (
-        ("kql_database_id", "KQLDatabase"),
         ("kql_queryset_id", "KQLQueryset"),
         ("kql_dashboard_id", "KQLDashboard"),
     ):

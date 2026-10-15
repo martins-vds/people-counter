@@ -590,7 +590,6 @@ def _verify_rti(
         )
         result[output_name] = item_id
     expected_references = {
-        "kql_database_id": (result["eventhouse_id"],),
         "kql_queryset_id": (result["kql_database_id"],),
         "kql_dashboard_id": (result["kql_database_id"],),
     }

@@ -95,6 +95,7 @@ locals {
   kql_dashboards = local.kql_dashboard_definition == null ? {} : {
     operations = local.kql_dashboard_definition
   }
+  workspace_monitoring_kql_database_display_name = "${var.workspace_display_name}_Monitoring_item_${var.workspace_display_name}_Database"
   rti_enabled = anytrue([
     local.eventhouse_definition != null,
     local.kql_database_definition != null,
@@ -580,6 +581,13 @@ resource "fabric_kql_database" "operations" {
   }
 }
 
+data "fabric_kql_database" "workspace_monitoring" {
+  count = local.rti_enabled ? 1 : 0
+
+  display_name = local.workspace_monitoring_kql_database_display_name
+  workspace_id = fabric_workspace.this.id
+}
+
 resource "fabric_kql_queryset" "operations" {
   for_each = local.kql_querysets
 
@@ -596,9 +604,9 @@ resource "fabric_kql_queryset" "operations" {
       processing_mode = "GoTemplate"
       tokens = {
         TargetWorkspaceId   = fabric_workspace.this.id
-        TargetKqlDatabaseId = fabric_kql_database.operations["operations"].id
+        TargetKqlDatabaseId = data.fabric_kql_database.workspace_monitoring[0].id
         TargetKqlQueryServiceUri = (
-          fabric_kql_database.operations["operations"].properties.query_service_uri
+          data.fabric_kql_database.workspace_monitoring[0].properties.query_service_uri
         )
       }
     }
@@ -626,9 +634,9 @@ resource "fabric_kql_dashboard" "operations" {
       processing_mode = "GoTemplate"
       tokens = {
         TargetWorkspaceId   = fabric_workspace.this.id
-        TargetKqlDatabaseId = fabric_kql_database.operations["operations"].id
+        TargetKqlDatabaseId = data.fabric_kql_database.workspace_monitoring[0].id
         TargetKqlQueryServiceUri = (
-          fabric_kql_database.operations["operations"].properties.query_service_uri
+          data.fabric_kql_database.workspace_monitoring[0].properties.query_service_uri
         )
       }
     }
@@ -660,10 +668,10 @@ resource "fabric_activator" "this" {
           TargetWorkspaceId = fabric_workspace.this.id
         },
         local.rti_enabled ? {
-          TargetEventhouseId = fabric_eventhouse.operations[0].id
+          TargetEventhouseId = data.fabric_kql_database.workspace_monitoring[0].properties.eventhouse_id
         } : {},
         local.rti_enabled ? {
-          TargetKqlDatabaseId = fabric_kql_database.operations["operations"].id
+          TargetKqlDatabaseId = data.fabric_kql_database.workspace_monitoring[0].id
         } : {},
         local.kql_queryset_definition == null ? {} : {
           TargetKqlQuerysetId = fabric_kql_queryset.operations["operations"].id

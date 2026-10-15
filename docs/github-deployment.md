@@ -368,7 +368,7 @@ Other optional environment variables are:
 | Variable | Accepted value and behavior |
 |---|---|
 | `FABRIC_ENABLE_REPORTING` | String `true` or `false`. The default is `false`. `true` requires both reporting bundles and verifies both semantic models and reports. |
-| `FABRIC_ENABLE_RTI` | String `true` or `false`. The default is `false`. `true` requires and verifies the Eventhouse, KQL database, queryset, and dashboard. |
+| `FABRIC_ENABLE_RTI` | String `true` or `false`. The default is `false`. `true` discovers Workspace Monitoring's managed Eventhouse and KQL database, then requires and verifies them with the queryset and dashboard. |
 | `FABRIC_ENABLE_ACTIVATOR` | String `true` or `false`. The default is `false`. `true` creates the operations Reflex item and requires live definition, enabled-rule, topology, and target verification. |
 | `FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT` | String `true` or `false`. The default is `true`. `true` requires current operator evidence that every configured Activator action executed. `false` records action execution as deferred without skipping live Activator configuration verification. |
 
@@ -376,6 +376,27 @@ Committed bundles control Reporting and RTI item creation. Do not set a flag
 until every bundle named in
 [Definition bundles and target IDs](#definition-bundles-and-target-ids) is
 reviewed. Activator requires its operations bundle and its flag.
+
+### Workspace Monitoring prerequisite
+
+RTI dashboards and the operations Activator query Fabric Workspace Monitoring.
+Before an RTI deployment can finish:
+
+1. In the Fabric Admin portal, enable **Allow monitoring data collection** for
+   the organization or a security group that contains the deployment workspace
+   operators. Allow up to 15 minutes for propagation.
+2. Open the target workspace, select **Workspace settings** > **Monitoring**,
+   migrate to the new monitoring experience if prompted, and create the
+   Monitoring item.
+3. Enable **Diagnostic data collection** and save.
+4. Keep the generated database name
+   `<workspace>_Monitoring_item_<workspace>_Database`.
+
+The Fabric Terraform provider cannot enable Workspace Monitoring. Terraform
+discovers the generated database by this name and stops rather than binding the
+dashboard to another KQL database. If Terraform is creating the workspace for
+the first time, the first apply creates the workspace and then stops at the
+monitoring lookup. Complete the steps above and rerun the same deployment.
 
 ### ADLS Gen2 shortcut configuration
 
@@ -466,9 +487,11 @@ Required bundle locations are:
 - RTI: `fabric/rti/{queryset,dashboard}`.
 - Activator: `fabric/activators/operations`.
 
-When `FABRIC_ENABLE_RTI=true`, Terraform creates the target Eventhouse and
-read/write KQL database. Their definition bundles are optional because Fabric can
-deny definition readback for managed monitoring resources.
+When `FABRIC_ENABLE_RTI=true`, Terraform retains the solution Eventhouse and
+read/write KQL database, discovers the managed Workspace Monitoring database,
+and binds the queryset, dashboard, and operations Activator to that monitoring
+source. Managed monitoring definitions are not exported because Fabric can deny
+their definition readback.
 
 Export on a review branch with `scripts/export_fabric_definition.py`, inspect
 every tokenized text part. Validate with
@@ -601,8 +624,8 @@ validates:
   required only after the separate production cutover workflow creates them.
 - both semantic-model refreshes on both deployment passes, Direct Lake
   workspace/Lakehouse bindings, and each PBIR report's semantic-model reference.
-- Eventhouse, KQL database, queryset, and dashboard assets when
-  `FABRIC_ENABLE_RTI=true`.
+- the managed Workspace Monitoring Eventhouse and KQL database plus the
+  queryset and dashboard assets when `FABRIC_ENABLE_RTI=true`.
 - Activator definition readback when `FABRIC_ENABLE_ACTIVATOR=true`, plus
   unexpired per-action execution evidence when
   `FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT=true`.
@@ -614,11 +637,12 @@ Set `FABRIC_ENABLE_REPORTING=true`, `FABRIC_ENABLE_RTI=true`, and
 settings make their verification gates mandatory. Reporting requires bundles at
 `fabric/semantic-models/{analytics,operational}` and
 `fabric/reports/{analytics,operational}`. RTI requires committed bundles at
-`fabric/rti/{queryset,dashboard}`. Terraform creates the target Eventhouse and
-read/write KQL database without requiring their source definitions. Activator
-requires `fabric/activators/operations`. With action-checkpoint enforcement
-enabled, it also requires the `FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON` secret
-described below. These are source definitions, not live item IDs.
+`fabric/rti/{queryset,dashboard}` and the Workspace Monitoring prerequisite
+described above. Terraform discovers the managed monitoring Eventhouse and KQL
+database without requiring their source definitions. Activator requires
+`fabric/activators/operations`. With action-checkpoint enforcement enabled, it
+also requires the `FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON` secret described
+below. These are source definitions, not live item IDs.
 
 ### Reporting, RTI, and Activator gates
 
@@ -626,7 +650,9 @@ described below. These are source definitions, not live item IDs.
   refresh both semantic models. Verification must check Direct Lake
   bindings plus PBIR model references.
 - With `FABRIC_ENABLE_RTI=true`, verification requires all four RTI outputs and
-  definition readback. The flag does not create missing bundles.
+  confirms that queryset and dashboard definitions reference the managed
+  Workspace Monitoring database. The flag does not create missing bundles or
+  enable monitoring.
 - With `FABRIC_ENABLE_ACTIVATOR=true`, Terraform and runtime both require the
   `operations` bundle and verify its live definition, enabled rule, action
   topology, and referenced targets.
