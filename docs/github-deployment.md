@@ -57,9 +57,10 @@ scripts/bootstrap-local.sh
 The local script requires a clean `main` branch matching `origin/main`. It
 validates the selected Azure CLI tenant and subscription, verifies that the
 operator can list Fabric capacities, applies only its saved Terraform plan,
-and resolves the Development Fabric capacity UUID. It then atomically creates
-the ignored `.env.deploy-dev.local` file with mode `600` from the bootstrap
-outputs. It refuses to replace an existing file unless `--force` is supplied.
+and resolves the selected environment's Fabric capacity UUID. It then
+atomically creates the ignored `.env.deploy-<environment>.local` file with mode
+`600` from the bootstrap outputs. It refuses to replace an existing file unless
+`--force` is supplied.
 Bootstrap logs, the human-readable plan, and non-secret outputs are retained
 under `evidence/local-bootstrap/`; the saved plan and full raw outputs are
 temporary.
@@ -69,11 +70,12 @@ appropriate:
 
 ```bash
 scripts/bootstrap-local.sh \
+  --environment test \
   --var-file /secure/path/bootstrap.tfvars \
-  --env-file /secure/path/deploy-dev.env
+  --env-file /secure/path/deploy-test.env
 ```
 
-The generated Development defaults create one shortcut named after the
+The generated defaults create one shortcut named after the selected
 bootstrap ADLS container at `Files/<container>`, enable Reporting, RTI, and
 Activator, and defer only Activator action-execution evidence. Review those
 non-output defaults before the first deployment. Add any additional workspace
@@ -676,10 +678,10 @@ item-share removal, or Activator actions produce
 `operator_checkpoint_required`. The workflow uploads evidence, exits
 unsuccessfully, skips downstream jobs, and leaves schedules disabled.
 
-## Local Development deployment
+## Local deployment
 
-An operator can run the same Development deployment sequence from a trusted
-Linux workstation with [deploy-dev-local.sh](../scripts/deploy-dev-local.sh).
+An operator can run the same deployment sequence from a trusted Linux
+workstation with [deploy-local.sh](../scripts/deploy-local.sh).
 The script uses the operator's Azure CLI user session instead of GitHub OIDC.
 It does not use, fetch, or modify GitHub Environment variables or secrets.
 
@@ -705,17 +707,27 @@ az account set --subscription "<subscription-guid>"
 ```
 
 Before running the script, confirm that no GitHub or operator deployment is
-active. Run it from the repository root on a clean `main` branch that exactly
-matches `origin/main`:
+active. Run Development from the repository root on a clean `main` branch that
+exactly matches `origin/main`:
 
 ```bash
-scripts/deploy-dev-local.sh
+scripts/deploy-local.sh
 ```
 
-The script fetches `origin/main`, records the full immutable commit SHA,
-validates the Azure tenant, subscription, and Fabric token audiences, and then:
+For Test or Production, bootstrap and deploy the selected environment:
 
-1. initializes and validates the Development Terraform root;
+```bash
+scripts/bootstrap-local.sh --environment test
+scripts/deploy-local.sh --environment test
+```
+
+`scripts/deploy-dev-local.sh` remains a compatibility wrapper for Development.
+
+The deployment script fetches `origin/main`, records the full immutable commit
+SHA, validates the Azure tenant, subscription, and Fabric token audiences, and
+then:
+
+1. initializes and validates the selected environment's Terraform root;
 2. creates and classifies a saved Terraform plan;
 3. applies only that saved plan;
 4. builds and validates the committed Fabric definitions;
@@ -727,7 +739,7 @@ Approval-gated changes stop before apply unless the matching reviewed flag is
 present:
 
 ```bash
-scripts/deploy-dev-local.sh \
+scripts/deploy-local.sh --environment test \
   --allow-protected-changes \
   --approve-shortcut-changes \
   --approve-workspace-identity-changes \
@@ -735,7 +747,8 @@ scripts/deploy-dev-local.sh \
 ```
 
 Pass only the flags required by the printed plan. The script stores
-access-restricted, ignored evidence under `evidence/local-deploy-dev/`. It
+access-restricted, ignored evidence under
+`evidence/local-deploy-<environment>/`. It
 retains Terraform logs and the human-readable plan, protected-change
 classification, definition validation, both reconciliation records, and smoke
 evidence. Raw Terraform output, saved plans, access tokens, and temporary
@@ -745,7 +758,7 @@ Local execution does not add distributed concurrency beyond the Terraform
 state lock. It is the operator's responsibility to prevent overlap with
 GitHub Actions or another workstation. Fabric operations are not
 transactionally rolled back. A failed postconfiguration or acceptance gate
-leaves Development schedules disabled.
+leaves the selected environment's schedules disabled.
 
 ## Deployment procedure
 

@@ -4,11 +4,10 @@ set -Eeuo pipefail
 readonly SCRIPT_NAME="${0##*/}"
 readonly TF_ROOT="infra/bootstrap"
 readonly DEFAULT_VAR_FILE="infra/bootstrap/terraform.tfvars"
-readonly DEFAULT_ENV_FILE=".env.deploy-dev.local"
-readonly TARGET_ENVIRONMENT="dev"
 
 var_file="${DEFAULT_VAR_FILE}"
-env_file="${DEFAULT_ENV_FILE}"
+target_environment="dev"
+env_file=""
 force=false
 temp_dir=""
 env_temp=""
@@ -18,15 +17,16 @@ usage() {
 Usage: ${SCRIPT_NAME} [options]
 
 Bootstrap the Azure and Microsoft Entra resources using the active Azure CLI
-user session, then create the local Development deployment environment file.
+user session, then create a local deployment environment file.
 
 Options:
+  --environment NAME  Target environment: dev, test, or prod (default: dev)
   --var-file PATH  Terraform variable file (default: ${DEFAULT_VAR_FILE})
-  --env-file PATH  Generated environment file (default: ${DEFAULT_ENV_FILE})
+  --env-file PATH  Generated environment file (default: .env.deploy-<environment>.local)
   --force          Replace an existing environment file
   -h, --help       Show this help
 
-The script applies only a saved Terraform plan. It resolves the Development
+The script applies only a saved Terraform plan. It resolves the selected
 Fabric capacity UUID through the Fabric API and writes the environment file
 with mode 600.
 EOF
@@ -58,6 +58,11 @@ trap cleanup EXIT
 
 while (($# > 0)); do
   case "$1" in
+    --environment)
+      (($# >= 2)) || die "--environment requires a name"
+      target_environment=$2
+      shift 2
+      ;;
     --var-file)
       (($# >= 2)) || die "--var-file requires a path"
       var_file=$2
@@ -81,6 +86,12 @@ while (($# > 0)); do
       ;;
   esac
 done
+
+case "${target_environment}" in
+  dev|test|prod) ;;
+  *) die "--environment must be dev, test, or prod" ;;
+esac
+[[ -n "${env_file}" ]] || env_file=".env.deploy-${target_environment}.local"
 
 for command in git az terraform jq curl; do
   require_command "${command}"
@@ -141,7 +152,7 @@ temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/people-counter-bootstrap.XXXXXX")
 
 jq -n \
   --arg commitSha "${deploy_ref}" \
-  --arg environment "${TARGET_ENVIRONMENT}" \
+  --arg environment "${target_environment}" \
   --arg runId "${run_id}" \
   '{
     schema: "people-counter-local-bootstrap-v1",
@@ -255,15 +266,15 @@ state_storage_account_name=$(jq -er '.state_storage_account_name.value' \
 state_container_name=$(jq -er '.state_container_name.value' \
   "${temp_dir}/terraform-output.json")
 capacity_arm_id=$(jq -er \
-  --arg environment "${TARGET_ENVIRONMENT}" \
+  --arg environment "${target_environment}" \
   '.fabric_capacity_ids_by_environment.value[$environment]' \
   "${temp_dir}/terraform-output.json")
 adls_storage_account_resource_id=$(jq -er \
-  --arg environment "${TARGET_ENVIRONMENT}" \
+  --arg environment "${target_environment}" \
   '.adls_shortcut_source_by_environment.value[$environment].storage_account_resource_id' \
   "${temp_dir}/terraform-output.json")
 adls_container=$(jq -er \
-  --arg environment "${TARGET_ENVIRONMENT}" \
+  --arg environment "${target_environment}" \
   '.adls_shortcut_source_by_environment.value[$environment].container_name' \
   "${temp_dir}/terraform-output.json")
 capacity_name=${capacity_arm_id##*/}
@@ -319,7 +330,7 @@ write_assignment() {
   write_assignment FABRIC_ENABLE_ACTIVATOR true
   write_assignment FABRIC_REQUIRE_ACTIVATOR_ACTION_CHECKPOINT false
   printf '\n'
-  printf '# Optional while Development action-execution verification is deferred.\n'
+  printf '# Optional while action-execution verification is deferred.\n'
   write_assignment FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON ''
 } > "${env_temp}"
 chmod 600 "${env_temp}"
