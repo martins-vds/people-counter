@@ -334,7 +334,7 @@ def _live_shortcut_identity(value: Mapping[str, Any]) -> tuple[str, ...]:
     target = _mapping(value.get("target"), "live shortcut target")
     adls = _mapping(target.get("adlsGen2"), "live shortcut ADLS Gen2 target")
     return (
-        str(value.get("path")),
+        str(value.get("path")).lstrip("/"),
         str(value.get("name")),
         "AdlsGen2",
         str(adls.get("location")),

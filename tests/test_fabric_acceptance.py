@@ -497,7 +497,7 @@ def test_lakehouse_acceptance_verifies_tables_folders_shortcuts_and_release() ->
             shortcut_path: [
                 {
                     "name": "archive",
-                    "path": "Files/archive",
+                    "path": "/Files/archive",
                     "target": {
                         "adlsGen2": {
                             "location": (
