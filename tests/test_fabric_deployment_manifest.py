@@ -69,9 +69,9 @@ def test_nonproduction_namespaces_are_isolated() -> None:
     dev = deploy.load_deployment_manifest("dev", env={})
     test = deploy.load_deployment_manifest("test", env={})
 
-    assert dev.lakehouse.table_prefix != test.lakehouse.table_prefix
+    assert dev.lakehouse.table_prefix == TABLE_PREFIX
+    assert test.lakehouse.table_prefix == TABLE_PREFIX
     assert dev.lakehouse.files_root != test.lakehouse.files_root
-    assert dev.lakehouse.table_prefix != TABLE_PREFIX
     assert test.lakehouse.files_root != FILES_ROOT
 
 
@@ -154,7 +154,7 @@ def test_file_overlay_deep_merges_defaults(tmp_path: Path) -> None:
     assert manifest.lakehouse.lakehouse_id == (
         "22222222-2222-2222-2222-222222222222"
     )
-    assert manifest.lakehouse.table_prefix == "people_counter_dev_"
+    assert manifest.lakehouse.table_prefix == TABLE_PREFIX
 
 
 def test_inline_overlay_wins_over_file_overlay(tmp_path: Path) -> None:
@@ -243,7 +243,7 @@ def test_schedule_interval_boundaries(interval: int, valid: bool) -> None:
             "must end",
         ),
         (
-            lambda doc: doc["lakehouse"].__setitem__("table_prefix", TABLE_PREFIX),
+            lambda doc: doc["lakehouse"].__setitem__("files_root", FILES_ROOT),
             "must not reuse",
         ),
     ],

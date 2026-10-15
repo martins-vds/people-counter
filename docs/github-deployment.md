@@ -497,7 +497,8 @@ The stage-specific contract in `fabric/runtime/<stage>.json` controls supported
 post-provisioning work. The reconciler validates the contract strictly and
 does not accept arbitrary URLs or request payloads. It:
 
-- verifies every namespaced Delta table after the Control bootstrap.
+- verifies every stable SJD bootstrap table in the stage's isolated workspace
+  after the Control bootstrap.
 - creates declared `Files/` directories with the documented OneLake DFS API.
 - writes an immutable, commit-addressed release manifest and refuses to
   overwrite conflicting content.
@@ -574,9 +575,10 @@ validates:
   references.
 - exactly one disabled schedule for each recurring role and no schedules for
   Process or Cutover before the final gate.
-- namespaced Lakehouse tables through the schema-aware OneLake Delta metadata
+- stable SJD bootstrap tables through the schema-aware OneLake Delta metadata
   API, configured OneLake folders, the exact Terraform shortcut set, and the
-  immutable commit-addressed release manifest.
+  immutable commit-addressed release manifest. Cutover journal tables are
+  required only after the separate production cutover workflow creates them.
 - both semantic-model refreshes on both deployment passes, Direct Lake
   workspace/Lakehouse bindings, and each PBIR report's semantic-model reference.
 - Eventhouse, KQL database, queryset, and dashboard assets when

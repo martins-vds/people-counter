@@ -590,7 +590,7 @@ def test_table_readback_uses_schema_aware_control_job() -> None:
     assert evidence.resource["method"] == "control-sjd-bootstrap"
     assert evidence.resource["expected"] == sorted(
         manifest.lakehouse.table(suffix)
-        for suffix in reconcilers.TABLE_SUFFIXES
+        for suffix in reconcilers.BOOTSTRAP_TABLE_SUFFIXES
     )
     submission = next(call for call in client.calls if call[0] == "POST")
     assert submission[2] == {"executionData": {"commandLineArguments": "bootstrap"}}
