@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 readonly SCRIPT_NAME="${0##*/}"
+readonly ORIGINAL_ARGS=("$@")
 
 tf_environment="dev"
 config_path=""
@@ -269,6 +270,170 @@ mkdir -p \
   "${common_evidence}"
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/people-counter-deploy-${TF_ENVIRONMENT}.XXXXXX")
 
+wait_for_fabric_operation() {
+  local operation_url=$1
+  local token=$2
+  local body
+  local status
+  local attempt
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    body=$(curl --fail-with-body --silent --show-error \
+      -H "Authorization: Bearer ${token}" "${operation_url}")
+    status=$(jq -r '.status // empty' <<<"${body}")
+    case "${status}" in
+      Succeeded) return 0 ;;
+      Failed)
+        jq -c . <<<"${body}" >&2
+        die "Fabric operation failed"
+        ;;
+    esac
+    sleep 10
+  done
+  die "Fabric operation did not complete within 5 minutes"
+}
+
+ensure_workspace_monitoring() {
+  local workspace_id
+  local workspace
+  local workspace_name
+  local monitoring_name
+  local database_name
+  local token
+  local items
+  local monitoring_id
+  local database_id
+  local headers="${temp_dir}/monitoring-headers.txt"
+  local response="${temp_dir}/monitoring-response.json"
+  local operation_url
+  local definition
+  local properties
+  local properties_payload
+  local update_body
+  local status
+  local attempt
+
+  monitoring_changed=false
+  workspace_id=$(terraform -chdir="${TF_ROOT}" output -raw workspace_id 2>/dev/null \
+    || true)
+  [[ "${workspace_id}" =~ ${guid_pattern} ]] || return 0
+
+  token=$(az account get-access-token \
+    --scope "https://api.fabric.microsoft.com/.default" \
+    --query accessToken --output tsv)
+  workspace=$(curl --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer ${token}" \
+    "https://api.fabric.microsoft.com/v1/workspaces/${workspace_id}")
+  workspace_name=$(jq -er '.displayName' <<<"${workspace}")
+  monitoring_name="Monitoring_item_${workspace_name}"
+  database_name="${workspace_name}_${monitoring_name}_Database"
+  items=$(curl --fail-with-body --silent --show-error \
+    -H "Authorization: Bearer ${token}" \
+    "https://api.fabric.microsoft.com/v1/workspaces/${workspace_id}/items")
+  database_id=$(jq -r --arg name "${database_name}" '
+    [.value[] | select(.type == "KQLDatabase" and .displayName == $name)]
+    | if length <= 1 then (.[0].id // "") else error("duplicate monitoring database") end
+  ' <<<"${items}")
+  if [[ -n "${database_id}" ]]; then
+    jq -n \
+      --arg workspaceId "${workspace_id}" \
+      --arg databaseId "${database_id}" \
+      --arg databaseName "${database_name}" \
+      '{status:"ready",workspaceId:$workspaceId,databaseId:$databaseId,databaseName:$databaseName}' \
+      > "${common_evidence}/workspace-monitoring.json"
+    return 0
+  fi
+
+  monitoring_id=$(jq -r --arg name "${monitoring_name}" '
+    [.value[] | select(.type == "Monitoring" and .displayName == $name)]
+    | if length <= 1 then (.[0].id // "") else error("duplicate Monitoring item") end
+  ' <<<"${items}")
+  if [[ -z "${monitoring_id}" ]]; then
+    log "Creating Workspace Monitoring item"
+    status=$(curl --silent --show-error \
+      --dump-header "${headers}" --output "${response}" --write-out '%{http_code}' \
+      -X POST \
+      -H "Authorization: Bearer ${token}" \
+      -H "Content-Type: application/json" \
+      --data "$(jq -cn --arg name "${monitoring_name}" \
+        '{displayName:$name,type:"Monitoring"}')" \
+      "https://api.fabric.microsoft.com/v1/workspaces/${workspace_id}/items")
+    [[ "${status}" == "202" ]] || {
+      cat "${response}" >&2
+      die "Workspace Monitoring item creation failed with HTTP ${status}"
+    }
+    operation_url=$(awk 'tolower($1) == "location:" {sub(/\r$/, "", $2); print $2}' \
+      "${headers}")
+    [[ -n "${operation_url}" ]] || die "Monitoring creation returned no operation URL"
+    wait_for_fabric_operation "${operation_url}" "${token}"
+    items=$(curl --fail-with-body --silent --show-error \
+      -H "Authorization: Bearer ${token}" \
+      "https://api.fabric.microsoft.com/v1/workspaces/${workspace_id}/items")
+    monitoring_id=$(jq -er --arg name "${monitoring_name}" '
+      .value[] | select(.type == "Monitoring" and .displayName == $name) | .id
+    ' <<<"${items}")
+  fi
+
+  log "Enabling Workspace Monitoring diagnostic collection"
+  definition=$(curl --fail-with-body --silent --show-error -X POST -d '' \
+    -H "Authorization: Bearer ${token}" \
+    "https://api.fabric.microsoft.com/v1/workspaces/${workspace_id}/items/${monitoring_id}/getDefinition")
+  properties=$(jq -cn '{
+    "$schema":"https://developer.microsoft.com/json-schemas/fabric/item/monitoring/definition/monitoringProperties/1.0.0/schema.json",
+    dataCollectionSettings:[{
+      sources:{workspaceDiagnostics:{mode:"All"}},
+      destinations:{
+        eventhouse:{mode:"Auto"},
+        eventStream:{customEndpoint:{enabled:false}}
+      }
+    }]
+  }')
+  properties_payload=$(jq -rn --arg value "${properties}" '$value | @base64')
+  update_body=$(jq -cn \
+    --argjson current "${definition}" \
+    --arg payload "${properties_payload}" \
+    '{definition:{parts:($current.definition.parts | map(
+      if .path == "MonitoringProperties.json" then .payload = $payload else . end
+    ))}}')
+  status=$(curl --silent --show-error \
+    --dump-header "${headers}" --output "${response}" --write-out '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    --data "${update_body}" \
+    "https://api.fabric.microsoft.com/v1/workspaces/${workspace_id}/items/${monitoring_id}/updateDefinition")
+  [[ "${status}" == "200" || "${status}" == "202" ]] || {
+    cat "${response}" >&2
+    die "Workspace Monitoring configuration failed with HTTP ${status}"
+  }
+  if [[ "${status}" == "202" ]]; then
+    operation_url=$(awk 'tolower($1) == "location:" {sub(/\r$/, "", $2); print $2}' \
+      "${headers}")
+    [[ -n "${operation_url}" ]] || die "Monitoring update returned no operation URL"
+    wait_for_fabric_operation "${operation_url}" "${token}"
+  fi
+
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    items=$(curl --fail-with-body --silent --show-error \
+      -H "Authorization: Bearer ${token}" \
+      "https://api.fabric.microsoft.com/v1/workspaces/${workspace_id}/items")
+    database_id=$(jq -r --arg name "${database_name}" '
+      .value[] | select(.type == "KQLDatabase" and .displayName == $name) | .id
+    ' <<<"${items}")
+    [[ -z "${database_id}" ]] || break
+    sleep 10
+  done
+  [[ -n "${database_id}" ]] || die \
+    "Workspace Monitoring database was not provisioned within 5 minutes"
+  monitoring_changed=true
+  jq -n \
+    --arg workspaceId "${workspace_id}" \
+    --arg monitoringId "${monitoring_id}" \
+    --arg databaseId "${database_id}" \
+    --arg databaseName "${database_name}" \
+    '{status:"configured",workspaceId:$workspaceId,monitoringId:$monitoringId,databaseId:$databaseId,databaseName:$databaseName}' \
+    > "${common_evidence}/workspace-monitoring.json"
+}
+
 jq -n \
   --arg commitSha "${deploy_ref}" \
   --arg environment "${TF_ENVIRONMENT}" \
@@ -291,6 +456,9 @@ terraform -chdir="${TF_ROOT}" init -input=false \
   2>&1 | tee "${terraform_evidence}/init.log"
 terraform -chdir="${TF_ROOT}" validate -no-color \
   2>&1 | tee "${terraform_evidence}/validate.log"
+if [[ "${FABRIC_ENABLE_RTI}" == "true" ]]; then
+  ensure_workspace_monitoring
+fi
 
 log "Creating saved Terraform plan"
 set +e
@@ -413,9 +581,22 @@ if ((${#violations[@]} > 0)); then
 fi
 
 log "Applying saved Terraform plan"
+set +e
 terraform -chdir="${TF_ROOT}" apply -input=false -auto-approve \
   "${temp_dir}/tfplan" \
   2>&1 | tee "${terraform_evidence}/apply.log"
+apply_status=${PIPESTATUS[0]}
+set -e
+if ((apply_status != 0)); then
+  if [[ "${FABRIC_ENABLE_RTI}" == "true" ]]; then
+    ensure_workspace_monitoring
+    if [[ "${monitoring_changed}" == "true" ]]; then
+      log "Workspace Monitoring is ready; restarting the saved operator request"
+      exec "${repo_root}/scripts/deploy-local.sh" "${ORIGINAL_ARGS[@]}"
+    fi
+  fi
+  die "Terraform apply failed with exit code ${apply_status}"
+fi
 
 log "Exporting non-secret deployment outputs"
 terraform -chdir="${TF_ROOT}" output -json > "${temp_dir}/terraform-output.json"
@@ -688,5 +869,5 @@ jq -n \
 [[ "${smoke_status}" == "succeeded" ]] || die \
   "Direct Fabric probes failed; schedules remain disabled"
 
-log "Development deployment succeeded"
+log "${TF_ENVIRONMENT^} deployment succeeded"
 printf 'Commit:  %s\nEvidence: %s\n' "${deploy_ref}" "${evidence_dir}"

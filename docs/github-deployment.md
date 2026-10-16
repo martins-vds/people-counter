@@ -382,23 +382,26 @@ reviewed. Activator requires its operations bundle and its flag.
 ### Workspace Monitoring prerequisite
 
 RTI dashboards and the operations Activator query Fabric Workspace Monitoring.
-Before an RTI deployment can finish:
+Before any RTI deployment, enable **Allow monitoring data collection** in the
+Fabric Admin portal for the organization or a security group that contains the
+deployment workspace operators. Allow up to 15 minutes for propagation.
 
-1. In the Fabric Admin portal, enable **Allow monitoring data collection** for
-   the organization or a security group that contains the deployment workspace
-   operators. Allow up to 15 minutes for propagation.
-2. Open the target workspace, select **Workspace settings** > **Monitoring**,
+Hosted deployments also require these workspace steps before the RTI apply:
+
+1. Open the target workspace, select **Workspace settings** > **Monitoring**,
    migrate to the new monitoring experience if prompted, and create the
    Monitoring item.
-3. Enable **Diagnostic data collection** and save.
-4. Keep the generated database name
+2. Enable **Diagnostic data collection** and save.
+3. Keep the generated database name
    `<workspace>_Monitoring_item_<workspace>_Database`.
 
-The Fabric Terraform provider cannot enable Workspace Monitoring. Terraform
-discovers the generated database by this name and stops rather than binding the
-dashboard to another KQL database. If Terraform is creating the workspace for
-the first time, the first apply creates the workspace and then stops at the
-monitoring lookup. Complete the steps above and rerun the same deployment.
+The Fabric Terraform provider cannot enable Workspace Monitoring. Hosted
+deployments therefore require the tenant and workspace steps above before the
+RTI apply. The local deployment script uses the supported Fabric item and
+definition APIs to create or configure the Monitoring item, waits for its
+managed database, and then restarts a fresh environment safely when the
+workspace was created during the first apply. Terraform still discovers the
+generated database by name and never binds the dashboard to another database.
 
 ### ADLS Gen2 shortcut configuration
 
@@ -653,8 +656,9 @@ below. These are source definitions, not live item IDs.
   bindings plus PBIR model references.
 - With `FABRIC_ENABLE_RTI=true`, verification requires all four RTI outputs and
   confirms that queryset and dashboard definitions reference the managed
-  Workspace Monitoring database. The flag does not create missing bundles or
-  enable monitoring.
+  Workspace Monitoring database. The flag does not create missing bundles.
+  Local deployment configures monitoring through the Fabric item-definition
+  API; hosted deployment requires the workspace prerequisite above.
 - With `FABRIC_ENABLE_ACTIVATOR=true`, Terraform and runtime both require the
   `operations` bundle and verify its live definition, enabled rule, action
   topology, and referenced targets.
@@ -722,6 +726,9 @@ scripts/deploy-local.sh --environment test
 ```
 
 `scripts/deploy-dev-local.sh` remains a compatibility wrapper for Development.
+When RTI is enabled, local deployment also creates or configures Workspace
+Monitoring after the workspace exists. The tenant-level **Allow monitoring
+data collection** setting remains an external administrative prerequisite.
 
 The deployment script fetches `origin/main`, records the full immutable commit
 SHA, validates the Azure tenant, subscription, and Fabric token audiences, and
