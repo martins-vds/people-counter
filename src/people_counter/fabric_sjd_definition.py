@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Mapping
+from typing import Any
 
 from people_counter.fabric_sjd import ENVIRONMENT_ID, LAKEHOUSE_ID
 
@@ -18,6 +19,31 @@ ENTRY_POINTS: Mapping[str, str] = {
     "gold": "people_counter.fabric_sjd_jobs:gold_main",
     "cutover": "people_counter.fabric_sjd_cutover_jobs:main",
 }
+
+
+def reviewed_compute_settings(existing: Mapping[str, Any]) -> dict[str, Any]:
+    properties = {
+        row["key"]: row["value"] for row in existing.get("sparkProperties", [])
+    }
+    properties.update({"spark.speculation": "false", "spark.task.cpus": "1", "spark.executor.instances": "2"})
+    return {
+        "driverCores": 8, "driverMemory": "56g",
+        "executorCores": 8, "executorMemory": "56g",
+        "dynamicExecutorAllocation": {"enabled": False},
+        "runtimeVersion": "2.0",
+        "sparkProperties": [{"key": key, "value": value} for key, value in sorted(properties.items())],
+    }
+
+
+def validate_reviewed_compute_settings(settings: Mapping[str, Any]) -> None:
+    expected = reviewed_compute_settings(settings)
+    for key, value in expected.items():
+        if key == "sparkProperties":
+            actual = {row["key"]: row["value"] for row in settings.get(key, [])}
+            if actual != {row["key"]: row["value"] for row in value}:
+                raise RuntimeError("Environment Spark properties differ from reviewed fixed allocation")
+        elif settings.get(key) != value:
+            raise RuntimeError(f"Environment {key} differs from reviewed fixed allocation")
 
 
 def definition_part(path: str, content: bytes) -> dict[str, str]:

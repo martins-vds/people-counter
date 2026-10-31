@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "people-counter"
-version = "0.9.57"
+version = "0.9.59"
 description = "A permissively licensed CPU/GPU distinct person counter"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -61,6 +61,7 @@ people_counter = ["py.typed", "data/*.json", "data/deploy/*.json"]
 source_paths = [
     "src/people_counter/",
     "scripts/deploy_sjd_analytics.py",
+    "scripts/deploy_sjd_operations.py",
     "scripts/deploy_sjd_operational_report.py",
     "scripts/check_fabric_definition_drift.py",
     "scripts/validate_fabric_deployment.py",
@@ -71,6 +72,7 @@ pytest_add_cli_args_test_selection = ["tests/"]
 also_copy = [
     "fabric/",
     "notebooks/fabric/",
+    "notebooks/customer_end_to_end_demo.ipynb",
     "samples/",
     "scripts/",
     "src/people_counter/data/sjd_release_identity.json",
@@ -102,6 +104,12 @@ experiments = [
     "jupyterlab>=4.4.0",
     "matplotlib>=3.8.0",
     "pandas>=2.2.0",
+]
+demo = [
+    "deltalake>=1,<2",
+    "duckdb>=1.5.6,<2",
+    "pyarrow>=18",
+    "pytz>=2024.1",
 ]
 export = [
     "libreyolo==1.5.0",

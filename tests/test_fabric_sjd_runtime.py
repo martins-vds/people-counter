@@ -72,6 +72,7 @@ from people_counter.sjd_process import (
     ProcessRouteMode,
     ProcessValidationError,
 )
+from people_counter.sjd_control import LeaseLostError
 
 
 class MemoryFiles:
@@ -695,6 +696,247 @@ def test_control_registration_is_idempotent_and_rejects_immutable_conflicts() ->
     ):
         store.register("work-a", {"camera_id": "camera-b"}, **arguments)
     assert len(store.data["work"]) == 1
+
+
+def test_stable_registration_rejects_old_release_before_creating_ready_work(monkeypatch) -> None:
+    from people_counter.fabric_sjd import FabricSjdConfig
+    import people_counter.fabric_release_provenance as provenance
+
+    store = MemoryControlStore(MemoryFiles())
+    store.config = FabricSjdConfig()
+    monkeypatch.setattr(
+        provenance, "resolve_published_release",
+        lambda read_text: SimpleNamespace(manifest_sha256="b" * 64),
+    )
+    with pytest.raises(ImmutableConflictError, match="release"):
+        store.register(
+            "old-work", {}, runtime_key="profile", duration_seconds=10,
+            config_sha256="config", release_digest="a" * 64,
+        )
+    assert store.data["work"] == []
+    assert store.data["attempts"] == []
+    assert store.data["batches"] == []
+    registered = store.register(
+        "new-work", {}, runtime_key="profile", duration_seconds=10,
+        config_sha256="config", release_digest="b" * 64,
+    )
+    assert registered.status == "READY"
+
+
+def test_fabric_claim_rejects_old_release_before_any_lease_or_envelope() -> None:
+    files = MemoryFiles()
+    store = MemoryControlStore(files)
+    store.register(
+        "old-work", {}, runtime_key="profile", duration_seconds=10,
+        config_sha256="config", release_digest="a" * 64,
+    )
+    with pytest.raises(ImmutableConflictError, match="old-work"):
+        store.claim(
+            "new-dispatcher", max_items=1, lease_seconds=100,
+            expected_release_digest="b" * 64,
+            minimum_speed_x=1, safety_factor=1, margin_seconds=1,
+        )
+    assert store.data["work"][0]["status"] == "READY"
+    assert store.data["work"][0]["attempt_count"] == 0
+    assert store.data["attempts"] == []
+    assert store.data["batches"] == []
+    assert files.content == {}
+    claimed = store.claim(
+        "compatible-dispatcher", max_items=1, lease_seconds=100,
+        expected_release_digest="a" * 64,
+        minimum_speed_x=1, safety_factor=1, margin_seconds=1,
+    )
+    assert claimed is not None
+    assert len(claimed.items) == 1
+
+
+def test_stable_claim_validates_dispatcher_binding_before_claim(monkeypatch) -> None:
+    from people_counter.fabric_sjd import FabricSjdConfig
+    import people_counter.fabric_release_provenance as provenance
+
+    store = MemoryControlStore(MemoryFiles())
+    store.config = FabricSjdConfig()
+    monkeypatch.setattr(
+        provenance, "resolve_published_release",
+        lambda read_text: SimpleNamespace(manifest_sha256="b" * 64),
+    )
+    with pytest.raises(ImmutableConflictError, match="release"):
+        store.claim(
+            "dispatcher", max_items=1, lease_seconds=100,
+            expected_release_digest="a" * 64,
+            minimum_speed_x=1, safety_factor=1, margin_seconds=1,
+        )
+    assert not store.data["batches"]
+
+
+def test_stable_dispatcher_validates_full_release_evidence_before_claim(monkeypatch) -> None:
+    from people_counter.fabric_sjd import FabricSjdConfig
+    import people_counter.fabric_sjd_runtime as runtime
+
+    store = MagicMock()
+    monkeypatch.setattr("people_counter.sjd_control.FabricControlStore", lambda *args, **kwargs: store)
+    monkeypatch.setattr(runtime, "_spark", lambda: object())
+    loader = MagicMock(side_effect=ValueError("release manifest path differs"))
+    monkeypatch.setattr(runtime, "_load_runtime_release_evidence", loader)
+    monkeypatch.setattr(runtime, "_write_control_diagnostic", MagicMock())
+    with pytest.raises(ValueError, match="manifest path differs"):
+        runtime.dispatcher_main([
+            "--release-manifest-path", "wrong-path",
+            "--release-manifest-sha256", "a" * 64,
+            "--release-receipt-path", "wrong-receipt",
+            "--release-receipt-sha256", "b" * 64,
+        ], config=FabricSjdConfig())
+    store.claim.assert_not_called()
+    assert loader.call_args.kwargs["manifest_path"] == "wrong-path"
+
+
+def test_stable_dispatcher_rejects_bad_compute_before_claim(monkeypatch) -> None:
+    from people_counter.fabric_sjd import FabricSjdConfig
+    import people_counter.fabric_sjd_runtime as runtime
+
+    store = MagicMock()
+    monkeypatch.setattr("people_counter.sjd_control.FabricControlStore", lambda *args, **kwargs: store)
+    monkeypatch.setattr(runtime, "_spark", lambda: object())
+    monkeypatch.setattr(runtime, "_load_runtime_release_evidence", lambda *args, **kwargs: object())
+    validation = MagicMock(side_effect=RuntimeError("fixed live pool required"))
+    monkeypatch.setattr(runtime, "_validate_fabric_runtime", validation)
+    monkeypatch.setattr(runtime, "_write_control_diagnostic", MagicMock())
+    with pytest.raises(RuntimeError, match="fixed live pool"):
+        runtime.dispatcher_main([
+            "--release-manifest-path", "manifest",
+            "--release-manifest-sha256", "a" * 64,
+            "--release-receipt-path", "receipt",
+            "--release-receipt-sha256", "b" * 64,
+        ], config=FabricSjdConfig())
+    store.claim.assert_not_called()
+
+
+
+def test_abandon_failed_claim_is_owner_checked_audited_and_fenced() -> None:
+    files = MemoryFiles()
+    store = MemoryControlStore(files)
+    store.register("failed-work", {}, runtime_key="profile", duration_seconds=1,
+                   config_sha256="c" * 64, release_digest="a" * 64)
+    claim = store.claim("failed-driver", max_items=1, lease_seconds=100,
+                        minimum_speed_x=1, safety_factor=1, margin_seconds=1)
+    assert claim is not None
+    batch = store.data["batches"][0]
+    original = copy.deepcopy(store.data["work"][0])
+    arguments = {
+        "batch_id": claim.batch_id, "expected_owner": "failed-driver",
+        "expected_envelope_sha256": batch["envelope_sha256"],
+        "failed_job_id": "terminal-job", "operator": "approved-operator",
+        "reason": "terminal-driver-failed-before-output",
+    }
+    with pytest.raises(LeaseLostError):
+        store.abandon_failed_claim(**{**arguments, "expected_owner": "wrong-owner"})
+    assert store.data["work"][0] == original
+    result = store.abandon_failed_claim(**arguments)
+    assert result["work_ids"] == ["failed-work"]
+    work = store.data["work"][0]
+    assert work["status"] == "READY"
+    assert work["lease_attempt_id"] is None
+    assert work["fence"] == original["fence"] + 1
+    for key in ("work_id", "payload_json", "payload_sha256", "release_digest", "config_sha256"):
+        assert work[key] == original[key]
+    assert json.loads(work["last_error"]) == {
+        "operation": "abandon-failed-claim", "operator": "approved-operator",
+        "reason": "terminal-driver-failed-before-output", "failed_job_id": "terminal-job",
+        "batch_id": claim.batch_id, "owner": "failed-driver",
+        "envelope_sha256": arguments["expected_envelope_sha256"],
+    }
+    assert store.data["batches"][0]["status"] == "EXPIRED"
+    assert store.data["attempts"][0]["status"] == "EXPIRED"
+    assert store.abandon_failed_claim(**arguments)["idempotent"] is True
+
+
+@pytest.mark.parametrize("marker", ["_delta_log", "_SUCCESS"])
+def test_abandon_failed_claim_refuses_staged_or_committed_output(marker) -> None:
+    from people_counter.sjd_process import verify_envelope
+
+    files = MemoryFiles()
+    store = MemoryControlStore(files)
+    store.register("failed-work", {}, runtime_key="profile", duration_seconds=1,
+                   config_sha256="c" * 64, release_digest="a" * 64)
+    claim = store.claim("failed-driver", max_items=1, lease_seconds=100,
+                        minimum_speed_x=1, safety_factor=1, margin_seconds=1)
+    raw, digest = store.load_claim_envelope_with_digest(claim.batch_id)
+    envelope = verify_envelope(raw, batch_id=claim.batch_id, envelope_sha256=digest)
+    path = (f"{store.config.file_path('attempts')}/process/batch={claim.batch_id}"
+            f"/attempt={envelope.execution_attempt_id}/{marker}")
+    files.content[path] = "{}"
+    with pytest.raises(BatchValidationError, match="output"):
+        store.abandon_failed_claim(
+            batch_id=claim.batch_id, expected_owner="failed-driver",
+            expected_envelope_sha256=digest, failed_job_id="terminal-job",
+            operator="approved-operator", reason="terminal-driver-failed",
+        )
+    assert store.data["work"][0]["status"] == "LEASED"
+
+
+def test_abandon_failed_claim_refuses_an_existing_publication() -> None:
+    store = MemoryControlStore(MemoryFiles())
+    store.register("failed-work", {}, runtime_key="profile", duration_seconds=1,
+                   config_sha256="c" * 64, release_digest="a" * 64)
+    claim = store.claim("failed-driver", max_items=1, lease_seconds=100,
+                        minimum_speed_x=1, safety_factor=1, margin_seconds=1)
+    store.data["publications"].append({"work_id": "failed-work"})
+    before = copy.deepcopy(store.data)
+    with pytest.raises(BatchValidationError, match="published output"):
+        store.abandon_failed_claim(
+            batch_id=claim.batch_id, expected_owner="failed-driver",
+            expected_envelope_sha256=store.data["batches"][0]["envelope_sha256"],
+            failed_job_id="terminal-job", operator="approved-operator", reason="verified-failure",
+        )
+    assert store.data == before
+
+
+@pytest.mark.parametrize("table,field,value", [
+    ("work", "fence", 99), ("work", "lease_owner", "different-owner"),
+    ("work", "committed_attempt_id", "published-attempt"),
+    ("attempts", "output_path", "staged-output"),
+    ("attempts", "output_sha256", "d" * 64),
+    ("attempts", "terminal_succeeded", False),
+    ("batches", "status", "SEALED"),
+    ("batches", "envelope_sha256", "d" * 64),
+])
+def test_abandon_failed_claim_rejects_changed_preconditions_without_mutation(table, field, value) -> None:
+    store = MemoryControlStore(MemoryFiles())
+    store.register("failed-work", {}, runtime_key="profile", duration_seconds=1,
+                   config_sha256="c" * 64, release_digest="a" * 64)
+    claim = store.claim("failed-driver", max_items=1, lease_seconds=100,
+                        minimum_speed_x=1, safety_factor=1, margin_seconds=1)
+    digest = store.data["batches"][0]["envelope_sha256"]
+    store.data[table][0][field] = value
+    before = copy.deepcopy(store.data)
+    with pytest.raises((LeaseLostError, BatchValidationError)):
+        store.abandon_failed_claim(
+            batch_id=claim.batch_id, expected_owner="failed-driver",
+            expected_envelope_sha256=digest, failed_job_id="terminal-job",
+            operator="approved-operator", reason="terminal-driver-failed",
+        )
+    assert store.data == before
+
+
+def test_control_forwards_exact_failed_claim_recovery_evidence(capsys) -> None:
+    import people_counter.fabric_sjd_runtime as runtime
+
+    values = {
+        "batch-id": "batch", "expected-owner": "terminal-driver",
+        "expected-envelope-sha256": "a" * 64, "failed-job-id": "terminal-job",
+        "operator": "approved-operator", "reason": "verified-terminal-failure",
+    }
+    arguments = ["abandon-failed-claim"]
+    for key, value in values.items():
+        arguments += ["--" + key, value]
+    parsed = runtime._control_parser().parse_args(arguments)
+    store = MagicMock()
+    store.abandon_failed_claim.return_value = {"idempotent": False, "work_ids": ["work"]}
+    assert runtime._control_dispatch(parsed, store, FabricNamespaceConfig()) == 0
+    store.abandon_failed_claim.assert_called_once_with(
+        **{key.replace("-", "_"): value for key, value in values.items()},
+    )
+    assert json.loads(capsys.readouterr().out)["work_ids"] == ["work"]
 
 
 def test_fabric_bulk_registration_is_atomic_and_exactly_idempotent() -> None:

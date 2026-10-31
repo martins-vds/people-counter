@@ -54,6 +54,23 @@ class UnsupportedControlStoreError(ControlError):
     """The requested control-store implementation is intentionally unavailable."""
 
 
+def require_release_compatibility(
+    requests: Sequence[Mapping[str, Any]], expected_release_digest: str | None,
+) -> None:
+    if expected_release_digest is None:
+        return
+    expected = _required_text(expected_release_digest, "expected_release_digest")
+    mismatched = sorted(
+        str(row["work_id"]) for row in requests
+        if row["release_digest"] != expected
+    )
+    if mismatched:
+        raise ImmutableConflictError(
+            f"release compatibility mismatch: expected {expected}; "
+            f"incompatible work {mismatched!r}; no work was registered or claimed"
+        )
+
+
 @dataclass(frozen=True)
 class RegisteredWork:
     work_id: str
@@ -164,6 +181,7 @@ class ControlStore(Protocol):
         allowed_work_ids: Collection[str] | None = None,
         process_profile: object | None = None,
         peak_rss_bytes: int | None = None,
+        expected_release_digest: str | None = None,
     ) -> ClaimedBatch | None: ...
 
     def recover(self, *, now: float | None = None) -> RecoveryReport: ...
@@ -676,6 +694,7 @@ class SQLiteControlStore:
         allowed_work_ids: Collection[str] | None = None,
         process_profile: object | None = None,
         peak_rss_bytes: int | None = None,
+        expected_release_digest: str | None = None,
     ) -> ClaimedBatch | None:
         owner_id = _required_text(owner, "owner")
         if type(max_items) is not int or not 1 <= max_items <= 100:
@@ -732,6 +751,15 @@ class SQLiteControlStore:
                     ((work_id,) for work_id in scope),
                 )
                 scope_join = "JOIN claim_scope s ON s.work_id = w.work_id"
+            if expected_release_digest is not None:
+                eligible = connection.execute(
+                    f"SELECT w.work_id,w.release_digest FROM work w {scope_join} "
+                    "WHERE w.status = 'READY' AND w.available_at <= ?",
+                    (now,),
+                ).fetchall()
+                require_release_compatibility(
+                    [dict(row) for row in eligible], expected_release_digest,
+                )
             runtime_row = connection.execute(
                 f"""
                 SELECT w.runtime_key, MIN(w.created_at) AS first_created

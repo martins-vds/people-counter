@@ -356,6 +356,35 @@ def _executor_warm_works(
     return tuple(works)
 
 
+def _validate_fabric_runtime(spark: Any) -> tuple[int, int, int, int]:
+    from people_counter.sjd_process import GIB
+
+    if sys.version_info[:2] != (3, 13):
+        raise RuntimeError(f"Fabric SJD requires Python 3.13, got {sys.version}")
+    if not str(spark.version).startswith("4.1.1"):
+        raise RuntimeError(f"Fabric SJD requires Spark 4.1.1, got {spark.version}")
+    java = str(spark.sparkContext._jvm.java.lang.System.getProperty("java.version"))
+    if not java.startswith("21"):
+        raise RuntimeError(f"Fabric SJD requires Java 21, got {java}")
+    if str(spark.conf.get("spark.dynamicAllocation.enabled", "")).lower() != "false":
+        raise RuntimeError("Fabric SJD requires the reviewed fixed live pool")
+    if str(spark.conf.get("spark.speculation", "false")).lower() != "false":
+        raise RuntimeError("Fabric SJD requires Spark speculation disabled")
+    cores = int(spark.conf.get("spark.executor.cores"))
+    if cores < 1:
+        raise RuntimeError("Fabric SJD requires at least one executor core")
+    memory = str(spark.conf.get("spark.executor.memory")).lower()
+    match = re.fullmatch(r"(\d+)([gmk])", memory)
+    if match is None:
+        raise RuntimeError(f"unsupported Fabric executor memory {memory!r}")
+    scale = {"k": 1024, "m": 1024**2, "g": GIB}[match.group(2)]
+    return (
+        cores, int(match.group(1)) * scale,
+        int(spark.conf.get("spark.task.cpus", "1")),
+        max(1, int(spark.conf.get("spark.dynamicAllocation.minExecutors", "1"))),
+    )
+
+
 def _fabric_process_profile(
     spark: Any,
     *,
@@ -385,32 +414,7 @@ def _fabric_process_profile(
     from people_counter.fabric_executor_inventory import discover_active_executors
     from people_counter.sjd_process import GIB, build_profile_from_inventory
 
-    if sys.version_info[:2] != (3, 13):
-        raise RuntimeError(f"Fabric SJD requires Python 3.13, got {sys.version}")
-    if not str(spark.version).startswith("4.1.1"):
-        raise RuntimeError(f"Fabric SJD requires Spark 4.1.1, got {spark.version}")
-    java = str(
-        spark.sparkContext._jvm.java.lang.System.getProperty("java.version")
-    )
-    if not java.startswith("21"):
-        raise RuntimeError(f"Fabric SJD requires Java 21, got {java}")
-    if str(spark.conf.get("spark.dynamicAllocation.enabled", "")).lower() != "false":
-        raise RuntimeError("Fabric SJD requires the reviewed fixed live pool")
-    if str(spark.conf.get("spark.speculation", "false")).lower() != "false":
-        raise RuntimeError("Fabric SJD requires Spark speculation disabled")
-    expected_executor_cores = int(spark.conf.get("spark.executor.cores"))
-    if expected_executor_cores < 1:
-        raise RuntimeError("Fabric SJD requires at least one executor core")
-    memory = str(spark.conf.get("spark.executor.memory")).lower()
-    match = re.fullmatch(r"(\d+)([gmk])", memory)
-    if match is None:
-        raise RuntimeError(f"unsupported Fabric executor memory {memory!r}")
-    scale = {"k": 1024, "m": 1024**2, "g": GIB}[match.group(2)]
-    memory_bytes = int(match.group(1)) * scale
-    task_cpus = int(spark.conf.get("spark.task.cpus", "1"))
-    minimum_executors = max(
-        1, int(spark.conf.get("spark.dynamicAllocation.minExecutors", "1"))
-    )
+    expected_executor_cores, memory_bytes, task_cpus, minimum_executors = _validate_fabric_runtime(spark)
 
     discover = discover_executors or (
         lambda session, minimum: discover_active_executors(
@@ -1083,6 +1087,9 @@ def _control_parser() -> argparse.ArgumentParser:
     quarantine.add_argument("--reason", required=True)
     recover = commands.add_parser("recover")
     recover.add_argument("--now", type=float)
+    abandon = commands.add_parser("abandon-failed-claim")
+    for argument in ("batch-id", "expected-owner", "expected-envelope-sha256", "failed-job-id", "operator", "reason"):
+        abandon.add_argument("--" + argument, required=True)
     clear_lock = commands.add_parser("clear-stale-lock")
     clear_lock.add_argument("--expected-owner-id", required=True)
     commands.add_parser("reconcile")
@@ -1332,6 +1339,13 @@ def _control_dispatch(
         )
     elif arguments.command == "recover":
         result = asdict(store.recover(now=arguments.now))
+    elif arguments.command == "abandon-failed-claim":
+        result = store.abandon_failed_claim(
+            batch_id=arguments.batch_id, expected_owner=arguments.expected_owner,
+            expected_envelope_sha256=arguments.expected_envelope_sha256,
+            failed_job_id=arguments.failed_job_id,
+            operator=arguments.operator, reason=arguments.reason,
+        )
     elif arguments.command == "clear-stale-lock":
         result = _clear_stale_lock(
             _spark(), arguments.expected_owner_id, config=selected
@@ -1399,6 +1413,17 @@ def dispatcher_main(
     owner = arguments.owner or f"pc-production-dispatcher-{uuid.uuid4().hex}"
     store = FabricControlStore(_spark(), config=selected)
     try:
+        if getattr(selected, "stable_production", False):
+            from people_counter.fabric_control_store import NotebookUtilsOneLakeFiles
+
+            _load_runtime_release_evidence(
+                NotebookUtilsOneLakeFiles(),
+                manifest_path=arguments.release_manifest_path,
+                manifest_sha256=arguments.release_manifest_sha256,
+                receipt_path=arguments.release_receipt_path,
+                receipt_sha256=arguments.release_receipt_sha256,
+            )
+            _validate_fabric_runtime(store.spark)
         claimed = store.claim(
             owner,
             max_items=arguments.max_items,
@@ -1408,6 +1433,7 @@ def dispatcher_main(
             safety_factor=arguments.safety_factor,
             margin_seconds=arguments.margin_seconds,
             minimum_items=arguments.minimum_items,
+            expected_release_digest=arguments.release_manifest_sha256,
         )
         if claimed is None:
             print(

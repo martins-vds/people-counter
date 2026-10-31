@@ -105,6 +105,20 @@ class SJDControlTests(unittest.TestCase):
                 release_digest="release-a",
             )
 
+    def test_release_mismatch_cannot_create_a_lease(self):
+        self.register("old-release-work")
+        with self.assertRaisesRegex(ImmutableConflictError, "old-release-work"):
+            self.claim(expected_release_digest="release-b")
+        with self.store._connect() as connection:
+            row = connection.execute(
+                "SELECT status,attempt_count FROM work WHERE work_id = ?",
+                ("old-release-work",),
+            ).fetchone()
+            self.assertEqual(tuple(row), ("READY", 0))
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM batches").fetchone()[0], 0)
+        self.assertIsNotNone(self.claim(expected_release_digest="release-a"))
+
     def test_register_many_is_atomic_idempotent_and_rejects_partition_conflicts(self):
         def request(work_id, source):
             return {

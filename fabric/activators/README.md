@@ -99,3 +99,9 @@ definition readback, enabled rule, action topology, and referenced targets. It
 records the live definition hash and `actionExecutionRequired: false` with the
 deferral in retained evidence. The default is `true`; re-enable it before
 accepting action delivery.
+
+The [local customer demo](../../notebooks/customer_end_to_end_demo.ipynb)
+also verifies Eventstream source/stream/destination runtime status. An enabled
+Activator rule does not imply delivery when its Eventstream destination is
+paused. The rule validator accepts both `entityId` and the live Fabric
+`fabricJobConnectionDocumentId` argument for resolving item-invocation actions.

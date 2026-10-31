@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from azure.core.credentials import TokenCredential
 
 from people_counter.manifest import ManifestPublisherError
 
@@ -62,6 +65,7 @@ class AzureDataLakeStorage:
         filesystem: str,
         *,
         chunk_size: int,
+        credential: TokenCredential | None = None,
     ) -> None:
         try:
             from azure.identity import DefaultAzureCredential
@@ -72,7 +76,7 @@ class AzureDataLakeStorage:
                 "`uv sync --extra publisher`."
             ) from error
 
-        credential = DefaultAzureCredential()
+        credential = credential if credential is not None else DefaultAzureCredential()
         service = DataLakeServiceClient(
             account_url=(
                 f"https://{storage_account}.dfs.core.windows.net"

@@ -18,6 +18,7 @@ from people_counter.fabric_activator import (
     validate_reflex_bundle,
     validate_reflex_definition,
     verify_activator_runtime,
+    _argument_entity_id,
 )
 from people_counter.fabric_automation import DeploymentEvidence
 from people_counter.fabric_definition_bundle import write_definition_bundle
@@ -138,6 +139,34 @@ def _definition(
             ],
         }
     }
+
+
+def test_live_fabric_job_connection_argument_resolves_pipeline_target() -> None:
+    entities = _entities()
+    rule = entities[-1]["payload"]["definition"]
+    instance = json.loads(rule["instance"])
+    argument = instance["steps"][0]["rows"][0]["arguments"][0]
+    argument["name"] = "fabricJobConnectionDocumentId"
+    rule["instance"] = json.dumps(instance)
+
+    evidence = validate_reflex_definition(_definition(entities))
+
+    assert len(evidence.actions) == 1
+    assert evidence.actions[0].target_item_id == _TARGET
+    assert evidence.actions[0].target_workspace_id == _WS
+    assert evidence.actions[0].target_item_type == "Pipeline"
+
+
+def test_fabric_action_reference_requires_a_recognized_string_argument() -> None:
+    assert _argument_entity_id({}) is None
+    assert _argument_entity_id({"arguments": [{"name": "unrelated", "value": _ACTION}]}) is None
+    assert _argument_entity_id({"arguments": [{"name": "fabricJobConnectionDocumentId", "value": 123}]}) is None
+    assert _argument_entity_id({
+        "arguments": [{"arguments": [
+            {"name": "unrelated", "value": "literal"},
+            {"name": "fabricJobConnectionDocumentId", "value": _ACTION},
+        ]}],
+    }) == _ACTION
 
 
 def _bundle(tmp_path: Path, entities: list[dict[str, Any]] | None = None) -> Path:

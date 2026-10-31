@@ -1,0 +1,14 @@
+{
+  "already_published": 0,
+  "catalog_sha256": "63167cb0562b6f046b9d8acfee8d047b356484193e1baca5a0a37a74e3917939",
+  "discovered": 1,
+  "generator_version": "0.9.59",
+  "inventory_sha256": "08fde800b1793637596ccaaf400a45e61d05f80adb9fbe4bdab3cada8c1eb656",
+  "planned": 1,
+  "published": 0,
+  "rejected": 0,
+  "rejections_by_camera": {},
+  "rejections_by_prefix": {},
+  "rejections_by_reason": {},
+  "total_video_duration_seconds": 7.0
+}

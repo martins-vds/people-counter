@@ -215,7 +215,7 @@ def _argument_entity_id(row: Mapping[str, Any]) -> str | None:
         if isinstance(current, list):
             stack.extend(current)
         elif isinstance(current, Mapping):
-            if current.get("name") == "entityId" and isinstance(
+            if current.get("name") in {"entityId", "fabricJobConnectionDocumentId"} and isinstance(
                 current.get("value"), str
             ):
                 return str(current["value"])

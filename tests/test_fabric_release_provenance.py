@@ -83,15 +83,57 @@ def test_embedded_identity_contains_no_final_artifact_hashes() -> None:
             / "sjd_release_identity.json"
         ).read_text(encoding="utf-8")
     )
-    assert raw["package_version"] == "0.9.57"
+    assert raw["package_version"] == provenance.resolve_installed_package_version()
     assert "wheel_sha256" not in raw
     assert "cpu_bundle_sha256" not in raw
     assert "environment_target_version" not in raw
-    assert provenance.RELEASE_IDENTITY.release_evidence_root.endswith("/0.9.57")
+    assert provenance.RELEASE_IDENTITY.release_evidence_root.endswith("/" + raw["package_version"])
     assert all(
         str(uuid.UUID(item_id)) == item_id
         for item_id in provenance.RELEASE_IDENTITY.sjd_ids.values()
     )
+
+
+def test_published_release_resolves_only_installed_identity_paths(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_sha = _write(manifest_path, _manifest())
+    receipt_path = tmp_path / "receipt.json"
+    receipt_sha = _write(receipt_path, _receipt(manifest_sha))
+    expected = {
+        provenance.detached_manifest_evidence_path(): manifest_path.read_text(),
+        provenance.postpublish_receipt_evidence_path(): receipt_path.read_text(),
+    }
+    read_paths = []
+
+    def read_text(path: str) -> str:
+        read_paths.append(path)
+        return expected[path]
+
+    evidence = provenance.resolve_published_release(read_text)
+    assert evidence.manifest_sha256 == manifest_sha
+    assert evidence.receipt_sha256 == receipt_sha
+    assert read_paths == list(expected)
+    expected[provenance.postpublish_receipt_evidence_path()] = "{}"
+    with pytest.raises(provenance.ReleaseProvenanceError):
+        provenance.resolve_published_release(read_text)
+
+
+def test_registration_metadata_derives_release_from_installed_sdk(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    read_text = lambda path: path
+    observed = []
+
+    def published(reader):
+        observed.append(reader)
+        return SimpleNamespace(manifest_sha256="b" * 64)
+
+    monkeypatch.setattr(provenance, "resolve_published_release", published)
+    assert provenance.registration_release_digest(read_text) == "b" * 64
+    assert provenance.registration_release_digest(read_text, expected_digest="b" * 64) == "b" * 64
+    with pytest.raises(provenance.ReleaseProvenanceError, match="installed SDK"):
+        provenance.registration_release_digest(read_text, expected_digest="a" * 64)
+    assert observed == [read_text] * 3
 
 
 def test_detached_manifest_and_receipt_bind_exact_independent_bytes(
@@ -107,7 +149,7 @@ def test_detached_manifest_and_receipt_bind_exact_independent_bytes(
         receipt_path,
         expected_manifest_sha256=manifest_sha256,
         expected_receipt_sha256=receipt_sha256,
-        observed_package_version="0.9.57",
+        observed_package_version=provenance.RELEASE_IDENTITY.package_version,
     )
 
     assert evidence.manifest.wheel_sha256 == "1" * 64

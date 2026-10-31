@@ -20,6 +20,12 @@ Definitions and publishes the results to the SJD-native Power BI report:
 
 The sample workload totals approximately 106.86 seconds, or 0.03 video-hours.
 It uses the reviewed `onnx-r18-b1-1fps-1t` profile.
+The notebook derives release paths and hashes from the installed SDK's published
+manifest/receipt and validates their compatibility; it does not pin an old SDK
+release or require operators to copy release hashes.
+After publishing a new Environment version, restart any existing Fabric Spark
+session before running the demo. A session that still has the previous SDK must
+not submit work to a Dispatcher running a newer release; admission rejects it.
 
 ## Before the audience arrives
 

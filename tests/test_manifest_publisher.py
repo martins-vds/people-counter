@@ -1034,6 +1034,19 @@ class ManifestPublisherTests(unittest.TestCase):
             )
         )
 
+    def test_metadata_generator_records_the_installed_sdk_version(self):
+        package_dir = self.root / "versioned-package"
+        with patch("people_counter.manifest_publisher.version", return_value="9.8.7") as installed:
+            summary = run_publisher(
+                replace(self.config(dry_run=True), output_dir=package_dir),
+                storage=None, inspector=inspection,
+            )
+        index = json.loads((package_dir / "manifest-package.json").read_text())
+        self.assertEqual(summary.generator_version, "9.8.7")
+        self.assertEqual(index["generator_version"], "9.8.7")
+        self.assertEqual(index["manifest_package_version"], 1)
+        installed.assert_called_once_with("people-counter")
+
     def test_package_checksum_tampering_is_rejected_before_publication(self):
         package_dir = self.root / "prepared-output"
         run_publisher(

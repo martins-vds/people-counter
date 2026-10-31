@@ -8,6 +8,12 @@ deployment, promotion, and recovery.
 
 ## Demonstration files
 
+- [`../customer_end_to_end_demo.ipynb`](../customer_end_to_end_demo.ipynb) runs
+  locally in VS Code: camera metadata and hashes, gated F64/RBAC readiness,
+  staging upload, incoming promotion, and observation of automatic Fabric
+  execution through exact-asset committed results. See its
+  [presenter guide](../customer_end_to_end_demo.md).
+
 - `18_sjd_getting_started_demo.ipynb` registers three sample videos through
   the Control SJD.
 - `18_sjd_getting_started_demo_tutorial.md` contains the demonstration steps

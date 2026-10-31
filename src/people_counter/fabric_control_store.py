@@ -39,6 +39,7 @@ from people_counter.sjd_control import (
     _claim_admission_settings,
     _largest_admissible_claim_prefix,
     normalize_registration_requests,
+    require_release_compatibility,
 )
 
 
@@ -313,6 +314,7 @@ class FabricControlStoreImpl:
     ) -> tuple[RegisteredWork, ...]:
         """Atomically register one bounded partition under the global writer."""
         normalized = normalize_registration_requests(requests)
+        require_release_compatibility(normalized, self._release_digest(None))
         prepared: list[tuple[dict[str, Any], str, str]] = []
         seen: dict[str, tuple[object, ...]] = {}
         for request in normalized:
@@ -445,6 +447,7 @@ class FabricControlStoreImpl:
         allowed_work_ids: Collection[str] | None = None,
         process_profile: object | None = None,
         peak_rss_bytes: int | None = None,
+        expected_release_digest: str | None = None,
     ) -> ClaimedBatch | None:
         owner_id = _text(owner, "owner")
         if type(max_items) is not int or not 1 <= max_items <= 100:
@@ -478,6 +481,7 @@ class FabricControlStoreImpl:
             if allowed_work_ids is None
             else {_text(item, "allowed_work_id") for item in allowed_work_ids}
         )
+        expected_release_digest = self._release_digest(expected_release_digest)
 
         def operation() -> ClaimedBatch | None:
             now = self.now()
@@ -496,6 +500,7 @@ class FabricControlStoreImpl:
                 and float(row["available_at"]) <= now
                 and (scope is None or row["work_id"] in scope)
             ]
+            require_release_compatibility(eligible, expected_release_digest)
             if not eligible:
                 return None
             first_by_runtime: dict[str, float] = {}
@@ -647,6 +652,18 @@ class FabricControlStoreImpl:
             )
 
         return self.writer.run(operation)
+
+    def _release_digest(self, expected: str | None) -> str | None:
+        if not getattr(self.config, "stable_production", False):
+            return expected
+        from people_counter.fabric_release_provenance import resolve_published_release
+
+        published = resolve_published_release(self.envelopes.files.read_text).manifest_sha256
+        if expected is not None and expected != published:
+            raise ImmutableConflictError(
+                f"dispatcher release binding {expected} differs from installed release {published}"
+            )
+        return published
 
     def load_claim_envelope_with_digest(
         self, batch_id: str
@@ -892,6 +909,80 @@ class FabricControlStoreImpl:
                 publications=publications,
             )
             return tuple(sequences)
+
+        return self.writer.run(operation)
+
+    def abandon_failed_claim(
+        self, *, batch_id: str, expected_owner: str,
+        expected_envelope_sha256: str, failed_job_id: str,
+        operator: str, reason: str,
+    ) -> dict[str, Any]:
+        """Release one operator-confirmed terminal driver claim without output."""
+        from people_counter.sjd_process import verify_envelope
+
+        actor = _text(operator, "operator")
+        explanation = _text(reason, "reason")
+        job_id = _text(failed_job_id, "failed_job_id")
+        owner = _text(expected_owner, "expected_owner")
+        digest = _sha(expected_envelope_sha256, "expected_envelope_sha256")
+
+        def operation() -> dict[str, Any]:
+            batches = self._rows("batches")
+            batch = _require_one(batches, "batch_id", batch_id)
+            if batch["owner"] != owner or batch["envelope_sha256"] != digest:
+                raise LeaseLostError("failed-claim recovery owner or envelope differs")
+            raw = self.envelopes.read(str(batch["envelope_path"]), digest)
+            envelope = verify_envelope(raw, batch_id=batch_id, envelope_sha256=digest)
+            work_ids = sorted(item.work_id for item in envelope.items)
+            if batch["status"] == "EXPIRED":
+                return {"batch_id": batch_id, "work_ids": work_ids, "idempotent": True}
+            if batch["status"] != "LEASED":
+                raise BatchValidationError("only an unsealed failed claim may be abandoned")
+            self._verified_process_batch(envelope)
+            root = (
+                f"{self.config.file_path('attempts')}/process/"
+                f"batch={batch_id}/attempt={envelope.execution_attempt_id}"
+            )
+            if self.envelopes.files.exists(root + "/_delta_log") or self.envelopes.files.exists(root + "/_SUCCESS"):
+                raise BatchValidationError("failed claim has staged or committed output")
+            work = self._rows("work")
+            attempts = self._rows("attempts")
+            publications = self._rows("publications")
+            if any(row["work_id"] in work_ids for row in publications):
+                raise BatchValidationError("failed claim has published output")
+            marker = _canonical({
+                "operation": "abandon-failed-claim", "operator": actor,
+                "reason": explanation, "failed_job_id": job_id,
+                "batch_id": batch_id, "owner": owner, "envelope_sha256": digest,
+            })
+            now = self.now()
+            for item in envelope.items:
+                row = _require_one(work, "work_id", item.work_id)
+                attempt = _require_one(attempts, "attempt_id", item.attempt_id)
+                if (
+                    row["status"] != "LEASED" or row["lease_owner"] != owner
+                    or row["lease_attempt_id"] != item.attempt_id
+                    or int(row["fence"]) != item.fence
+                    or attempt["status"] != "LEASED"
+                ):
+                    raise LeaseLostError("failed claim no longer owns every work fence")
+                if (
+                    row["committed_attempt_id"] is not None
+                    or attempt["output_path"] is not None
+                    or attempt["output_sha256"] is not None
+                    or attempt["terminal_succeeded"] is not None
+                ):
+                    raise BatchValidationError("failed claim has attempt output")
+                row.update({
+                    "status": "READY", "available_at": now,
+                    "lease_owner": None, "lease_attempt_id": None,
+                    "lease_expires_at": None, "fence": int(row["fence"]) + 1,
+                    "last_error": marker, "updated_at": now,
+                })
+                attempt.update({"status": "EXPIRED", "recovery_outcome": "READY"})
+            batch["status"] = "EXPIRED"
+            self._replace_many(work=work, attempts=attempts, batches=batches)
+            return {"batch_id": batch_id, "work_ids": work_ids, "idempotent": False}
 
         return self.writer.run(operation)
 

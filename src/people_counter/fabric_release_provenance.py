@@ -17,6 +17,8 @@ import importlib.metadata
 import importlib.resources
 import json
 import os
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -419,6 +421,34 @@ def load_runtime_release_evidence(
         manifest_sha256=manifest_sha256,
         receipt_sha256=receipt_sha256,
     )
+
+
+def resolve_published_release(read_text: Callable[[str], str]) -> RuntimeReleaseEvidence:
+    """Resolve the installed release through its immutable published evidence."""
+    manifest_text = read_text(detached_manifest_evidence_path())
+    receipt_text = read_text(postpublish_receipt_evidence_path())
+    with tempfile.TemporaryDirectory(prefix="pc-published-release-") as root:
+        manifest_path = Path(root) / "manifest.json"
+        receipt_path = Path(root) / "receipt.json"
+        manifest_path.write_text(manifest_text, encoding="utf-8")
+        receipt_path.write_text(receipt_text, encoding="utf-8")
+        return load_runtime_release_evidence(
+            manifest_path, receipt_path,
+            expected_manifest_sha256=_sha256_bytes(manifest_text.encode("utf-8")),
+            expected_receipt_sha256=_sha256_bytes(receipt_text.encode("utf-8")),
+        )
+
+
+def registration_release_digest(
+    read_text: Callable[[str], str], *, expected_digest: str = "",
+) -> str:
+    published = resolve_published_release(read_text).manifest_sha256
+    if expected_digest and expected_digest != published:
+        raise ReleaseProvenanceError(
+            f"registration metadata release {expected_digest} differs from "
+            f"the installed SDK release {published}"
+        )
+    return published
 
 
 def validate_installed_package_version(

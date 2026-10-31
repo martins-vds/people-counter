@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
+import copy
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -15,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from people_counter.fabric_release_provenance import RELEASE_IDENTITY
-from people_counter.fabric_sjd_definition import build_sjd_definition
+from people_counter.fabric_sjd_definition import build_sjd_definition, reviewed_compute_settings, validate_reviewed_compute_settings
 
 
 API_ROOT = "https://api.fabric.microsoft.com/v1"
@@ -29,6 +32,113 @@ ITEM_NAMES = {
 
 class OperationsDeploymentError(RuntimeError):
     """A Fabric operation deployment or readback failed."""
+
+
+def validate_workspace_pool_policy(settings: Mapping[str, Any]) -> None:
+    desired = reviewed_compute_settings({})
+    count = int(next(row["value"] for row in desired["sparkProperties"] if row["key"] == "spark.executor.instances"))
+    pool = settings.get("pool", {})
+    limits = pool.get("starterPool", {})
+    if (
+        pool.get("customizeComputeEnabled") is not True
+        or limits.get("maxExecutors") != count
+        or limits.get("maxNodeCount") != count + 1
+    ):
+        raise OperationsDeploymentError(
+            f"Starter Pool must allow {count + 1} nodes / {count} executors; "
+            "Environment properties alone do not prove the live allocation"
+        )
+
+
+def validate_live_allocation(
+    properties: Mapping[str, str], executors: Sequence[Mapping[str, Any]],
+) -> None:
+    desired = reviewed_compute_settings({})
+    count = int(next(row["value"] for row in desired["sparkProperties"] if row["key"] == "spark.executor.instances"))
+    if (
+        properties.get("spark.dynamicAllocation.enabled", "").lower() != "false"
+        or int(properties.get("spark.executor.instances", "0")) != count
+        or properties.get("spark.executor.cores") != str(desired["executorCores"])
+    ):
+        raise OperationsDeploymentError(f"Canary runtime must request {count} fixed executors with reviewed cores")
+    workers = [row for row in executors if row.get("id") != "driver"]
+    if len(workers) != count or any(int(row["totalCores"]) != desired["executorCores"] for row in workers):
+        raise OperationsDeploymentError(f"Canary must contain exactly {count} observed executors with reviewed cores")
+    if properties.get("spark.executor.memory", "").lower() != desired["executorMemory"]:
+        raise OperationsDeploymentError("Canary executor memory differs from the reviewed allocation")
+
+
+def bind_intake_release(
+    definition: Mapping[str, Any], release_digest: str,
+) -> dict[str, Any]:
+    if re.fullmatch(r"[0-9a-f]{64}", release_digest) is None:
+        raise OperationsDeploymentError("release digest must be a SHA-256 value")
+    updated = copy.deepcopy(dict(definition))
+    parts = updated.get("definition", {}).get("parts", [])
+    matches = [part for part in parts if part.get("path") == "pipeline-content.json"]
+    if len(matches) != 1:
+        raise OperationsDeploymentError("expected exactly one pipeline-content.json part")
+    part = matches[0]
+    if part.get("payloadType") != "InlineBase64":
+        raise OperationsDeploymentError("intake definition must use InlineBase64")
+    try:
+        content = json.loads(base64.b64decode(part["payload"], validate=True))
+    except (ValueError, KeyError) as error:
+        raise OperationsDeploymentError("intake pipeline definition is invalid") from error
+    activities = [
+        activity for activity in content.get("properties", {}).get("activities", [])
+        if activity.get("name") == "ValidateManifest"
+    ]
+    if len(activities) != 1:
+        raise OperationsDeploymentError("expected exactly one ValidateManifest activity")
+    parameters = activities[0].get("typeProperties", {}).get("parameters", {})
+    parameter = parameters.get("RELEASE_MANIFEST_SHA256")
+    if not isinstance(parameter, dict) or parameter.get("type") != "string":
+        raise OperationsDeploymentError("intake release parameter must be a string")
+    parameter["value"] = release_digest
+    part["payload"] = base64.b64encode(
+        json.dumps(content, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+    return updated
+
+
+def bind_registration_notebook(definition: Mapping[str, Any]) -> dict[str, Any]:
+    updated = copy.deepcopy(dict(definition))
+    parts = updated.get("definition", {}).get("parts", [])
+    matches = [part for part in parts if part.get("path") == "notebook-content.py"]
+    if len(matches) != 1 or matches[0].get("payloadType") != "InlineBase64":
+        raise OperationsDeploymentError("expected exactly one notebook-content.py part")
+    part = matches[0]
+    try:
+        source = base64.b64decode(part["payload"], validate=True).decode("utf-8")
+        tree = ast.parse(source)
+    except (ValueError, KeyError, SyntaxError) as error:
+        raise OperationsDeploymentError("registration notebook source is invalid") from error
+    assignments = [
+        node for node in tree.body if isinstance(node, ast.Assign)
+        and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "release_digest"
+    ]
+    if len(assignments) != 1:
+        raise OperationsDeploymentError("expected exactly one release_digest assignment")
+    assignment = assignments[0]
+    expression = (
+        "registration_release_digest(NotebookUtilsOneLakeFiles().read_text, "
+        "expected_digest=RELEASE_MANIFEST_SHA256)"
+    )
+    if ast.dump(assignment.value) == ast.dump(ast.parse(expression, mode="eval").body):
+        return updated
+    replacement = (
+        "from people_counter.fabric_release_provenance import registration_release_digest\n"
+        "from people_counter.fabric_control_store import NotebookUtilsOneLakeFiles\n"
+        f"release_digest = {expression}\n"
+    )
+    lines = source.splitlines(keepends=True)
+    lines[assignment.lineno - 1:assignment.end_lineno] = [replacement]
+    source = "".join(lines)
+    ast.parse(source)
+    part["payload"] = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    return updated
 
 
 def _token() -> str:
@@ -111,6 +221,15 @@ class FabricApi:
             raise OperationsDeploymentError(
                 f"{method} {url} returned {error.code}: {detail}"
             ) from error
+
+    def verify_compute(self) -> None:
+        _, _, settings = self.request(
+            "GET",
+            f"/workspaces/{self.workspace_id}/environments/{RELEASE_IDENTITY.environment_id}/sparkcompute?beta=false",
+        )
+        validate_reviewed_compute_settings(settings)
+        _, _, workspace = self.request("GET", f"/workspaces/{self.workspace_id}/spark/settings")
+        validate_workspace_pool_policy(workspace)
 
     def wait(self, headers: Mapping[str, str]) -> str:
         location = headers.get("Location") or headers.get("location")
@@ -215,12 +334,14 @@ class FabricApi:
             )
         return item_id
 
-    def get_definition(self, item_id: str) -> dict[str, Any]:
+    def get_definition(
+        self, item_id: str, *, format_name: str | None = "SparkJobDefinitionV2",
+    ) -> dict[str, Any]:
         status, headers, definition = self.request(
             "POST",
             (
                 f"/workspaces/{self.workspace_id}/items/{item_id}"
-                "/getDefinition?format=SparkJobDefinitionV2"
+                "/getDefinition" + (f"?format={format_name}" if format_name else "")
             ),
         )
         if status == 202:
@@ -230,6 +351,47 @@ class FabricApi:
                 f"/operations/{operation_id}/result",
             )
         return definition
+
+    def reconcile_intake_release(self, item_id: str, release_digest: str) -> None:
+        expected = bind_intake_release(self.get_definition(item_id, format_name=None), release_digest)
+        status, headers, _ = self.request(
+            "POST", f"/workspaces/{self.workspace_id}/items/{item_id}/updateDefinition",
+            expected,
+        )
+        if status == 202:
+            self.wait(headers)
+        elif status not in {200, 204}:
+            raise OperationsDeploymentError(f"intake definition update returned {status}")
+        observed = self.get_definition(item_id, format_name=None)
+        for definition in (expected, observed):
+            part = next(
+                part for part in definition["definition"]["parts"]
+                if part["path"] == "pipeline-content.json"
+            )
+            definition["pipeline_content"] = json.loads(base64.b64decode(part["payload"]))
+        if observed["pipeline_content"] != expected["pipeline_content"]:
+            raise OperationsDeploymentError("intake release definition readback differs")
+
+    def reconcile_registration_notebook(self, item_id: str) -> None:
+        expected = bind_registration_notebook(self.get_definition(item_id, format_name=None))
+        status, headers, _ = self.request(
+            "POST", f"/workspaces/{self.workspace_id}/items/{item_id}/updateDefinition",
+            expected,
+        )
+        if status == 202:
+            self.wait(headers)
+        elif status not in {200, 204}:
+            raise OperationsDeploymentError(f"registration notebook update returned {status}")
+        observed = self.get_definition(item_id, format_name=None)
+        sources = []
+        for definition in (expected, observed):
+            part = next(
+                part for part in definition["definition"]["parts"]
+                if part["path"] == "notebook-content.py"
+            )
+            sources.append(base64.b64decode(part["payload"]).decode("utf-8").replace("\r\n", "\n"))
+        if sources[0] != sources[1]:
+            raise OperationsDeploymentError("registration notebook source readback differs")
 
     def reconcile_schedule(
         self,
@@ -372,13 +534,18 @@ def deploy_operations(
     semantic_model_id: str,
     additional_semantic_model_ids: Sequence[str] = (),
     enable_schedules: bool,
+    intake_pipeline_id: str,
+    registration_notebook_id: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    api.verify_compute()
     items = _fixed_item_ids()
     for kind, display_name in ITEM_NAMES.items():
         items[kind] = api.upsert_sjd(kind, display_name)
         observed = api.get_definition(items[kind])
         validate_definition_readback(kind, observed)
+    api.reconcile_intake_release(intake_pipeline_id, release_manifest_sha256)
+    api.reconcile_registration_notebook(registration_notebook_id)
     release_root = RELEASE_IDENTITY.release_evidence_root.rstrip("/")
     schedules = {
         "dispatcher": (
@@ -456,6 +623,9 @@ def deploy_operations(
         "enabled": enable_schedules,
         "items": items,
         "schedules": readbacks,
+        "intake_pipeline_id": intake_pipeline_id,
+        "registration_notebook_id": registration_notebook_id,
+        "release_manifest_sha256": release_manifest_sha256,
     }
 
 
@@ -476,6 +646,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--release-manifest-sha256", required=True)
     parser.add_argument("--release-receipt-sha256", required=True)
+    parser.add_argument("--intake-pipeline-id", required=True)
+    parser.add_argument("--registration-notebook-id", required=True)
     parser.add_argument("--enable-schedules", action="store_true")
     arguments = parser.parse_args(argv)
     result = deploy_operations(
@@ -487,6 +659,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.additional_semantic_model_id
         ),
         enable_schedules=arguments.enable_schedules,
+        intake_pipeline_id=arguments.intake_pipeline_id,
+        registration_notebook_id=arguments.registration_notebook_id,
     )
     print(json.dumps(result, allow_nan=False, indent=2, sort_keys=True))
     return 0
