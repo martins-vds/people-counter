@@ -374,6 +374,33 @@ target Fabric runtime or deployment environment. The generator includes only
 the selected PyTorch index, so a CPU bundle cannot accidentally resolve CUDA
 wheels and a GPU bundle cannot resolve CPU-only wheels.
 
+### GitHub SDK releases
+
+The [SDK release workflow](.github/workflows/release.yml) builds CPU-only
+Python 3.12 bundles on native Linux amd64 and arm64 runners. Each bundle must
+pass archive validation and an offline installation and CLI smoke test before
+both bundles and `SHA256SUMS` are published together as a GitHub Release.
+Model weights are not included.
+
+Set the package version in `pyproject.toml`, update `uv.lock` with `uv lock`,
+and merge the changes before pushing a matching stable tag:
+
+```bash
+git tag v0.9.59
+git push origin v0.9.59
+```
+
+Alternatively, run **Release SDK** manually with an existing matching tag.
+Both triggers build the tagged commit, not the current branch tip. Configure
+the GitHub `release` environment with any required approval rules. Publication
+requires the workflow token to have `contents: write` permission; no additional
+release secret is needed. Existing releases are not overwritten.
+
+Download the archive for your architecture and verify it with `sha256sum
+--check --ignore-missing SHA256SUMS` before extracting it. Follow the enclosed
+`README.txt` to install into a Python 3.12 environment. The build hosts use
+Ubuntu 24.04; compatibility with older Linux distributions is not guaranteed.
+
 ## CPU-only
 
 ```bash
