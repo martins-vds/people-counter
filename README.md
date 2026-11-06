@@ -377,7 +377,7 @@ wheels and a GPU bundle cannot resolve CPU-only wheels.
 ### GitHub SDK releases
 
 The [SDK release workflow](.github/workflows/release.yml) builds CPU-only
-Python 3.12 bundles on native Linux amd64 and arm64 runners. Each bundle must
+Python 3.13 bundles on native Linux amd64 and arm64 runners. Each bundle must
 pass archive validation and an offline installation and CLI smoke test before
 both bundles and `SHA256SUMS` are published together as a GitHub Release.
 Model weights are not included.
@@ -400,7 +400,7 @@ release secret is needed. Existing releases are not overwritten.
 
 Download the archive for your architecture and verify it with `sha256sum
 --check --ignore-missing SHA256SUMS` before extracting it. Follow the enclosed
-`README.txt` to install into a Python 3.12 environment. The build hosts use
+`README.txt` to install into a Python 3.13 environment. The build hosts use
 Ubuntu 24.04; compatibility with older Linux distributions is not guaranteed.
 
 ## CPU-only

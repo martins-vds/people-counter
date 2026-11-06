@@ -51,7 +51,15 @@ Have the following:
   the same source revision. Do not use an unmodified older SDK wheel for
   manual execution. Artifact preparation is not cloud deployment: a release
   owner can supply these files or build them locally. Browser upload requires
-  files accessible on the browser host.
+  files accessible on the browser host. Prepare the SDK and its dependencies
+  using [Build the upload artifacts](#build-the-upload-artifacts), then upload
+  them in [step 10](#10-install-and-publish-the-spark-environment).
+- For Fabric inference, a separately reviewed **headless OpenCV-compatible**
+  dependency set and SDK packaging. This walkthrough requires headless OpenCV
+  for Fabric, based on the operator's legacy-workspace experience. The current
+  general-purpose SDK/CPU dependency metadata does not yet satisfy that
+  requirement; see the [Fabric compatibility gate](#headless-opencv-compatibility-gate).
+  Do not treat the existing bootstrap evidence as approval for inference.
 
 Choose unique names. Use one resource group and the same approved Canadian
 region throughout. This walkthrough retained:
@@ -313,6 +321,223 @@ Eventstream metrics require their own Eventstream monitoring setting.
 
 ## 10. Install and publish the Spark Environment
 
+### Build the upload artifacts
+
+The release owner prepares artifacts from the same reviewed source revision
+as the seven job entry points. Run these commands from the repository root;
+they do not create or change cloud resources:
+
+```bash
+# SDK plus all locked CPU dependencies, built on a target-compatible Linux host.
+# Runtime 2.0 requires Python 3.13.
+uv run --python 3.13 --locked --no-dev --extra cpu \
+  python scripts/build_sdk_bundle.py cpu
+```
+
+See the [bundle generator](../scripts/build_sdk_bundle.py) and
+[bundle contents and options](../README.md#build-cpu-or-gpu-deployment-bundles).
+Extract the ZIP from `dist/sdk-bundles/`. It contains the SDK wheel and dependency
+wheels under `wheels/`, a locked requirements file, and `manifest.json` with
+artifact checksums. Verify those checksums before uploading. Transfer the
+extracted files to the browser host if the build host is a different machine.
+Use the SDK wheel from that same bundle rather than mixing release revisions.
+The general CPU bundle currently contains **non-headless** `opencv-python`.
+It is a release inventory, not an already qualified Fabric-headless
+installation. Do not bulk-upload its OpenCV wheel to this Fabric Environment.
+
+**Match the Fabric runtime, not the operator's laptop.** Confirm the runtime's
+Python version and machine architecture before selecting dependency wheels.
+[Fabric Runtime 2.0](https://learn.microsoft.com/en-us/fabric/data-engineering/runtime-2-0)
+uses Python 3.13 and Azure Linux 3.0. Build or obtain compatible Linux wheels
+for that runtime; an ARM64 laptop bundle is not a substitute for an amd64
+Fabric environment. The [SDK release workflow](../.github/workflows/release.yml)
+now targets Python 3.13; select the matching Linux architecture and verify
+the bundle manifest. Older Python 3.12 bundles must **not** be reused for
+this Python 3.13 deployment. Matching Python and architecture does not replace
+validation against Fabric's Linux runtime. The SDK's `py3-none-any` wheel is universal;
+its NumPy, OpenCV, PyTorch, and other native dependencies are not.
+
+### Include dependencies, not just the SDK wheel
+
+The SDK wheel contains People Counter code and dependency metadata, **not**
+copies of the packages it imports. The Environment must contain compatible
+versions of the complete dependency graph. This includes the base packages
+and the selected hardware extra from
+[`pyproject.toml`](../pyproject.toml): for CPU inference, that includes
+Transformers, Hugging Face Hub, OpenCV, NumPy, SciPy, LibreYOLO, RF-DETR,
+Supervision, Trackers, PyTorch, and TorchVision, plus their transitive
+dependencies. Uploading the SDK wheel alone does not request its optional
+`cpu` extra.
+
+**Fabric-only requirement:** use `opencv-python-headless`, not `opencv-python`,
+in the Fabric Environment. This deployment policy does not change the default
+dependencies for local SDK users or the general Linux SDK releases.
+
+**Once the compatibility gate below is satisfied**, use the portal's
+repository-backed installation: upload the reviewed Fabric-compatible SDK wheel
+from the bundle under **Libraries > Custom > Upload to Full mode**. Then add
+the approved dependencies through **Libraries > External repositories**, using
+the package names and exact versions below. Fabric resolves transitive
+dependencies during Full-mode publication; the operator does not need to type
+every transitive package separately. Repository access is required.
+Do not publish the current unmodified SDK wheel alongside headless OpenCV and
+assume its conflicting dependency metadata has been resolved.
+
+Do not upload the bundle ZIP, its requirements file, or its manifest as a
+Python library. Do not upload all dependency wheels as well as adding the same
+packages through PyPI. An offline deployment needs a separately reviewed
+Fabric-headless wheelhouse; the existing general CPU bundle is not that
+wheelhouse.
+
+#### Direct dependency versions for the portal
+
+This table describes the current SDK **0.9.59**, CPU variant, Linux/Python
+3.13. Only some requirements in [`pyproject.toml`](../pyproject.toml) are exact
+pins; the others are ranges or unversioned names. The exact versions below
+come from the corresponding [`uv.lock`](../uv.lock), selected for this runtime,
+except for the explicitly identified Fabric-only OpenCV substitution.
+The table is a dependency-planning inventory, **not evidence that the current
+SDK supports a clean headless installation**. Blocked rows must not be added.
+For another release, use its reviewed Fabric inventory rather than copying this
+table unchanged.
+
+| Library name | Requirement in project configuration | Exact version to select |
+|---|---|---|
+| `transformers` | `>=5.1.0,<6` | `5.17.0` |
+| `huggingface-hub` | `>=0.34.0` | `1.31.0` |
+| `opencv-python-headless` | Fabric-only requirement; SDK currently declares `opencv-python>=4.11.0.86` | `5.0.0.93`; published package, not yet Fabric-qualified here |
+| `numpy` | `>=1.24.0,<2.5` | `2.4.6` |
+| `scipy` | `>=1.10.0` | `1.18.1` |
+| `libreyolo` | `==1.5.0` | **Do not add:** current `1.5.0` metadata conflicts with the Fabric-headless requirement |
+| `rfdetr` | `==1.10.1` | `1.10.1` |
+| `supervision` | `==0.30.3` | `0.30.3` |
+| `trackers` | `==2.6.0` | **Do not add:** current `2.6.0` metadata has the same conflict |
+| `torch` | CPU index; no version constraint | `2.14.0+cpu`; see exception below |
+| `torchvision` | CPU index; no version constraint | `0.29.0+cpu`; see exception below |
+
+**CPU PyTorch exception:** the last two versions are from
+`https://download.pytorch.org/whl/cpu`, not the portal's default PyPI index.
+Do **not** substitute the PyPI builds without `+cpu` or switch to CUDA packages
+just because those appear in the version list. Check the Environment's built-in
+inventory first. If it does not already provide the reviewed CPU builds, upload
+the matching `torch` and `torchvision` wheels from the same Python 3.13/Linux
+bundle under **Custom > Upload to Full mode**. These two dependencies are
+exceptions to entering the public libraries through the PyPI form.
+
+The CPU bundle includes only the `cpu` extra. For the reviewed **ONNX**
+inference profile, also add `onnxruntime` version **`1.30.0`** through the same
+PyPI form. It is an additional profile dependency from the current lock's
+`export` graph, not a direct base/CPU requirement or a wheel included in the
+CPU bundle. Fabric resolves its dependencies during publication. Model export
+tooling is separate; inspect that graph with
+`uv export --locked --extra cpu --extra export --no-dev --no-emit-project`.
+Do not assume a successful CPU-only publication proves ONNX inference is ready.
+
+#### Enter each public package through the UI
+
+1. In `pc_dev_environment`, open **Libraries > External repositories**.
+   Keep **List view** and the **Full mode** tab selected.
+2. Click **Add library** > **Add library from public repository**.
+
+![Environment External repositories page; Add library is outlined.](images/manual-deployment/38-environment-external-repositories.png)
+
+3. Select **PyPI** as the public repository.
+4. In **Name**, type the approved library name. For the Fabric-only OpenCV
+   requirement, use `opencv-python-headless`, not `opencv-python`.
+5. Wait for the version list, open **Version**, and choose the inventory's
+   exact version. The current headless OpenCV candidate is **`5.0.0.93`**.
+   Do not accept an automatically selected latest version.
+
+![PyPI version picker for opencv-python-headless; the candidate version is 5.0.0.93.](images/manual-deployment/39-pypi-select-pinned-version.png)
+
+6. Require **Publish Mode: Full mode**, then click **Add** to stage the row.
+7. Repeat only for the approved, non-blocked PyPI packages in the reviewed
+   Fabric inventory, plus `onnxruntime` when the selected profile requires it.
+   Enter the name and version separately, not `name==version` in the Name box.
+8. Review the complete staged inventory, including the SDK custom wheel and
+   the CPU PyTorch exception. Resolve conflicts with built-in libraries before
+   continuing to **Publish all** below. Stop if a required version is unavailable;
+   do not silently select a newer version.
+
+![Headless OpenCV 5.0.0.93 with Full mode selected. This form does not establish backend compatibility.](images/manual-deployment/40-pypi-full-mode-library.png)
+
+These are real browser captures of package entry. The demonstration selected
+the pinned version and then used **Cancel**; it did not add or publish libraries.
+They prove the UI path, not successful installation of the complete dependency
+set. Full mode resolves transitive versions at publication time; direct pins
+alone do not guarantee the entire graph matches the bundle lock. Review the
+resolved inventory and retain the publication evidence before accepting it.
+
+#### Headless OpenCV compatibility gate
+
+**For this manual Fabric deployment, headless OpenCV is required.** The
+operator reported needing it in the legacy Fabric workspace. This is the
+Fabric deployment requirement, not a claim that every Fabric runtime image
+universally fails with every non-headless OpenCV build. Headless is an OpenCV
+choice, not a PyTorch variant; CPU-only PyTorch still uses the `+cpu` builds
+described above. Local SDK installations and general release bundles are
+unchanged.
+
+The current SDK metadata requires `opencv-python`, and the pinned
+`libreyolo==1.5.0` and `trackers==2.6.0` dependencies also require that
+distribution. LibreYOLO `1.7.2` and Trackers `2.7.0`, checked on 2026-11-06,
+still require it. Merely
+replacing the SDK's own requirement or entering `opencv-python-headless` in
+the portal does not migrate the dependency graph: normal resolution can
+install `opencv-python` as well.
+
+Do **not** install both OpenCV variants. They provide the same `cv2` namespace
+and can overwrite each other's files; see the
+[OpenCV package installation guidance](https://pypi.org/project/opencv-python-headless/).
+Treat the current LibreYOLO-dependent method as **incompatible with this
+deployment's approved dependency policy**, not as proof that its algorithms
+cannot execute with headless `cv2`. A clean installation is blocked until
+the SDK and upstream metadata are compatible or a separately reviewed
+replacement is approved. No package/lock changes are implied by this guide.
+
+Choose another inference option **only after its complete dependency graph
+and executor-side execution have been qualified for headless Fabric**:
+
+| Current SDK option | Fabric-headless status |
+|---|---|
+| RT-DETR/OSNet, PyTorch | Not approved: imports `OSNetEmbedder` from LibreYOLO. |
+| RT-DETR/OSNet, ONNX | Not a bypass: the pipeline still imports LibreYOLO at module load, before selecting ONNX. |
+| RF-DETR/BoT-SORT, PyTorch or ONNX | Not an automatically compatible alternative: imports `BoTSORTTracker` from Trackers, whose metadata also requires `opencv-python`. |
+
+These imports are in the
+[RT-DETR/OSNet pipeline](../src/people_counter/pipelines/rtdetr_osnet.py) and
+[RF-DETR/BoT-SORT pipeline](../src/people_counter/pipelines/rfdetr_botsort.py).
+The current SDK therefore has **no qualified headless alternative established
+by this walkthrough**. Do not omit LibreYOLO/Trackers and assume selecting
+ONNX will make their imports optional. Keep inference and recurring schedules
+disabled until a compatible backend and Fabric-specific package set are
+provided and verified.
+
+Before accepting the Environment, verify OpenCV import and video decoding on
+the driver **and executors**. If loading fails because a GUI/system library
+such as `libGL.so.1` is unavailable, stop and resolve the dependency/runtime
+plan with the release owner. Do not mask the failure by adding both variants,
+disabling dependency checks, or treating bootstrap success as inference
+compatibility evidence.
+
+Do not upload local `pyspark` or `delta-spark` packages over Fabric's managed
+Spark/Delta runtime. Model weights and converted ONNX files are separate
+artifacts, not Python libraries; provision them through the reviewed model
+loading/release process before inference. See
+[offline model loading](../README.md#offline-model-loading).
+
+Use **Full mode** for every library needed by these jobs. Quick mode is
+not supported for Spark Job Definitions. See Microsoft's
+[Environment library management](https://learn.microsoft.com/en-us/fabric/data-engineering/environment-manage-library)
+for dependency resolution, supported repository sources, and network restrictions.
+
+### Upload and publish
+
+For a new Fabric-headless deployment, proceed only after the
+[compatibility gate](#headless-opencv-compatibility-gate) has passed. The
+historical successful SDK publication shown below does not establish that
+the current stock SDK wheel has headless-compatible dependency metadata.
+
 1. Return to the workspace item list and click **New item** > **Environment**.
 2. Enter `pc_dev_environment`, then click **Create**.
 3. Skip the optional teaching tour if it covers the editor.
@@ -321,8 +546,13 @@ Eventstream metrics require their own Eventstream monitoring setting.
 
 4. Confirm **Runtime 2.0 (Spark 4.1, Delta 4.2)**.
 5. Open **Libraries** > **Custom**.
-6. Click **Upload** > **Upload to Full mode**. Select the reviewed
-   `people_counter-<version>-py3-none-any.whl`.
+6. Click **Upload** > **Upload to Full mode**. Select
+   `people_counter-<version>-py3-none-any.whl` from the bundle's `wheels/`
+   directory prepared [above](#build-the-upload-artifacts). Add the direct
+   public dependencies using the [PyPI steps](#enter-each-public-package-through-the-ui)
+   and handle the CPU PyTorch exception before publishing. Verify the staged
+   inventory includes the selected CPU and model-format dependencies, not only
+   the SDK wheel.
 
 ![Custom library upload control.](images/manual-deployment/22-upload-custom-wheel.png)
 
@@ -380,6 +610,58 @@ This command prepares an upload artifact locally; it does not deploy cloud
 resources. Do not equate an unchanged older library's **Success** row with
 successful installation of its replacement.
 
+After publishing, start a **new** session attached to this Environment and
+Lakehouse. Check the installed SDK/dependency versions against the reviewed
+inventory and test the selected model backend on the executors, not only the
+driver. Existing sessions can retain the old library snapshot. A bootstrap
+success alone does not test the inference dependencies.
+
+### Capacity, executors, and concurrent executions
+
+These are different controls; increasing one does not automatically increase
+the others:
+
+| Control | Meaning and operator action |
+|---|---|
+| Capacity SKU and current load | Bound the Spark resources available across workloads. Other jobs, notebooks, throttling, bursting policy, and pool limits affect admission. A larger SKU is not a promise of a particular allocation. |
+| Workspace Spark pool | Sets the available node sizes and scaling limits. Check **Workspace settings > Data Engineering/Science > Spark settings** and the pool selected for the Environment. Its limits must accommodate the reviewed session. |
+| Driver cores / memory | Resources for coordinating the Spark application. The driver is not an inference executor. The reviewed request is 8 cores / 56 GB. |
+| Executor cores / memory | Resources per worker executor, not the total for the job. The reviewed request is 8 cores / 56 GB per executor. |
+| `spark.executor.instances=2` | Requests two executors for one session. It does not mean two job executions and does not prove that two were allocated. |
+| Dynamic executor allocation off | Keeps the reviewed fixed-allocation request; do not turn it on merely to fit a smaller capacity. Pool node autoscaling and Spark executor allocation are separate controls. |
+| `spark.task.cpus=1` | Reserves one executor core per Spark task. Two 8-core executors give a nominal ceiling of 16 simultaneous task slots, not a guarantee of 16 safe inference workers. Memory, model/thread budgets, partitions, and runtime admission can lower it. |
+| `spark.speculation=false` | Disables speculative duplicate task execution. This is a correctness setting, not a capacity-tuning knob. |
+| Dispatcher `--maximum-active-batches` | Application-level limit on active batches; the current default is 1. It is not an Environment Spark property or a Fabric capacity quota. Increase only after the release, resource, and concurrency checks have passed. |
+| Dispatcher `--max-items` | Maximum items considered for a claimed batch; the current default is 64. It does not request 64 executors or 64 concurrent Spark jobs. |
+| Schedule frequency / overlapping runs | Controls how often jobs are submitted. More frequent schedules can create overlap or queueing, not more compute. Keep schedules disabled throughout this walkthrough. |
+
+The requested sizes therefore depend on capacity and workload, but the values
+in this guide are a **reviewed deployment profile**, not an automatic SKU-to-
+executor sizing formula. The source of that profile is
+[`reviewed_compute_settings`](../src/people_counter/fabric_sjd_definition.py);
+the [runtime admission code](../src/people_counter/fabric_sjd_runtime.py)
+also checks live runtime/executor evidence and memory-safe placement.
+
+Before approving a different profile:
+
+1. Have the capacity owner review the SKU, competing workloads, pool limits,
+   and [Fabric Spark concurrency and queueing rules](https://learn.microsoft.com/en-us/fabric/data-engineering/spark-job-concurrency-and-queueing).
+   Do not budget only executor cores and forget driver/session overhead.
+2. Obtain approval for the revised compute profile and any corresponding
+   application/release changes. Do not change only the portal values while
+   leaving a different reviewed contract in the release.
+3. Publish the Environment and start a fresh test session. In the run details,
+   inspect the actual executor count, cores/memory, and Spark configuration.
+   Record observed values, not just the saved request.
+4. Validate executor-side package/model loading, warmed memory usage, task
+   placement, and representative throughput before increasing active batches
+   or enabling schedules.
+
+For the captured F2 setup, retain the stop-after-bootstrap boundary: the run
+received one executor, so it did not demonstrate the reviewed two-executor
+profile. Neither changing a concurrency flag nor rerunning more jobs resolves
+that evidence gap.
+
 ## 11. Create the seven Spark Job Definitions
 
 1. From the workspace list, click **New item** > **Spark Job Definition**.
@@ -403,9 +685,30 @@ Terraform resource names.
 
 ![Select the Environment from the correct workspace.](images/manual-deployment/29-select-job-environment.png)
 
-7. In **Lakehouse Reference**, click **Add**, select `pc_dev_lakehouse` in
-   your manual workspace, and click **Add**. Confirm it is the default Lakehouse.
-8. Click **Save** if there are unsaved settings. Do not click **Run** yet.
+7. After uploading the main file, scroll to **Lakehouse Reference** and expand
+   **All lakehouses**. Check the associated Lakehouse **even if the file upload
+   succeeded**; uploading a Python file does not attach a Lakehouse.
+   - If the list is empty or no Lakehouse is attached, click **Add**, find
+     `pc_dev_lakehouse`, verify its **Location/workspace** is your manual
+     workspace, select it, and click **Add** in the picker.
+   - If the correct Lakehouse is already listed, keep it; do not attach a
+     duplicate or choose an identically named Lakehouse from another workspace.
+   - Confirm it is the **default Lakehouse**. The captured editor marks it with
+     a pin; the control's accessible label is **Default lakehouse**.
+     If a different Lakehouse is default, use the intended row's default
+     control to set it correctly before proceeding.
+8. Click **Save** if there are unsaved settings. Refresh/reopen the job and
+   confirm the Lakehouse name, workspace, and default marker persisted.
+   Do not click **Run** yet.
+
+![Lakehouse Reference with the correct workspace and default pin.](images/manual-deployment/41-sjd-default-lakehouse.png)
+
+![Lakehouse picker; verify Location as well as name. The correct row is already attached, so it is selected and disabled. Owner details are masked.](images/manual-deployment/42-sjd-lakehouse-picker.png)
+
+The picker capture is a readback of an existing attachment, not an instruction
+to detach it for a screenshot. If a new job's list is empty, select the correct
+available row and use **Add**; never select the other workspace's same-name
+Lakehouse to bypass a disabled row.
 
 ### Repeat for every role
 
@@ -413,6 +716,9 @@ Use the configured job's toolbar **Copy** button. Name the copy as below,
 keep its location in the manual workspace, and click **Save**.
 For each copy, upload the matching role's `main.py`, confirm replacement when
 prompted, and verify that the Environment and Lakehouse bindings were retained.
+Recheck **Lakehouse Reference** on **every** role: attach the intended Lakehouse
+if missing, confirm the default marker and workspace, save, and reopen to verify.
+Do not assume a copied or uploaded definition retained the attachment.
 
 ![Copy the configured job into the next canonical role.](images/manual-deployment/30-copy-next-role.png)
 
@@ -443,6 +749,30 @@ Older wheels retain fixed production IDs and must not be used for this step.
 Record the **workspace**, **Lakehouse**, and **Environment** IDs from their
 Fabric browser URLs. These are not the Azure subscription, capacity, or
 workspace-identity IDs.
+
+### Find and verify the three IDs
+
+Start from the manual workspace's item list, not the monitoring activity page
+or an identically named item in another workspace:
+
+| ID to record | Portal steps |
+|---|---|
+| Workspace ID | Open `people-counter-guide-dev` (or your chosen workspace). In its browser URL, copy the workspace UUID following `/groups/`; some Fabric experiences expose it as the `workspaceObjectId` query parameter. Record the UUID only, not the whole URL. |
+| Lakehouse ID | From that workspace's item list, open `pc_dev_lakehouse`. Copy the Lakehouse item UUID from its item URL, commonly after `/lakehouses/`. The workspace UUID in the same URL is not the Lakehouse UUID. Do not use the SQL analytics endpoint ID. |
+| Environment ID | Return to the same workspace list and open `pc_dev_environment` in the Environment editor. Copy that Environment item's UUID from the item URL. Do not copy a notebook ID, SJD ID, Spark session ID, or run/activity ID. |
+
+For example, a Lakehouse URL shaped as
+`https://app.fabric.microsoft.com/groups/<workspace-id>/lakehouses/<lakehouse-id>`
+contains **two different IDs**. UI routes can vary by experience; the required
+values are the workspace UUID and each opened item's own UUID, not simply the
+last UUID on any Fabric page. If the route is unclear, stop and have a workspace
+administrator confirm the item ID before saving job arguments.
+
+Keep a small binding record with each item's display name, item type, UUID,
+and workspace UUID. Reopen each saved item link and confirm the workspace
+breadcrumb and item name before using the IDs. All three UUIDs must belong
+to this deployment. A successful runtime-context check below is the final
+binding check; it is not permission to guess IDs.
 
 For reference, the captured deployment used:
 
@@ -564,6 +894,10 @@ continue. A finished Spark job does not pause the Azure capacity.
 Before calling this a working application, independently verify:
 
 - Successful Environment publication and the intended installed SDK/dependencies.
+- For this Fabric-only headless profile, `opencv-python-headless` is the only
+  installed OpenCV distribution. SDK/backend dependency metadata must agree,
+  and the selected inference backend must pass executor-side validation.
+  The current stock LibreYOLO/Trackers-based options have not passed this gate.
 - Control `bootstrap` succeeds and the expected `people_counter_sjd_*` Delta
   tables exist. The script runs this command through the Control job; it does
   not run the inference pipeline as a substitute.
