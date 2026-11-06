@@ -94,9 +94,8 @@ class RuntimeLoadingTests(unittest.TestCase):
                     "REID_SHA256",
                     hashlib.sha256(weights).hexdigest(),
                 ),
-                patch.object(
-                    rtdetr_osnet,
-                    "OSNetEmbedder",
+                patch(
+                    "libreyolo.tracking.reid.OSNetEmbedder",
                     return_value=embedder,
                 ) as embedder_type,
             ):
@@ -149,9 +148,8 @@ class RuntimeLoadingTests(unittest.TestCase):
                     rtdetr_osnet,
                     "hf_hub_download",
                 ) as download,
-                patch.object(
-                    rtdetr_osnet,
-                    "OSNetEmbedder",
+                patch(
+                    "libreyolo.tracking.reid.OSNetEmbedder",
                     return_value=embedder,
                 ),
             ):

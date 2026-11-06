@@ -18,12 +18,13 @@ from tempfile import TemporaryDirectory
 from typing import Literal, TypedDict
 
 
-Variant = Literal["cpu", "gpu"]
+Variant = Literal["cpu", "gpu", "fabric-onnx"]
 
 PYPI_INDEX = "https://pypi.org/simple"
 PYTORCH_INDEXES: dict[Variant, str] = {
     "cpu": "https://download.pytorch.org/whl/cpu",
     "gpu": "https://download.pytorch.org/whl/cu128",
+    "fabric-onnx": "https://download.pytorch.org/whl/cpu",
 }
 
 
@@ -65,6 +66,15 @@ def build_bundle(
     """Build and archive an SDK wheelhouse for the current platform."""
     project_root = project_root.resolve()
     _validate_project_root(project_root)
+    if variant == "fabric-onnx" and (
+        sys.version_info[:2] != (3, 13)
+        or platform.system() != "Linux"
+        or platform.machine() != "x86_64"
+    ):
+        raise RuntimeError(
+            "Fabric ONNX bundles require Python 3.13 on Linux x86_64; "
+            "use the documented linux/amd64 build container"
+        )
     output_directory = output_directory.expanduser().resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
 
@@ -80,6 +90,11 @@ def build_bundle(
         dir=output_directory,
     ) as temporary_directory:
         temporary_root = Path(temporary_directory)
+        build_root = project_root
+        if variant == "fabric-onnx":
+            build_root = temporary_root / "fabric-project"
+            _prepare_fabric_onnx_project(project_root, build_root)
+            _run(["uv", "lock"], build_root)
         bundle_directory = temporary_root / name
         wheels_directory = bundle_directory / "wheels"
         wheels_directory.mkdir(parents=True)
@@ -89,7 +104,7 @@ def build_bundle(
         raw_requirements_path = temporary_root / "requirements.raw"
         _run(
             _export_command(variant, raw_requirements_path),
-            project_root,
+            build_root,
         )
         has_vcs_requirements = _write_requirements(
             raw_requirements_path,
@@ -98,14 +113,19 @@ def build_bundle(
             variant,
         )
 
-        _run(_sdk_build_command(wheels_directory), project_root)
+        _run(
+            _sdk_build_command(
+                wheels_directory, fabric_onnx=variant == "fabric-onnx"
+            ),
+            build_root,
+        )
         (wheels_directory / ".gitignore").unlink(missing_ok=True)
         _run(
             _dependency_wheel_command(
                 requirements_path,
                 wheels_directory,
             ),
-            project_root,
+            build_root,
         )
         if has_vcs_requirements:
             _run(
@@ -113,9 +133,11 @@ def build_bundle(
                     vcs_requirements_path,
                     wheels_directory,
                 ),
-                project_root,
+                build_root,
             )
         _validate_wheelhouse(wheels_directory)
+        if variant == "fabric-onnx":
+            _validate_fabric_wheelhouse(wheels_directory)
 
         readme_path = bundle_directory / "README.txt"
         readme_path.write_text(
@@ -173,14 +195,89 @@ def _export_command(
     ]
 
 
-def _sdk_build_command(wheels_directory: Path) -> list[str]:
-    return [
+def _sdk_build_command(
+    wheels_directory: Path, *, fabric_onnx: bool = False
+) -> list[str]:
+    command = [
         "uv",
         "build",
         "--wheel",
         "--out-dir",
         str(wheels_directory),
     ]
+    if fabric_onnx:
+        command.append(
+            "--config-setting=--build-option=--build-number=1fabriconnx"
+        )
+    return command
+
+
+def _prepare_fabric_onnx_project(project_root: Path, target: Path) -> None:
+    import toml
+
+    metadata = toml.load(project_root / "pyproject.toml")
+    project = metadata["project"]
+    dependencies = project["dependencies"]
+    if sum(value.startswith("opencv-python>=") for value in dependencies) != 1:
+        raise RuntimeError(
+            "Fabric ONNX profile requires exactly one opencv-python core dependency"
+        )
+    project["dependencies"] = [
+        "opencv-python-headless==5.0.0.93"
+        if value.startswith("opencv-python>=")
+        else value
+        for value in dependencies
+    ]
+    project["requires-python"] = ">=3.13,<3.14"
+    project["optional-dependencies"] = {
+        "fabric-onnx": [
+            "supervision==0.30.3",
+            "torch",
+            "torchvision",
+            "onnxruntime>=1.24,<2",
+        ]
+    }
+    uv = metadata["tool"]["uv"]
+    uv.pop("conflicts", None)
+    uv["sources"] = {
+        "torch": {"index": "pytorch-cpu"},
+        "torchvision": {"index": "pytorch-cpu"},
+    }
+    metadata.pop("dependency-groups", None)
+    target.mkdir()
+    (target / "pyproject.toml").write_text(toml.dumps(metadata), encoding="utf-8")
+    shutil.copy2(project_root / "uv.lock", target / "uv.lock")
+    shutil.copytree(
+        project_root / "src",
+        target / "src",
+        ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"),
+    )
+    for name in ("README.md", "LICENSE"):
+        source = project_root / name
+        if source.is_file():
+            shutil.copy2(source, target / name)
+
+
+def _validate_fabric_wheelhouse(wheels_directory: Path) -> None:
+    packages = [
+        path.name.split("-", 1)[0] for path in wheels_directory.glob("*.whl")
+    ]
+    forbidden = {
+        "opencv_python",
+        "opencv_contrib_python",
+        "opencv_contrib_python_headless",
+        "libreyolo",
+        "trackers",
+        "rfdetr",
+    }
+    if (
+        packages.count("opencv_python_headless") != 1
+        or forbidden.intersection(packages)
+    ):
+        raise RuntimeError(
+            "Fabric ONNX requires exactly one headless OpenCV wheel and no "
+            "non-headless or unqualified backend distributions"
+        )
 
 
 def _dependency_wheel_command(

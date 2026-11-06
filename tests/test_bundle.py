@@ -10,6 +10,9 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import toml
+
+from people_counter import bundle
 from people_counter.bundle import (
     PYPI_INDEX,
     PYTORCH_INDEXES,
@@ -29,6 +32,170 @@ from people_counter.bundle import (
 
 
 class BundleBuilderTests(unittest.TestCase):
+    def _fabric_project(self):
+        project = {
+            "project": {
+                "name": "people-counter",
+                "version": "1.2.3",
+                "dependencies": [
+                    "numpy>=1.24",
+                    "opencv-python>=4.11.0.86",
+                ],
+                "scripts": {"people-counter": "people_counter.cli:main"},
+                "optional-dependencies": {
+                    "cpu": [
+                        "libreyolo==1.5.0",
+                        "supervision==0.30.3",
+                        "trackers==2.6.0",
+                        "torch",
+                        "torchvision",
+                    ]
+                },
+            },
+            "tool": {
+                "uv": {
+                    "conflicts": [[{"extra": "cpu"}, {"extra": "gpu"}]],
+                    "sources": {"torch": [{"index": "pytorch-cpu", "extra": "cpu"}]},
+                }
+            },
+        }
+        original = toml.dumps(project)
+        (self.project_root / "pyproject.toml").write_text(original)
+        source = self.project_root / "src" / "people_counter"
+        source.mkdir(parents=True)
+        (source / "__init__.py").write_text('"""Test SDK."""\n')
+        (self.project_root / "README.md").write_text("Test SDK\n")
+        return project
+
+    def test_fabric_onnx_profile_isolated_from_normal_project(self):
+        project = self._fabric_project()
+        original = toml.dumps(project)
+        target = self.project_root / "fabric-profile"
+
+        bundle._prepare_fabric_onnx_project(self.project_root, target)
+
+        profile = toml.load(target / "pyproject.toml")
+        self.assertEqual((self.project_root / "pyproject.toml").read_text(), original)
+        self.assertEqual(profile["project"]["name"], "people-counter")
+        self.assertEqual(profile["project"]["version"], "1.2.3")
+        self.assertEqual(profile["project"]["scripts"], project["project"]["scripts"])
+        self.assertEqual(profile["project"]["requires-python"], ">=3.13,<3.14")
+        self.assertEqual(
+            profile["project"]["dependencies"],
+            ["numpy>=1.24", "opencv-python-headless==5.0.0.93"],
+        )
+        self.assertEqual(
+            profile["project"]["optional-dependencies"],
+            {"fabric-onnx": ["supervision==0.30.3", "torch", "torchvision", "onnxruntime>=1.24,<2"]},
+        )
+        self.assertNotIn("conflicts", profile["tool"]["uv"])
+        self.assertEqual(
+            profile["tool"]["uv"]["sources"],
+            {"torch": {"index": "pytorch-cpu"}, "torchvision": {"index": "pytorch-cpu"}},
+        )
+        self.assertEqual((target / "uv.lock").read_text(), "version = 1\n")
+        self.assertTrue((target / "src" / "people_counter" / "__init__.py").is_file())
+        self.assertEqual((target / "README.md").read_text(), "Test SDK\n")
+
+    def test_fabric_onnx_profile_rejects_unexpected_core_metadata(self):
+        (self.project_root / "pyproject.toml").write_text(
+            "[project]\nname='people-counter'\ndependencies=['numpy>=1.24']\n"
+        )
+        with self.assertRaisesRegex(RuntimeError, "exactly one opencv-python"):
+            bundle._prepare_fabric_onnx_project(
+                self.project_root, self.project_root / "fabric-profile"
+            )
+
+    def test_fabric_wheelhouse_requires_only_headless_opencv(self):
+        wheels = self.project_root / "wheels"
+        wheels.mkdir()
+        (wheels / "opencv_python_headless-5.0.0.93-cp37-abi3-linux_x86_64.whl").touch()
+        bundle._validate_fabric_wheelhouse(wheels)
+        for package in (
+            "opencv_python", "opencv_contrib_python", "opencv_contrib_python_headless",
+            "libreyolo", "trackers", "rfdetr",
+        ):
+            with self.subTest(package=package):
+                wheel = wheels / f"{package}-1.0-py3-none-any.whl"
+                wheel.touch()
+                with self.assertRaisesRegex(RuntimeError, "Fabric ONNX"):
+                    bundle._validate_fabric_wheelhouse(wheels)
+                wheel.unlink()
+        next(wheels.iterdir()).unlink()
+        with self.assertRaisesRegex(RuntimeError, "Fabric ONNX"):
+            bundle._validate_fabric_wheelhouse(wheels)
+
+    def test_fabric_bundle_uses_staged_metadata_and_a_distinct_wheel(self):
+        self._fabric_project()
+        original = (self.project_root / "pyproject.toml").read_text()
+
+        def run(command, project_root):
+            self.assertEqual(project_root.name, "fabric-project")
+            profile = toml.load(project_root / "pyproject.toml")
+            self.assertEqual(
+                profile["project"]["dependencies"][-1],
+                "opencv-python-headless==5.0.0.93",
+            )
+            if command[:2] == ["uv", "lock"]:
+                return
+            if command[:2] == ["uv", "export"]:
+                self.assertEqual(command[command.index("--extra") + 1], "fabric-onnx")
+                Path(command[command.index("--output-file") + 1]).write_text(
+                    "opencv-python-headless==5.0.0.93 \\\n    --hash=sha256:headless\n"
+                )
+                return
+            if command[:2] == ["uv", "build"]:
+                self.assertIn(
+                    "--config-setting=--build-option=--build-number=1fabriconnx",
+                    command,
+                )
+                wheels = Path(command[command.index("--out-dir") + 1])
+                (wheels / "people_counter-1.2.3-1fabriconnx-py3-none-any.whl").touch()
+                return
+            if "pip" in command and "wheel" in command:
+                self.assertNotIn("--no-deps", command)
+                wheels = Path(command[command.index("--wheel-dir") + 1])
+                (wheels / "opencv_python_headless-5.0.0.93-cp37-abi3-linux_x86_64.whl").touch()
+                return
+            self.fail(f"Unexpected command: {command}")
+
+        with (
+            patch("people_counter.bundle.sys.version_info", (3, 13, 0)),
+            patch("people_counter.bundle.platform.system", return_value="Linux"),
+            patch("people_counter.bundle.platform.machine", return_value="x86_64"),
+            patch("people_counter.bundle.version", return_value="1.2.3"),
+            patch("people_counter.bundle._run", side_effect=run),
+        ):
+            archive_path = build_bundle(
+                self.project_root, "fabric-onnx", self.output_directory
+            )
+
+        self.assertEqual((self.project_root / "pyproject.toml").read_text(), original)
+        with zipfile.ZipFile(archive_path) as archive:
+            root = archive.namelist()[0].split("/", 1)[0]
+            manifest = json.loads(archive.read(f"{root}/manifest.json"))
+            self.assertEqual(manifest["variant"], "fabric-onnx")
+            self.assertEqual(manifest["pytorch_index"], PYTORCH_INDEXES["cpu"])
+            self.assertTrue(any("1fabriconnx" in name for name in archive.namelist()))
+
+    def test_fabric_bundle_rejects_an_incompatible_build_host(self):
+        for python, system, machine in (
+            ((3, 12, 0), "Linux", "x86_64"),
+            ((3, 13, 0), "Linux", "aarch64"),
+            ((3, 13, 0), "Windows", "x86_64"),
+        ):
+            with (
+                self.subTest(python=python, system=system, machine=machine),
+                patch("people_counter.bundle.sys.version_info", python),
+                patch("people_counter.bundle.platform.system", return_value=system),
+                patch("people_counter.bundle.platform.machine", return_value=machine),
+                patch("people_counter.bundle._run") as run,
+                self.assertRaisesRegex(RuntimeError, "Python 3.13 on Linux x86_64"),
+            ):
+                build_bundle(self.project_root, "fabric-onnx", self.output_directory)
+            run.assert_not_called()
+        self.assertFalse(self.output_directory.exists())
+
     def _fake_run(self, command, project_root):
         self.assertEqual(project_root, self.project_root)
         if command[:2] == ["uv", "export"]:

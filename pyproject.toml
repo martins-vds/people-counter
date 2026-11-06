@@ -24,6 +24,7 @@ dev = [
     "mutmut>=3.8.0",
     "pytest-cov>=7.1.0",
     "pytest-crap>=0.3.0",
+    "toml>=0.10.2",
 ]
 
 [project.scripts]

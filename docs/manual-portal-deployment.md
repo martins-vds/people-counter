@@ -1,6 +1,6 @@
 # Manual Azure and Fabric deployment
 
-This is the **portal-only infrastructure and Lakehouse-bootstrap path**. Do not run
+This is the **portal-only deployment walkthrough**. Do not run
 Terraform, `bootstrap-local.sh`, or `deploy-local.sh` while following it.
 The deployment script is the requirements checklist, not an instruction to
 create a Terraform backend or a GitHub deployment identity.
@@ -10,11 +10,13 @@ Open [Azure](https://portal.azure.com/) and
 Keep the page being operated visible. Red outlines in the screenshots mark
 the next control or the value to verify. Dark masks hide account details.
 
-> **Stop after bootstrap on the captured F2 setup.** The live bootstrap
-> succeeded, but its run received **one executor**, not the **two** required
-> by the reviewed inference contract. The operator chose to keep F2 and stop
-> here. Do not run Dispatcher/Process, enable recurring schedules, or call
-> this a production-accepted deployment.
+> **The bootstrap checkpoint is not application acceptance.** Its captured
+> run received **one executor**, not the **two** required by the reviewed
+> inference contract. The operator subsequently approved continuing component
+> deployment and resolving the execution gates, without an unapproved capacity
+> upgrade or backend replacement. External notifications must remain disabled.
+> Do not enable unattended processing or call this production-accepted while
+> an acceptance gate remains unresolved.
 
 ## Scope and evidence
 
@@ -861,7 +863,226 @@ workspace plus both `--semantic-model-id` arguments once those models exist.
 An attempt to refresh a different workspace is rejected before creating the
 Gold state or requesting a refresh.
 
-## Verified outcome and F2 stop point
+## 13. Create the operations Activator
+
+The operations Activator monitors job health. It is **not** the separate
+manifest-arrival Activator that invokes the intake pipeline.
+
+1. Open the **new manual workspace**. Click **New item**, then **Activator**.
+   Fabric creates an item with a timestamped default name; a separate naming
+   dialog is not required in the captured UI.
+
+![New item gallery with the Activator card outlined.](images/manual-deployment/43-new-activator.png)
+
+2. Open the item-name drop-down in the top bar. Set **Name** to
+   `pc_dev_operations_activator` and press **Enter**.
+3. Click **Get data**. In the source picker, select **Fabric events**, then
+   **Job events**.
+4. Open **Event type(s)**. Deselect Created, StatusChanged, and Succeeded.
+   Leave only **Microsoft.Fabric.JobEvents.ItemJobFailed** selected.
+
+![Only the failed-job event type remains selected.](images/manual-deployment/44-activator-failed-job-event.png)
+
+5. Keep **Event scope** at **By item**. Check **Workspace** is your manual
+   workspace. Under **Item**, select `pc_sjd_dev_dispatcher`, not a job in
+   another workspace. Click **Next**.
+6. On **Review + connect**, verify the event type, workspace, dispatcher,
+   and destination Activator. Click **Connect**.
+
+![Review the manual workspace and dispatcher before connecting the source.](images/manual-deployment/45-activator-dispatcher-source-review.png)
+
+7. Wait for **Ingest Job events into Activator: Successful**. Click
+   **Finish**. Dismiss the first-use tour with **Get started**, if shown.
+8. Select the dispatcher event source and click **New rule**. The source
+   already filters failures, so **On every value** means every received
+   dispatcher-failure event; it does not mean every dispatcher run.
+9. Click the rule-name pencil. Rename the rule to
+   `alert_pc_sjd_dev_dispatcher_failed` and press **Enter**.
+10. **Do not click Start or Send me a test action.** The portal initially
+    supplies an email action addressed to its current author. That default
+    is not recipient approval. Leave the rule stopped, close the definition
+    pane, and verify **Start** is available and **Stop** is disabled.
+
+![Dispatcher failure rule exists but is stopped; no notification was sent.](images/manual-deployment/46-activator-failure-rule-stopped.png)
+
+The walkthrough created Activator
+`126d9ab1-b1d9-4a2a-8733-397ef8cdd174` and rule
+`5b0d5fd8-1cf6-475c-8c47-b1afc7942b76`. These are evidence IDs, not values to
+paste into a different deployment.
+
+**Verification boundary:** the connection task succeeded and the rule was
+created stopped. No dispatcher-failure event has yet been proven to arrive.
+The initial Live feed/analytics panels displayed no data and returned HTTP
+400 errors; these are not evidence of healthy event delivery. Resolve that
+readback and verify a controlled failure reaches this exact source before
+accepting the monitoring path. Notification delivery remains explicitly
+deferred by operator choice.
+
+## 14. Prepare offline model artifacts, then upload through Fabric
+
+### 14.1 Download and convert with the existing script
+
+Run these commands from the repository root on a connected preparation
+machine with `uv` installed. This is the model-preparation exception to the
+browser-only cloud setup: use the existing
+[`scripts/download_models.py`](../scripts/download_models.py), not manual
+downloads from individual model-hosting pages. No Terraform or cloud
+deployment script is involved.
+
+Download both RT-DETR backbones (R18 and R50), OSNet, and RF-DETR Large:
+
+```bash
+uv run --frozen --extra cpu python scripts/download_models.py \
+  --pipeline all \
+  --output-dir outputs/models
+```
+
+Original `.safetensors`, `.pt`, and `.pth` weights are not ONNX models.
+For the selected RT-DETR/OSNet ONNX runtime, also run:
+
+```bash
+uv run --frozen --extra cpu --extra export python scripts/download_models.py \
+  --pipeline rtdetr-osnet \
+  --output-dir outputs/models \
+  --convert onnx
+```
+
+This exports **both** RT-DETR backbones and OSNet. If preparing the alternative
+RF-DETR ONNX backend as well, run:
+
+```bash
+uv run --frozen --extra cpu --extra export python scripts/download_models.py \
+  --pipeline rfdetr-botsort \
+  --output-dir outputs/models \
+  --convert onnx
+```
+
+Alternatively, `--pipeline all --convert onnx` downloads and converts the
+complete set in one invocation. Conversion uses the preparation machine's
+CPU; its export dependencies are not the Fabric headless runtime profile.
+Keep that preparation environment separate from the published Fabric
+Environment. A successful export is not executor qualification.
+
+The script pins the Hugging Face revisions and checks the RF-DETR checkpoint
+checksum. It reuses existing downloads/exports unless `--force` is supplied.
+Do not use `--force` routinely, and do not assume an existing ONNX file was
+revalidated merely because the command reused it. Stop on any download,
+checksum, or conversion error.
+
+**Executed evidence:** all three commands above completed successfully during
+this walkthrough. All four exported ONNX files passed `onnx.checker` and a
+local ONNX Runtime CPU zero-input smoke run with finite outputs:
+
+| Model | Input shape | Output shapes |
+|---|---|---|
+| RT-DETR R18 | `1 x 3 x 640 x 640` | `1 x 300 x 80`, `1 x 300 x 4` |
+| RT-DETR R50 | `1 x 3 x 640 x 640` | `1 x 300 x 80`, `1 x 300 x 4` |
+| OSNet | `1 x 3 x 256 x 128` | `1 x 512` |
+| RF-DETR Large | `1 x 3 x 704 x 704` | `1 x 300 x 4`, `1 x 300 x 91` |
+
+These are structural/local runtime checks, not accuracy tests or Fabric
+inference acceptance. Export emitted Torch tracing/deprecation warnings;
+representative input and batch-size qualification remain required.
+
+### 14.2 Preserve the Lakehouse file layout
+
+Upload model artifacts through the **Fabric Lakehouse UI**, not a terminal
+uploader, Terraform, or a notebook upload API. The target is the manual
+Lakehouse's **Files** area, not Tables and not the ADLS footage shortcut.
+Preserve this layout relative to **Files**:
+
+```text
+models/
+  rtdetr_osnet/
+    rtdetr_v2_r18vd/
+      config.json
+      preprocessor_config.json
+      model.safetensors
+      model.onnx
+    rtdetr_v2_r50vd/
+      config.json
+      preprocessor_config.json
+      model.safetensors
+      model.onnx
+    libre_reid_osnet/
+      osnet_ain_x0_25.pt
+      osnet_ain_x0_25.onnx
+  rfdetr_botsort/
+    rf-detr-large-2026.pth
+    rf-detr-large-2026.onnx
+```
+
+For the selected R18/OSNet ONNX runtime, the required runtime files are the
+R18 `config.json`, `preprocessor_config.json`, and `model.onnx`, plus
+`libre_reid_osnet/osnet_ain_x0_25.onnx`. Keep originals and alternative
+backbones when staging the full artifact set. Do not upload Hugging Face
+`.cache` directories, flatten the folders, add another `models` level, or
+rename original weights to `.onnx`. The runtime model root is
+`Files/models`, not `Files/people-counter/sjd/v1`.
+
+### 14.3 Select the prepared folder through the Fabric UI
+
+1. Open the manual workspace and `pc_dev_lakehouse`. In Explorer, click
+   **Files**. Verify the destination breadcrumb ends at **Files**, not
+   `footage` or a table.
+2. Open **More options** beside the **Files** tree item. Click **Upload**,
+   then **Upload folder**.
+
+![Files context menu with Upload folder outlined.](images/manual-deployment/52-lakehouse-upload-model-folder.png)
+
+3. In **Upload folder**, verify the destination is
+   `<manual-workspace>/<manual-lakehouse>/Files/`. Leave **Overwrite if
+   folder already exists** unchecked for a new deployment.
+4. Click the outlined file-selection field. Select the prepared **models**
+   folder itself, not its parent `outputs` and not a single backbone folder.
+   The native file picker reads files on the computer running VS Code's
+   integrated browser. If preparation ran on a remote Linux host, first copy
+   the prepared folder to that computer while preserving its internal paths.
+   Exclude Hugging Face `.cache` directories from the upload copy.
+
+![Upload-folder dialog with the native folder-selection field outlined.](images/manual-deployment/53-lakehouse-select-model-folder.png)
+
+5. After selecting the folder, verify the field reads **models** and the
+   **Upload** button is enabled. Click **Upload** once.
+
+![Prepared models folder selected, with the Upload button outlined.](images/manual-deployment/54-lakehouse-submit-model-upload.png)
+
+6. Wait for every entry under **Current uploads** to complete. A queued
+   **Waiting...** entry or a full byte counter with a running progress bar
+   is not a completed upload. Do not close the browser or dismiss all tasks
+   while uploads are running.
+
+![Completed model uploads; the close-dialog control is outlined.](images/manual-deployment/55-lakehouse-model-uploads-completed.png)
+
+7. Verify every task has the **Completed file upload** checkmark. The full
+   artifact set has **12** files. Click **Close upload dialog**.
+8. Under **Files**, double-click **models**, then **rtdetr_osnet**, then
+   **rtdetr_v2_r18vd**. Verify the four expected filenames and sizes.
+
+![R18 model files read back from the Lakehouse, with model.onnx outlined.](images/manual-deployment/56-lakehouse-r18-model-readback.png)
+
+9. Use the Explorer tree to inspect the other folders. R50 must have four
+   files; `libre_reid_osnet` and `rfdetr_botsort` must each have two. If a
+   breadcrumb collapses a parent into an overflow menu, select the parent
+   from that menu or use Explorer instead.
+
+| Destination under `Files/models` | Verified file count | Portal-displayed sizes |
+|---|---|---|
+| `rtdetr_osnet/rtdetr_v2_r18vd` | 4 | Config 5 KB; preprocessor 444 B; ONNX 77 MB; weights 77 MB |
+| `rtdetr_osnet/rtdetr_v2_r50vd` | 4 | Config 5 KB; preprocessor 444 B; ONNX 164 MB; weights 164 MB |
+| `rtdetr_osnet/libre_reid_osnet` | 2 | ONNX 888 KB; weights 978 KB |
+| `rfdetr_botsort` | 2 | ONNX 116 MB; weights 129 MB |
+
+**Executed evidence:** all 12 upload tasks reported **Completed file upload**.
+All four destination folders were opened and their filenames/counts and
+displayed sizes read back through the native browser. Before submission,
+all 12 selected model/configuration files matched the Linux-prepared
+SHA-256 hashes; `.cache` entries were excluded from the browser selection.
+Portal size labels are rounded, not exact byte counts or remote checksums.
+Post-upload SHA-256 readback and executor-side model loading remain release
+acceptance gates; neither has been demonstrated by this upload walkthrough.
+
+## Historical bootstrap outcome and F2 checkpoint
 
 | Check | Captured result |
 |---|---|

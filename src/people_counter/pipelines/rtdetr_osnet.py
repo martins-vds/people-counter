@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
-from libreyolo.tracking.reid import OSNetEmbedder
 from people_counter.config import (
     DETECTOR_FLOOR,
     MIN_CONFIRMATION_FRAMES,
@@ -178,6 +177,8 @@ def load_reid_embedder(
             f"ReID weights checksum mismatch for {weights_path}: "
             f"expected {REID_SHA256}, got {weights_digest}"
         )
+    from libreyolo.tracking.reid import OSNetEmbedder
+
     return OSNetEmbedder(
         variant="osnet_ain_x0_25",
         weights=weights_path,
