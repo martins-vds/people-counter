@@ -391,6 +391,8 @@ git push origin v0.9.59
 ```
 
 Alternatively, run **Release SDK** manually with an existing matching tag.
+Manual dispatch does not create tags. A missing tag fails with instructions
+to create it at the intended release commit and push it before retrying.
 Both triggers build the tagged commit, not the current branch tip. Configure
 the GitHub `release` environment with any required approval rules. Publication
 requires the workflow token to have `contents: write` permission; no additional

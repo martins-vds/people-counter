@@ -44,6 +44,10 @@ jobs:
             echo "::error::Release tag must be vMAJOR.MINOR.PATCH"
             exit 1
           fi
+          if ! git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+            echo "::error::Release tag ${RELEASE_TAG} does not exist. Create and push it first: git tag ${RELEASE_TAG} <release-commit> && git push origin refs/tags/${RELEASE_TAG}. Then rerun this workflow."
+            exit 1
+          fi
           commit=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
           echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
