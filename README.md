@@ -21,6 +21,7 @@ All roles use the `people_counter_sjd_*` tables. They also use the
 - [Fabric SJD operations](notebooks/fabric/README.md)
 - [GitHub/Terraform deployment](docs/github-deployment.md)
 - [Local deployment](docs/local-deployment.md)
+- [Manual portal deployment (no Terraform)](docs/manual-portal-deployment.md)
 - [Source-controlled Fabric definitions](fabric/README.md)
 - [Getting-started tutorial](notebooks/fabric/18_sjd_getting_started_demo_tutorial.md)
 

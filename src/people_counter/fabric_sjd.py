@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
@@ -71,10 +72,13 @@ class FabricSjdConfig:
     stable_production: bool = True
 
     def __post_init__(self) -> None:
+        self._validate_config((WORKSPACE_ID, LAKEHOUSE_ID, ENVIRONMENT_ID))
+
+    def _validate_config(self, artifact_ids: tuple[str, str, str]) -> None:
         expected = {
-            "workspace_id": WORKSPACE_ID,
-            "lakehouse_id": LAKEHOUSE_ID,
-            "environment_id": ENVIRONMENT_ID,
+            "workspace_id": artifact_ids[0],
+            "lakehouse_id": artifact_ids[1],
+            "environment_id": artifact_ids[2],
             "table_prefix": TABLE_PREFIX,
             "files_root": FILES_ROOT,
             "runtime": FABRIC_RUNTIME,
@@ -91,7 +95,11 @@ class FabricSjdConfig:
                 f"stable production configuration is fixed: {mismatches!r}"
             )
         for value in (self.workspace_id, self.lakehouse_id, self.environment_id):
-            if str(uuid.UUID(value)) != value:
+            try:
+                identity = uuid.UUID(value)
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError("Fabric artifact IDs must be canonical UUIDs") from error
+            if str(identity) != value or identity.int == 0:
                 raise ValueError("Fabric artifact IDs must be canonical UUIDs")
 
     def require_write_enabled(self) -> None:
@@ -138,3 +146,31 @@ class FabricSjdConfig:
             f"abfss://{self.workspace_id}@onelake.dfs.fabric.microsoft.com/"
             f"{self.lakehouse_id}/{validated}"
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ManualFabricSjdConfig(FabricSjdConfig):
+    """Explicit artifact binding; the stable namespace and write guards stay fixed."""
+
+    workspace_id: str
+    lakehouse_id: str
+    environment_id: str
+
+    def __post_init__(self) -> None:
+        self._validate_config((self.workspace_id, self.lakehouse_id, self.environment_id))
+
+    def validate_runtime_context(self, context: Mapping[str, object]) -> None:
+        if not isinstance(context, Mapping):
+            raise ValueError("Manual runtime context must be a mapping")
+        for key, expected in (
+            ("currentWorkspaceId", self.workspace_id),
+            ("defaultLakehouseId", self.lakehouse_id),
+            ("defaultLakehouseWorkspaceId", self.workspace_id),
+            ("environmentId", self.environment_id),
+            ("environmentWorkspaceId", self.workspace_id),
+        ):
+            if context.get(key) != expected:
+                raise ValueError(
+                    f"Manual runtime context {key} must match {expected}; "
+                    f"observed {context.get(key)!r}"
+                )

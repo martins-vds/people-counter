@@ -1,5 +1,9 @@
 # Local deployment runbook
 
+For a browser-operated deployment without Terraform, use the
+[manual Azure and Fabric guide](manual-portal-deployment.md).
+The procedure below is the separate, Terraform-managed path.
+
 An operator can run the same deployment sequence from a trusted Linux
 workstation with [deploy-local.sh](../scripts/deploy-local.sh).
 The script uses the operator's Azure CLI user session instead of GitHub OIDC.

@@ -10,6 +10,32 @@ committed file contains an environment-specific artifact ID.
 Tests compare these files with `build_sjd_definition()`. This check keeps each
 generated payload equal to its Terraform source.
 
+## Manual workspace binding
+
+For the browser-operated path, follow the
+[manual deployment guide](../../docs/manual-portal-deployment.md).
+The six stable runtime entry points accept an explicit prefix:
+
+```text
+--manual-artifacts <workspace-id> <lakehouse-id> <environment-id> <role arguments>
+```
+
+All three IDs must be canonical, non-nil UUIDs. The entry points compare them
+against NotebookUtils `currentWorkspaceId`, `defaultLakehouseId`,
+`defaultLakehouseWorkspaceId`, `environmentId`, and `environmentWorkspaceId`
+before dispatch. Missing or mismatched context fails closed. The selected
+binding is also used for video/model localization and distributed-cache URIs.
+Refresh rejects a different `--workspace-id`.
+
+This opts into `ManualFabricSjdConfig`; the fixed table/file namespace, runtime,
+release admission, and production write guards are unchanged. Omitting the
+prefix preserves the existing fixed deployment defaults.
+
+The legacy Cutover entry point does not accept this prefix and rejects it
+before starting Spark. Do not remove it to run legacy migration/retirement
+commands in a new manual workspace. Use Control `bootstrap` for greenfield
+initialization and keep all schedules disabled until acceptance.
+
 ## Release admission
 
 Stable production registration resolves the installed SDK's immutable detached

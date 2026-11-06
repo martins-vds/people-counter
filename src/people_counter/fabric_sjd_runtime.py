@@ -36,7 +36,10 @@ from people_counter.fabric_input_resolver import (
     verify_sha256,
 )
 from people_counter.fabric_source_cache import LocalizedSourceCache
-from people_counter.fabric_sjd import FabricSjdConfig
+from people_counter.fabric_sjd import FabricSjdConfig, ManualFabricSjdConfig
+
+
+FabricRuntimeConfig = FabricNamespaceConfig | FabricSjdConfig
 
 
 def _sha256_json(value: object) -> str:
@@ -123,7 +126,7 @@ def _consumer_probe_profile(
 
 def _probe_and_persist_consumer_decision(
     spark: Any,
-    config: FabricNamespaceConfig,
+    config: FabricRuntimeConfig,
     batch_id: str,
     envelope: Mapping[str, Any],
     *,
@@ -455,7 +458,7 @@ def _fabric_process_profile(
 
 def select_process_execution_harness(
     spark: Any,
-    config: FabricNamespaceConfig,
+    config: FabricRuntimeConfig,
     batch_id: str,
     *,
     row_enrichment: Mapping[str, Mapping[str, Any]],
@@ -730,6 +733,8 @@ def _resolve_localized_video(
     staged_sources: dict[str, Any],
     broadcast_digests: set[str],
     distributed_alias_root_uri: str | None = None,
+    workspace_id: str = WORKSPACE_ID,
+    lakehouse_id: str = LAKEHOUSE_ID,
     validation_error: type[Exception],
 ) -> tuple[str, str, str | None]:
     """Resolve and hash-verify one item's video; never a whole-file read.
@@ -759,8 +764,8 @@ def _resolve_localized_video(
             spark,
             cache,
             abfss_uri=(
-                f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
-                f"{LAKEHOUSE_ID}/{relative}"
+                f"abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/"
+                f"{lakehouse_id}/{relative}"
             ),
             original_basename=source.rsplit("/", 1)[-1],
             expected_sha256=str(payload.get("source_sha256", "")),
@@ -811,6 +816,8 @@ def _resolve_localized_models(
     staged_sources: dict[str, Any],
     broadcast_digests: set[str],
     distributed_alias_root_uri: str | None = None,
+    workspace_id: str = WORKSPACE_ID,
+    lakehouse_id: str = LAKEHOUSE_ID,
     validation_error: type[Exception],
 ) -> dict[str, dict[str, str]]:
     """Resolve and hash-verify every fixed model artifact for one item."""
@@ -838,8 +845,8 @@ def _resolve_localized_models(
                 spark,
                 cache,
                 abfss_uri=(
-                    f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
-                    f"{LAKEHOUSE_ID}/{full_model_path}"
+                    f"abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/"
+                    f"{lakehouse_id}/{full_model_path}"
                 ),
                 original_basename=model_path.rsplit("/", 1)[-1],
                 expected_sha256=expected_digest,
@@ -985,8 +992,8 @@ def _localize_process_inputs(
     ):
         store_config = FabricNamespaceConfig()
     distributed_alias_root_uri = (
-        f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
-        f"{LAKEHOUSE_ID}/{store_config.file_path('distributed-cache')}"
+        f"abfss://{store_config.workspace_id}@onelake.dfs.fabric.microsoft.com/"
+        f"{store_config.lakehouse_id}/{store_config.file_path('distributed-cache')}"
     )
 
     enrichment: dict[str, dict[str, Any]] = {}
@@ -1008,6 +1015,8 @@ def _localize_process_inputs(
             staged_sources=staged_sources,
             broadcast_digests=broadcast_digests,
             distributed_alias_root_uri=distributed_alias_root_uri,
+            workspace_id=store_config.workspace_id,
+            lakehouse_id=store_config.lakehouse_id,
             validation_error=validation_error,
         )
         model_paths = _model_artifact_paths(
@@ -1023,6 +1032,8 @@ def _localize_process_inputs(
             staged_sources=staged_sources,
             broadcast_digests=broadcast_digests,
             distributed_alias_root_uri=distributed_alias_root_uri,
+            workspace_id=store_config.workspace_id,
+            lakehouse_id=store_config.lakehouse_id,
             validation_error=validation_error,
         )
         _check_synthetic_model_identity(
@@ -1100,7 +1111,7 @@ def _clear_stale_lock(
     spark: Any,
     expected_owner_id: str,
     *,
-    config: FabricNamespaceConfig | None = None,
+    config: FabricRuntimeConfig | None = None,
 ) -> dict[str, Any]:
     """Manually clear one investigated canary writer token by exact CAS."""
     from delta.tables import DeltaTable
@@ -1150,7 +1161,7 @@ def _clear_stale_lock(
 
 
 def _write_control_diagnostic(
-    config: FabricNamespaceConfig,
+    config: FabricRuntimeConfig,
     command: str,
     error: BaseException,
     *,
@@ -1200,7 +1211,7 @@ def _write_control_diagnostic(
 def control_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricNamespaceConfig | None = None,
+    config: FabricRuntimeConfig | None = None,
 ) -> int:
     """Run bounded control maintenance against the fixed canary tables."""
     arguments = _control_parser().parse_args(argv)
@@ -1219,7 +1230,7 @@ def control_main(
 def _control_dispatch(
     arguments: argparse.Namespace,
     store: Any,
-    selected: FabricNamespaceConfig,
+    selected: FabricRuntimeConfig,
 ) -> int:
     """Execute one parsed control command; isolated so the diagnostic
     wrapper in ``control_main`` always sees command failures."""
@@ -1401,7 +1412,7 @@ def _dispatcher_parser() -> argparse.ArgumentParser:
 def dispatcher_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricNamespaceConfig | None = None,
+    config: FabricRuntimeConfig | None = None,
     route_mode: str | None = None,
 ) -> int:
     """Atomically claim at most one bounded batch and process it."""
@@ -1617,7 +1628,7 @@ def _refresh_semantic_model(
 def refresh_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricNamespaceConfig | None = None,
+    config: FabricRuntimeConfig | None = None,
 ) -> int:
     """Refresh the stable semantic model and acknowledge its durable outbox."""
     arguments = _refresh_parser().parse_args(argv)
@@ -1626,6 +1637,8 @@ def refresh_main(
 
     selected = config or FabricNamespaceConfig()
     selected.require_write_enabled()
+    if isinstance(selected, ManualFabricSjdConfig) and arguments.workspace_id != selected.workspace_id:
+        raise ValueError("Manual reporting workspace must match the runtime binding")
     state = FabricGoldState(_spark(), config=selected)
     pending = state.pending_refreshes()
     if not pending:
@@ -1770,7 +1783,7 @@ def _process_output(
 def process_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricNamespaceConfig | None = None,
+    config: FabricRuntimeConfig | None = None,
     route_mode: str | None = None,
     route_identity: Mapping[str, Any] | None = None,
 ) -> int:
@@ -1922,7 +1935,7 @@ def _gold_parser() -> argparse.ArgumentParser:
 def gold_main(
     argv: Sequence[str] | None = None,
     *,
-    config: FabricNamespaceConfig | None = None,
+    config: FabricRuntimeConfig | None = None,
 ) -> int:
     """Build gold through committed pointers and typed Delta tables."""
     arguments = _gold_parser().parse_args(argv)
