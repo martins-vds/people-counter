@@ -67,11 +67,13 @@ source_paths = [
     "scripts/check_fabric_definition_drift.py",
     "scripts/validate_fabric_deployment.py",
     "scripts/download_models.py",
+    "scripts/prepare_manual_fabric_assets.py",
 ]
 pytest_add_cli_args = ["-o", "pythonpath=src"]
 pytest_add_cli_args_test_selection = ["tests/"]
 also_copy = [
     "fabric/",
+    "infra/modules/fabric-foundation/definitions/variable-library/",
     "notebooks/fabric/",
     "notebooks/customer_end_to_end_demo.ipynb",
     "samples/",

@@ -1,6 +1,6 @@
 # Manual Azure and Fabric deployment
 
-This is the **portal-only deployment walkthrough**. Do not run
+This is the **portal-operated deployment walkthrough**. Do not run
 Terraform, `bootstrap-local.sh`, or `deploy-local.sh` while following it.
 The deployment script is the requirements checklist, not an instruction to
 create a Terraform backend or a GitHub deployment identity.
@@ -21,7 +21,7 @@ the next control or the value to verify. Dark masks hide account details.
 ## Scope and evidence
 
 The screenshots are real captures from the shared integrated browser on
-2026-11-06. The walkthrough uses an isolated Development workspace; it does not
+2026-11-06 and 2026-11-07 (UTC). The walkthrough uses an isolated Development workspace; it does not
 change the existing `people-counter-dev` workspace.
 
 **Creation-form evidence is not creation evidence.** The resource group, F2
@@ -36,6 +36,14 @@ This guide does not claim the script's saved-plan approval, zero-Terraform-drift
 two-pass reconciliation, or clean-room acceptance guarantees. Creating Fabric
 items alone does not establish a working or production-ready People Counter
 pipeline. The final acceptance checklist identifies the additional gates.
+
+For the completed post-bootstrap component instructions, continue with
+[publication inputs](#15-prepare-the-browser-run-publication-notebook),
+[managed monitoring](#16-provision-and-enable-managed-workspace-monitoring),
+[variables](#17-publish-and-verify-the-variable-library),
+[reporting](#18-publish-the-analytics-and-operations-reporting),
+[RTI and operations rules](#19-complete-the-rti-operations-surfaces), and
+[release configuration and its explicit admission hold](#20-release-configuration-and-operational-handover).
 
 ## Before starting
 
@@ -304,6 +312,13 @@ does not grant the signed-in human access.
 ![Successful listing of the new Files/footage shortcut.](images/manual-deployment/20-shortcut-readback.png)
 
 ## 9. Turn on workspace monitoring
+
+**For a new deployment, use the managed monitoring procedure in
+[section 16](#16-provision-and-enable-managed-workspace-monitoring), not the
+classic `+ Eventhouse` procedure below.** Complete that section before accepting
+RTI queries or alerts. The following captures explain the older artifacts
+already present in this walkthrough; they are historical evidence, not the
+recommended greenfield path.
 
 1. Open **Workspace settings** > **Monitoring**.
 2. In the experience shown in this tenant, click **+ Eventhouse**.
@@ -1082,6 +1097,642 @@ Portal size labels are rounded, not exact byte counts or remote checksums.
 Post-upload SHA-256 readback and executor-side model loading remain release
 acceptance gates; neither has been demonstrated by this upload walkthrough.
 
+## 15. Prepare the browser-run publication notebook
+
+The analytics and operations reports are repository definitions, not PBIX
+files. Their semantic models are TMDL bundles. A report-only upload cannot
+create the matching model or bind it to this Lakehouse.
+
+The operator approved using a **small notebook created and run in the native
+browser** to publish these exact definitions through Fabric's APIs. This is
+the explicit notebook-assisted part of the manual path. It does not run
+Terraform, connect workspace Git, or deploy from a terminal.
+
+### Prepare and upload the checked definition inputs
+
+1. On the preparation machine, from the repository root, run:
+
+   ```bash
+   uv run --frozen python scripts/prepare_manual_fabric_assets.py
+   ```
+
+   This validates the hashes, sizes, complete part lists, and token evidence
+   of the seven reporting/RTI/Activator bundles using the existing definition reader.
+   It also packages the repository REST client, tested publication helpers,
+   and variable-library template. **It makes no cloud requests.**
+
+2. Record the printed **SHA256**. If the command refuses to overwrite different
+   prepared inputs, choose a fresh `--output` path and use that new filename
+   consistently. Do not silently replace an earlier publication input.
+3. Make the resulting `manual-publication.json` accessible to the computer
+   running the integrated browser. Optional compression uses Python's
+   standard library:
+
+   ```bash
+   uv run python -c "import gzip; from pathlib import Path; p=Path('outputs/manual-fabric/manual-publication.json'); p.with_suffix('.json.gz').write_bytes(gzip.compress(p.read_bytes(), mtime=0))"
+   ```
+
+   The notebook checks the **uncompressed JSON's** SHA-256, not the `.gz`
+   file's SHA-256.
+4. Open the manual Lakehouse and select **Files**. Use **More options** beside
+   Files > **Upload** > **Upload files**. Select the prepared JSON or its gzip
+   envelope. Leave overwrite unchecked. Click **Upload** and wait for
+   **Completed file upload**. Verify the file appears directly under Files.
+
+![Upload the checked publication input to the manual Lakehouse.](images/manual-deployment/58-upload-publication-input.png)
+
+The captured upload used `Files/manual-publication.json.gz`. This input is
+not a model artifact and must not go into `Files/models`.
+
+### Create, bind, and run the notebook
+
+1. Return to the manual workspace. Click **New item** > **Notebook**.
+   Enter `pc_dev_deployment`, verify the location is the manual workspace,
+   and click **Create**. If a previously created notebook exists, open it
+   instead of creating a duplicate.
+
+![Create the publication notebook in the manual workspace.](images/manual-deployment/57-create-deployment-notebook.png)
+
+2. Dismiss the actual first-use dialog with **Skip for now**, if shown.
+   Do not attempt to operate a cell through an onboarding overlay.
+3. Under **Add data items**, choose **From OneLake catalog**. Select the
+   `pc_dev_lakehouse` row in **people-counter-guide-dev** whose icon/type is
+   **Lakehouse**, not its SQL analytics endpoint or an identically named
+   item in another workspace. Click **Add**.
+4. Open the supplied
+   [publication notebook](../notebooks/fabric/manual_workspace_publication.ipynb)
+   in VS Code. Copy its code cells into the browser notebook in order.
+   To insert below the selected browser cell, press **Esc**, then **B**.
+5. In the first cell, replace all example target IDs and the workspace name
+   with this deployment's values. Set `EXPECTED_INPUT_SHA256` to the exact
+   preparation output and `INPUT_FILE_NAME` to the uploaded filename.
+6. Click **Run cell** for the setup cell. Confirm **Workspace verified**
+   identifies the intended manual workspace and the printed input hash is
+   the one recorded during preparation. The live workspace check runs before
+   publication. Never print the token or session authorization headers.
+   If the administrative session has timed out, select **Connect** >
+   **New standard session**, wait for **Session ready**, and rerun setup
+   before any publication cell. A queued cell in **Not connected** state
+   has not executed and must not be recorded as successful.
+7. Run the subsequent cells separately at the checkpoints below. This
+   administrative notebook can use **Workspace default**; that does not
+   qualify the inference SDK, Environment, or executor profile.
+
+The walkthrough notebook is
+`31e89e1a-cb68-447c-8a3d-fa1552160635`. The input prepared during the initial
+browser run had SHA-256
+`784ff71c581dbdd8421746efcce3702dcc8de115976a2fa8aa10964699093c42`.
+These identify that captured run, not the hash to paste after rebuilding
+inputs from changed source. The publication helpers were subsequently
+corrected and tested for Fabric JSON normalization, default-format handling,
+and same-name Eventhouse/database items. Always prepare from the current
+checked-out sources.
+
+After the walkthrough, this live notebook was reduced to a two-cell audit:
+a summary and a read-only configuration-evidence check. Its historical
+publication and recovery cells were archived privately in OneLake and
+removed from the executable notebook. For a fresh deployment, use the
+repository template above, not the finished audit notebook or its recovery
+archive.
+
+The helper only updates items it previously marked as its own or an
+explicitly approved existing item ID. It refuses ambiguous same-type names
+and unrelated existing items. Do not remove those checks to force an update.
+
+## 16. Provision and enable managed workspace monitoring
+
+Managed monitoring is separate from the dedicated operations Eventhouse in
+section 19. Its database is the datasource for the repository Queryset and
+dashboard.
+
+**Pause classic collection before enrolling.** If the workspace already has
+classic monitoring, open **Workspace settings** > **Monitoring** and turn
+**Log workspace activity** from **On** to **Off**. Verify the paused message.
+Do not delete the classic Eventhouse or database. A genuinely new workspace
+without classic monitoring can skip this pause. Microsoft explicitly states
+that migration cannot proceed while legacy collection is running; see
+[the supported migration prerequisites](https://learn.microsoft.com/en-us/fabric/fundamentals/enable-workspace-monitoring#migrate-from-legacy-workspace-monitoring).
+
+![Pause legacy collection without deleting its stored history.](images/manual-deployment/70-pause-legacy-monitoring.png)
+
+1. Run **Provision managed monitoring** in the publication notebook. It
+   creates `Monitoring_item_<workspace-name>`, configures its Eventhouse
+   destination, waits for the managed database, and reads the definition
+   back. Keep the existing classic artifacts and their history; do not
+   click **Delete legacy monitoring artifacts**.
+2. Return to the workspace. Click **Workspace settings** > **Monitoring**.
+   Wait until **Fetching monitoring definition** disappears.
+3. Click **Manage settings**. Check **Enable diagnostic data collection**.
+   Verify **Monitoring item name** identifies this workspace's new item.
+4. Leave **Provision an Event stream custom endpoint** and **Enable AI
+   powered investigations** unchecked unless separately approved.
+5. Click **Save**.
+
+![Managed monitoring settings with diagnostic data collection outlined.](images/manual-deployment/59-managed-monitoring-diagnostics.png)
+
+![Enable only the approved diagnostic capability, then save.](images/manual-deployment/60-save-managed-monitoring.png)
+
+6. Reopen the settings and verify **Status: Enabled** and diagnostic data
+   collection is listed under **Capabilities enabled**. A created item,
+   successful definition update, or provisioned database is not this check.
+7. In the workspace list, inspect the managed item and its generated
+   Eventhouse, database, Eventstream, and Activator. Do not manually create
+   duplicate supporting items to reproduce their names.
+
+**Captured provisioning:** managed item
+`ba765085-8f64-47b4-b6b2-4b256ad48962`; database
+`3892ea43-e64b-48dc-9bef-d65d600c7c95`.
+The managed database's service-returned query endpoint was used for RTI
+binding. Do not reuse the classic database's ID or guess an endpoint URL.
+
+**Captured correction:** the initial Save returned HTTP 400 / `UnknownError`
+from `createDiagnosticsettings` and displayed **Disabled / None** because
+classic collection was still running. This was not a capacity-sizing problem.
+The successful notebook definition readback had not established collection.
+
+![Historical failed enablement, before pausing legacy collection.](images/manual-deployment/61-managed-monitoring-status.png)
+
+For this already partially configured walkthrough, the new monitoring
+Eventhouse was verified to have **0 B** stored data, and private,
+readback-verified backups of the three dependent RTI definitions were retained. Only those
+new consumers were temporarily detached; lineage was checked before the
+empty premature enrollment was moved to the recycle bin. That exposed the
+classic pause control. After pausing classic logging, the monitoring item
+and its supporting items were restored together from the recycle bin,
+retaining their original IDs. No classic monitoring data was deleted.
+
+This repair is **not** a routine greenfield step. Do not copy it onto a
+collector with data or unreviewed dependents. It requires an owner-reviewed
+backup, dependency, and restoration plan. The integrated browser's **Use new
+experience** confirmation did not render a usable input in this session;
+no typed Move confirmation is claimed. The notebook-assisted enrollment and
+supported item restoration were the verified route.
+
+![Recovery only: the exact empty premature enrollment, not classic history.](images/manual-deployment/69-revert-empty-monitoring-enrollment.png)
+
+![The migration banner becomes available after classic logging is paused.](images/manual-deployment/71-migrate-after-pausing-legacy.png)
+
+![Restore only the selected monitoring enrollment and its supporting items.](images/manual-deployment/72-restore-monitoring-after-legacy-pause.png)
+
+**Final capability readback:** Save then succeeded. The native settings pane
+showed **Status: Enabled**, **Capabilities enabled: Diagnostic data collection**,
+and **Updated workspace monitoring item successfully**. AI investigations and
+custom endpoint export were not enabled.
+
+![Verified managed monitoring enabled with diagnostic collection.](images/manual-deployment/73-managed-monitoring-enabled.png)
+
+All three temporarily detached consumers were subsequently restored from
+their SHA-256-verified private backups: the Queryset, dashboard, and operations
+Activator retained their original IDs and their exact bound definitions.
+New
+telemetry can take **up to one hour** after migration while cached legacy
+destination settings expire. Zero rows during that interval are not proof of
+failed configuration, nor proof of successful event delivery. Generate and
+read back new relevant activity before accepting collection end to end.
+
+**Later post-repair readback:** at `2026-11-07 02:31 UTC`, the restored
+Queryset completed in **0.301 s** and returned `Completed: 2` and
+`InProgress: 1` from this managed database. This establishes that job events
+are reaching managed monitoring. It does not establish a particular
+Dispatcher failure, intake-duration trigger, or inference run.
+
+![Run the restored Queryset and verify actual managed-monitoring job events.](images/manual-deployment/77-managed-monitoring-events-readback.png)
+
+Eventstream metrics are a separate setting on each applicable Eventstream:
+open that item > **Settings** > **Monitoring** and verify the required metrics
+configuration. Provisioning an Eventstream or its custom endpoint does not
+prove that metrics or workspace diagnostics are flowing.
+
+## 17. Publish and verify the variable library
+
+1. Run **Publish typed deployment variables** in the publication notebook.
+   It resolves the seven manual job IDs from this workspace, not fixed
+   IDs from another environment, then publishes `pc_dev_variables`.
+2. Wait for **Variable library configured** and the typed-reference list.
+   Readback compares JSON values, not formatting: Fabric reformats JSON
+   during export. Changed values still fail verification.
+3. Return to the workspace and open `pc_dev_variables`.
+4. Verify the base/default values below. Do not add a value-set override
+   pointing to a different workspace.
+
+| Variable | Type | Required value |
+|---|---|---|
+| `DeploymentStage` | String | `dev` for this walkthrough |
+| `WorkspaceId` | String | The manual workspace ID |
+| `Lakehouse` | ItemReference | Manual workspace + manual Lakehouse |
+| `Environment` | ItemReference | Manual workspace + published Environment |
+| `ControlSparkJob` | ItemReference | Manual Control job |
+| `DispatcherSparkJob` | ItemReference | Manual Dispatcher job |
+| `ProcessSparkJob` | ItemReference | Manual Process job |
+| `RefreshSparkJob` | ItemReference | Manual Refresh job |
+| `ReconciliationSparkJob` | ItemReference | Manual Reconciliation job |
+| `GoldSparkJob` | ItemReference | Manual Gold job |
+| `CutoverSparkJob` | ItemReference | Manual Cutover item; still on-demand and not approved for greenfield migration |
+
+The walkthrough library is `d8540289-cb2d-45e8-bcc2-4998be59a757`.
+All eleven values and their types were read back successfully. The library
+records deployment references; it does not replace the explicit manual job
+arguments, SDK release identity, or immutable admission evidence.
+
+![Verify the active default value set and typed item references.](images/manual-deployment/62-variable-library-default-values.png)
+
+## 18. Publish the analytics and operations reporting
+
+Use the **exact** definitions under
+[`fabric/semantic-models/`](../fabric/semantic-models/) and
+[`fabric/reports/`](../fabric/reports/). Do not build substitute reports from
+blank canvases. Do not connect Git to this populated workspace as a shortcut:
+an initial synchronization can replace workspace content.
+
+### Publish and verify both pairs
+
+1. Confirm the Power BI author has an appropriate license. The walkthrough
+   used the explicitly approved free 60-day trial, not a paid purchase.
+   Record its expiry and arrange ongoing author/viewer access separately.
+   An F2 capacity alone is not a Power BI author license.
+2. Run **Publish the exact repository reporting definitions** in the notebook.
+3. Wait for both **Semantic model definition verified** and **Report
+   definition verified** for **each** bundle.
+4. Inspect the printed bindings and the workspace item list:
+
+| Bundle | Semantic model | Report |
+|---|---|---|
+| Analytics | `pc_sjd_dev_analytics_model` | `pc_sjd_dev_analytics_report` |
+| Operations | `pc_sjd_dev_operations_model` | `pc_sjd_dev_operations_report` |
+
+The notebook binds `TargetWorkspaceId`, `TargetLakehouseId`, and
+`TargetLakehouseName` in the models. It binds the actual newly created model
+ID/name in each report **and** changes the report's Power BI workspace
+connection from the old workspace name to this manual workspace.
+
+Legacy-looking logical table names inside the models are not proof of an
+incorrect source: the repository's physical partitions already target
+`people_counter_sjd_*` tables. Do not rename those logical objects and break
+the report visuals. Template `.platform` metadata is omitted from publication,
+not reused as a live item identity.
+
+**Verified definition bindings in this walkthrough:**
+
+| Artifact | ID |
+|---|---|
+| Analytics model | `3b014b01-3f01-4395-805c-5346c65a2684` |
+| Analytics report | `e6e16e24-009e-4db2-bc5e-1ac04d8a425e` |
+| Operations model | `9eb0a2b3-f78b-4363-94ef-73352aa0fa7f` |
+| Operations report | `bdb6b65b-bc84-4d93-8a48-0f579828dfba` |
+
+### Refresh and open the reports
+
+5. Submit each model refresh with **NoNotification** from the browser
+   notebook. The same checked REST client can use the Power BI API root:
+
+   ```python
+   power_bi = FabricRESTController(
+       NotebookTokenProvider(),
+       workspace_id=TARGET_WORKSPACE_ID,
+       api_root="https://api.powerbi.com/v1.0/myorg",
+   )
+   for bundle, binding in reporting_ids.items():
+       path = (
+           f"/groups/{TARGET_WORKSPACE_ID}/datasets/"
+           f"{binding['semanticModelId']}/refreshes"
+       )
+       power_bi._json(
+           "POST", path,
+           value={"notifyOption": "NoNotification"},
+           expected=(202,),
+       )
+       print(bundle, "refresh accepted; completion still requires readback")
+   ```
+
+6. Open each semantic model's **Refresh history** in Fabric and wait for a
+   terminal **Completed** result. An HTTP 202 response is only submission.
+   If several refreshes appear, inspect their IDs, types, timestamps, and
+   outcomes rather than guessing which request completed.
+7. Open **both reports**. Visit their pages and verify the visuals load
+   without missing-model, credential, missing-table, or broken-field errors.
+   An empty chart is expected before representative processing and Gold
+   publication; it is not end-to-end inference acceptance.
+8. Reopen the Refresh job and bind **both new semantic-model IDs** in its
+   role arguments. Retain the manual-artifact prefix and same workspace:
+
+   ```text
+   --manual-artifacts <workspace-id> <lakehouse-id> <environment-id> --workspace-id <workspace-id> --semantic-model-id <analytics-model-id> --semantic-model-id <operations-model-id>
+   ```
+
+Do not enable a Refresh schedule until the release-configuration checkpoint
+below passes. If refresh fails on credentials, fix the model's actual data
+connection and permissions in its settings; do not rebind it to an older
+working workspace to make the error disappear.
+
+**Captured refresh evidence:** analytics ViaApi request
+`5a4e4bae-f7f9-45b3-80d2-845dc84a8d4b` completed at
+`2026-11-07T00:37:41.517Z`; operations ViaApi request
+`d8a66174-fdaa-43b8-b0e6-04673dd64d8c` completed at
+`2026-11-07T00:37:59.907Z`. The history also contains automatic
+`DirectLakeFraming` entries. Those are not additional caller-submitted API
+refreshes and must not be confused with their request IDs.
+
+All six analytics pages and all three operations pages were opened in the
+native browser. The captured report views rendered without visible
+missing-model or broken-field error cards. No representative processing data
+has been loaded. The Forecast page contains the repository's baseline
+scenario, not measured throughput for this F2 capacity.
+
+![Repository analytics report, with the Forecast page control outlined.](images/manual-deployment/63-analytics-report-forecast.png)
+
+![Repository operations report, with the Operations page control outlined.](images/manual-deployment/64-operations-report-rendered.png)
+
+## 19. Complete the RTI operations surfaces
+
+### Eventhouse and database
+
+1. Run **Publish RTI definitions** in the notebook.
+2. Verify `pc_operations_eventhouse` and its `pc_operations` ReadWrite
+   database exist. Open the Eventhouse and check the database belongs to it.
+   Fabric can also create a default database named
+   `pc_operations_eventhouse`; that is a different item type, not a duplicate
+   Eventhouse. Do not delete it merely because the display names match.
+
+Walkthrough Eventhouse: `46a7385b-a79a-4de1-9963-c1acff5813f5`.
+Operations database: `db68b713-7a91-4410-862b-d81025518eeb`.
+
+![Verify the operations Eventhouse and its two differently named databases.](images/manual-deployment/68-operations-eventhouse-databases.png)
+
+### Queryset
+
+3. Open `pc_dev_operations_queries`. If adopting an existing manually created
+   Queryset, set its verified ID in `APPROVED_QUERYSET_ID` in the template
+   before publication. Leave that parameter empty for a new item.
+4. Check its datasource is the **managed workspace-monitoring database**,
+   not the separate operations database or classic monitoring database.
+5. Check the saved query is the repository query:
+
+   ```kusto
+   ItemJobEventLogs
+   | where isnotempty(JobStatus)
+   | summarize Events = count() by JobStatus
+   | order by JobStatus asc
+   ```
+
+6. Run it in the browser. Confirm a valid result/schema; zero rows alone
+   does not establish event delivery. A missing table or disabled collection
+   must be resolved at the monitoring source, not hidden by changing the KQL.
+
+The existing Queryset `052ad7f3-2b3b-49fa-9fd5-8c5637cb4ac2` was explicitly
+adopted and its bound definition read back successfully.
+
+The saved query was run in the native browser: **Done (0.398 s)**, one
+dataset, columns **JobStatus** and **Events**, and zero rows. This proves
+query/schema access, not event collection. This is the earlier checkpoint;
+the post-repair repeat in section 16 subsequently returned actual events.
+
+![Run the bound Queryset and inspect its actual result schema.](images/manual-deployment/67-queryset-executed-empty-results.png)
+
+### Real-Time Dashboard
+
+7. Open `pc_operations_dashboard`, not either Power BI report. Its bound
+   definition must retain all eight repository tiles:
+   **Jobs by status**, **Running Jobs**, **Not-started Jobs**,
+   **Oldest not-started age**, **P95 terminal duration**, **Recent failures**,
+   **Terminal job trend**, and **Intake jobs at or above 20 minutes**.
+8. Verify its datasource is the same managed monitoring database and its
+   parameters/queries are present. Exercise the time-range control and check
+   for datasource or query errors.
+
+The walkthrough dashboard is `e18782d7-33cd-446e-ae93-df3e5ab73731`.
+Its full bound definition was read back successfully. A published dashboard
+does not establish that its monitoring source is enabled.
+
+To inspect the datasource in this UI, open **Viewing** > **Editing**, expand
+**Data sources**, and click **Details** for `workspace_monitoring`. Verify
+the manual workspace and service-returned connection URI. Return to Viewing
+without changing the definition. The source was shown as used by **8 Tiles,
+3 Parameters, 0 Base queries**, with **Pass-through identity** access.
+
+![Choose Editing to inspect the published operations dashboard's bindings.](images/manual-deployment/65-operations-rti-dashboard.png)
+
+![Verify the workspace-monitoring datasource details.](images/manual-deployment/66-dashboard-managed-datasource.png)
+
+The captured empty dashboard showed zero running/not-started jobs, no result
+rows, and `NaN` for empty duration/age gauges. Those are not measured healthy
+operational values. Resolve collection and verify new events before accepting
+the dashboard.
+
+On the post-repair repeat, all eight tiles finished loading without
+datasource/query error cards. **Jobs by status** showed two Completed jobs,
+and **Terminal job trend** had two populated time buckets. Both failure and
+intake-duration tables returned zero rows. The dashboard was returned to
+**Viewing** without editing its definitions.
+
+The repository's gauge presentation still uses percent-style axes, and
+**Oldest not-started age** remained `NaN` for an empty set. Validate metric
+units and empty-state presentation before operational acceptance; neither
+those gauges nor these job events establish inference health.
+
+![Restored dashboard with actual job telemetry; the time-range control is outlined.](images/manual-deployment/78-restored-dashboard-job-events.png)
+
+### Operations Activator completion
+
+9. Keep the dispatcher-failure rule from section 13 stopped.
+10. In the template's **Publish both operations rules** cell, set
+    `APPROVED_ACTIVATOR_ID` to the verified existing manual item ID. Run the
+    cell to replace the earlier one-rule setup with the full repository
+    operations definition. This intentionally changes internal source/rule
+    IDs; the section 13 rule ID describes the earlier checkpoint.
+11. The tested preparation helper binds this tenant and the manual Dispatcher,
+    monitoring database, and dashboard. It **replaces the repository action
+    rows with the existing portal-authored draft action**, sets both rules
+    stopped, and pauses the KQL query source. Fabric rejects an empty action
+    step with `InvalidTemplateInstance`; do not work around that with invented
+    recipients. Retaining the portal's draft is not delivery approval. Verify the
+    dispatcher-failure rule and `alert_pc_event_intake_duration_20m` in the
+    Activator UI. The latter source's reviewed polling interval is 300 seconds
+    and its query identifies `NotStarted`/`InProgress` intake jobs with elapsed
+    time of at least 20 minutes. One dispatcher-failure rule is not equivalent
+    to this two-rule definition.
+12. Configure and approve recipients, channels, messages, and referenced fields
+    only after separate approval. A structurally valid draft is not
+    notification acceptance. Do not
+    click Start or send a test action under the current no-notifications
+    approval.
+13. Before acceptance, demonstrate that a controlled job event reaches the
+    correct source and that the stopped rule's condition sees the expected
+    event/query row. Enabling external delivery remains a separate checkpoint.
+
+The intake-duration query names `pc-event-intake` and `01_register_event`.
+Neither item was present in the reference workspace comparison. Preserve the
+reviewed definition, but do not claim this alert covers a working intake path
+until those intended producers are separately established. A permanently
+empty query is not a successful duration-alert test.
+
+On the final browser pass, each rule had **Start** available and **Stop**
+disabled, consistent with the stopped-definition readback. The intake rule's
+condition displayed **Is greater than or equal to 20**. Both rule previews
+showed **No data to show**, and preview requests returned errors; no working
+live feed or action delivery is claimed. Do not start the rules or send test
+actions to make those previews populate.
+
+![Select the intake-duration rule and inspect its condition without starting it.](images/manual-deployment/74-operations-activator-two-rules.png)
+
+## 20. Release configuration and operational handover
+
+The publication notebook is an **administrative tool**, not an inference
+release or an admission bypass. Keep the deployment out of service while
+any gate below is unresolved.
+
+### Record the new target references
+
+1. Retain the preparation input hash and source revision alongside the
+   actual workspace, Lakehouse, Environment, seven job, variable-library,
+   reporting, monitoring, and RTI IDs. Use the values read back from this
+   workspace, not the reference workspace.
+2. Retain the model-file hashes and the exact SDK wheel, dependency lock,
+   and bundle hashes. A filename or package version alone is not release
+   identity. Do not hash a different local wheel and describe it as the
+   published Environment's wheel.
+3. Create and retain deployment evidence under the intended Lakehouse
+   `Files/deployment-evidence` and release artifacts under their reviewed
+   release root. An inventory/evidence record must clearly distinguish
+   **configured**, **verified**, **blocked**, and **not tested**. It is not
+   a substitute for the SDK's detached manifest and postpublish receipt.
+
+### Prepare and verify admission artifacts
+
+4. Have the release owner prepare a target-bound SDK build. The wheel's
+   embedded `sjd_release_identity.json` must name this manual workspace,
+   Lakehouse, Environment, and actual role IDs. Stage that identity in the
+   build inputs; do not change another deployment's installed files in place.
+5. Use the existing
+   [release-provenance helpers](../src/people_counter/fabric_release_provenance.py)
+   to compute the staged build-input digest and canonical immutable JSON.
+   The detached manifest must bind the actual identity, wheel, dependency
+   lock, bundle, dependency source hashes, reviewer, review time, and target
+   references. Review data must be real, not placeholders.
+6. Publish the approved wheel/dependencies through the Environment UI.
+   Wait for successful publication and read back its **published target
+   version**, libraries, public-package policy, compute settings, and all
+   seven job bindings before preparing the postpublish receipt.
+7. Bind the receipt to the detached-manifest SHA-256 and those actual
+   publication observations. Upload the immutable files through the
+   Lakehouse UI to the **exact paths embedded in that wheel's identity**.
+   Re-read their contents/hashes and validate them with the matching SDK.
+   Do not disable identity requirements or create a success-shaped receipt
+   from requested settings.
+
+**Current admission gate:** the committed/candidate SDK identity still names
+a different deployment, and the headless candidate has not completed Fabric
+x86_64 executor qualification. The manual three-ID prefix does not rewrite
+that embedded identity. No target-valid immutable admission manifest/receipt
+has been demonstrated here. Dispatcher/Process must remain unscheduled.
+
+### Configure recurring roles only after release arguments are valid
+
+8. The script's Development schedule cadences are:
+
+| Role | Cadence | Required initial state |
+|---|---|---|
+| Control | Every 5 minutes | Disabled |
+| Dispatcher | Every 5 minutes | Disabled |
+| Refresh | Every 15 minutes | Disabled |
+| Reconciliation | Every 15 minutes | Disabled |
+| Gold | Every 15 minutes | Disabled |
+| Process, Cutover | On demand | No recurring schedule |
+
+9. Open each recurring SJD's **Schedule** settings. Use UTC, the reviewed
+   cadence and date range, and keep it disabled. Reopen/read back exactly
+   one schedule per recurring role and none for Process/Cutover. An absent
+   schedule is not a configured disabled schedule.
+   In the captured UI, open the job's toolbar **Setting** button, select
+   **Schedule**, and expand **Show more**. For a new schedule, use
+   **Add schedule**, enter the reviewed cadence/date range and UTC, and
+   explicitly leave it inactive. If the editor requires initial activation,
+   cancel rather than briefly enabling an unadmitted job. Reopen and verify
+   the card reads **Inactive**; **Turn On** must remain unclicked. Leave
+   failure-notification recipients empty under the no-notifications approval.
+
+![Refresh schedule read back as Every 15 minutes, Inactive, UTC.](images/manual-deployment/75-refresh-schedule-inactive.png)
+
+10. Set and verify the role-specific execution arguments:
+    - Control: manual-artifact prefix followed by `reconcile`, **not**
+      the initial `bootstrap` command.
+    - Reconciliation: its entry point performs `reconcile`; retain the
+      manual-artifact prefix.
+    - Gold: manual-artifact prefix followed by its required mode, `run`.
+    - Refresh: the workspace and **both new model IDs**, as shown above.
+    - Dispatcher: manual-artifact prefix plus all four required
+      `--release-manifest-path`, `--release-manifest-sha256`,
+      `--release-receipt-path`, and `--release-receipt-sha256` arguments,
+      using the verified immutable artifacts. Do not save invented digests.
+11. Start a fresh qualified session and verify two observed executors and
+    the complete runtime/package/model contract before any processing.
+    A saved Environment request is not allocation evidence. The separately
+    approved F4 change must be performed and its actual limits checked
+    before using it as inference evidence; it has not been applied here.
+12. Recheck all bindings and readbacks on a second pass. This manual path
+    cannot claim a Terraform drift result. Keep schedules and external
+    actions disabled until an explicitly accepted operational handover.
+    Stop the administrative notebook's Spark session when finished.
+
+### Captured configuration checkpoint
+
+The completed walkthrough contains **30 items**. Compared with the script's
+26-item reference inventory, the four extras are the three retained classic
+monitoring artifacts and the administrative notebook. The managed monitoring
+supporting items are service-generated, not extra application Eventstreams.
+Neither an intake pipeline nor a registration notebook was present in that
+reference inventory; their absence must not be hidden by claiming a working
+intake-duration alert.
+
+| Surface | Verified checkpoint |
+|---|---|
+| Reporting | Exact repository definitions; both ViaApi refreshes completed; six analytics and three operations pages opened |
+| Variable library | Eleven typed references; Default active; no alternative value sets |
+| Managed monitoring | Enabled / Diagnostic data collection; classic collection paused and history retained |
+| Operations RTI | Eventhouse/database, bound Queryset, eight-tile dashboard, and two stopped operations rules; KQL source paused |
+| Control schedule | Every 5 minutes, disabled; ID `b4aea835-ec51-452b-98f2-914de1d2b2e0` |
+| Reconciliation schedule | Every 15 minutes, disabled; ID `178b6bdf-723d-4b1d-9ebe-d728cf73134a` |
+| Gold schedule | Every 15 minutes, disabled; ID `1b377c38-88a0-4c96-be45-61adfee60bf0` |
+| Refresh schedule | Every 15 minutes, disabled, both current model IDs; ID `7262ab4d-4a78-486c-ac49-cbec48a25915` |
+| Dispatcher schedule | **Absent**, not “disabled”: valid manifest/receipt arguments are unavailable |
+| Process / Cutover schedules | Absent, on demand |
+| SDK admission / inference | **Blocked / not accepted**; no production handover |
+
+The four configured schedules and their arguments were read back, including
+the retained Lakehouse/Environment bindings. Do not create the Dispatcher
+schedule with incomplete release arguments simply to make the item count or
+schedule count match the reference.
+
+A non-overwriting, content-addressed configuration snapshot was written to
+the manual Lakehouse and read back byte-for-byte:
+
+```text
+Files/deployment-evidence/configuration-3dde60c1cf9a7284d516d518e78be42296f39019c6309828346272d572b512f4.json
+SHA256: 3dde60c1cf9a7284d516d518e78be42296f39019c6309828346272d572b512f4
+Schema: people-counter-manual-configuration-evidence-v1
+Status: configuration-verified-admission-blocked
+```
+
+To inspect it through the UI, open `pc_dev_lakehouse` > **Files** >
+**deployment-evidence**, locate the exact content-addressed filename, and
+open/download it. Use the finished administrative notebook's read-only cell
+to verify its hash. This is a captured configuration record, not live drift
+validation, an SDK detached manifest, or a postpublish admission receipt.
+Do not pass it to the Dispatcher's release-manifest/receipt arguments.
+
+![Run the read-only hash/schema check and inspect the captured admission hold.](images/manual-deployment/76-configuration-evidence-audit.png)
+
+The audit check was executed successfully against the saved OneLake file:
+30 captured resources, `configuration-verified-admission-blocked`, and SDK
+admission `blocked`. The administrative Spark session was then stopped;
+the browser confirmed **Session stopped successfully**. This does not pause
+the F2 capacity.
+
+Remaining acceptance work is explicit: target-bound SDK release evidence,
+Fabric x86_64 runtime and two-executor qualification, post-upload model
+hash/loading checks, representative inference/Gold data, controlled
+role-specific alert-event verification, the intended intake producers, and separately approved notification
+delivery. F2 remains provisioned; F4 has not been applied.
+
 ## Historical bootstrap outcome and F2 checkpoint
 
 | Check | Captured result |
@@ -1148,7 +1799,63 @@ the deployment out of service. Use the
 [automated local runbook](local-deployment.md) only if the operator separately
 chooses the Terraform-managed path; do not mix the two management models.
 
-## Application-change validation
+## Publication-helper validation
+
+The offline preparer and publication helpers were tested separately from
+the earlier runtime-binding changes. The final focused command was:
+
+```bash
+uv run --frozen --extra cpu python -m pytest \
+  tests/test_manual_fabric_publication.py \
+  tests/test_fabric_rest.py \
+  tests/test_fabric_definition_bundle.py \
+  -q --crap --cov \
+  --cov-config=/home/vinima/.copilot/session-state/4a4e384b-db2d-4212-9be7-534fcca49c39/files/manual-publication-coverage.ini \
+  --cov-report=term:skip-covered
+```
+
+That session-local coverage file limits measurement to
+`*/manual_fabric_publication.py` and `*/prepare_manual_fabric_assets.py`;
+use an equivalent focused configuration on another machine.
+
+- **82 tests passed.** The publication module has 100% measured line
+  coverage; the preparer has 74% (its CLI wrapper is not targeted).
+- **CRAP threshold 30:** highest `ensure_item` 26.34, complexity 25,
+  function coverage 87.1%; `stopped_activator_definition` 15.02,
+  complexity 15, function coverage 95.2%. No measured function exceeds
+  the threshold. No additional CRAP-driven refactor is required here.
+- **Mutation:** the final command below completed with **460 killed,
+  47 survived** among 507 selected terminal mutants, with no selected
+  timeout, suspicious, or no-test outcomes. Another 27 CLI-wrapper mutants
+  were not selected. This is not a perfect mutation score.
+
+```bash
+PYTEST_ADDOPTS='-k manual_fabric_publication' \
+  uv run --frozen --extra cpu mutmut run \
+  'people_counter.manual_fabric_publication.*' \
+  'scripts.prepare_manual_fabric_assets.*prepare_assets*' \
+  --max-children 2
+```
+
+Inspection of surviving mutations strengthened the tenant rejection test
+to use an otherwise valid definition, and added explicit Dispatcher-container
+rename assertions. Representative remaining Activator survivors include
+`x_stopped_activator_definition__mutmut_3` (message-only wording),
+`__mutmut_40` (redundant inner Base64 validation after rendering already
+validates it), `__mutmut_105` (missing-settings fallback not exercised by
+the repository bundle), `__mutmut_134` (shallow versus deep action copy
+before immediate serialization), and `__mutmut_140` / `__mutmut_153`
+(JSON whitespace). Remaining diagnostic, encoding, and preparer-serialization
+survivors are advisory; the suite is not evidence that every malformed bundle
+is covered.
+
+Python source and every supplied notebook code cell passed syntax/AST
+validation; the reusable notebook has no stored outputs or execution counts.
+Embedded screenshots resolve and `git diff --check` passes. Pylance syntax
+requests timed out, so no fresh Pylance/type-analysis pass is claimed.
+These checks do not replace the live release/inference gates above.
+
+## Earlier runtime-binding validation
 
 The additional manual-binding application change was developed test-first.
 The existing fixed deployment defaults remain unchanged; the manual path
