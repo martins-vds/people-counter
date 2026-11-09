@@ -85,7 +85,7 @@ jobs:
           python-version: "3.13"
           enable-cache: false
 
-      - name: Verify package version and immutable tag
+      - name: Verify package version, lockfile, identity, and immutable tag
         id: version
         env:
           RELEASE_BRANCH: ${{ steps.source.outputs.branch }}

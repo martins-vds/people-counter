@@ -9,7 +9,27 @@ git init --quiet
 git config user.name "Release test"
 git config user.email "release-test@example.invalid"
 printf '[project]\nname = "release-test"\nversion = "1.2.3"\n' > pyproject.toml
-git add pyproject.toml
+mkdir -p src/people_counter/data
+cp "${scripts}/../../src/people_counter/fabric_release_provenance.py" src/people_counter/
+printf 'Release fixture\n' > README.md
+uv run --no-project python - "${scripts}/../../src/people_counter" <<'PY'
+import json
+import runpy
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+module = runpy.run_path(str(source / "fabric_release_provenance.py"))
+identity = json.loads((source / "data/sjd_release_identity.json").read_text())
+identity["package_version"] = "1.2.3"
+identity["release_evidence_root"] = "Files/releases/1.2.3"
+path = Path("src/people_counter/data/sjd_release_identity.json")
+path.write_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
+identity["build_input_sha256"] = module["release_build_input_sha256"](Path("."))
+path.write_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
+PY
+uv lock --offline
+git add pyproject.toml uv.lock README.md src
 git commit --quiet -m "Release fixture"
 commit="$(git rev-parse HEAD)"
 export GITHUB_OUTPUT="${temp}/output"
@@ -24,6 +44,11 @@ expect_failure() {
   grep -F "${message}" "${temp}/error"
 }
 
+uv run --no-project python -S src/people_counter/fabric_release_provenance.py 1.2.3
+printf 'Changed release fixture\n' > README.md
+expect_failure "release identity build_input_sha256" \
+  uv run --no-project python -S src/people_counter/fabric_release_provenance.py 1.2.3
+printf 'Release fixture\n' > README.md
 bash "${scripts}/validate-release.sh" pr releases/v1.2.3
 grep -Fx "tag=v1.2.3" "${GITHUB_OUTPUT}"
 grep -Fx "version=1.2.3" "${GITHUB_OUTPUT}"
@@ -35,6 +60,15 @@ for branch in releases/v1.2 releases/v01.2.3 releases/v1.2.3-rc1 feature/v1.2.3;
 done
 expect_failure "Unknown release validation mode" \
   bash "${scripts}/validate-release.sh" typo releases/v1.2.3
+uv lock --offline
+printf '[project]\nname = "release-test"\nversion = "1.2.4"\n' > pyproject.toml
+expect_failure "uv.lock is out of date" \
+  bash "${scripts}/validate-release.sh" pr releases/v1.2.4
+printf '[project]\nname = "release-test"\nversion = "1.2.3"\n' > pyproject.toml
+mv uv.lock saved.lock
+expect_failure "uv.lock is out of date" \
+  bash "${scripts}/validate-release.sh" pr releases/v1.2.3
+mv saved.lock uv.lock
 bash "${scripts}/validate-release.sh" release releases/v1.2.3 "${commit}"
 git tag -a v1.2.3 -m "Existing annotated release tag"
 expect_failure "already exists" \

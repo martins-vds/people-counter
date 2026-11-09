@@ -24,12 +24,13 @@ Pull requests from `releases/` branches also run **Release version and unused
 tag**. The branch must be named `releases/vMAJOR.MINOR.PATCH`, its version must
 exactly match `project.version` in `pyproject.toml`, and the corresponding tag
 must not exist in this repository. A mismatch fails CI; maintainers must update
-the project version and `uv.lock` themselves. Other branches skip this check.
-Version bumps must also refresh the embedded Fabric release identity version,
-evidence path, and source/build-input digest, as described in the SDK release
-instructions; provenance tests reject stale identity metadata.
+the project version and `uv.lock` themselves. The check rejects an out-of-date
+or missing lockfile and stale embedded Fabric release identity version,
+evidence path, or source/build-input digest. It uses only uv and the Python
+standard library, so it runs before installing SDK dependencies. Other branches
+skip this check. See the SDK release instructions for refreshing these files.
 Require this check in the `main` ruleset. On merge, the release workflow
-revalidates the merged source, creates the tag, and publishes both SDK bundles
+revalidates all release files before creating the tag, and publishes both SDK bundles
 and the model archive. See [SDK releases](../README.md#github-sdk-releases).
 
 Each job uploads machine-readable or text evidence for 14 days. Mutmut requires

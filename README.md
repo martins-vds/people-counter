@@ -420,9 +420,12 @@ gh pr create --base main --title "Release SDK v1.0.0" --body "Prepare SDK v1.0.0
 
 The **Release version and unused tag** PR check fails if the branch version
 does not exactly match `pyproject.toml`, the branch name is malformed, or the
-tag already exists. A human must fix the version; CI does not edit files or
-open a PR. Make this check required in the `main` branch ruleset to prevent
-merging a failing release PR.
+tag already exists. It also checks that `uv.lock` is current and the embedded
+release identity's version, evidence root, and source/build-input digest match
+the release source. These checks run without installing SDK dependencies and
+run again before a merge creates a tag. A human must fix stale release files;
+CI does not edit files or open a PR. Make this check required in the `main`
+branch ruleset to prevent merging a failing release PR.
 
 Merging a release PR creates the matching tag at the exact merged commit and
 builds that commit. Closing without merging, merging an ordinary branch, or
@@ -435,6 +438,9 @@ not create missing tags. Retries reuse a tag only if it points to the same
 commit, resume incomplete draft releases, and leave an already published,
 complete release unchanged. All assets upload to a draft before publication;
 failed downloads, builds, or uploads do not publish a partial release.
+If a failed release already has a tag but its source files need corrections,
+prepare the next release version. Rerunning the old tag still uses the old
+source; the workflow never moves an existing tag to pick up source fixes.
 
 Configure the GitHub `release` environment with any required approval rules.
 The workflow token needs `contents: write` to create tags and releases; repository

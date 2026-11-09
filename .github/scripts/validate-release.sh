@@ -34,6 +34,14 @@ if git show-ref --verify --quiet "refs/tags/${tag}"; then
     exit 1
   fi
 fi
+if ! uv lock --check; then
+  echo "::error::uv.lock is out of date. Run uv lock and commit it with the version change." >&2
+  exit 1
+fi
+if ! uv run --no-project python src/people_counter/fabric_release_provenance.py "${version}"; then
+  echo "::error::Release identity is out of date. Update its version, evidence root, and build-input digest before merging." >&2
+  exit 1
+fi
 {
   echo "tag=${tag}"
   echo "version=${version}"
