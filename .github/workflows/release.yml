@@ -168,10 +168,10 @@ jobs:
           retention-days: 7
 
   models:
-    name: Download and archive model weights
+    name: Download, export ONNX, and archive models
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -183,16 +183,21 @@ jobs:
           python-version: "3.13"
           enable-cache: false
 
-      - name: Download all pinned model weights
+      - name: Download all pinned model weights and export ONNX
         run: |
-          uv run --locked --no-dev python scripts/download_models.py \
-            --pipeline all --output-dir outputs/models
+          uv run --locked --no-dev --extra cpu --extra export \
+            python scripts/download_models.py \
+            --pipeline all --output-dir outputs/models --convert onnx
 
       - name: Archive models without download cache metadata
         working-directory: outputs
         env:
           SDK_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          test -s models/rtdetr_osnet/rtdetr_v2_r18vd/model.onnx
+          test -s models/rtdetr_osnet/rtdetr_v2_r50vd/model.onnx
+          test -s models/rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx
+          test -s models/rfdetr_botsort/rf-detr-large-2026.onnx
           mkdir -p "${GITHUB_WORKSPACE}/release-assets"
           archive="${GITHUB_WORKSPACE}/release-assets/people-counter-${SDK_VERSION}-models.zip"
           zip -r "${archive}" models -x '*/.cache/*'
