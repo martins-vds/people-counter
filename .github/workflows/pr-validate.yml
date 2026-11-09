@@ -29,7 +29,7 @@ jobs:
           python-version: "3.13"
           enable-cache: false
 
-      - name: Validate release branch against project and repository tags
+      - name: Validate release branch, lockfile, identity, and unused tag
         env:
           RELEASE_BRANCH: ${{ github.head_ref }}
         run: bash .github/scripts/validate-release.sh pr "${RELEASE_BRANCH}"

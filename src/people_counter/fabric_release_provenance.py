@@ -11,6 +11,7 @@ artifact it attempts to hash.
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import hashlib
 import importlib.metadata
@@ -543,6 +544,25 @@ def release_build_input_sha256(root: Path) -> str:
     return _sha256_bytes(_canonical_bytes(inventory))
 
 
+def validate_release_source(root: Path, expected_version: str) -> None:
+    identity, _ = load_release_identity(
+        root / "src" / "people_counter" / "data" / "sjd_release_identity.json"
+    )
+    if identity.package_version != expected_version:
+        raise ReleaseProvenanceError(
+            f"release identity package_version must be {expected_version}"
+        )
+    if not identity.release_evidence_root.rstrip("/").endswith(f"/{expected_version}"):
+        raise ReleaseProvenanceError(
+            f"release identity release_evidence_root must end with /{expected_version}"
+        )
+    if identity.build_input_sha256 != release_build_input_sha256(root):
+        raise ReleaseProvenanceError(
+            "release identity build_input_sha256 is stale; recompute it "
+            "with release_build_input_sha256 after finalizing the release source"
+        )
+
+
 def verify_file_sha256_unchecked(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as stream:
@@ -664,3 +684,11 @@ def validate_trackers_distribution_identity(
                 f"installed trackers file {relative_path!r} hash mismatch"
             )
     return value
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Validate source release identity before tagging.")
+    parser.add_argument("version")
+    arguments = parser.parse_args()
+    validate_release_source(Path(__file__).resolve().parents[2], arguments.version)
+    print(f"Release source metadata matches {arguments.version}")
