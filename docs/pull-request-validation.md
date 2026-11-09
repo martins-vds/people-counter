@@ -7,6 +7,9 @@ it safely.
 - Ruff checks changed Python files.
 - Pyright checks changed production and utility files.
 - Pytest runs the non-Compose suite with branch coverage and CRAP results.
+- Python validation installs the `demo` extra for the real DuckDB/Delta tests.
+  Test and mutation jobs use Temurin Java 21 for local Spark/Delta tests rather
+  than the runner's default Java runtime.
 - Mutmut runs a scoped mutation test when tests change.
 - Terraform format, backend-free initialization, validation, and tests for
   bootstrap, the reusable module, and all environment roots.
@@ -22,6 +25,9 @@ tag**. The branch must be named `releases/vMAJOR.MINOR.PATCH`, its version must
 exactly match `project.version` in `pyproject.toml`, and the corresponding tag
 must not exist in this repository. A mismatch fails CI; maintainers must update
 the project version and `uv.lock` themselves. Other branches skip this check.
+Version bumps must also refresh the embedded Fabric release identity version,
+evidence path, and source/build-input digest, as described in the SDK release
+instructions; provenance tests reject stale identity metadata.
 Require this check in the `main` ruleset. On merge, the release workflow
 revalidates the merged source, creates the tag, and publishes both SDK bundles
 and the model archive. See [SDK releases](../README.md#github-sdk-releases).
