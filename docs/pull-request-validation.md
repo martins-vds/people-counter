@@ -14,6 +14,17 @@ it safely.
   definition-export manifest validation.
 - actionlint, ShellCheck, immutable action-pin checks, and a zizmor audit of
   every workflow, including deployment and drift workflows.
+- shell regression tests for release version validation, tag conflicts,
+  draft recovery, and idempotent publication.
+
+Pull requests from `releases/` branches also run **Release version and unused
+tag**. The branch must be named `releases/vMAJOR.MINOR.PATCH`, its version must
+exactly match `project.version` in `pyproject.toml`, and the corresponding tag
+must not exist in this repository. A mismatch fails CI; maintainers must update
+the project version and `uv.lock` themselves. Other branches skip this check.
+Require this check in the `main` ruleset. On merge, the release workflow
+revalidates the merged source, creates the tag, and publishes both SDK bundles
+and the model archive. See [SDK releases](../README.md#github-sdk-releases).
 
 Each job uploads machine-readable or text evidence for 14 days. Mutmut requires
 a green changed-test baseline and complete results for every test-associated

@@ -1,8 +1,9 @@
 name: Release SDK
 
 on:
-  push:
-    tags: ["v*"]
+  pull_request:
+    branches: [main]
+    types: [closed]
   workflow_dispatch:
     inputs:
       tag:
@@ -14,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: sdk-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  group: sdk-release-${{ github.event_name == 'workflow_dispatch' && format('releases/{0}', inputs.tag) || github.event.pull_request.head.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -23,8 +24,15 @@ defaults:
 
 jobs:
   prepare:
+    name: Validate source and tag merged release
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       startsWith(github.event.pull_request.head.ref, 'releases/'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write # Create the immutable release tag.
     outputs:
       tag: ${{ steps.source.outputs.tag }}
       commit: ${{ steps.source.outputs.commit }}
@@ -32,29 +40,44 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Resolve immutable tagged source
+      - name: Resolve immutable release source
         id: source
         env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          MERGE_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
-          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Release tag must be vMAJOR.MINOR.PATCH"
-            exit 1
+          if [[ "${EVENT_NAME}" == workflow_dispatch ]]; then
+            if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::error::Release tag must be vMAJOR.MINOR.PATCH"
+              exit 1
+            fi
+            if ! git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+              echo "::error::Release tag ${RELEASE_TAG} does not exist. Merge a release PR first."
+              exit 1
+            fi
+            commit=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+            branch="releases/${RELEASE_TAG}"
+          else
+            commit=$(git rev-parse --verify "${MERGE_COMMIT}^{commit}")
+            branch="${RELEASE_BRANCH}"
+            RELEASE_TAG="${branch#releases/}"
           fi
-          if ! git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
-            echo "::error::Release tag ${RELEASE_TAG} does not exist. Create and push it first: git tag ${RELEASE_TAG} <release-commit> && git push origin refs/tags/${RELEASE_TAG}. Then rerun this workflow."
-            exit 1
-          fi
-          commit=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
-          echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "tag=${RELEASE_TAG}"
+            echo "commit=${commit}"
+            echo "branch=${branch}"
+          } >> "${GITHUB_OUTPUT}"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.source.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -62,19 +85,27 @@ jobs:
           python-version: "3.13"
           enable-cache: false
 
-      - name: Verify package version matches tag
+      - name: Verify package version and immutable tag
         id: version
         env:
-          RELEASE_TAG: ${{ steps.source.outputs.tag }}
+          RELEASE_BRANCH: ${{ steps.source.outputs.branch }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: bash .github/scripts/validate-release.sh release "${RELEASE_BRANCH}" "${SOURCE_COMMIT}"
+
+      - name: Create tag at the merged commit if absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
         run: |
-          version=$(uv version --short)
-          if [[ "${RELEASE_TAG}" != "v${version}" ]]; then
-            echo "::error::Tag ${RELEASE_TAG} does not match package version ${version}"
-            exit 1
+          if ! git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+            gh api --method POST "repos/${GH_REPO}/git/refs" \
+              -f "ref=refs/tags/${RELEASE_TAG}" -f "sha=${SOURCE_COMMIT}"
           fi
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
   build:
+    name: Build CPU SDK (${{ matrix.arch }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -136,13 +167,53 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  models:
+    name: Download and archive model weights
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.13"
+          enable-cache: false
+
+      - name: Download all pinned model weights
+        run: |
+          uv run --locked --no-dev python scripts/download_models.py \
+            --pipeline all --output-dir outputs/models
+
+      - name: Archive models without download cache metadata
+        working-directory: outputs
+        env:
+          SDK_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/release-assets"
+          archive="${GITHUB_WORKSPACE}/release-assets/people-counter-${SDK_VERSION}-models.zip"
+          zip -r "${archive}" models -x '*/.cache/*'
+          unzip -t "${archive}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-models
+          path: release-assets/*-models.zip
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   publish:
-    needs: [prepare, build]
+    name: Publish complete SDK release
+    needs: [prepare, build, models]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release
     permissions:
-      contents: write
+      contents: write # Upload release assets and publish the draft.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -151,7 +222,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: sdk-linux-*
+          pattern: sdk-*
           path: release-assets
           merge-multiple: true
           digest-mismatch: error
@@ -164,18 +235,4 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.prepare.outputs.commit }}
           SDK_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          remote_commit=$(gh api "repos/${GH_REPO}/commits/${RELEASE_TAG}" --jq .sha)
-          if [[ "${remote_commit}" != "${SOURCE_COMMIT}" ]]; then
-            echo "::error::Release tag moved after the build started"
-            exit 1
-          fi
-          assets=(
-            "people-counter-${SDK_VERSION}-cpu-linux-amd64-cp313.zip"
-            "people-counter-${SDK_VERSION}-cpu-linux-arm64-cp313.zip"
-          )
-          sha256sum "${assets[@]}" > SHA256SUMS
-          sha256sum --check SHA256SUMS
-          gh release create "${RELEASE_TAG}" "${assets[@]}" SHA256SUMS \
-            --verify-tag --generate-notes --fail-on-no-commits \
-            --title "People Counter SDK ${RELEASE_TAG}"
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/publish-sdk-release.sh"

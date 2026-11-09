@@ -379,29 +379,55 @@ wheels and a GPU bundle cannot resolve CPU-only wheels.
 The [SDK release workflow](.github/workflows/release.yml) builds CPU-only
 Python 3.13 bundles on native Linux amd64 and arm64 runners. Each bundle must
 pass archive validation and an offline installation and CLI smoke test before
-both bundles and `SHA256SUMS` are published together as a GitHub Release.
-Model weights are not included.
+both bundles, a separate `people-counter-VERSION-models.zip`, and `SHA256SUMS`
+are published together as a GitHub Release. The model archive contains all
+pinned RT-DETR R18/R50, OSNet, and RF-DETR original weights downloaded by
+`scripts/download_models.py`, without Hugging Face cache metadata. It is shared
+by both architectures; ONNX and OpenVINO conversions are not included.
 
-Set the package version in `pyproject.toml`, update `uv.lock` with `uv lock`,
-and merge the changes before pushing a matching stable tag:
+Create a release branch using the stable `releases/vMAJOR.MINOR.PATCH` format.
+Branch creation alone does not run the release workflow. Update the package
+version and lockfile, then open a pull request to `main`:
 
 ```bash
-git tag v0.9.59
-git push origin v0.9.59
+git switch -c releases/v1.0.0
+uv version 1.0.0
+uv lock
+git add pyproject.toml uv.lock
+git commit -m "Prepare SDK v1.0.0"
+git push -u origin releases/v1.0.0
+gh pr create --base main --title "Release SDK v1.0.0" --body "Prepare SDK v1.0.0."
 ```
 
-Alternatively, run **Release SDK** manually with an existing matching tag.
-Manual dispatch does not create tags. A missing tag fails with instructions
-to create it at the intended release commit and push it before retrying.
-Both triggers build the tagged commit, not the current branch tip. Configure
-the GitHub `release` environment with any required approval rules. Publication
-requires the workflow token to have `contents: write` permission; no additional
-release secret is needed. Existing releases are not overwritten.
+The **Release version and unused tag** PR check fails if the branch version
+does not exactly match `pyproject.toml`, the branch name is malformed, or the
+tag already exists. A human must fix the version; CI does not edit files or
+open a PR. Make this check required in the `main` branch ruleset to prevent
+merging a failing release PR.
+
+Merging a release PR creates the matching tag at the exact merged commit and
+builds that commit. Closing without merging, merging an ordinary branch, or
+pushing a tag does not publish an SDK release. A second version check at merge
+time prevents conflicting tags from being overwritten.
+
+Rerun a failed workflow to resume the same release. Alternatively, run
+**Release SDK** manually with an existing matching tag. Manual dispatch does
+not create missing tags. Retries reuse a tag only if it points to the same
+commit, resume incomplete draft releases, and leave an already published,
+complete release unchanged. All assets upload to a draft before publication;
+failed downloads, builds, or uploads do not publish a partial release.
+
+Configure the GitHub `release` environment with any required approval rules.
+The workflow token needs `contents: write` to create tags and releases; repository
+tag rules must allow it to create release tags. No additional secret is needed.
 
 Download the archive for your architecture and verify it with `sha256sum
 --check --ignore-missing SHA256SUMS` before extracting it. Follow the enclosed
-`README.txt` to install into a Python 3.13 environment. The build hosts use
-Ubuntu 24.04; compatibility with older Linux distributions is not guaranteed.
+`README.txt` to install into a Python 3.13 environment. Download and verify the
+models archive with the same checksums, then extract its `models/` directory
+and pass that directory to the SDK's `--models-dir` option for offline use.
+The build hosts use Ubuntu 24.04; compatibility with older Linux distributions
+is not guaranteed.
 
 ## CPU-only
 
