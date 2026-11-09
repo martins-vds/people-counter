@@ -1,0 +1,28 @@
+{
+  "workspace_id": "<workspace-uuid>",
+  "lakehouse_id": "<default-lakehouse-uuid>",
+  "environment_id": "<published-environment-uuid>",
+  "control_sjd_id": "<control-sjd-uuid>",
+  "intake_mode": "explicit",
+  "storage_account": "<source-storage-account>",
+  "filesystem": "<source-filesystem>",
+  "shortcut_path": "Files/videos",
+  "table_directory": "Tables/dbo",
+  "config_sha256": "<approved-effective-configuration-sha256>",
+  "profile": {
+    "pipeline": "rtdetr-osnet",
+    "detector_model": "r18",
+    "model_format": "onnx",
+    "device_variant": "cpu",
+    "batch_size": 1,
+    "sample_fps": 1.0,
+    "profile_id": "onnx-r18-b1-1fps-1t",
+    "runtime_key": "<approved-runtime-key>",
+    "model_artifact_sha256": {
+      "rtdetr_osnet/rtdetr_v2_r18vd/config.json": "<approved-sha256>",
+      "rtdetr_osnet/rtdetr_v2_r18vd/preprocessor_config.json": "<approved-sha256>",
+      "rtdetr_osnet/rtdetr_v2_r18vd/model.onnx": "<approved-sha256>",
+      "rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx": "<approved-sha256>"
+    }
+  }
+}

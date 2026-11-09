@@ -76,6 +76,7 @@ also_copy = [
     "infra/modules/fabric-foundation/definitions/variable-library/",
     "notebooks/fabric/",
     "notebooks/customer_end_to_end_demo.ipynb",
+    "notebooks/manifest_package_operator_tutorial.ipynb",
     "samples/",
     "scripts/",
     "src/people_counter/data/sjd_release_identity.json",

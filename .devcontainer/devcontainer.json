@@ -1,0 +1,55 @@
+{
+	"name": "People Counter (CPU)",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"features": {
+		"ghcr.io/devcontainers/features/docker-in-docker:2": {
+			"version": "latest",
+			"moby": false,
+			"dockerDashComposeVersion": "v2"
+		},
+		"ghcr.io/devcontainers/features/java:1": {
+			"version": "21",
+			"jdkDistro": "tem"
+		},
+		"ghcr.io/devcontainers-extra/features/uv:1": {
+			"version": "latest"
+		},
+		"ghcr.io/devcontainers/features/node:1": {
+			"version": "lts"
+		},
+		"ghcr.io/devcontainers/features/go:1": {
+			"version": "latest",
+			"installGoTools": false
+		},
+		"ghcr.io/devcontainers/features/azure-cli:1": {},
+		"ghcr.io/devcontainers/features/github-cli:1": {}
+	},
+	"containerEnv": {
+		"UV_PYTHON": "3.13"
+	},
+	"remoteEnv": {
+		"PATH": "${containerWorkspaceFolder}/.venv/bin:${containerEnv:PATH}"
+	},
+	"postCreateCommand": {
+		"lfs": "git lfs install --skip-repo && git lfs pull",
+		"python": "uv sync --frozen --dev --extra cpu --extra experiments --extra export --extra publisher --extra local-spark --extra demo",
+		"actionlint": "go install github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106"
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.vscode-pylance",
+				"ms-toolsai.jupyter"
+			],
+			"settings": {
+				"python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
+				"python.testing.pytestEnabled": true,
+				"python.testing.pytestArgs": ["tests", "-m", "not compose"]
+			}
+		}
+	},
+	"remoteUser": "vscode"
+}

@@ -40,6 +40,37 @@ Start with the [GitHub deployment runbook](docs/github-deployment.md).
 
 - [Local Spark development](docs/local-spark-development.md)
 
+### Development container
+
+Open the repository in VS Code and select **Dev Containers: Rebuild and Reopen
+in Container**. The CPU development container installs Python 3.13, uv, Java 21
+for Spark, FFmpeg/ffprobe, OpenCV system libraries, Git LFS, and Docker-in-Docker
+with Compose v2. Creation installs the frozen development dependencies and the
+`cpu`, `experiments`, `export`, `publisher`, `local-spark`, and `demo` extras,
+matching Python CI. `UV_PYTHON=3.13` overrides the host-oriented
+`.python-version` inside the container. uv downloads the Python interpreter;
+VS Code and container terminals use the project `.venv`.
+
+The container also includes Node.js, Go, actionlint, ShellCheck, jq, Terraform
+1.9.8, Azure CLI, and GitHub CLI. The Python quality scripts use uvx to obtain
+their pinned Ruff, Pyright, and zizmor versions on demand. Cloud authentication
+is separate; it is not required for the ordinary tests.
+
+Run the non-Compose suite with branch coverage and CRAP reporting:
+
+```bash
+uv run pytest tests -m "not compose" --crap \
+  --cov=people_counter --cov-branch --cov-report=term-missing
+```
+
+Docker-in-Docker requires a host that permits privileged containers. Compose
+tests are opt-in and need about 6 GiB of Docker memory plus disk space for the
+Spark image. Dependency installation, LFS downloads, and initial Spark/Delta
+JAR resolution need network access. See
+[Local Spark development](docs/local-spark-development.md) for the Compose
+commands. The default container does not enable GPU passthrough or download
+offline model weights.
+
 The local end-to-end contract can be exercised without a model:
 
 ```bash
@@ -299,9 +330,11 @@ control writer so same-date videos can run in parallel without competing
 control-table mutations. Existing deployments require the coordinated SDK
 and notebook upgrade described in section 4.1 of that plan; replacing only
 the worker notebook is not sufficient.
-For a runnable operator walkthrough from camera catalog creation through
-guarded ADLS publication, use the
+For a preparation-only walkthrough from camera catalog creation to a validated
+offline package, use the
 [manifest package operator tutorial](notebooks/manifest_package_operator_tutorial.ipynb).
+Then use the separate [explicit backfill command](docs/explicit-backfill.md)
+to preview, publish, and register that package with the deployed Control SJD.
 
 ### Publish backfill manifests
 

@@ -10,7 +10,7 @@ evidence/
 
 # Virtual environments
 .venv
-.coverage
+.coverage*
 
 # Mutation tests
 mutants/
@@ -31,3 +31,14 @@ local-data/
 *.xlsx
 *.docx
 *.pdf
+
+# Spark warehouse directory
+spark-warehouse/
+
+# None directory
+None/
+
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.test-artifacts/
