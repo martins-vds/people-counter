@@ -393,7 +393,23 @@ version and lockfile, then open a pull request to `main`:
 git switch -c releases/v1.0.0
 uv version 1.0.0
 uv lock
-git add pyproject.toml uv.lock
+```
+
+Also update `src/people_counter/data/sjd_release_identity.json`: set
+`package_version` to the new version and update the version suffix in
+`release_evidence_root`. After finalizing the release source, compute the new
+`build_input_sha256` with the existing provenance helper and copy its output
+into the identity file:
+
+```bash
+uv run python -c 'from pathlib import Path; from people_counter.fabric_release_provenance import release_build_input_sha256; print(release_build_input_sha256(Path(".")))'
+```
+
+The identity is shipped in the wheel; its version must match the installed
+package. Commit it with the version and lockfile changes:
+
+```bash
+git add pyproject.toml uv.lock src/people_counter/data/sjd_release_identity.json
 git commit -m "Prepare SDK v1.0.0"
 git push -u origin releases/v1.0.0
 gh pr create --base main --title "Release SDK v1.0.0" --body "Prepare SDK v1.0.0."
