@@ -9,8 +9,14 @@ implementations. It does not run inference locally or start Spark.
 Install Docker with Compose v2.20+ and run from the repository root:
 
 ```bash
-docker compose --profile portal up --build --wait portal
+./scripts/start-portal.sh
 ```
+
+The script runs `docker compose --profile portal up --build --wait portal`
+from the repository root, even when invoked by absolute path from another
+directory. It uses existing `.env` values and environment overrides without
+rewriting configuration, and exits nonzero if Compose fails. Compose waits for
+healthy services and leaves them running in the background.
 
 Open **http://127.0.0.1:8088** in your browser, or in VS Code's integrated browser.
 Specifying `portal` starts the portal and its Tailwind compiler dependency;

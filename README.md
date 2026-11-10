@@ -45,7 +45,7 @@ Start with the [GitHub deployment runbook](docs/github-deployment.md).
 Start the local browser-based camera, package, profile, and backfill tools:
 
 ```bash
-docker compose --profile portal up --build --wait portal
+./scripts/start-portal.sh
 ```
 
 Open **http://127.0.0.1:8088**. The portal and live Tailwind watcher start, not Spark. Footage and
