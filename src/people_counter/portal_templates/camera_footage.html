@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% from "components.html" import icon, heading, badge %}
+{% block title %}{{ camera.display_name }} footage{% endblock %}
+{% block content %}
+{% call heading(camera.display_name ~ ' footage', 'One camera can own many recordings. The calibration example is only a reference frame, not the complete footage list.', 'Camera assignments') %}
+<a class="btn btn-secondary" href="{{ url_for('cameras') }}">&larr; Cameras</a>
+<a class="btn" href="{{ url_for('footage') }}">Assign more footage</a>
+{% endcall %}
+{% if not configs %}<div class="alert alert-warning"><p>Not calibrated: save a counting line using an assigned video before preparing a package. Assigning footage alone does not calibrate the camera.</p></div>{% endif %}
+<section class="card">
+  <div class="card-header"><h2>Associated video files</h2>{{ badge(videos|length ~ ' recordings') }}</div>
+  <div class="table-wrap"><table aria-label="Associated footage"><thead><tr><th>Video</th><th>Calibration</th><th>Action</th></tr></thead><tbody>
+  {% for video in videos %}<tr>
+    <td class="break-all">{{ video }}</td>
+    <td>{% set examples = configs|selectattr('video','equalto',video)|list %}{{ badge('Calibration example' if examples else 'Uses camera configurations' if configs else 'Not calibrated', 'info' if examples else 'neutral') }}</td>
+    <td><a href="{{ url_for('calibrate', video=video, camera_id=camera.id) }}">{{ 'Review counting line' if configs else 'Calibrate counting line' }}</a></td>
+  </tr>{% else %}<tr><td colspan="3"><div class="empty-state"><p>No footage assigned. Select one or more files in the footage library and assign them to this camera.</p></div></td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% if configs %}<section class="card">
+  <div class="card-header"><h2>Saved counting-line configurations</h2></div>
+  <div class="card-body">{% for config in configs %}<p><a href="{{ url_for('calibrate', video=config.video, config_id=config.id) }}">Review counting line from {{ config.catalog.effective_from_utc }}</a> &middot; <a href="{{ url_for('camera_metadata', camera_id=camera.id, config_id=config.id) }}">Edit metadata</a></p>{% endfor %}
+  <p><a href="{{ url_for('calibrate', video=configs[0].video, camera_id=camera.id, new='1') }}">Add effective-dated counting line</a></p><p class="help">Choose non-overlapping effective dates. Existing configurations remain unchanged.</p></div>
+</section>{% endif %}
+{% endblock %}

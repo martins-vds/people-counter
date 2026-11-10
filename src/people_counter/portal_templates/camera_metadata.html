@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% from "components.html" import heading %}
+{% block title %}Edit camera metadata{% endblock %}
+{% block content %}
+{% call heading('Edit camera metadata', 'Update recording-time rules and effective dates without changing the saved counting line, calibration example, or footage assignments.', config.catalog.camera_id) %}
+<a class="btn btn-secondary" href="{{ url_for('cameras') }}">&larr; Camera metadata</a>
+{% endcall %}
+<form method="post" class="card">
+  <div class="card-body">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <div class="form-grid">
+      {% for field in fields %}<div class="field"><label for="{{ field }}">{{ field|replace('_',' ')|capitalize }}</label>
+      {% if field == 'camera_timezone' %}<select id="{{ field }}" name="{{ field }}" required>{% for zone in timezones %}<option {% if config.catalog[field] == zone %}selected{% endif %}>{{ zone }}</option>{% endfor %}</select>
+      {% elif field == 'capture_time_source' %}<select id="{{ field }}" name="{{ field }}">{% for value in ['auto','embedded','filename_utc','inventory'] %}<option {% if config.catalog[field] == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select>
+      {% else %}<input id="{{ field }}" name="{{ field }}" value="{{ config.catalog[field] }}" {% if field == 'effective_from_utc' %}required{% endif %}>{% endif %}
+      </div>{% endfor %}
+    </div>
+    <p class="help">Effective dates are UTC. They select a configuration; they do not supply a video's recording time.</p>
+  </div>
+  <div class="card-footer"><p>Saved locally. Generate a new package after changes.</p><button>Save metadata</button></div>
+</form>
+{% endblock %}

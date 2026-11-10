@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% from "components.html" import heading %}
+{% macro report_value(value, depth=0) %}
+{% if value is mapping and depth < 6 %}
+<dl class="space-y-2">{% for key, item in value.items() %}{% if loop.index <= 50 %}<div><dt class="font-medium">{{ key|replace('_',' ') }}</dt><dd class="break-all">{{ report_value(item, depth + 1) }}</dd></div>{% endif %}{% endfor %}</dl>
+{% if value|length > 50 %}<p>Showing 50 fields. Download the report for all fields.</p>{% endif %}
+{% elif value is sequence and value is not string and depth < 6 %}
+{% for item in value[:50] %}<details class="technical-details"><summary>Record {{ loop.index }}</summary><div class="card-body">{{ report_value(item, depth + 1) }}</div></details>{% else %}<p>No records.</p>{% endfor %}
+{% if value|length > 50 %}<p>Showing 50 of {{ value|length }} records. Download the report for all records.</p>{% endif %}
+{% elif value is mapping or (value is sequence and value is not string) %}<p>Nested details exceed the inline depth limit. Download the report to inspect them.</p>
+{% elif value is none %}<span>Not provided</span>
+{% else %}{{ value }}{% endif %}
+{% endmacro %}
+{% block title %}{{ name }}{% endblock %}
+{% block content %}
+{% call heading(name, 'Read the saved report here or download the original file. Report values are displayed as data, never executed.', 'Job report') %}
+<a class="btn btn-secondary" href="{{ url_for('job', identity=identity) }}">&larr; Back to job</a>
+<a class="btn" href="{{ url_for('report', identity=identity, name=name) }}">Download original report</a>
+{% endcall %}
+<section class="card">
+{% if preview_error %}<div class="card-body"><div class="alert alert-warning" role="alert">{{ preview_error }}</div></div>
+{% elif preview.format == 'csv' %}
+<div class="table-wrap"><table aria-label="Report rows"><thead><tr>{% for header in preview.headers %}<th>{{ header|replace('_',' ') }}</th>{% endfor %}</tr></thead><tbody>
+{% for row in preview.rows %}<tr>{% for value in row %}<td class="break-all">{{ value }}</td>{% endfor %}</tr>
+{% else %}<tr><td colspan="{{ preview.headers|length or 1 }}"><div class="empty-state">No rows on this page.</div></td></tr>{% endfor %}
+</tbody></table></div>
+<nav class="card-footer" aria-label="Report pages">
+{% if page > 1 %}<a href="{{ url_for('report_view', identity=identity, name=name, page=page-1) }}">Previous</a>{% endif %}
+<span>Page {{ page }} &middot; up to 50 rows per page</span>
+{% if preview.has_next %}<a href="{{ url_for('report_view', identity=identity, name=name, page=page+1) }}">Next</a>{% endif %}
+</nav>
+{% else %}<div class="card-body">
+  {% if preview.data is not none %}{{ report_value(preview.data) }}{% endif %}
+  {% if preview.sections %}<nav class="flex flex-wrap gap-3" aria-label="Report sections">{% for section, count in preview.sections.items() %}<a href="{{ url_for('report_view', identity=identity, name=name, section=section) }}" {% if section == preview.section %}aria-current="page"{% endif %}>{{ section|replace('_',' ') }} ({{ count }})</a>{% endfor %}</nav>
+  <h2>{{ preview.section|replace('_',' ')|capitalize }}</h2>
+  {% for record in preview.records %}<details class="technical-details"><summary>Record {{ (page - 1) * 50 + loop.index }}</summary><div class="card-body">{{ report_value(record) }}</div></details>{% else %}<p>No records on this page.</p>{% endfor %}
+  <nav class="card-footer" aria-label="Report pages">
+    {% if page > 1 %}<a href="{{ url_for('report_view', identity=identity, name=name, page=page-1, section=preview.section) }}">Previous</a>{% endif %}
+    <span>Page {{ page }} &middot; up to 50 records per page</span>
+    {% if preview.has_next %}<a href="{{ url_for('report_view', identity=identity, name=name, page=page+1, section=preview.section) }}">Next</a>{% endif %}
+  </nav>{% endif %}
+</div>{% endif %}
+</section>
+{% endblock %}

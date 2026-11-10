@@ -107,6 +107,7 @@ class CameraCatalogEntry:
     capture_time_format: str | None
     effective_from_utc: datetime
     effective_to_utc: datetime | None
+    video_relative_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -327,6 +328,10 @@ def _parse_catalog_row(row: dict[str, str], line: int) -> CameraCatalogEntry:
         capture_time_format=time_format,
         effective_from_utc=effective_from,
         effective_to_utc=effective_to,
+        video_relative_path=(
+            normalize_relative_path(row["video_relative_path"])
+            if row.get("video_relative_path") else None
+        ),
     )
 
 
@@ -356,6 +361,11 @@ def _validate_catalog(entries: list[CameraCatalogEntry]) -> None:
                 left.source_path_prefix.startswith(right.source_path_prefix)
                 or right.source_path_prefix.startswith(left.source_path_prefix)
             )
+            if left.video_relative_path or right.video_relative_path:
+                prefixes_overlap = (
+                    left.video_relative_path is not None
+                    and left.video_relative_path == right.video_relative_path
+                )
             if prefixes_overlap and _intervals_overlap(left, right):
                 raise CatalogError(
                     "Overlapping source prefixes have overlapping effective "
@@ -379,7 +389,7 @@ def load_camera_catalog(path: Path) -> list[CameraCatalogEntry]:
         for line, row in enumerate(reader, start=2):
             missing_values = [
                 column
-                for column in CATALOG_COLUMNS
+                for column in fieldnames
                 if row.get(column) is None
             ]
             if None in row or missing_values:
@@ -486,10 +496,13 @@ def match_catalog_entry(
     inventory: dict[str, InventoryEntry],
     embedded_capture_times: tuple[str, ...] = (),
 ) -> tuple[CameraCatalogEntry, datetime, str]:
-    path_matches = [
+    exact_matches = [
+        entry for entry in entries if entry.video_relative_path == relative_path
+    ]
+    path_matches = exact_matches or [
         entry
         for entry in entries
-        if relative_path.startswith(entry.source_path_prefix)
+        if entry.video_relative_path is None and relative_path.startswith(entry.source_path_prefix)
     ]
     if not path_matches:
         raise VideoValidationError(

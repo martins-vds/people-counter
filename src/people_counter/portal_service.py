@@ -20,6 +20,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -40,6 +41,11 @@ REPORTS = (
     "summary.json", "rejection-report.csv", "generated-video-inventory.csv",
     "manifest-package.json", "publication-summary.json", "publication-rejections.csv",
     "registration-summary.json", "processing-summary.json",
+)
+PORTAL_CATALOG_FIELDS = (*sorted(CATALOG_COLUMNS), "video_relative_path")
+METADATA_FIELDS = (
+    "camera_timezone", "capture_time_source", "capture_time_regex", "capture_time_format",
+    "effective_from_utc", "effective_to_utc",
 )
 
 
@@ -321,6 +327,19 @@ class PortalStore:
             raise ValueError(f"Camera {identity!r} already exists; choose a different camera name") from error
         return identity
 
+    def assign_footage(self, camera_id: str, videos: list[str]) -> None:
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute(
+                "SELECT 1 FROM entries WHERE kind='camera_identity' AND id=?", (camera_id,),
+            ).fetchone() is None:
+                raise ValueError("Select an existing registered camera")
+            db.executemany(
+                "INSERT INTO entries VALUES ('footage',?,?) "
+                "ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                [(video, json.dumps({"camera_id": camera_id})) for video in videos],
+            )
+
     def locations(self) -> list[dict[str, Any]]:
         with self.connection() as db:
             rows = db.execute(
@@ -428,6 +447,11 @@ class PortalService:
         self.state = state.resolve()
         self.state.mkdir(parents=True, exist_ok=True)
         self.store = PortalStore(self.state / "portal.sqlite3")
+        known = {item["id"] for item in self.store.entries("footage")}
+        for item in self.store.entries("camera"):
+            if item["video"] not in known:
+                self.store.assign_footage(item["catalog"]["camera_id"], [item["video"]])
+                known.add(item["video"])
         self.catalog = self.state / "backfill-catalog.json"
         self.allow_cloud = allow_cloud
         self.worker_error: str | None = None
@@ -442,6 +466,70 @@ class PortalService:
             path = Path(directory) / "validation.csv"
             path.write_text(csv_text(fields, rows), encoding="utf-8")
             (load_video_inventory if inventory else load_camera_catalog)(path)
+
+    def footage_assignments(self) -> dict[str, str]:
+        assignments = {}
+        for item in self.store.entries("camera"):
+            assignments.setdefault(item["video"], item["catalog"]["camera_id"])
+        assignments.update({
+            item["id"]: item["camera_id"] for item in self.store.entries("footage")
+        })
+        return assignments
+
+    def assign_footage(self, camera_id: str, videos: list[str]) -> None:
+        if not videos:
+            raise ValueError("Select one or more video files")
+        canonical = []
+        for video in videos:
+            path = self.source.resolve(video)
+            if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES:
+                raise ValueError("Select supported video files")
+            canonical.append(path.relative_to(self.source.root).as_posix())
+        self.store.assign_footage(camera_id, sorted(set(canonical)))
+
+    def camera_catalog(self) -> list[dict[str, Any]]:
+        cameras = self.store.entries("camera")
+        assignments = self.footage_assignments()
+        rows = []
+        for item in cameras:
+            row = item["catalog"]
+            if not any(
+                other["catalog"]["camera_id"] != row["camera_id"] and (
+                    other["catalog"]["source_path_prefix"].startswith(row["source_path_prefix"])
+                    or row["source_path_prefix"].startswith(other["catalog"]["source_path_prefix"])
+                ) for other in cameras
+            ):
+                rows.append(row)
+        for video, camera_id in assignments.items():
+            configs = [item for item in cameras if item["catalog"]["camera_id"] == camera_id]
+            matching = [
+                item for item in configs
+                if not item["folder"] or video.startswith(item["folder"].rstrip("/") + "/")
+            ]
+            for item in matching or configs:
+                relative = self.source.root.name + "/" + video
+                rows.append({
+                    **item["catalog"], "video_relative_path": relative,
+                    "source_path_prefix": relative.rsplit("/", 1)[0] + "/",
+                })
+        return rows
+
+    def update_camera_metadata(
+        self, camera_id: str, config_id: str, form: Mapping[str, str],
+    ) -> None:
+        cameras = self.store.entries("camera")
+        item = next((
+            item for item in cameras
+            if item["id"] == config_id and item["catalog"]["camera_id"] == camera_id
+        ), None)
+        if item is None:
+            raise ValueError("Unknown camera configuration")
+        row = {**item["catalog"], **{name: form.get(name, "") for name in METADATA_FIELDS}}
+        self.validate_csv(tuple(sorted(CATALOG_COLUMNS)), [
+            row if other["id"] == config_id else other["catalog"]
+            for other in cameras if other["catalog"]["camera_id"] == camera_id
+        ])
+        self.store.put("camera", config_id, {**item, "catalog": row})
 
     def save_calibration(self, form: Mapping[str, str]) -> str:
         if form.get("scope") not in {"camera", "video"}:
@@ -460,7 +548,13 @@ class PortalService:
             self.store.put("exception", relative, row)
             return "Saved per-video exception. Camera defaults are unchanged."
         folder = form.get("folder", "")
-        if not self.source.resolve(video).is_relative_to(self.source.resolve(folder)):
+        camera_id = form.get("camera_id", "")
+        if not any(item["id"] == camera_id for item in self.store.entries("camera_identity")):
+            raise ValueError("Select an existing registered camera before saving calibration")
+        assigned = self.footage_assignments().get(video)
+        if assigned is not None and assigned != camera_id:
+            raise ValueError("Assign this footage to the selected camera before changing its counting line")
+        if not self.source.resolve(video).is_relative_to(self.source.resolve(folder)) and assigned != camera_id:
             raise ValueError("The preview video must be inside the selected camera folder")
         row = {
             "catalog_version": "1", "source_path_prefix": self.source.prefix(folder),
@@ -477,9 +571,18 @@ class PortalService:
         cameras = self.store.entries("camera")
         if form.get("config_id") and not any(item["id"] == identity for item in cameras):
             raise ValueError("Unknown camera configuration")
-        candidates = [item["catalog"] for item in cameras if item["id"] != identity] + [row]
+        if any(
+            item["id"] == identity and item["catalog"]["camera_id"] != camera_id for item in cameras
+        ):
+            raise ValueError("An existing counting-line configuration cannot move to a different camera")
+        candidates = [
+            item["catalog"] for item in cameras
+            if item["id"] != identity and item["catalog"]["camera_id"] == camera_id
+        ] + [row]
         self.validate_csv(tuple(sorted(CATALOG_COLUMNS)), candidates)
         self.store.put("camera", identity, {"catalog": row, "folder": folder, "video": video})
+        if assigned is None:
+            self.store.assign_footage(camera_id, [video])
         return "Saved camera configuration. Generate a new package to use this calibration."
 
     def enqueue(self, kind: str, payload: Mapping[str, Any]) -> str:
@@ -491,10 +594,18 @@ class PortalService:
 
     def enqueue_preparation(self, folder: str) -> str:
         self.source.prefix(folder)
+        relative = self.source.resolve(folder).relative_to(self.source.root).as_posix()
+        folder = "" if relative == "." else relative
+        calibrated = {item["catalog"]["camera_id"] for item in self.store.entries("camera")}
         return self.enqueue("prepare", {
             "folder": folder,
-            "cameras": [item["catalog"] for item in self.store.entries("camera")],
+            "cameras": self.camera_catalog(),
             "exceptions": self.store.entries("exception"),
+            "uncalibrated": sorted({
+                camera_id for video, camera_id in self.footage_assignments().items()
+                if (video == folder or video.startswith(folder.rstrip("/") + "/") or not folder)
+                and camera_id not in calibrated
+            }),
         })
 
     def enqueue_cloud(self, package_id: str, target: str, profile: str, action: str, wait: bool) -> str:
@@ -507,12 +618,17 @@ class PortalService:
         return self.enqueue(action, {"package_id": package_id, "config": asdict(config), "wait": wait})
 
     def _prepare(self, identity: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if payload.get("uncalibrated"):
+            raise ValueError(
+                "Save a counting line for assigned cameras before preparation: "
+                + ", ".join(payload["uncalibrated"])
+            )
         if not payload["cameras"]:
             raise ValueError("Add camera metadata before preparing a manifest package")
         folder = self.job_dir(identity)
         catalog = folder / "camera-catalog.csv"
         inventory = folder / "exceptions.csv"
-        catalog.write_text(csv_text(tuple(sorted(CATALOG_COLUMNS)), payload["cameras"]), encoding="utf-8")
+        catalog.write_text(csv_text(PORTAL_CATALOG_FIELDS, payload["cameras"]), encoding="utf-8")
         inventory.write_text(csv_text(EXCEPTION_FIELDS, payload["exceptions"]), encoding="utf-8")
         package = folder / "package"
         config = PublisherConfig(
@@ -602,6 +718,48 @@ class PortalService:
             if path.is_file():
                 return path
         raise ValueError("Report is not available")
+
+    def report_preview(
+        self, identity: str, name: str, page: int, section: str | None = None,
+    ) -> dict[str, Any]:
+        if page < 1:
+            raise ValueError("Report page must be positive")
+        path = self.report(identity, name)
+        if path.stat().st_size > 5 * 1024 * 1024:
+            raise ValueError("This report exceeds the 5 MiB inline limit. Use Download to inspect it.")
+        if name.endswith(".json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise ValueError(f"Cannot display JSON report: {error}") from error
+            collections = (
+                {key: value for key, value in data.items() if isinstance(value, list)}
+                if isinstance(data, dict) else {"records": data} if isinstance(data, list) else {}
+            )
+            section = section or next(iter(collections), None)
+            if section is not None and section not in collections:
+                raise ValueError("Select an existing report section")
+            records = collections[section] if section is not None else []
+            return {
+                "format": "json", "data": (
+                    {key: value for key, value in data.items() if key not in collections}
+                    if isinstance(data, dict) else None if collections else data
+                ),
+                "sections": {key: len(value) for key, value in collections.items()},
+                "section": section, "records": records[(page - 1) * 50:page * 50],
+                "has_next": len(records) > page * 50,
+            }
+        try:
+            with path.open(newline="", encoding="utf-8-sig") as handle:
+                reader = csv.reader(handle, strict=True)
+                headers = next(reader, [])
+                rows = list(islice(reader, (page - 1) * 50, page * 50 + 1))
+        except (UnicodeError, csv.Error) as error:
+            raise ValueError(f"Cannot display CSV report: {error}") from error
+        return {
+            "format": "csv", "headers": headers, "rows": rows[:50],
+            "has_next": len(rows) > 50,
+        }
 
     def archive(self, identity: str) -> Path:
         job = self.store.job(identity)

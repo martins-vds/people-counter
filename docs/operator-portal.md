@@ -214,32 +214,53 @@ re-slugged. On upgrade, legacy locations/cameras acquire their existing IDs as
 display names. Registration is separate from calibration; uncalibrated cameras
 are not exported as fabricated camera-catalog rows.
 
-1. **Footage:** open a folder and use its single **Calibrate counting line**
-   action. The editor's scope selector distinguishes camera defaults from
-   video-only exceptions. Previews decode a frame on the server, so browser
-   video-codec support is not required.
+1. **Footage:** select one or more video checkboxes, choose a registered camera,
+   and use **Assign selected footage**. A camera can own many recordings, including
+   recordings from different days/folders. Repeating assignment updates ownership
+   without changing the saved counting line. The camera's footage page lists all
+   associated files and identifies the calibration example separately.
+   Assignment is allowed before calibration: the UI says **Not calibrated** until
+   a counting line is saved. Package preparation rejects selected footage assigned
+   to an uncalibrated camera; association alone never creates a synthetic line.
+   Existing calibration example files are retained as assignments on upgrade.
 2. **Counting line:** select the preview time, then click two endpoints or enter
    their coordinates under **Manual line coordinates**. Drawing uses the original frame's pixel coordinates,
    including when the canvas is scaled on a small screen. The arrow shows
    endpoint order, not walking direction; reversing endpoints swaps in/out.
-3. **Camera metadata:** select a location, then select one of that location's
+3. **Camera metadata:** when first calibrating, select a location, then one of that location's
    registered cameras. Changing location clears the previous camera selection.
    Choose the camera timezone from the IANA timezone list and set timestamp rules
    and effective dates under **Recording time and effective dates**. Editing a
    calibration restores its saved selections and expands nondefault recording rules.
-   A camera default applies to matching videos in that folder.
+   The example video is not the complete assignment list. Existing counting lines
+   are restored when reviewing another recording from the same camera. Multiple
+   effective-dated configurations remain separate. Use **Edit metadata** on the
+   camera page to change recording-time rules/effective dates without opening
+   geometry or decoding footage; use **Edit counting line** for geometry.
+   Legacy folder defaults continue to apply where a folder has one camera.
+   When different cameras share a folder, assign each video explicitly.
    Review the Cameras page or download its catalog CSV. Calibration cannot
    create an unregistered camera or move one to another location; forged requests
    are rejected without changing metadata.
 4. **Video exceptions:** choose "This video only" to override that video's line
    and frame dimensions. An optional authoritative UTC timestamp overrides
    capture time; a blank timestamp retains normal embedded/filename resolution.
-   Camera defaults are not changed. A camera default must still cover the video.
+   Camera defaults are not changed. A camera configuration must still cover the video.
 5. **Packages:** choose **Generate manifest package** and review the folder in
    its dialog. **Prepare this folder** opens it with the selected folder retained.
-   Preparation snapshots
-   metadata before queuing the job, probes/hashes videos, and displays progress
-   and rejection reports. The safety bound is 10,000 videos per package; larger
+   Preparation snapshots metadata and footage ownership before queuing the job,
+   probes/hashes videos, and displays progress and rejection reports.
+   This is an **offline preparation job only**: it does not upload footage,
+   publish to cloud storage, submit Fabric work, or run inference. Cloud actions
+   remain separate and require approval.
+   Use **View** beside each JSON/CSV report on the job page to inspect it in the
+   UI; original downloads remain available. CSV rows and JSON record collections
+   have 50-item pagination, with section links for multiple JSON collections.
+   JSON uses labeled fields and expandable records rather than raw JSON.
+   Inline reports are limited to 5 MiB, 50 nested records/fields per collection,
+   and six levels of nesting; larger/deeper content is explicitly marked and the
+   original download is available. Empty and invalid reports are reported visibly.
+   The safety bound is 10,000 videos per package; larger
    folders fail explicitly rather than being truncated. Use the CLI for a
    deliberately different bound. Resolve rejections before publication.
 6. **Profiles:** the page keeps the approved target catalog visible. Choose
@@ -289,6 +310,16 @@ validation finds an invalid field in a closed disclosure, it opens before the
 browser focuses the field.
 
 ### Per-video calibration CSV
+
+The camera catalog also accepts an optional `video_relative_path` column for an
+exact footage-to-camera assignment. Its path is relative to the same `video_root`
+as source discovery (portal exports use `videos/...` with the default mount).
+Exact assignments take precedence over folder-prefix defaults, including for
+timestamp/configuration errors: an invalid exact assignment does not silently
+fall back to another camera. Duplicate exact assignments with overlapping effective
+dates are rejected. The portal exports these bindings with the catalog and embeds
+the resolved camera ID in each prepared video manifest. Use an SDK containing
+this exact-assignment support when consuming an exported portal catalog.
 
 The shared exception inventory retains its original timestamp-only format and
 also accepts these optional columns:

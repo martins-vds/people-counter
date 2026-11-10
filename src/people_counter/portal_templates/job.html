@@ -6,6 +6,7 @@
 {% call heading(job.kind|capitalize ~ ' job', 'Inputs and progress are retained. Closing this page does not stop local work or cancel accepted Fabric execution.', 'Job activity') %}
 <a class="btn btn-secondary" href="{{ url_for('jobs') }}">&larr; All jobs</a>
 {% endcall %}
+{% if job.kind == 'prepare' %}<div class="alert alert-info"><p><strong>Offline preparation only.</strong> This job inspects and hashes videos and writes a local manifest package and reports. It does not upload videos, publish to cloud storage, submit Fabric work, or run inference.</p></div>{% endif %}
 {% set tone = {'SUCCEEDED':'success','RUNNING':'info','QUEUED':'neutral','FAILED':'danger','INTERRUPTED':'warning'}.get(job.status,'neutral') %}
 <section class="card">
   <div class="card-body flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
@@ -17,7 +18,7 @@
 {% if job.result %}<section class="card">
   <div class="card-header"><div><h2>Result</h2><p class="card-description">The completed job's recorded outcome.</p></div>{{ badge('Saved', 'success') }}</div>
   <div class="card-body">
-    {% if job.kind == 'prepare' %}<p>{{ job.result.planned }} video(s) prepared; {{ job.result.rejected }} rejected. Download the metadata below.</p>
+    {% if job.kind == 'prepare' %}<p>{{ job.result.planned }} video(s) prepared; {{ job.result.rejected }} rejected. View the reports below or download the metadata.</p>
     {% elif job.kind == 'profiles' %}<p>Generated {{ job.result.profiles|join(', ') }} for target <strong>{{ job.result.target }}</strong>.</p>
     {% elif job.kind == 'publish' %}<p>{{ job.result.published }} published; {{ job.result.already_published }} existing publications verified.</p>
     {% elif job.result.processing_complete %}<p>Processing finished for all submitted work. Verify Gold and report refresh separately.</p>
@@ -36,7 +37,7 @@
   <div class="card-header"><div><h2>Reports</h2><p class="card-description">Review validation results and retain package evidence.</p></div></div>
   <div class="card-body">
     {% if reports or (job.kind == 'prepare' and job.status == 'SUCCEEDED') %}<ul class="report-list">
-    {% for name in reports %}<li><a class="report-link" href="{{ url_for('report', identity=job.id, name=name) }}">{{ icon('download', 'size-5 shrink-0') }}<span class="break-all font-mono text-xs">{{ name }}</span></a></li>{% endfor %}
+    {% for name in reports %}<li><a class="report-link" href="{{ url_for('report_view', identity=job.id, name=name) }}">{{ icon('jobs', 'size-5 shrink-0') }}<span class="break-all font-mono text-xs">View {{ name }}</span></a><a class="text-xs" href="{{ url_for('report', identity=job.id, name=name) }}">Download {{ name }}</a></li>{% endfor %}
     {% if job.kind == 'prepare' and job.status == 'SUCCEEDED' %}<li class="sm:col-span-2"><a class="btn w-full" href="{{ url_for('package_zip', identity=job.id) }}">{{ icon('package', 'size-4') }}Download manifest package ZIP</a></li>{% endif %}
     </ul>{% else %}<p class="text-sm text-slate-500">No reports available yet.</p>{% endif %}
   </div>

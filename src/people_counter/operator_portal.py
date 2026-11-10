@@ -18,8 +18,10 @@ from flask import (
 
 from people_counter import backfill_operator as backfill
 from people_counter.inference_profiles import PRESETS
-from people_counter.manifest import CATALOG_COLUMNS, ManifestPublisherError
-from people_counter.portal_service import LINE_FIELDS, REPORTS, PortalService, csv_text
+from people_counter.manifest import ManifestPublisherError
+from people_counter.portal_service import (
+    LINE_FIELDS, METADATA_FIELDS, PORTAL_CATALOG_FIELDS, REPORTS, PortalService, csv_text,
+)
 
 
 def _codespaces_origin() -> str | None:
@@ -128,6 +130,14 @@ def create_app(service: PortalService) -> Flask:
         if kind not in {"all", "videos", "folders"}:
             raise ValueError("Select All types, Videos, or Folders")
         entries = service.source.entries(folder)
+        assignments = service.footage_assignments()
+        configs = service.store.entries("camera")
+        for entry in entries:
+            camera_id = assignments.get(entry["path"])
+            entry["camera_id"] = camera_id
+            entry["calibrated"] = any(
+                item["catalog"]["camera_id"] == camera_id for item in configs
+            ) if camera_id else False
         visible = [
             entry for entry in entries
             if query.casefold() in entry["name"].casefold()
@@ -142,7 +152,14 @@ def create_app(service: PortalService) -> Flask:
                 for index, name in enumerate(Path(folder).parts)
             ],
             parent=Path(folder).parent.as_posix() if folder else "",
+            camera_registry=service.store.entries("camera_identity"),
         )
+
+    @app.post("/footage/assign")
+    def assign_footage():
+        service.assign_footage(request.form.get("camera_id", ""), request.form.getlist("videos"))
+        flash("Selected footage assigned to the camera. Its saved counting line is unchanged.")
+        return redirect(url_for("footage", folder=request.form.get("folder", "")))
 
     @app.get("/folders")
     def folders():
@@ -162,16 +179,38 @@ def create_app(service: PortalService) -> Flask:
             video, float(request.args.get("seconds", "0")),
         )
         config_id = request.args.get("config_id", "")
+        camera_id = request.args.get("camera_id", "") or service.footage_assignments().get(video, "")
         values = {}
+        folder = request.args.get("folder", Path(video).parent.as_posix())
+        new_configuration = request.args.get("new") == "1"
+        if not config_id and camera_id and not new_configuration:
+            candidates = [
+                item for item in service.store.entries("camera")
+                if item["catalog"]["camera_id"] == camera_id
+            ]
+            if len(candidates) == 1:
+                config_id = candidates[0]["id"]
+            elif candidates:
+                flash("Choose the saved effective-dated counting-line configuration to review.")
+                return redirect(url_for("camera_footage", camera_id=camera_id))
         if config_id:
             found = next((item for item in service.store.entries("camera") if item["id"] == config_id), None)
             if found is None:
                 abort(404)
             values = found["catalog"]
+            folder = found["folder"]
+        elif camera_id:
+            registered = next((
+                item for item in service.store.entries("camera_identity") if item["id"] == camera_id
+            ), None)
+            if registered is None:
+                abort(404)
+            values = {"camera_id": camera_id, "location_id": registered["location_id"]}
         return render_template(
             "calibrate.html", video=video, width=width, height=height,
-            folder=request.args.get("folder", Path(video).parent.as_posix()),
+            folder=folder,
             config_id=config_id, values=values,
+            new_configuration=new_configuration,
             scope=request.args.get("scope", "camera"), seconds=request.args.get("seconds", "0"),
             locations=service.store.locations(), camera_registry=service.store.entries("camera_identity"),
             timezones=sorted(available_timezones()),
@@ -188,7 +227,7 @@ def create_app(service: PortalService) -> Flask:
             service.store.add_camera(
                 request.form.get("display_name", ""), request.form.get("location_id", ""),
             )
-            flash("Camera added. Calibrate it later using footage from its folder.")
+            flash("Camera added. Assign footage now, then save its counting line when ready.")
             return redirect(url_for("cameras"))
         directory = service.store.entries("camera_identity")
         locations = service.store.locations()
@@ -198,6 +237,42 @@ def create_app(service: PortalService) -> Flask:
             locations=locations, selected_location=request.args.get("location_id", ""),
             camera_names={row["id"]: row["display_name"] for row in directory},
             location_names={row["id"]: row["display_name"] for row in locations},
+            assignments=service.footage_assignments(),
+        )
+
+    @app.get("/cameras/<camera_id>/footage")
+    def camera_footage(camera_id):
+        camera = next((
+            item for item in service.store.entries("camera_identity") if item["id"] == camera_id
+        ), None)
+        if camera is None:
+            abort(404)
+        return render_template(
+            "camera_footage.html", camera=camera,
+            videos=sorted(
+                video for video, owner in service.footage_assignments().items() if owner == camera_id
+            ),
+            configs=[
+                item for item in service.store.entries("camera")
+                if item["catalog"]["camera_id"] == camera_id
+            ],
+        )
+
+    @app.route("/cameras/<camera_id>/metadata/<config_id>", methods=["GET", "POST"])
+    def camera_metadata(camera_id, config_id):
+        found = next((
+            item for item in service.store.entries("camera")
+            if item["id"] == config_id and item["catalog"]["camera_id"] == camera_id
+        ), None)
+        if found is None:
+            abort(404)
+        if request.method == "POST":
+            service.update_camera_metadata(camera_id, config_id, request.form)
+            flash("Camera metadata saved. Footage assignments and counting line are unchanged.")
+            return redirect(url_for("cameras"))
+        return render_template(
+            "camera_metadata.html", config=found, fields=METADATA_FIELDS,
+            timezones=sorted(available_timezones()),
         )
 
     @app.route("/locations", methods=["GET", "POST"])
@@ -216,7 +291,7 @@ def create_app(service: PortalService) -> Flask:
     @app.get("/cameras.csv")
     def camera_csv():
         content = csv_text(
-            tuple(sorted(CATALOG_COLUMNS)), [item["catalog"] for item in service.store.entries("camera")],
+            PORTAL_CATALOG_FIELDS, service.camera_catalog(),
         )
         return app.response_class(
             content, mimetype="text/csv",
@@ -329,6 +404,29 @@ def create_app(service: PortalService) -> Flask:
         except ValueError:
             abort(404)
         return send_file(path, as_attachment=True)
+
+    @app.get("/jobs/<identity>/reports/<name>")
+    def report_view(identity, name):
+        if service.store.job(identity) is None or name not in REPORTS:
+            abort(404)
+        try:
+            service.report(identity, name)
+        except ValueError:
+            abort(404)
+        try:
+            page = int(request.args.get("page", "1"))
+        except ValueError as error:
+            raise ValueError("Report page must be a positive integer") from error
+        try:
+            preview = service.report_preview(identity, name, page, request.args.get("section"))
+        except ValueError as error:
+            return render_template(
+                "report.html", identity=identity, name=name, page=page,
+                preview=None, preview_error=str(error),
+            ), 400
+        return render_template(
+            "report.html", identity=identity, name=name, page=page, preview=preview,
+        )
 
     @app.get("/jobs/<identity>/package.zip")
     def package_zip(identity):

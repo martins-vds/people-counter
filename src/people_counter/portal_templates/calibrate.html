@@ -2,8 +2,9 @@
 {% from "components.html" import icon, heading, badge %}
 {% block title %}Calibrate counting line{% endblock %}
 {% block content %}
-{% call heading('Calibrate counting line', 'Draw a directed line on the original video frame. Camera defaults and per-video exceptions stay separate.', 'Camera geometry') %}
+{% call heading('Calibrate counting line', 'This is a calibration example for the camera, not its complete footage list. A saved camera line applies to its associated recordings and effective dates. Per-video exceptions stay separate.', 'Camera geometry') %}
 <a class="btn btn-secondary" href="{{ url_for('footage', folder=folder) }}">&larr; Back to footage</a>
+{% if values.get('camera_id') %}<a class="btn btn-secondary" href="{{ url_for('camera_footage', camera_id=values.camera_id) }}">All associated footage</a>{% endif %}
 {% endcall %}
 <div class="grid min-w-0 items-start gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(24rem,1fr)]">
   <section class="card">
@@ -12,6 +13,7 @@
       <form method="get" id="preview-form" class="flex flex-col items-start gap-3 sm:flex-row sm:items-end">
         <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="folder" value="{{ folder }}">
         <input type="hidden" name="scope" value="{{ scope }}"><input type="hidden" name="config_id" value="{{ config_id }}">
+        {% if new_configuration %}<input type="hidden" name="new" value="1">{% endif %}
         <div class="field w-full"><label for="preview-seconds">Preview time in seconds</label><input id="preview-seconds" name="seconds" type="number" min="0" step="0.1" value="{{ seconds }}"></div>
         <button class="btn-secondary shrink-0">Show frame</button>
       </form>
@@ -31,7 +33,7 @@
       <input type="hidden" name="config_id" value="{{ config_id }}">
       <div class="field"><label for="calibration-scope">Apply calibration to</label>
         <select name="scope" id="calibration-scope">
-          <option value="camera" {% if scope == 'camera' %}selected{% endif %}>Camera default for this folder and effective dates</option>
+          <option value="camera" {% if scope == 'camera' %}selected{% endif %}>Camera counting line for associated footage and effective dates</option>
           <option value="video" {% if scope == 'video' %}selected{% endif %}>This video only</option>
         </select>
       </div>

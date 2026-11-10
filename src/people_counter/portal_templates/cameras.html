@@ -2,10 +2,10 @@
 {% from "components.html" import icon, heading, badge, stat, dialog_button, form_dialog %}
 {% block title %}Camera metadata{% endblock %}
 {% block content %}
-{% call heading('Camera metadata', 'Register cameras without footage, then manage their counting lines and per-video exceptions. Each camera belongs to one location.', 'Camera registry') %}
+{% call heading('Camera metadata', 'Each camera belongs to one location and can own many video files. Manage footage, metadata, and counting-line calibration separately.', 'Camera registry') %}
 {{ dialog_button('camera-dialog', 'Add camera', 'camera', enabled=locations|length > 0) }}
 <a class="btn btn-secondary" href="{{ url_for('camera_csv') }}">{{ icon('download', 'size-4') }}Download camera catalog CSV</a>
-<a class="btn btn-secondary" href="{{ url_for('footage') }}">{{ icon('camera', 'size-4') }}Browse footage to calibrate</a>
+<a class="btn btn-secondary" href="{{ url_for('footage') }}">{{ icon('camera', 'size-4') }}Browse and assign footage</a>
 {% endcall %}
 {% if not locations %}<div class="alert alert-warning"><p><a href="{{ url_for('locations', create='1') }}">Add a location</a> before registering a camera. No footage is required.</p></div>{% endif %}
 {% call form_dialog('camera-dialog', 'Add a camera', 'Register its name and location now. No video or counting line is required.', auto_open=(selected_location or request.args.get('create') == '1') and locations) %}
@@ -22,26 +22,26 @@
 {% endcall %}
 <section class="card">
   <div class="card-header"><div><h2>Registered cameras</h2><p class="card-description">Cameras remain in the directory even before their first calibration.</p></div>{{ badge(camera_registry|length ~ ' cameras') }}</div>
-  <div class="table-wrap"><table><thead><tr><th>Camera</th><th>Location</th><th>Calibration</th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>Camera</th><th>Location</th><th>Calibration</th><th>Footage</th></tr></thead><tbody>
   {% for camera in camera_registry %}{% set count = cameras|selectattr('catalog.camera_id','equalto',camera.id)|list|length %}
-    <tr data-camera-id="{{ camera.id }}"><td class="break-all"><span class="cell-title">{{ camera.display_name }}</span><br><code class="cell-meta">{{ camera.id }}</code></td><td class="break-all"><span>{{ location_names[camera.location_id] }}</span><br><code class="cell-meta">{{ camera.location_id }}</code></td><td>{{ badge(count ~ ' configurations' if count else 'Not calibrated', 'info' if count else 'neutral') }}</td></tr>
-  {% else %}<tr><td colspan="3"><div class="empty-state"><p class="empty-title">No registered cameras yet</p><p class="empty-copy">Choose Add camera to register a camera at an existing location.</p></div></td></tr>{% endfor %}
+    <tr data-camera-id="{{ camera.id }}"><td class="break-all"><span class="cell-title">{{ camera.display_name }}</span><br><code class="cell-meta">{{ camera.id }}</code></td><td class="break-all"><span>{{ location_names[camera.location_id] }}</span><br><code class="cell-meta">{{ camera.location_id }}</code></td><td>{{ badge(count ~ ' configurations' if count else 'Not calibrated', 'info' if count else 'neutral') }}</td><td><a href="{{ url_for('camera_footage', camera_id=camera.id) }}">{{ assignments.values()|select('equalto',camera.id)|list|length }} video files / manage footage</a></td></tr>
+  {% else %}<tr><td colspan="4"><div class="empty-state"><p class="empty-title">No registered cameras yet</p><p class="empty-copy">Choose Add camera to register a camera at an existing location.</p></div></td></tr>{% endfor %}
   </tbody></table></div>
 </section>
 <div class="grid gap-4 sm:grid-cols-2">
-  {{ stat('Configurations', cameras|length, 'Effective-dated defaults for camera folders', 'camera') }}
+  {{ stat('Configurations', cameras|length, 'Saved counting lines and effective-dated metadata', 'camera') }}
   {{ stat('Video exceptions', exceptions|length, 'Overrides that leave camera defaults unchanged', 'settings') }}
 </div>
 <section class="card">
   <div class="card-header"><div><h2>Camera configurations</h2><p class="card-description">Review location, geometry, and effective dates before preparing a package.</p></div><a href="{{ url_for('locations') }}">Manage locations</a></div>
   <div class="table-wrap"><table>
-    <thead><tr><th>Camera / location</th><th>Folder</th><th>Calibration details</th><th>Action</th></tr></thead>
+    <thead><tr><th>Camera / location</th><th>Default folder</th><th>Calibration details</th><th>Action</th></tr></thead>
     <tbody>{% for item in cameras %}{% set row = item.catalog %}
     <tr>
       <td><span class="cell-title">{{ camera_names[row.camera_id] }} / {{ location_names[row.location_id] }}</span><br><code class="cell-meta">{{ row.camera_id }}</code><br><span class="cell-meta">{{ row.camera_timezone }}</span></td>
       <td class="break-all text-slate-600">{{ item.folder or 'Source root' }}</td>
       <td><details class="technical-details mt-0"><summary>Geometry and effective dates</summary><dl class="space-y-2 p-4 text-xs"><div><dt class="font-medium">Frame</dt><dd>{{ row.frame_width }} &times; {{ row.frame_height }}</dd></div><div><dt class="font-medium">Directed line</dt><dd><code>{{ row.counting_line_x1 }},{{ row.counting_line_y1 }} &rarr; {{ row.counting_line_x2 }},{{ row.counting_line_y2 }}</code></dd></div><div><dt class="font-medium">Effective from</dt><dd>{{ row.effective_from_utc }}</dd></div><div><dt class="font-medium">Effective until</dt><dd>{{ row.effective_to_utc or 'No end date' }}</dd></div></dl></details></td>
-      <td><a class="btn btn-secondary btn-sm" href="{{ url_for('calibrate', video=item.video, folder=item.folder, config_id=item.id) }}">Edit {{ row.camera_id }}</a></td>
+      <td><a class="btn btn-secondary btn-sm" href="{{ url_for('camera_metadata', camera_id=row.camera_id, config_id=item.id) }}">Edit metadata</a><a class="btn btn-secondary btn-sm" href="{{ url_for('calibrate', video=item.video, folder=item.folder, config_id=item.id) }}">Edit counting line</a></td>
     </tr>
     {% else %}<tr><td colspan="4"><div class="empty-state"><span class="empty-icon">{{ icon('camera', 'size-6') }}</span><p class="empty-title">No camera configurations yet</p><p class="empty-copy">Register a camera, then browse footage to calibrate it. Only calibrated configurations are exported to the catalog CSV.</p><a class="btn btn-secondary" href="{{ url_for('footage') }}">Browse footage</a></div></td></tr>{% endfor %}</tbody>
   </table></div>
