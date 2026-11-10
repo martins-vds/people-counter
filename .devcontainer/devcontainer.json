@@ -29,12 +29,20 @@
 	"containerEnv": {
 		"UV_PYTHON": "3.13"
 	},
+	"forwardPorts": [8088],
+	"portsAttributes": {
+		"8088": {
+			"label": "People Counter operator portal",
+			"protocol": "http",
+			"onAutoForward": "notify"
+		}
+	},
 	"remoteEnv": {
 		"PATH": "${containerWorkspaceFolder}/.venv/bin:${containerEnv:PATH}"
 	},
 	"postCreateCommand": {
 		"lfs": "git lfs install --skip-repo && git lfs pull",
-		"python": "uv sync --frozen --dev --extra cpu --extra experiments --extra export --extra publisher --extra local-spark --extra demo",
+		"python": "uv sync --frozen --dev --extra cpu --extra experiments --extra export --extra publisher --extra portal --extra local-spark --extra demo --group ui",
 		"actionlint": "go install github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106"
 	},
 	"customizations": {

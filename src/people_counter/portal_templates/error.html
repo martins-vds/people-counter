@@ -1,7 +1,15 @@
 {% extends "base.html" %}
+{% from "components.html" import icon %}
+{% block title %}Action needs attention{% endblock %}
 {% block content %}
-<h1>Unable to complete this action</h1>
-<p class="error" role="alert">{{ message }}</p>
-<p>Correct the input and try again. No successful result is assumed.</p>
-<a href="{{ url_for('footage') }}">Back to footage</a>
+<section class="card mx-auto max-w-2xl">
+  <div class="card-body py-10 text-center sm:py-12">
+    <span class="mx-auto flex size-14 items-center justify-center rounded-2xl bg-red-50 text-red-700">{{ icon('info', 'size-7') }}</span>
+    <p class="eyebrow mt-6">Action needs attention</p>
+    <h1 class="mt-2">Unable to complete this action</h1>
+    <div class="alert alert-danger mt-6 text-left" role="alert"><p class="break-words">{{ message }}</p></div>
+    <p class="mt-5 text-slate-500">Correct the input and try again. No successful result is assumed.</p>
+    <div class="mt-7 flex flex-wrap justify-center gap-3"><a class="btn" href="{{ url_for('footage') }}">Back to footage{{ icon('arrow', 'size-4') }}</a><a class="btn btn-secondary" href="{{ url_for('jobs') }}">View job activity</a></div>
+  </div>
+</section>
 {% endblock %}

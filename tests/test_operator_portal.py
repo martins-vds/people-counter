@@ -1,8 +1,10 @@
 import json
 import sqlite3
 import threading
+import shutil
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +15,7 @@ from people_counter.portal_service import PortalService, PortalStore
 from people_counter.manifest import CatalogError, build_manifest_plan, load_camera_catalog, load_video_inventory
 from tests.test_manifest_publisher import inspection, write_catalog
 from people_counter import portal_service as portal_module
+from people_counter import operator_portal as portal_web
 from people_counter import backfill_operator as backfill_module
 from people_counter.backfill_operator import progress_reporter, _progress
 
@@ -441,3 +444,96 @@ def test_locations_form_requires_csrf_and_creates_empty_location(app, service, m
     assert page.status_code == 200 and b"warehouse" in page.data
     assert b'data-camera-count="0"' in page.data
     assert service.store.entries("camera") == []
+
+
+def test_tailwind_stylesheet_is_compiled_and_served_locally(app):
+    response = app.test_client().get("/static/build/portal.css")
+    assert response.status_code == 200
+    assert "text/css" in response.content_type
+    assert b"tailwindcss v4.3.0" in response.data
+    assert b"@apply" not in response.data
+    assert b'@import "tailwindcss"' not in response.data
+
+
+def test_compose_live_assets_reload_templates_without_restarting_jobs(service, tmp_path, monkeypatch):
+    source = Path(portal_web.__file__).parent
+    templates = tmp_path / "live-templates"
+    static = tmp_path / "live-static"
+    shutil.copytree(source / "portal_templates", templates)
+    shutil.copytree(source / "portal_static", static)
+    monkeypatch.setenv("PC_PORTAL_TEMPLATE_DIR", str(templates))
+    monkeypatch.setenv("PC_PORTAL_STATIC_DIR", str(static))
+    monkeypatch.setenv("PC_PORTAL_LIVE_TEMPLATES", "1")
+    app = create_app(service)
+    assert app.template_folder == str(templates)
+    assert app.static_folder == str(static)
+    assert app.config["TEMPLATES_AUTO_RELOAD"] is True
+    client = app.test_client()
+    assert client.get("/").status_code == 200
+    page = templates / "footage.html"
+    page.write_text(page.read_text().replace("Operator portal", "Live template marker"))
+    assert b"Live template marker" in client.get("/").data
+
+
+def test_codespaces_exact_private_forwarded_host_and_origin_work(service, monkeypatch):
+    monkeypatch.setenv("CODESPACES", "true")
+    monkeypatch.setenv("CODESPACE_NAME", "test-portal-abc")
+    monkeypatch.setenv("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", "app.github.dev")
+    host = "test-portal-abc-8088.app.github.dev"
+    app = create_app(service)
+    client = app.test_client()
+    response = client.get("/", base_url=f"https://{host}")
+    assert response.status_code == 200
+    assert "Secure" in response.headers["Set-Cookie"]
+    with client.session_transaction(base_url=f"https://{host}") as stored:
+        token = stored["csrf"]
+    response = client.post(
+        "/locations", base_url=f"http://{host}",
+        data={"csrf": token, "location_id": "codespaces-location"},
+        headers={"Origin": f"https://{host}"},
+    )
+    assert response.status_code == 302
+    assert client.post(
+        "/locations", base_url=f"http://{host}",
+        data={"csrf": token, "location_id": "forbidden"},
+        headers={"Origin": "https://another-codespace-8088.app.github.dev"},
+    ).status_code == 403
+    assert client.get("/", base_url="https://another-codespace-8088.app.github.dev").status_code == 400
+    assert service.store.locations() == [
+        {"id": "codespaces-location", "camera_ids": [], "camera_count": 0},
+    ]
+
+
+@pytest.mark.parametrize("variable,value", [
+    ("CODESPACE_NAME", None),
+    ("CODESPACE_NAME", "-invalid"),
+    ("CODESPACE_NAME", "name/path"),
+    ("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", None),
+    ("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", "*.app.github.dev"),
+    ("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", "app.github.dev/path"),
+    ("PC_PORTAL_PORT", "0"),
+    ("PC_PORTAL_PORT", "65536"),
+])
+def test_codespaces_rejects_invalid_forwarding_configuration(monkeypatch, variable, value):
+    monkeypatch.setenv("CODESPACES", "true")
+    monkeypatch.setenv("CODESPACE_NAME", "test-portal-abc")
+    monkeypatch.setenv("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", "app.github.dev")
+    monkeypatch.setenv("PC_PORTAL_PORT", "8088")
+    if value is None:
+        monkeypatch.delenv(variable)
+    else:
+        monkeypatch.setenv(variable, value)
+    with pytest.raises(ValueError, match="Invalid Codespaces port-forwarding environment"):
+        portal_web._codespaces_origin()
+
+
+@pytest.mark.parametrize("port", [None, "1", "65535"])
+def test_codespaces_default_and_valid_boundary_ports(monkeypatch, port):
+    monkeypatch.setenv("CODESPACES", "true")
+    monkeypatch.setenv("CODESPACE_NAME", "test-portal-abc")
+    monkeypatch.setenv("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", "app.github.dev")
+    if port is None:
+        monkeypatch.delenv("PC_PORTAL_PORT", raising=False)
+    else:
+        monkeypatch.setenv("PC_PORTAL_PORT", port)
+    assert portal_web._codespaces_origin() == f"https://test-portal-abc-{port or '8088'}.app.github.dev"

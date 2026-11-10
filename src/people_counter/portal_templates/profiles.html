@@ -1,42 +1,45 @@
 {% extends "base.html" %}
+{% from "components.html" import icon, heading, badge %}
+{% block title %}Profiles and targets{% endblock %}
 {% block content %}
-<h1>Profiles and targets</h1>
-<p>Model requirements and hashes are calculated automatically. This does not download or approve model files.</p>
-<section><h2>Approved target catalog</h2>
-{% for target, entry in catalog.targets.items() %}
-<h3>{{ target }}</h3><ul>{% for name, profile in entry.profiles.items() %}
-<li>{{ name }}: {{ profile.detector_model }} / {{ profile.model_format }} / {{ profile.device_variant }},
-batch {{ profile.batch_size }}, {{ profile.sample_fps }} FPS</li>{% endfor %}</ul>
-{% else %}<p>No target profiles have been generated yet.</p>{% endfor %}
+{% call heading('Profiles and targets', 'Select approved inference presets and let the shared resolver calculate model requirements, configuration hashes, and runtime identities.', 'Deployment configuration') %}
+<a class="btn btn-secondary" href="{{ url_for('jobs') }}">{{ icon('jobs', 'size-4') }}View profile jobs</a>
+{% endcall %}
+<section class="card">
+  <div class="card-header"><div><h2>Approved target catalog</h2><p class="card-description">These resolved profiles are available for explicit cloud actions.</p></div>{{ badge(catalog.targets|length ~ ' targets') }}</div>
+  {% if catalog.targets %}<div class="table-wrap"><table>
+    <thead><tr><th>Target</th><th>Profile</th><th>Model / format</th><th>Device</th><th>Batch</th><th>Sampling</th></tr></thead><tbody>
+    {% for target, entry in catalog.targets.items() %}{% for name, profile in entry.profiles.items() %}<tr>
+      <td class="cell-title">{{ target }}</td><td><code>{{ name }}</code></td><td>{{ profile.detector_model }} / {{ profile.model_format }}</td><td>{{ badge(profile.device_variant|upper) }}</td><td>{{ profile.batch_size }}</td><td class="whitespace-nowrap">{{ profile.sample_fps }} FPS</td>
+    </tr>{% endfor %}{% endfor %}
+    </tbody></table></div>
+  {% else %}<div class="empty-state"><span class="empty-icon">{{ icon('settings', 'size-6') }}</span><p class="empty-title">No target profiles yet</p><p class="empty-copy">Use the form below to generate a catalog from reviewed local model files.</p></div>{% endif %}
 </section>
 <form method="post" class="card">
-  <h2>Generate approved profiles</h2>
-  <input type="hidden" name="csrf" value="{{ session.csrf }}">
-  <p>Administrator setup. Use the same reviewed model bytes deployed to Fabric. Models root: <code>{{ models }}</code>.</p>
-  <div class="grid">
-    <label>Target name <input name="target" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="production"></label>
-    <label>Workspace ID <input name="workspace_id" required></label>
-    <label>Lakehouse ID <input name="lakehouse_id" required></label>
-    <label>Environment ID <input name="environment_id" required></label>
-    <label>Control SJD ID <input name="control_sjd_id" required></label>
-    <label>Storage account <input name="storage_account" required></label>
-    <label>Filesystem <input name="filesystem" required></label>
-    <label>Shortcut path <input name="shortcut_path" value="Files/videos" required></label>
-    <label>Table directory <input name="table_directory" value="Tables/dbo" required></label>
+  <div class="card-header"><div><h2>Generate approved profiles</h2><p class="card-description">Administrator setup &middot; no JSON editing or hash calculation required.</p></div>{{ badge('Automatic identities', 'info') }}</div>
+  <div class="card-body">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <div class="alert alert-info">{{ icon('folder', 'size-5 shrink-0') }}<div><p class="font-medium">Use the same reviewed model bytes deployed to Fabric.</p><p class="mt-1 break-all text-xs">Models root: <code>{{ models }}</code>. This tool does not download or approve files.</p></div></div>
+    <fieldset><legend>Deployment binding</legend><div class="form-grid">
+      <div class="field"><label for="target-name">Target name</label><input id="target-name" name="target" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="production"></div>
+      {% for name, label in [('workspace_id','Workspace ID'),('lakehouse_id','Lakehouse ID'),('environment_id','Environment ID'),('control_sjd_id','Control SJD ID'),('storage_account','Storage account'),('filesystem','Filesystem')] %}
+      <div class="field"><label for="{{ name }}">{{ label }}</label><input id="{{ name }}" name="{{ name }}" required placeholder="{{ 'Deployment UUID' if name.endswith('_id') else '' }}"></div>
+      {% endfor %}
+      <div class="field"><label for="shortcut-path">Shortcut path</label><input id="shortcut-path" name="shortcut_path" value="Files/videos" required></div>
+      <div class="field"><label for="table-directory">Table directory</label><input id="table-directory" name="table_directory" value="Tables/dbo" required></div>
+    </div></fieldset>
+    <fieldset><legend>Select profiles to generate</legend>
+      <div class="grid gap-3 sm:grid-cols-2">{% for name in presets %}<label class="checkbox-card"><input type="checkbox" name="profiles" value="{{ name }}"><span class="break-all font-mono text-xs leading-6">{{ name }}</span></label>{% endfor %}</div>
+      <p class="help">Only supported Fabric presets are offered. RF-DETR/BoT-SORT is not supported by the production localizer.</p>
+    </fieldset>
+    <details class="technical-details"><summary>Advanced inference overrides (optional)</summary>
+      <div class="form-grid border-t border-slate-100 p-5">
+        <div class="field"><label for="profile-batch-size">Batch size override</label><select name="batch_size" id="profile-batch-size"><option value="">Use preset default (1)</option><option value="1">1</option><option value="2">2</option><option value="4">4</option></select></div>
+        <div class="field"><label for="profile-sampling">Sampling FPS override</label><input id="profile-sampling" name="sample_fps" type="number" min="0" step="any" placeholder="Use preset default (1.0)"></div>
+        <p class="help md:col-span-2">FPS must be positive and finite. Overrides apply to all selected presets and automatically recalculate identities.</p>
+      </div>
+    </details>
   </div>
-  <fieldset><legend>Select profiles to generate</legend>
-  {% for name in presets %}<label class="check"><input type="checkbox" name="profiles" value="{{ name }}"> {{ name }}</label>{% endfor %}
-  </fieldset>
-  <details><summary>Advanced inference overrides (optional)</summary>
-    <label for="profile-batch-size">Batch size override</label>
-    <select name="batch_size" id="profile-batch-size">
-      <option value="">Use preset default (1)</option>
-      <option value="1">1</option><option value="2">2</option><option value="4">4</option>
-    </select>
-    <label>Sampling FPS override <input name="sample_fps" type="number" min="0" step="any" placeholder="Use preset default (1.0)"></label>
-    <p>FPS must be positive and finite. The same overrides apply to all selected presets. Identities are recalculated automatically.</p>
-  </details>
-  <p>Changing an existing target definition requires a new target name/catalog revision. Unsupported Fabric pipelines, including RF-DETR/BoT-SORT, are not offered.</p>
-  <button>Generate profiles</button>
+  <div class="card-footer"><p class="max-w-2xl text-xs text-slate-500">Existing target definitions are immutable. Use a new target name/catalog revision when changing an approved definition.</p><button>{{ icon('settings', 'size-4') }}Generate profiles</button></div>
 </form>
 {% endblock %}

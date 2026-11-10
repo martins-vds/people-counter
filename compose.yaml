@@ -26,6 +26,33 @@ x-common: &common
     - spark
 
 services:
+  portal-tailwind:
+    profiles: ["portal"]
+    image: ${PEOPLE_COUNTER_TAILWIND_IMAGE:-people-counter-tailwind:4.3.0}
+    build:
+      context: .
+      dockerfile: docker/portal/tailwind.Dockerfile
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    cpus: 1.0
+    mem_limit: 512m
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,uid=10001,gid=10001,mode=1777
+    volumes:
+      - ./src/people_counter:/source:ro
+      - portal-css:/output
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/tailwind-ready && test -s /output/portal.css"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
   portal:
     profiles: ["portal"]
     image: ${PEOPLE_COUNTER_PORTAL_IMAGE:-people-counter-portal:local}
@@ -44,9 +71,19 @@ services:
       - "127.0.0.1:${PC_PORTAL_PORT:-8088}:8088"
     environment:
       PC_PORTAL_ALLOW_CLOUD: ${PC_PORTAL_ALLOW_CLOUD:-0}
+      PC_PORTAL_PORT: ${PC_PORTAL_PORT:-8088}
+      PC_PORTAL_TEMPLATE_DIR: /opt/portal-ui/templates
+      PC_PORTAL_STATIC_DIR: /opt/portal-ui/static
+      PC_PORTAL_LIVE_TEMPLATES: "1"
+      CODESPACES: ${CODESPACES:-}
+      CODESPACE_NAME: ${CODESPACE_NAME:-}
+      GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN: ${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}
     tmpfs:
       - /tmp:uid=10001,gid=10001,mode=1777
     volumes:
+      - ./src/people_counter/portal_templates:/opt/portal-ui/templates:ro
+      - ./src/people_counter/portal_static:/opt/portal-ui/static:ro
+      - portal-css:/opt/portal-ui/static/build:ro
       - type: bind
         source: ${PC_PORTAL_FOOTAGE_DIR:-./samples}
         target: /data/videos
@@ -62,6 +99,9 @@ services:
       - portal-state:/var/lib/people-counter/portal
       - portal-azure:/var/lib/people-counter/azure
     networks: ["portal"]
+    depends_on:
+      portal-tailwind:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/healthz', timeout=3).read()"]
       interval: 5s
@@ -216,6 +256,7 @@ networks:
     internal: true
 
 volumes:
+  portal-css:
   portal-state:
   portal-azure:
   spark-control:

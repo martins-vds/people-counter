@@ -1,74 +1,76 @@
 {% extends "base.html" %}
+{% from "components.html" import icon, heading, badge %}
 {% block title %}Calibrate counting line{% endblock %}
 {% block content %}
-<h1>Calibrate counting line</h1>
-<p><code>{{ video }}</code> &middot; native frame: {{ width }} &times; {{ height }}</p>
-<section>
-  <form method="get" id="preview-form">
-    <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="folder" value="{{ folder }}">
-    <input type="hidden" name="scope" value="{{ scope }}"><input type="hidden" name="config_id" value="{{ config_id }}">
-    <label>Preview time in seconds <input name="seconds" type="number" min="0" step="0.1" value="{{ seconds }}"></label>
-    <button>Show frame</button>
-  </form>
-  <img id="preview-image" hidden src="{{ url_for('frame', video=video, seconds=seconds) }}" alt="Source video frame">
-  <canvas id="line-canvas" width="{{ width }}" height="{{ height }}" tabindex="0" aria-label="Counting line editor"></canvas>
-  <p id="line-instructions" role="status">Click the first endpoint, then the second. You can also edit the coordinates below.</p>
-  <p>The arrow shows endpoint order, not walking direction. Reversing endpoints swaps in/out. Confirm the physical entry direction for this camera.</p>
-  <button type="button" id="redraw-line">Redraw line</button>
-</section>
-<form method="post" class="card" id="calibration-form">
-  <input type="hidden" name="csrf" value="{{ session.csrf }}">
-  <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="folder" value="{{ folder }}">
-  <input type="hidden" name="config_id" value="{{ config_id }}">
-  <label>Apply calibration to
-    <select name="scope" id="calibration-scope">
-      <option value="camera" {% if scope == 'camera' %}selected{% endif %}>Camera default for this folder and effective dates</option>
-      <option value="video" {% if scope == 'video' %}selected{% endif %}>This video only</option>
-    </select>
-  </label>
-  {% set defaults = [width // 5, height // 2, width * 4 // 5, height // 2] %}
-  <fieldset class="coordinates"><legend>Directed line in original frame pixels</legend>
-    {% for name in line_fields %}
-      <label>{{ ['X1','Y1','X2','Y2'][loop.index0] }}
-        <input id="{{ name }}" name="{{ name }}" type="number" required min="0"
-          max="{{ width - 1 if loop.index0 in [0,2] else height - 1 }}"
-          value="{{ values.get(name, defaults[loop.index0]) }}">
-      </label>
-    {% endfor %}
-  </fieldset>
-  <fieldset id="camera-fields" {% if scope == 'video' %}disabled{% endif %}>
-    <legend>Camera metadata</legend>
-    <div class="grid">
-      <label>Camera ID <input name="camera_id" required value="{{ values.get('camera_id', '') }}"></label>
-      <div>
-        <label for="camera-location">Location ID</label>
-        <select id="camera-location" name="location_id" required>
-          <option value="">Select an existing location</option>
-          {% for location in locations %}
-          <option value="{{ location.id }}" {% if values.get('location_id') == location.id %}selected{% endif %}>{{ location.id }}</option>
-          {% endfor %}
-        </select>
-        <p><a href="{{ url_for('locations') }}">Add a location</a> before assigning a camera.</p>
+{% call heading('Calibrate counting line', 'Draw a directed line on the original video frame. Camera defaults and per-video exceptions stay separate.', 'Camera geometry') %}
+<a class="btn btn-secondary" href="{{ url_for('footage', folder=folder) }}">&larr; Back to footage</a>
+{% endcall %}
+<div class="grid min-w-0 items-start gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(24rem,1fr)]">
+  <section class="card">
+    <div class="card-header"><div class="min-w-0"><h2 class="break-all">{{ video }}</h2><p class="card-description">Original frame coordinates, regardless of display size.</p></div>{{ badge(width ~ ' x ' ~ height ~ ' px') }}</div>
+    <div class="card-body">
+      <form method="get" id="preview-form" class="flex flex-col items-start gap-3 sm:flex-row sm:items-end">
+        <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="folder" value="{{ folder }}">
+        <input type="hidden" name="scope" value="{{ scope }}"><input type="hidden" name="config_id" value="{{ config_id }}">
+        <div class="field w-full"><label for="preview-seconds">Preview time in seconds</label><input id="preview-seconds" name="seconds" type="number" min="0" step="0.1" value="{{ seconds }}"></div>
+        <button class="btn-secondary shrink-0">Show frame</button>
+      </form>
+      <div class="preview-stage">
+        <img id="preview-image" hidden src="{{ url_for('frame', video=video, seconds=seconds) }}" alt="Source video frame">
+        <canvas id="line-canvas" class="preview-canvas" width="{{ width }}" height="{{ height }}" tabindex="0" aria-label="Counting line editor"></canvas>
       </div>
-      <label>Camera timezone <input name="camera_timezone" required value="{{ values.get('camera_timezone', 'UTC') }}"></label>
-      <label>Capture time source <select name="capture_time_source">
-        {% for name in ['auto','embedded','filename_utc','inventory'] %}
-        <option {% if values.get('capture_time_source','auto') == name %}selected{% endif %}>{{ name }}</option>
-        {% endfor %}
-      </select></label>
-      <label>Effective from (UTC) <input name="effective_from_utc" value="{{ values.get('effective_from_utc','1970-01-01T00:00:00Z') }}"></label>
-      <label>Effective until (UTC, optional) <input name="effective_to_utc" value="{{ values.get('effective_to_utc','') }}"></label>
-      <label>Filename timestamp regex (optional) <input name="capture_time_regex" value="{{ values.get('capture_time_regex','') }}"></label>
-      <label>Filename timestamp format (optional) <input name="capture_time_format" value="{{ values.get('capture_time_format','') }}"></label>
+      <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><p id="line-instructions" class="text-sm text-slate-600" role="status">Click the first endpoint, then the second. You can also edit the coordinates.</p><button class="btn-secondary btn-sm shrink-0" type="button" id="redraw-line">Redraw line</button></div>
+      <div class="workflow-note">{{ icon('info', 'size-5 shrink-0') }}<p class="text-xs leading-5">The arrow shows endpoint order, not walking direction. Reversing endpoints swaps in/out. Confirm the physical entry direction for this camera.</p></div>
     </div>
-  </fieldset>
-  <fieldset id="video-fields" {% if scope != 'video' %}disabled{% endif %}>
-    <legend>Video exception</legend>
-    <label>Authoritative capture time override (UTC, optional)
-      <input name="captured_at_utc" placeholder="2026-01-01T12:00:00Z">
-    </label>
-    <p>Leave blank to retain normal embedded/filename timestamp resolution. This line does not change the camera default.</p>
-  </fieldset>
-  <button>Save calibration</button>
-</form>
+  </section>
+  <form method="post" class="card" id="calibration-form">
+    <div class="card-header"><div><h2>Calibration &amp; metadata</h2><p class="card-description">Review the scope before saving.</p></div>{{ badge('Local metadata') }}</div>
+    <div class="card-body">
+      <input type="hidden" name="csrf" value="{{ session.csrf }}">
+      <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="folder" value="{{ folder }}">
+      <input type="hidden" name="config_id" value="{{ config_id }}">
+      <div class="field"><label for="calibration-scope">Apply calibration to</label>
+        <select name="scope" id="calibration-scope">
+          <option value="camera" {% if scope == 'camera' %}selected{% endif %}>Camera default for this folder and effective dates</option>
+          <option value="video" {% if scope == 'video' %}selected{% endif %}>This video only</option>
+        </select>
+      </div>
+      {% set defaults = [width // 5, height // 2, width * 4 // 5, height // 2] %}
+      <fieldset class="coordinates"><legend>Directed line in original frame pixels</legend>
+        {% for name in line_fields %}<div class="field"><label for="{{ name }}">{{ ['X1','Y1','X2','Y2'][loop.index0] }}</label>
+          <input id="{{ name }}" name="{{ name }}" type="number" required min="0" max="{{ width - 1 if loop.index0 in [0,2] else height - 1 }}" value="{{ values.get(name, defaults[loop.index0]) }}">
+        </div>{% endfor %}
+      </fieldset>
+      <fieldset id="camera-fields" {% if scope == 'video' %}disabled{% endif %}>
+        <legend>Camera metadata</legend>
+        <div class="form-grid">
+          <div class="field"><label for="camera-id">Camera ID</label><input id="camera-id" name="camera_id" required value="{{ values.get('camera_id', '') }}" placeholder="camera-17"></div>
+          <div class="field"><label for="camera-location">Location ID</label>
+            <select id="camera-location" name="location_id" required>
+              <option value="">Select an existing location</option>
+              {% for location in locations %}<option value="{{ location.id }}" {% if values.get('location_id') == location.id %}selected{% endif %}>{{ location.id }}</option>{% endfor %}
+            </select>
+            <p class="help"><a href="{{ url_for('locations') }}">Add a location</a> before assigning a camera.</p>
+          </div>
+          <div class="field"><label for="camera-timezone">Camera timezone</label><input id="camera-timezone" name="camera_timezone" required value="{{ values.get('camera_timezone', 'UTC') }}" placeholder="America/Denver"></div>
+          <div class="field"><label for="capture-source">Capture time source</label><select id="capture-source" name="capture_time_source">
+            {% for name in ['auto','embedded','filename_utc','inventory'] %}<option {% if values.get('capture_time_source','auto') == name %}selected{% endif %}>{{ name }}</option>{% endfor %}
+          </select></div>
+          <div class="field"><label for="effective-from">Effective from (UTC)</label><input id="effective-from" name="effective_from_utc" value="{{ values.get('effective_from_utc','1970-01-01T00:00:00Z') }}"></div>
+          <div class="field"><label for="effective-to">Effective until (UTC, optional)</label><input id="effective-to" name="effective_to_utc" value="{{ values.get('effective_to_utc','') }}" placeholder="No end date"></div>
+          <div class="field"><label for="capture-regex">Filename timestamp regex (optional)</label><input id="capture-regex" name="capture_time_regex" value="{{ values.get('capture_time_regex','') }}"></div>
+          <div class="field"><label for="capture-format">Filename timestamp format (optional)</label><input id="capture-format" name="capture_time_format" value="{{ values.get('capture_time_format','') }}"></div>
+        </div>
+        <p class="help">Effective dates select the camera configuration. They are never substituted for recording time.</p>
+      </fieldset>
+      <fieldset id="video-fields" {% if scope != 'video' %}disabled{% endif %}>
+        <legend>Video exception</legend>
+        <label for="capture-override">Authoritative capture time override (UTC, optional)</label>
+        <input id="capture-override" name="captured_at_utc" placeholder="2026-01-01T12:00:00Z">
+        <p class="help">Leave blank to retain embedded/filename timestamp resolution. This line does not change the camera default.</p>
+      </fieldset>
+    </div>
+    <div class="card-footer"><p class="text-xs text-slate-500">Saved locally. Generate a new package after changes.</p><button>{{ icon('check', 'size-4') }}Save calibration</button></div>
+  </form>
+</div>
 {% endblock %}

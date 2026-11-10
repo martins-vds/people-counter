@@ -1,26 +1,35 @@
 {% extends "base.html" %}
+{% from "components.html" import icon, heading, badge, stat %}
 {% block title %}Locations{% endblock %}
 {% block content %}
-<h1>Locations</h1>
-<p>A location can have no cameras, one camera, or many cameras. A camera ID can belong to only one location across its configurations.</p>
-<form method="post" class="card">
-  <h2>Add a location</h2>
-  <input type="hidden" name="csrf" value="{{ session.csrf }}">
-  <label for="location-id">Location ID</label>
-  <input id="location-id" name="location_id" required placeholder="For example: north-entrance">
-  <button>Add location</button>
-</form>
-<section><h2>Registered locations</h2>
-<div class="table-wrap"><table>
-<thead><tr><th>Location ID</th><th>Camera count</th><th>Camera IDs</th></tr></thead>
-<tbody>{% for location in locations %}
-<tr data-location-id="{{ location.id }}" data-camera-count="{{ location.camera_count }}">
-  <td>{{ location.id }}</td><td>{{ location.camera_count }}</td>
-  <td>{{ location.camera_ids|join(', ') if location.camera_ids else 'No cameras yet' }}</td>
-</tr>
-{% else %}<tr><td colspan="3">No locations yet. Locations can be added before footage or cameras.</td></tr>{% endfor %}</tbody>
-</table></div>
-<p>Counts represent distinct camera IDs, not the number of effective-dated configurations.</p>
-<a href="{{ url_for('footage') }}">Browse footage to add or configure cameras</a>
-</section>
+{{ heading('Locations', 'Create locations independently of footage. Each camera ID belongs to one location, while a location can have zero or many cameras.', 'Location directory') }}
+<div class="stats-grid">
+  {{ stat('Registered locations', locations|length, 'Including locations with no cameras', 'location') }}
+  {{ stat('Associated cameras', locations|sum(attribute='camera_count'), 'Distinct camera IDs, not configurations', 'camera') }}
+  {{ stat('Empty locations', locations|selectattr('camera_count','equalto',0)|list|length, 'Ready for cameras whenever you are', 'folder') }}
+</div>
+<div class="grid min-w-0 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+  <section class="card">
+    <div class="card-header"><div><h2>Registered locations</h2><p class="card-description">A durable directory of your sites and their cameras.</p></div>{{ badge(locations|length ~ ' locations') }}</div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Location ID</th><th>Camera count</th><th>Camera IDs</th></tr></thead>
+      <tbody>{% for location in locations %}
+      <tr data-location-id="{{ location.id }}" data-camera-count="{{ location.camera_count }}">
+        <td class="cell-title break-all">{{ location.id }}</td><td><span class="badge badge-{{ 'info' if location.camera_count else 'neutral' }}">{{ location.camera_count }}</span></td>
+        <td>{% if location.camera_ids %}<span class="break-words text-slate-600">{{ location.camera_ids|join(', ') }}</span>{% else %}<span class="text-slate-400">No cameras yet</span>{% endif %}</td>
+      </tr>
+      {% else %}<tr><td colspan="3"><div class="empty-state"><span class="empty-icon">{{ icon('location', 'size-6') }}</span><p class="empty-title">No locations yet</p><p class="empty-copy">Add your first location. No footage or cameras are required.</p></div></td></tr>{% endfor %}</tbody>
+    </table></div>
+    <div class="card-footer"><p class="text-xs text-slate-500">Camera counts stay unique across effective-dated configurations.</p><a href="{{ url_for('footage') }}">Browse footage to add or configure cameras &rarr;</a></div>
+  </section>
+  <form method="post" class="card">
+    <div class="card-header"><div><h2>Add a location</h2><p class="card-description">Register a site now; associate cameras later.</p></div></div>
+    <div class="card-body">
+      <input type="hidden" name="csrf" value="{{ session.csrf }}">
+      <div class="field"><label for="location-id">Location ID</label><input id="location-id" name="location_id" required placeholder="For example: north-entrance"><p class="help">Use a stable, recognizable identifier for this location.</p></div>
+      <button class="w-full">{{ icon('location', 'size-4') }}Add location</button>
+      <div class="workflow-note">{{ icon('info', 'size-4 shrink-0') }}<p class="text-xs leading-5">Empty locations are kept. Camera assignments are checked when configurations are saved.</p></div>
+    </div>
+  </form>
+</div>
 {% endblock %}

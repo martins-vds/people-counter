@@ -48,7 +48,7 @@ Start the local browser-based camera, package, profile, and backfill tools:
 docker compose --profile portal up --build --wait portal
 ```
 
-Open **http://127.0.0.1:8088**. Only the portal starts, not Spark. Footage and
+Open **http://127.0.0.1:8088**. The portal and live Tailwind watcher start, not Spark. Footage and
 models are mounted read-only, state persists in named volumes, and cloud
 actions are disabled by default. See the [operator portal guide](docs/operator-portal.md)
 for source-folder configuration, Azure sign-in, recovery, and Playwright/CI tests.
@@ -59,8 +59,9 @@ Open the repository in VS Code and select **Dev Containers: Rebuild and Reopen
 in Container**. The CPU development container installs Python 3.13, uv, Java 21
 for Spark, FFmpeg/ffprobe, OpenCV system libraries, Git LFS, and Docker-in-Docker
 with Compose v2. Creation installs the frozen development dependencies and the
-`cpu`, `experiments`, `export`, `publisher`, `local-spark`, and `demo` extras,
-matching Python CI. `UV_PYTHON=3.13` overrides the host-oriented
+`cpu`, `experiments`, `export`, `publisher`, `portal`, `local-spark`, and `demo` extras,
+plus the UI test dependency group. Port 8088 is forwarded for the operator portal
+in VS Code/Codespaces; keep its visibility private. `UV_PYTHON=3.13` overrides the host-oriented
 `.python-version` inside the container. uv downloads the Python interpreter;
 VS Code and container terminals use the project `.venv`.
 

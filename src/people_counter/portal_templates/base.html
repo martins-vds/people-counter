@@ -1,34 +1,47 @@
+{% from "components.html" import icon, badge %}
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Operator portal{% endblock %} - People Counter</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='build/portal.css') }}">
   <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
   {% block head %}{% endblock %}
 </head>
-<body>
-<header>
-  <a class="brand" href="{{ url_for('footage') }}">People Counter</a>
-  <span>Local operator portal</span>
-  <nav aria-label="Main navigation">
-    <a href="{{ url_for('footage') }}">Footage</a>
-    <a href="{{ url_for('locations') }}">Locations</a>
-    <a href="{{ url_for('cameras') }}">Cameras</a>
-    <a href="{{ url_for('packages') }}">Packages</a>
-    <a href="{{ url_for('profiles') }}">Profiles</a>
-    <a href="{{ url_for('cloud') }}">Cloud work</a>
-    <a href="{{ url_for('jobs') }}">Jobs</a>
-  </nav>
+<body class="app-shell">
+<a href="#main" class="skip-link">Skip to main content</a>
+<header class="shell-header">
+  <div class="header-inner">
+    <a class="brand" href="{{ url_for('footage') }}" aria-label="People Counter">
+      <span class="brand-mark">{{ icon('camera', 'size-6') }}</span>
+      <span><span class="brand-title">People Counter</span><span class="brand-subtitle">Operator console</span></span>
+    </a>
+    <div class="header-status">
+      {{ badge('Local operator mode', 'dark') }}
+      <span class="badge badge-dark">{{ icon('cloud' if cloud_enabled else 'lock', 'size-3.5') }} Cloud {{ 'enabled' if cloud_enabled else 'locked' }}</span>
+    </div>
+  </div>
+  <div class="nav-scroller">
+    <nav class="main-nav" aria-label="Main navigation">
+      {% set navigation = [('footage','Footage','folder'),('locations','Locations','location'),('cameras','Cameras','camera'),('packages','Packages','package'),('profiles','Profiles','settings'),('cloud','Cloud work','cloud'),('jobs','Jobs','jobs')] %}
+      {% set active = 'cameras' if request.endpoint == 'calibrate' else 'jobs' if request.endpoint == 'job' else request.endpoint %}
+      {% for endpoint, label, glyph in navigation %}
+      <a class="nav-link" href="{{ url_for(endpoint) }}" {% if active == endpoint %}aria-current="page"{% endif %}>{{ icon(glyph, 'size-4') }}{{ label }}</a>
+      {% endfor %}
+    </nav>
+  </div>
 </header>
-<main>
-  {% if worker_error %}<p class="error" role="alert">{{ worker_error }} Restart the portal after correcting the problem.</p>{% endif %}
-  {% for message in get_flashed_messages() %}<p class="notice" role="status">{{ message }}</p>{% endfor %}
+<main id="main" class="workspace" tabindex="-1">
+  {% if worker_error %}<div class="alert alert-danger" role="alert">{{ icon('info') }}<p>{{ worker_error }} Restart the portal after correcting the problem.</p></div>{% endif %}
+  {% for message in get_flashed_messages() %}<div class="alert alert-success" role="status">{{ icon('check') }}<p>{{ message }}</p></div>{% endfor %}
   {% block content %}{% endblock %}
 </main>
-<footer>Local files are read-only. Jobs continue when you close this page.
-  Cloud actions are {{ 'enabled; explicit confirmation is still required' if cloud_enabled else 'disabled' }}.
+<footer class="border-t border-slate-200 bg-white">
+  <div class="footer-inner">
+    <span>Read-only source footage. Closing this page does not cancel jobs.</span>
+    <span>People Counter &middot; Cloud actions {{ 'require confirmation' if cloud_enabled else 'disabled by default' }}</span>
+  </div>
 </footer>
 </body>
 </html>

@@ -158,6 +158,45 @@ def test_locations_support_zero_many_cameras_and_reject_split_assignments(page, 
     )).to_have_attribute("data-camera-count", "2")
 
 
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
+def test_tailwind_design_covers_every_page_and_accessible_controls(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    routes = [
+        "/", "/locations", "/cameras", "/packages", "/profiles", "/cloud", "/jobs",
+        "/calibrate?video=lobby/clip.mp4&folder=lobby", "/not-found",
+    ]
+    for route in routes:
+        response = page.goto(portal.url + route)
+        assert response.status == (404 if route == "/not-found" else 200)
+        stylesheet = page.locator('link[rel="stylesheet"]')
+        expect(stylesheet).to_have_attribute("href", "/static/build/portal.css")
+        heading = page.get_by_role("heading", level=1)
+        expect(heading).to_be_visible()
+        assert heading.evaluate("(element) => parseFloat(getComputedStyle(element).fontSize)") >= 24
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        expect(page.get_by_role("navigation", name="Main navigation").get_by_role("link")).to_have_count(7)
+        headers = page.get_by_role("columnheader")
+        if headers.count():
+            assert headers.first.evaluate("(element) => parseFloat(getComputedStyle(element).paddingLeft)") >= 12
+    page.goto(portal.url + "/profiles")
+    field = page.get_by_label("Target name", exact=True)
+    assert field.evaluate("(element) => parseFloat(getComputedStyle(element).borderRadius)") >= 8
+    initial_shadow = field.evaluate("(element) => getComputedStyle(element).boxShadow")
+    field.focus()
+    page.wait_for_function(
+        "args => getComputedStyle(args[0]).boxShadow !== args[1]",
+        arg=[field.element_handle(), initial_shadow],
+    )
+    assert field.evaluate("(element) => getComputedStyle(element).boxShadow") != initial_shadow
+    page.get_by_text("Advanced inference overrides (optional)", exact=True).click()
+    combo = page.get_by_label("Batch size override", exact=True)
+    assert combo.evaluate("(element) => parseFloat(getComputedStyle(element).borderRadius)") >= 8
+    expect(page.get_by_role("button", name="Generate profiles", exact=True)).to_be_visible()
+    page.goto(portal.url + "/")
+    page.keyboard.press("Tab")
+    expect(page.get_by_role("link", name="Skip to main content", exact=True)).to_be_focused()
+
+
 @pytest.mark.portal_cloud
 def test_profile_generation_publication_and_submit_wait_use_shared_backends(page, portal):
     calibrate_camera(page, portal)

@@ -58,7 +58,7 @@ where = ["src"]
 include = ["people_counter*"]
 
 [tool.setuptools.package-data]
-people_counter = ["py.typed", "data/*.json", "data/deploy/*.json", "portal_templates/*.html", "portal_static/*"]
+people_counter = ["py.typed", "data/*.json", "data/deploy/*.json", "portal_templates/*.html", "portal_static/*", "portal_static/build/*.css"]
 
 [tool.mutmut]
 source_paths = [

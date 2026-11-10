@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import secrets
 import threading
 from pathlib import Path
@@ -20,9 +21,31 @@ from people_counter.manifest import CATALOG_COLUMNS, ManifestPublisherError
 from people_counter.portal_service import LINE_FIELDS, REPORTS, PortalService, csv_text
 
 
+def _codespaces_origin() -> str | None:
+    if os.environ.get("CODESPACES") != "true":
+        return None
+    name = os.environ.get("CODESPACE_NAME", "")
+    domain = os.environ.get("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", "")
+    port = int(os.environ.get("PC_PORTAL_PORT", "8088"))
+    if (
+        re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) is None
+        or re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9-]+", domain) is None
+        or not 1 <= port <= 65535
+    ):
+        raise ValueError("Invalid Codespaces port-forwarding environment")
+    return f"https://{name}-{port}.{domain}"
+
+
 def create_app(service: PortalService) -> Flask:
+    public_origin = _codespaces_origin()
+    public_address = urlsplit(public_origin) if public_origin else None
+    trusted_hosts = ["localhost", "127.0.0.1", "[::1]"]
+    if public_address is not None:
+        trusted_hosts.append(public_address.netloc)
     app = Flask(
-        __name__, template_folder="portal_templates", static_folder="portal_static",
+        __name__,
+        template_folder=os.environ.get("PC_PORTAL_TEMPLATE_DIR", "portal_templates"),
+        static_folder=os.environ.get("PC_PORTAL_STATIC_DIR", "portal_static"),
         static_url_path="/static",
     )
     saved = service.store.entries("secret")
@@ -32,7 +55,9 @@ def create_app(service: PortalService) -> Flask:
     app.config.update(
         SECRET_KEY=saved[0]["value"], MAX_CONTENT_LENGTH=64 * 1024,
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
-        TRUSTED_HOSTS=["localhost", "127.0.0.1", "[::1]"],
+        SESSION_COOKIE_SECURE=public_origin is not None,
+        TRUSTED_HOSTS=trusted_hosts,
+        TEMPLATES_AUTO_RELOAD=os.environ.get("PC_PORTAL_LIVE_TEMPLATES") == "1",
     )
     app.extensions["portal_service"] = service
 
@@ -43,7 +68,12 @@ def create_app(service: PortalService) -> Flask:
             origin = request.headers.get("Origin")
             if origin:
                 parsed = urlsplit(origin)
-                if (parsed.scheme, parsed.netloc.lower()) != (request.scheme, request.host.lower()):
+                address = (parsed.scheme, parsed.netloc.lower())
+                forwarded = (
+                    (public_address.scheme, public_address.netloc)
+                    if public_address is not None else None
+                )
+                if address not in {(request.scheme, request.host.lower()), forwarded}:
                     abort(403, "Cross-origin actions are not permitted")
             if not secrets.compare_digest(request.form.get("csrf", ""), session["csrf"]):
                 abort(403, "Invalid form token; reload the page and try again")
@@ -291,7 +321,7 @@ def main() -> None:
         worker = threading.Thread(target=service.work, args=(stop,), daemon=True)
         worker.start()
         try:
-            print(f"Operator portal: http://{args.host}:{args.port}", flush=True)
+            print(f"Operator portal: {_codespaces_origin() or f'http://{args.host}:{args.port}'}", flush=True)
             serve(create_app(service), host=args.host, port=args.port, threads=4)
         finally:
             stop.set()

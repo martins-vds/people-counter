@@ -13,8 +13,9 @@ docker compose --profile portal up --build --wait portal
 ```
 
 Open **http://127.0.0.1:8088** in your browser, or in VS Code's integrated browser.
-Specifying `portal` starts only the portal; existing Spark services are unchanged.
-The first build downloads Python dependencies, FFmpeg, and Azure CLI.
+Specifying `portal` starts the portal and its Tailwind compiler dependency;
+existing Spark services are unchanged. The first build downloads Python
+dependencies, FFmpeg, Azure CLI, and the checksum-verified Tailwind CLI.
 If VS Code does not expose a native ZIP save dialog, use a standard browser for
 downloads; the download endpoint and archive contents are covered by Chromium E2E.
 
@@ -46,13 +47,68 @@ Cloud publication of local footage is a separate, supported operation below.
 Stop without deleting state:
 
 ```bash
-docker compose --profile portal stop portal
+docker compose --profile portal stop portal portal-tailwind
 ```
 
 Camera metadata, generated catalogs, packages, job inputs/results, and progress
 live in the `portal-state` named volume. Azure CLI credentials have a separate
 `portal-azure` volume. Treat both as private and do not share their backups.
 Do not use `docker compose down --volumes` unless you intend to delete that state.
+The separate `portal-css` volume contains only generated public styles.
+
+## Live Tailwind design
+
+The UI follows the reference repository's Python-served HTML plus standalone
+Tailwind watcher pattern, without a SPA, runtime CSS CDN, or Node package tree.
+Tailwind v4.3.0 is pinned and its Linux x64/arm64 downloads are SHA-256 verified.
+
+- Design tokens and shared form/table/button/badge styles:
+  `src/people_counter/portal_styles/input.css`.
+- Server-rendered pages and shared components:
+  `src/people_counter/portal_templates/`.
+- Generated production asset:
+  `src/people_counter/portal_static/build/portal.css`.
+
+The `portal-tailwind` Compose service builds once, then checks content hashes of
+the small template/CSS/portal-JavaScript source set once per second. It invokes
+the same standalone compiler only when content changes. This works detached
+and across Docker bind mounts that do not deliver native file-watch events.
+It writes only to the shared CSS volume; it cannot change the checkout, footage,
+models, or portal state and has no network access at runtime.
+The portal mounts UI sources and generated styles read-only. Jinja template
+auto-reload and uncached assets let you refresh the browser to see edits without
+restarting jobs. Python/business-logic changes still require rebuilding the image.
+
+Compiled CSS is also committed and packaged for standalone/image use without
+the watcher. Regenerate it after changing templates or design sources:
+
+```bash
+docker compose --profile portal build portal-tailwind
+mkdir -p src/people_counter/portal_static/build
+docker compose --profile portal run --rm --no-deps \
+  --entrypoint sh portal-tailwind -c \
+  'tailwindcss -i /source/portal_styles/input.css -o /tmp/portal.css --minify && cat /tmp/portal.css' \
+  > src/people_counter/portal_static/build/portal.css
+```
+
+CI compares the running compiler's output against that committed asset, so stale
+production styles fail validation instead of shipping silently.
+
+## VS Code and Codespaces
+
+The dev container forwards port **8088**, labels it **People Counter operator
+portal**, and notifies you when it becomes available. Rebuild the dev container
+to apply changed forwarding settings, start Compose, then open the port from the
+VS Code **Ports** panel.
+
+Keep the Codespaces port visibility **Private**. This remains a single-operator
+tool, not a publicly authenticated service. Compose passes only the nonsecret
+Codespaces forwarding variables into the portal. The app allows the exact
+forwarded hostname for this codespace and port, accepts its HTTPS form origin
+through the proxy, and uses secure cookies there. It does not trust wildcard
+`app.github.dev` hosts or arbitrary forwarded headers. Localhost operation is
+unchanged. Live Codespaces access requires a codespace; proxy/host behavior is
+covered by request tests.
 
 ## Operator workflow
 

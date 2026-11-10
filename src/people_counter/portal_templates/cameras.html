@@ -1,25 +1,35 @@
 {% extends "base.html" %}
+{% from "components.html" import icon, heading, badge, stat %}
+{% block title %}Camera metadata{% endblock %}
 {% block content %}
-<h1>Camera metadata</h1>
-<p>Camera defaults are effective-dated. Video exceptions override only the selected video's line and optional capture time.</p>
-<p>Each camera ID belongs to one existing location across all its configurations.
-<a href="{{ url_for('locations') }}">Manage locations, including locations with no cameras</a>.</p>
-<p><a href="{{ url_for('footage') }}">Browse footage to add a camera</a> &middot;
-<a href="{{ url_for('camera_csv') }}">Download camera catalog CSV</a></p>
-<section><h2>Camera configurations</h2><div class="table-wrap"><table>
-<thead><tr><th>Camera / location</th><th>Folder</th><th>Frame</th><th>Line</th><th>Effective dates</th><th>Action</th></tr></thead>
-<tbody>{% for item in cameras %}{% set row = item.catalog %}
-<tr><td>{{ row.camera_id }} / {{ row.location_id }}<br>{{ row.camera_timezone }}</td>
-<td>{{ item.folder or 'Source root' }}</td><td>{{ row.frame_width }} &times; {{ row.frame_height }}</td>
-<td>{{ row.counting_line_x1 }},{{ row.counting_line_y1 }} &rarr; {{ row.counting_line_x2 }},{{ row.counting_line_y2 }}</td>
-<td>{{ row.effective_from_utc }}<br>{{ row.effective_to_utc or 'No end date' }}</td>
-<td><a href="{{ url_for('calibrate', video=item.video, folder=item.folder, config_id=item.id) }}">Edit {{ row.camera_id }}</a></td></tr>
-{% else %}<tr><td colspan="6">No cameras yet. Add a location, then select a video and calibrate its camera.</td></tr>{% endfor %}</tbody>
-</table></div></section>
-<section><h2>Per-video exceptions</h2><ul>
-{% for item in exceptions %}<li>{{ item.video_relative_path }}:
-{{ item.counting_line_x1 }},{{ item.counting_line_y1 }} &rarr; {{ item.counting_line_x2 }},{{ item.counting_line_y2 }}
-({{ item.captured_at_utc or 'original capture time' }})</li>
-{% else %}<li>No per-video exceptions.</li>{% endfor %}
-</ul></section>
+{% call heading('Camera metadata', 'Manage effective-dated camera defaults and per-video exceptions. Every camera ID is associated with one existing location.', 'Camera registry') %}
+<a class="btn btn-secondary" href="{{ url_for('camera_csv') }}">{{ icon('download', 'size-4') }}Download camera catalog CSV</a>
+<a class="btn" href="{{ url_for('footage') }}">{{ icon('camera', 'size-4') }}Browse footage to add a camera</a>
+{% endcall %}
+<div class="grid gap-4 sm:grid-cols-2">
+  {{ stat('Configurations', cameras|length, 'Effective-dated defaults for camera folders', 'camera') }}
+  {{ stat('Video exceptions', exceptions|length, 'Overrides that leave camera defaults unchanged', 'settings') }}
+</div>
+<section class="card">
+  <div class="card-header"><div><h2>Camera configurations</h2><p class="card-description">Review location, geometry, and effective dates before preparing a package.</p></div><a href="{{ url_for('locations') }}">Manage locations</a></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Camera / location</th><th>Folder</th><th>Frame</th><th>Line</th><th>Effective dates</th><th>Action</th></tr></thead>
+    <tbody>{% for item in cameras %}{% set row = item.catalog %}
+    <tr>
+      <td><span class="cell-title">{{ row.camera_id }} / {{ row.location_id }}</span><br><span class="cell-meta">{{ row.camera_timezone }}</span></td>
+      <td class="break-all text-slate-600">{{ item.folder or 'Source root' }}</td>
+      <td class="whitespace-nowrap text-slate-600">{{ row.frame_width }} &times; {{ row.frame_height }}</td>
+      <td class="whitespace-nowrap"><code>{{ row.counting_line_x1 }},{{ row.counting_line_y1 }} &rarr; {{ row.counting_line_x2 }},{{ row.counting_line_y2 }}</code></td>
+      <td class="whitespace-nowrap"><span class="text-xs">{{ row.effective_from_utc }}</span><br><span class="cell-meta">{{ row.effective_to_utc or 'No end date' }}</span></td>
+      <td><a class="btn btn-secondary btn-sm" href="{{ url_for('calibrate', video=item.video, folder=item.folder, config_id=item.id) }}">Edit {{ row.camera_id }}</a></td>
+    </tr>
+    {% else %}<tr><td colspan="6"><div class="empty-state"><span class="empty-icon">{{ icon('camera', 'size-6') }}</span><p class="empty-title">No cameras yet</p><p class="empty-copy">Add a location, then select a video and calibrate its camera.</p><a class="btn btn-secondary" href="{{ url_for('locations') }}">Create your first location</a></div></td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+<section class="card">
+  <div class="card-header"><div><h2>Per-video exceptions</h2><p class="card-description">Specific video geometry or capture-time corrections.</p></div>{{ badge(exceptions|length ~ ' exceptions') }}</div>
+  {% if exceptions %}<div class="table-wrap"><table><thead><tr><th>Video</th><th>Directed line</th><th>Capture time</th></tr></thead><tbody>
+  {% for item in exceptions %}<tr><td class="break-all"><code>{{ item.video_relative_path }}:</code></td><td class="whitespace-nowrap"><code>{{ item.counting_line_x1 }},{{ item.counting_line_y1 }} &rarr; {{ item.counting_line_x2 }},{{ item.counting_line_y2 }}</code></td><td>{{ item.captured_at_utc or 'Original capture time' }}</td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<div class="empty-state"><span class="empty-icon">{{ icon('settings', 'size-6') }}</span><p class="empty-title">No per-video exceptions</p><p class="empty-copy">Camera defaults apply unless you save an exception for a particular video.</p></div>{% endif %}
+</section>
 {% endblock %}

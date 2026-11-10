@@ -1,0 +1,41 @@
+{% macro icon(name, classes='size-5') -%}
+<svg class="{{ classes }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+{% if name == 'folder' %}<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z"/><path d="M3 10h18"/>
+{% elif name == 'location' %}<path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2.5"/>
+{% elif name == 'camera' %}<rect x="3" y="6" width="14" height="12" rx="3"/><path d="m17 10 4-2v8l-4-2"/><circle cx="10" cy="12" r="2.5"/>
+{% elif name == 'package' %}<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="M3 8v9l9 5 9-5V8M12 13v9M7 5.8l9 5"/>
+{% elif name == 'settings' %}<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="8" cy="6" r="2" fill="currentColor"/><circle cx="16" cy="12" r="2" fill="currentColor"/><circle cx="10" cy="18" r="2" fill="currentColor"/>
+{% elif name == 'cloud' %}<path d="M7 18H6a4 4 0 0 1-1-8 7 7 0 0 1 13-2 5 5 0 0 1 1 10h-2"/><path d="M12 21V12m-3 3 3-3 3 3"/>
+{% elif name == 'jobs' %}<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2M9 9h6M9 13h6M9 17h3"/>
+{% elif name == 'download' %}<path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4"/>
+{% elif name == 'arrow' %}<path d="M5 12h14m-5-5 5 5-5 5"/>
+{% elif name == 'lock' %}<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>
+{% elif name == 'check' %}<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>
+{% else %}<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>{% endif %}
+</svg>
+{%- endmacro %}
+
+{% macro heading(title, description, eyebrow='Operator workspace') -%}
+<div class="page-heading">
+  <div class="page-heading-copy">
+    <p class="eyebrow">{{ eyebrow }}</p>
+    <h1>{{ title }}</h1>
+    <p class="page-description">{{ description }}</p>
+  </div>
+  {% if caller is defined %}<div class="page-actions">{{ caller() }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro badge(label, tone='neutral') -%}<span class="badge badge-{{ tone }}">{{ label }}</span>{%- endmacro %}
+
+{% macro stat(label, value, note, glyph='jobs') -%}
+<div class="stat-card">
+  <div><p class="stat-label">{{ label }}</p><p class="stat-value">{{ value }}</p><p class="stat-note">{{ note }}</p></div>
+  <span class="stat-icon">{{ icon(glyph) }}</span>
+</div>
+{%- endmacro %}
+
+{% macro state(status) -%}
+{% set tone = {'SUCCEEDED':'success','RUNNING':'info','QUEUED':'neutral','FAILED':'danger','INTERRUPTED':'warning'}.get(status,'neutral') %}
+<span class="badge badge-{{ tone }}">{{ status }}</span>
+{%- endmacro %}

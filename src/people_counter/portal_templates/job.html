@@ -1,32 +1,52 @@
 {% extends "base.html" %}
+{% from "components.html" import icon, heading, badge %}
 {% block head %}{% if job.status in ['QUEUED','RUNNING'] %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
+{% block title %}{{ job.kind|capitalize }} job{% endblock %}
 {% block content %}
-<h1>{{ job.kind|capitalize }} job</h1>
-<p><code>{{ job.id }}</code></p>
-<p class="notice" data-job-status="{{ job.status }}" role="status">{{ job.status }}</p>
-{% if job.error %}<p class="error" role="alert">{{ job.error }}</p>{% endif %}
-<p>Inputs are snapshotted. Closing this page does not stop the job. Server interruption never cancels accepted Fabric work.</p>
-{% if job.result %}<section><h2>Result</h2>
-{% if job.kind == 'prepare' %}<p>{{ job.result.planned }} video(s) prepared; {{ job.result.rejected }} rejected. Download the metadata below.</p>
-{% elif job.kind == 'profiles' %}<p>Generated {{ job.result.profiles|join(', ') }} for target {{ job.result.target }}.</p>
-{% elif job.kind == 'publish' %}<p>{{ job.result.published }} published; {{ job.result.already_published }} existing publications verified.</p>
-{% elif job.result.processing_complete %}<p>Processing finished for all submitted work. Verify Gold and report refresh separately.</p>
-{% else %}<p>Registration finished. Processing and reporting are not yet confirmed.</p>{% endif %}
-<details><summary>Technical details</summary><pre>{{ job.result|tojson(indent=2) }}</pre></details>
+{% call heading(job.kind|capitalize ~ ' job', 'Inputs and progress are retained. Closing this page does not stop local work or cancel accepted Fabric execution.', 'Job activity') %}
+<a class="btn btn-secondary" href="{{ url_for('jobs') }}">&larr; All jobs</a>
+{% endcall %}
+{% set tone = {'SUCCEEDED':'success','RUNNING':'info','QUEUED':'neutral','FAILED':'danger','INTERRUPTED':'warning'}.get(job.status,'neutral') %}
+<section class="card">
+  <div class="card-body flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+    <div class="min-w-0"><p class="text-xs font-medium text-slate-500">Job ID</p><code class="mt-1 block text-slate-700">{{ job.id }}</code></div>
+    <div class="flex items-center gap-3">{% if job.status in ['QUEUED','RUNNING'] %}<span class="text-xs text-slate-500">Updates automatically</span>{% endif %}<span class="badge badge-{{ tone }}" data-job-status="{{ job.status }}" role="status">{{ job.status }}</span></div>
+  </div>
+</section>
+{% if job.error %}<div class="alert alert-danger" role="alert">{{ icon('info', 'size-5 shrink-0') }}<p class="break-words">{{ job.error }}</p></div>{% endif %}
+{% if job.result %}<section class="card">
+  <div class="card-header"><div><h2>Result</h2><p class="card-description">The completed job's recorded outcome.</p></div>{{ badge('Saved', 'success') }}</div>
+  <div class="card-body">
+    {% if job.kind == 'prepare' %}<p>{{ job.result.planned }} video(s) prepared; {{ job.result.rejected }} rejected. Download the metadata below.</p>
+    {% elif job.kind == 'profiles' %}<p>Generated {{ job.result.profiles|join(', ') }} for target <strong>{{ job.result.target }}</strong>.</p>
+    {% elif job.kind == 'publish' %}<p>{{ job.result.published }} published; {{ job.result.already_published }} existing publications verified.</p>
+    {% elif job.result.processing_complete %}<p>Processing finished for all submitted work. Verify Gold and report refresh separately.</p>
+    {% else %}<p>Registration finished. Processing and reporting are not yet confirmed.</p>{% endif %}
+    <details class="technical-details"><summary>Technical details</summary><pre>{{ job.result|tojson(indent=2) }}</pre></details>
+  </div>
 </section>{% endif %}
-<section><h2>Progress</h2><pre id="job-log">{{ events|join('\n') }}</pre></section>
-<section><h2>Reports</h2><ul>
-{% for name in reports %}<li><a href="{{ url_for('report', identity=job.id, name=name) }}">{{ name }}</a></li>{% else %}<li>No reports available yet.</li>{% endfor %}
-{% if job.kind == 'prepare' and job.status == 'SUCCEEDED' %}<li><a href="{{ url_for('package_zip', identity=job.id) }}">Download manifest package ZIP</a></li>{% endif %}
-</ul></section>
+<section class="card">
+  <div class="card-header"><div><h2>Progress</h2><p class="card-description">Persisted job events, in execution order.</p></div>{{ badge(events|length ~ ' events') }}</div>
+  <div class="p-3 sm:p-4"><pre id="job-log" class="max-h-96 overflow-y-auto">{{ events|join('\n') if events else 'Waiting for the worker to start this job...' }}</pre></div>
+</section>
+<section class="card">
+  <div class="card-header"><div><h2>Reports</h2><p class="card-description">Review validation results and retain package evidence.</p></div></div>
+  <div class="card-body">
+    {% if reports or (job.kind == 'prepare' and job.status == 'SUCCEEDED') %}<ul class="report-list">
+    {% for name in reports %}<li><a class="report-link" href="{{ url_for('report', identity=job.id, name=name) }}">{{ icon('download', 'size-5 shrink-0') }}<span class="break-all font-mono text-xs">{{ name }}</span></a></li>{% endfor %}
+    {% if job.kind == 'prepare' and job.status == 'SUCCEEDED' %}<li class="sm:col-span-2"><a class="btn w-full" href="{{ url_for('package_zip', identity=job.id) }}">{{ icon('package', 'size-4') }}Download manifest package ZIP</a></li>{% endif %}
+    </ul>{% else %}<p class="text-sm text-slate-500">No reports available yet.</p>{% endif %}
+  </div>
+</section>
 {% if job.status in ['FAILED','INTERRUPTED'] %}
 <form method="post" action="{{ url_for('resume', identity=job.id) }}" class="card">
-  <input type="hidden" name="csrf" value="{{ session.csrf }}">
-  <p>Resume reuses the saved inputs and state. After editing camera metadata, generate a new package instead.</p>
-  {% if job.kind in ['publish','submit'] %}
-  <label class="check"><input type="checkbox" name="confirm" value="yes" required> I approve resuming this cloud action with its retained state.</label>
-  {% endif %}
-  <button>Resume with retained state</button>
+  <div class="card-header"><div><h2>Resume safely</h2><p class="card-description">Reuse the same identity, input snapshot, checkpoints, and remote job locations.</p></div>{{ badge('Review required', 'warning') }}</div>
+  <div class="card-body">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <div class="alert alert-warning">{{ icon('info', 'size-5 shrink-0') }}<p>After editing camera metadata, generate a new package instead. A resume keeps the original saved inputs and state.</p></div>
+    {% if job.kind in ['publish','submit'] %}<label class="check"><input type="checkbox" name="confirm" value="yes" required>I approve resuming this cloud action with its retained state.</label>{% endif %}
+    <button>Resume with retained state{{ icon('arrow', 'size-4') }}</button>
+  </div>
 </form>
 {% endif %}
 {% endblock %}

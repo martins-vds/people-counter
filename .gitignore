@@ -2,6 +2,9 @@
 __pycache__/
 *.py[oc]
 build/
+!/src/people_counter/portal_static/build/
+/src/people_counter/portal_static/build/*
+!/src/people_counter/portal_static/build/portal.css
 dist/
 wheels/
 *.egg-info
