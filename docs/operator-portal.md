@@ -36,7 +36,7 @@ PC_PORTAL_ALLOW_CLOUD=0
 ```
 
 Both folders must already exist. Compose mounts footage and models read-only
-at `/data/videos` and `/data/models`. The browser's folder field is relative
+at `/data/videos` and `/data/models`. The browser's optional folder field is relative
 to the allowed footage root; it cannot browse the rest of the host filesystem.
 Portal packages use the logical source prefix `videos/`.
 
@@ -110,9 +110,39 @@ through the proxy, and uses secure cookies there. It does not trust wildcard
 unchanged. Live Codespaces access requires a codespace; proxy/host behavior is
 covered by request tests.
 
+## Footage explorer
+
+The footage page uses folder navigation beside a compact file table.
+Breadcrumbs and the parent link retain the current folder context. On narrow
+screens, choose **Folders** to show or hide the navigation pane. Folder nodes
+use native disclosures with keyboard-accessible folder links.
+
+Only the selected folder and its ancestors are expanded initially. Other
+branches request their immediate subfolders from the read-only `/folders`
+endpoint when expanded; there is no recursive video scan or thumbnail decoding.
+Loaded branches are retained for the current page. Loading failures remain
+visible with a Retry action instead of appearing as an empty folder.
+
+Name filtering is a case-insensitive substring match in the **current folder**,
+not a recursive search or a glob expression. The type filter supports all items,
+videos, and folders. Filters persist through folder navigation; **Clear filters**
+retains the folder. Empty folders and filters with no matches have distinct states.
+
+Folders sort first, followed by files and blocked links. Size is real filesystem
+metadata, and modification times are explicitly UTC. Modification time is not
+the recording/capture time used in manifests. Unavailable metadata is reported
+on its row. Links outside the mounted source are blocked without exposing their
+metadata. Browsing does not modify source files.
+
+Each video has one **Calibrate** action, opening the existing counting-line
+editor. **Generate manifest package** opens the existing package dialog with the
+current folder retained. Source/mount information and manual path entry remain
+under **Source configuration**. There are no upload, rename, or delete actions.
+
 ## Operator workflow
 
-Start on **Locations** to add a display name independently of footage and cameras.
+Start on **Locations** and choose **Add location** to add a display name
+independently of footage and cameras.
 The portal previews and generates its ID: `North Store` becomes
 `north-store`. Names are trimmed, accented Latin characters are normalized,
 and IDs use lowercase ASCII letters, digits, and hyphens. Names without a usable
@@ -151,7 +181,9 @@ are not exported as fabricated camera-catalog rows.
    and frame dimensions. An optional authoritative UTC timestamp overrides
    capture time; a blank timestamp retains normal embedded/filename resolution.
    Camera defaults are not changed. A camera default must still cover the video.
-5. **Packages:** generate an offline manifest package. Preparation snapshots
+5. **Packages:** choose **Generate manifest package** and review the folder in
+   its dialog. **Prepare this folder** opens it with the selected folder retained.
+   Preparation snapshots
    metadata before queuing the job, probes/hashes videos, and displays progress
    and rejection reports. The safety bound is 10,000 videos per package; larger
    folders fail explicitly rather than being truncated. Use the CLI for a
@@ -167,7 +199,8 @@ are not exported as fabricated camera-catalog rows.
    the artifacts deployed in Fabric.
    Optional advanced controls select batch size and sampling FPS; the shared
    resolver validates them and recalculates identities automatically.
-7. **Cloud work:** choose a completed package, target/profile, and explicit action.
+7. **Cloud work:** choose **Start cloud action** to review a completed package,
+   target/profile, and explicit action in its dialog.
    Publication-only and publish-plus-registration are separate choices.
    "Wait for processing" applies only to explicit submission.
 
@@ -177,8 +210,18 @@ release is a new processing run, not recovery of an existing run.
 
 ### Progressive disclosure
 
-Primary tasks stay visible: folder browsing, camera/location/timezone selection,
-drawing, package generation, job status, downloads, errors, and cloud approval.
+Directory tables and catalogs stay visible. Location/camera creation, package
+generation, profile setup, cloud actions, and resume confirmations share the same
+native modal pattern: a named action button, labeled dialog, Close/Cancel/Escape,
+viewport-bounded scrolling, and keyboard focus returned to the action button.
+Creation shortcuts retain their selected location or folder. Required fields
+and explicit approvals remain visible within the active dialog. Draft values
+survive closing/reopening on the same page, but cloud approval checkboxes are
+cleared so each submission/resume needs fresh consent.
+
+Folder browsing and frame-preview controls stay inline, as does the counting-line
+editor with its location/camera/timezone selections. Job status, downloads,
+errors, safety warnings, and recovery guidance remain visible outside dialogs.
 Source configuration, manual coordinates, recording rules, camera geometry/date
 details, package explanations, inference overrides, completed-job logs, and raw
 result JSON are available through labeled native disclosures. They work with a

@@ -107,6 +107,19 @@
   .cell-title { @apply font-medium text-slate-900; }
   .cell-meta { @apply mt-1 text-xs text-slate-500; }
   .cell-actions { @apply flex flex-wrap items-center gap-2; }
+  .explorer-path { @apply flex min-w-0 flex-wrap items-center gap-3 border-b border-slate-200 px-4 py-3; }
+  .explorer-toolbar { @apply flex min-w-0 flex-wrap items-end gap-3 border-b border-slate-200 bg-slate-50/60 p-4; }
+  .explorer-table td { @apply px-4 py-3; }
+  .explorer-table th { @apply px-4 py-3; }
+  .explorer-footer { @apply flex flex-wrap justify-between gap-2 border-t border-slate-200 px-4 py-3 text-xs text-slate-500; }
+  .folder-sidebar { @apply min-w-0 border-b border-slate-200 bg-slate-50/80 px-2 py-4 lg:border-r lg:border-b-0; }
+  .folder-link { @apply inline-flex max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-xs; }
+  .folder-node > summary > .folder-link { max-width: calc(100% - 1.25rem); }
+  .folder-link span { @apply min-w-0 break-all; }
+  .folder-link[aria-current=page] { @apply bg-brand-100 font-semibold text-brand-800; }
+  .folder-node > summary { @apply cursor-pointer rounded-md text-xs text-slate-500 hover:bg-slate-100; }
+  .folder-node > ul { @apply ml-3 border-l border-slate-200 pl-2; }
+  .folder-message { @apply px-2 py-2 text-xs text-slate-500; }
   .empty-state { @apply flex flex-col items-center justify-center gap-3 px-5 py-12 text-center; }
   .empty-icon { @apply flex size-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-400; }
   .empty-title { @apply font-semibold text-slate-800; }
@@ -119,12 +132,13 @@
   .technical-details summary { @apply px-4 py-3 text-sm transition hover:bg-slate-50; }
   .technical-details[open] summary { @apply border-b border-slate-200; }
   .technical-details pre { @apply m-3; }
-  .profile-dialog {
+  .portal-dialog {
     width: calc(100% - 2rem);
     max-height: calc(100dvh - 2rem);
-    @apply m-auto max-w-4xl overflow-y-auto rounded-2xl border-0 bg-transparent p-0 text-slate-800 shadow-2xl;
+    @apply m-auto max-w-2xl overflow-y-auto rounded-2xl border-0 bg-transparent p-0 text-slate-800 shadow-2xl;
   }
-  .profile-dialog::backdrop { @apply bg-ink-950/60; }
+  .portal-dialog-wide { @apply max-w-4xl; }
+  .portal-dialog::backdrop { @apply bg-ink-950/60; }
   .report-list { @apply grid gap-3 sm:grid-cols-2; }
   .report-link { @apply flex min-w-0 items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 transition hover:border-brand-600 hover:bg-brand-50/40; }
   .footer-inner { @apply mx-auto flex max-w-7xl flex-col justify-between gap-2 px-4 py-5 text-xs text-slate-500 sm:flex-row sm:px-6 lg:px-8; }

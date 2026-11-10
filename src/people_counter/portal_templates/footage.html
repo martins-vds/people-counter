@@ -1,41 +1,68 @@
 {% extends "base.html" %}
-{% from "components.html" import icon, heading, badge, stat %}
+{% from "components.html" import icon, heading, badge, folder_nodes %}
+{% block title %}Footage library{% endblock %}
 {% block content %}
-{% call heading('Operator portal', 'Start with your footage, configure its camera, then prepare a validated package. Nothing is uploaded automatically.', 'Footage library') %}
-<a class="btn btn-secondary" href="{{ url_for('locations') }}">{{ icon('location', 'size-4') }}Manage locations</a>
+{% call heading('Footage library', 'Find footage, calibrate its counting line, or prepare the current folder. Source files remain read-only.', 'Operator portal') %}
+{{ badge('Read-only source', 'success') }}
+<a class="btn" href="{{ url_for('packages', folder=folder) }}">{{ icon('package', 'size-4') }}Generate manifest package</a>
 {% endcall %}
-<div class="stats-grid">
-  {{ stat('Video files', entries|selectattr('video')|list|length, 'In the current folder', 'camera') }}
-  {{ stat('Folders', entries|selectattr('directory')|list|length, 'Available to browse', 'folder') }}
-  {{ stat('Source access', 'Read-only', 'Your original files stay untouched', 'lock') }}
-</div>
 <section class="card">
-  <div class="card-header"><div><h2>Footage source</h2><p class="card-description">Choose a folder inside the configured source root.</p></div>{{ badge('Local disk') }}</div>
-  <div class="card-body">
-    <details class="technical-details"><summary>Source configuration</summary><div class="form-grid p-4">
-      <div class="field"><label for="source-type">Source implementation</label><select id="source-type" disabled><option>Local disk</option><option disabled>Cloud storage (future adapter)</option></select><p class="help">Cloud-source adapters are not implemented yet.</p></div>
-      <div class="field"><p class="text-sm font-medium text-slate-700">Allowed source root</p><div class="mt-2 rounded-lg border border-slate-200 bg-slate-50 p-3"><code>{{ root }}</code></div><p class="help">Use the Compose footage mount to select another local folder.</p></div>
-    </div></details>
-    <form method="get" class="flex flex-col items-start gap-3 sm:flex-row sm:items-end">
-      <div class="field w-full"><label for="browse-folder">Folder within source root</label><input id="browse-folder" name="folder" value="{{ folder }}" placeholder="For example: lobby/camera-17"></div>
-      <button class="shrink-0">{{ icon('folder', 'size-4') }}Browse folder</button>
-    </form>
+  <div class="explorer-path">
+    <button class="btn-secondary btn-sm lg:hidden" type="button" id="toggle-folders" aria-expanded="false" aria-controls="folder-sidebar">{{ icon('folder', 'size-4') }}Folders</button>
+    <nav aria-label="Folder path" class="min-w-0 flex-1">
+      <ol class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+        <li><a href="{{ url_for('footage', q=query, kind=kind) }}" {% if not folder %}aria-current="page"{% endif %}>Source root</a></li>
+        {% for crumb in breadcrumbs %}<li class="flex min-w-0 items-center gap-2"><span class="text-slate-400" aria-hidden="true">/</span>{% if loop.last %}<span class="break-all font-semibold text-slate-800" aria-current="page">{{ crumb.name }}</span>{% else %}<a class="break-all" href="{{ url_for('footage', folder=crumb.path, q=query, kind=kind) }}">{{ crumb.name }}</a>{% endif %}</li>{% endfor %}
+      </ol>
+    </nav>
+    {% if folder %}<a class="btn btn-secondary btn-sm" aria-label="Parent folder" href="{{ url_for('footage', folder=parent, q=query, kind=kind) }}">&uarr; Parent</a>{% endif %}
+  </div>
+  <div class="grid min-w-0 lg:grid-cols-[14rem_minmax(0,1fr)]">
+    <aside id="folder-sidebar" class="folder-sidebar hidden lg:block">
+      <nav aria-label="Folders" id="folder-navigation" data-folders-url="{{ url_for('folders') }}" data-browse-url="{{ url_for('footage') }}" data-current-folder="{{ folder }}" data-query="{{ query }}" data-kind="{{ kind }}">
+        <h2 class="px-3 pb-3 text-xs uppercase tracking-wide text-slate-500">Folders</h2>
+        <a class="folder-link mb-2" href="{{ url_for('footage', q=query, kind=kind) }}" {% if not folder %}aria-current="page"{% endif %}>{{ icon('folder', 'size-4 shrink-0') }}<span>Source root</span></a>
+        <ul class="folder-tree">{{ folder_nodes(folder_tree, folder, query, kind) }}</ul>
+        <p class="mt-4 border-t border-slate-200 px-3 pt-3 text-xs leading-5 text-slate-500">Folders load as you expand them. Camera ownership is configured separately.</p>
+      </nav>
+    </aside>
+    <div class="min-w-0">
+      <form method="get" class="explorer-toolbar">
+        <input type="hidden" name="folder" value="{{ folder }}">
+        <div class="field min-w-0 flex-1"><label for="file-query">Filter files by name</label><input id="file-query" name="q" value="{{ query }}" placeholder="Filter names in this folder"></div>
+        <div class="field w-full sm:w-36"><label for="file-kind">File type</label><select id="file-kind" name="kind">{% for value, label in [('all','All types'),('videos','Videos'),('folders','Folders')] %}<option value="{{ value }}" {% if kind == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+        <button class="btn-secondary shrink-0">Apply filters</button>
+        {% if query or kind != 'all' %}<a class="text-xs" href="{{ url_for('footage', folder=folder) }}">Clear filters</a>{% endif %}
+      </form>
+      <div class="table-wrap">
+        <table class="explorer-table" aria-label="Folder contents">
+          <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified (UTC)</th><th>Action</th></tr></thead>
+          <tbody>{% for entry in entries %}
+            <tr data-entry-path="{{ entry.path }}">
+              <td><span class="flex min-w-0 items-center gap-2"><span class="shrink-0 text-slate-400">{{ icon('lock' if entry.blocked else 'folder' if entry.directory else 'camera' if entry.video else 'info', 'size-4') }}</span>{% if entry.directory %}<a class="break-all" aria-label="Open folder {{ entry.name }}" href="{{ url_for('footage', folder=entry.path, q=query, kind=kind) }}">{{ entry.name }}/</a>{% else %}<span class="cell-title break-all">{{ entry.name }}</span>{% endif %}</span></td>
+              <td class="text-xs text-slate-500">{{ 'Blocked' if entry.blocked else 'Unavailable' if entry.error else 'Folder' if entry.directory else 'Video' if entry.video else 'Other file' }}</td>
+              <td class="whitespace-nowrap text-xs text-slate-500">{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else '&mdash;'|safe }}</td>
+              <td class="whitespace-nowrap text-xs text-slate-500">{{ entry.modified_utc or '&mdash;'|safe }}</td>
+              <td>{% if entry.blocked %}{{ badge('Outside source root', 'danger') }}{% elif entry.error %}<span class="text-xs text-red-700">{{ entry.error }}</span>{% elif entry.video %}<a class="inline-flex items-center gap-1 whitespace-nowrap text-xs" aria-label="Calibrate counting line for {{ entry.name }}" href="{{ url_for('calibrate', video=entry.path, folder=folder) }}">Calibrate{{ icon('arrow', 'size-4') }}</a>{% elif not entry.directory %}<span class="text-xs text-slate-400">Not a supported video</span>{% endif %}</td>
+            </tr>
+          {% else %}<tr><td colspan="5"><div class="empty-state">{{ icon('folder', 'size-8 text-slate-400') }}{% if total %}<p class="empty-title">No matching items</p><p class="empty-copy">Change the name or type filter. Other folders remain available in the folder pane.</p>{% else %}<p class="empty-title">This folder is empty.</p><p class="empty-copy">Choose another folder or add footage to the mounted source directory.</p>{% endif %}</div></td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+      <div class="explorer-footer"><span>Showing {{ entries|length }} of {{ total }} items</span><span>Filesystem modification time is not recording time.</span></div>
+    </div>
   </div>
 </section>
-<section class="card">
-  <div class="card-header"><div><h2>{{ folder or 'Source root' }}</h2><p class="card-description">Open a folder or select a video for calibration.</p></div><a class="btn btn-secondary btn-sm" href="{{ url_for('packages', folder=folder) }}">{{ icon('package', 'size-4') }}Prepare this folder</a></div>
-  {% if folder %}<div class="border-b border-slate-100 px-5 py-3 sm:px-6"><a class="inline-flex items-center gap-2 text-sm" href="{{ url_for('footage', folder=parent) }}">&larr; Parent folder</a></div>{% endif %}
-  <div class="table-wrap"><table>
-    <thead><tr><th>Name</th><th>Actions</th></tr></thead>
-    <tbody>{% for entry in entries %}
-      <tr><td><span class="flex items-center gap-3"><span class="text-slate-400">{{ icon('folder' if entry.directory else 'camera' if entry.video else 'info') }}</span><span class="cell-title break-all">{{ entry.name }}</span></span></td><td>
-        {% if entry.blocked %}{{ badge('Blocked: outside source root', 'danger') }}
-        {% elif entry.directory %}<a class="btn btn-secondary btn-sm" href="{{ url_for('footage', folder=entry.path) }}">Open folder {{ entry.name }}{{ icon('arrow', 'size-4') }}</a>
-        {% elif entry.video %}<div class="cell-actions">
-          <a class="btn btn-secondary btn-sm" href="{{ url_for('calibrate', video=entry.path, folder=folder) }}">Calibrate counting line for {{ entry.name }}</a>
-        </div>{% else %}<span class="text-xs text-slate-500">Not a supported video</span>{% endif %}
-      </td></tr>
-    {% else %}<tr><td colspan="2"><div class="empty-state"><span class="empty-icon">{{ icon('folder', 'size-6') }}</span><p class="empty-title">This folder is empty.</p><p class="empty-copy">Choose another folder or add footage to the mounted source directory.</p></div></td></tr>{% endfor %}</tbody>
-  </table></div>
-</section>
+<details class="technical-details"><summary>Source configuration</summary>
+  <div class="card-body">
+    <div class="form-grid">
+      <div class="field"><label for="source-type">Source implementation</label><select id="source-type" disabled><option>Local disk</option><option disabled>Cloud storage (future adapter)</option></select><p class="help">Cloud-source adapters are not implemented yet.</p></div>
+      <div class="field"><p class="text-sm font-medium">Allowed source root</p><code>{{ root }}</code><p class="help"><a href="{{ url_for('locations') }}">Manage locations</a> separately from footage folders.</p></div>
+    </div>
+    <form method="get" class="flex flex-col items-start gap-3 sm:flex-row sm:items-end">
+      <input type="hidden" name="q" value="{{ query }}"><input type="hidden" name="kind" value="{{ kind }}">
+      <div class="field w-full"><label for="browse-folder">Folder within source root</label><input id="browse-folder" name="folder" value="{{ folder }}" placeholder="For example: lobby/camera-17"></div>
+      <button class="btn-secondary shrink-0">Browse folder</button>
+    </form>
+  </div>
+</details>
 {% endblock %}

@@ -1,10 +1,13 @@
 import json
+import os
 import sqlite3
 import threading
 import shutil
+import time
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -127,7 +130,203 @@ def test_source_rejects_symlink_escape(service, tmp_path):
     (service.source.root / "escape.mp4").symlink_to(outside)
     with pytest.raises(ValueError, match="source root"):
         service.source.resolve("escape.mp4")
-    assert service.source.entries("")[0]["blocked"] is True
+    assert next(entry for entry in service.source.entries("") if entry["name"] == "escape.mp4")["blocked"] is True
+
+
+def test_explorer_metadata_is_read_only_and_folders_sort_first(service, monkeypatch):
+    video = service.source.root / "Alpha.MP4"
+    video.write_bytes(b"x" * 2048)
+    os.utime(video, (1767268800, 1767268800))
+    (service.source.root / "notes.txt").write_text("notes")
+    monkeypatch.setattr(service.source, "frame", lambda *args: pytest.fail("Browsing must not decode video"))
+    entries = service.source.entries("")
+    assert [entry["name"] for entry in entries] == ["lobby", "Alpha.MP4", "notes.txt"]
+    row = entries[1]
+    assert row["video"] is True and row["directory"] is False
+    assert row["size_bytes"] == 2048
+    assert row["modified_utc"] == "2026-01-01 12:00 UTC"
+    assert video.read_bytes() == b"x" * 2048
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="Requires POSIX timezone switching")
+def test_explorer_modified_times_are_utc_regardless_of_server_timezone(service, monkeypatch):
+    video = service.source.root / "clip.mp4"
+    video.write_bytes(b"video")
+    os.utime(video, (1767268800, 1767268800))
+    try:
+        with monkeypatch.context() as environment:
+            environment.setenv("TZ", "America/Denver")
+            time.tzset()
+            row = next(entry for entry in service.source.entries("") if entry["name"] == "clip.mp4")
+            assert row["modified_utc"] == "2026-01-01 12:00 UTC"
+    finally:
+        time.tzset()
+
+
+def test_explorer_tree_only_loads_the_current_ancestor_branch(service, monkeypatch):
+    (service.source.root / "site/east/nested").mkdir(parents=True)
+    (service.source.root / "unopened/deep").mkdir(parents=True)
+    calls = []
+    original = service.source.folders
+
+    def folders(folder):
+        calls.append(folder)
+        return original(folder)
+
+    monkeypatch.setattr(service.source, "folders", folders)
+    tree = service.source.folder_tree("site/east")
+    assert calls == ["", "site", "site/east"]
+    site = next(node for node in tree if node["path"] == "site")
+    east = site["children"][0]
+    assert east["path"] == "site/east"
+    assert east["children"] == [{"name": "nested", "path": "site/east/nested", "children": None}]
+    assert next(node for node in tree if node["path"] == "unopened")["children"] is None
+
+
+def test_folder_endpoint_is_shallow_and_excludes_blocked_links(app, service, tmp_path):
+    (service.source.root / "lobby/child/deep").mkdir(parents=True)
+    (service.source.root / "lobby/clip.mp4").write_bytes(b"video")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (service.source.root / "lobby/outside").symlink_to(outside, target_is_directory=True)
+    response = app.test_client().get("/folders", query_string={"folder": "lobby"})
+    assert response.status_code == 200
+    assert response.json == {"folders": [
+        {"name": "child", "path": "lobby/child", "children": None},
+    ]}
+    blocked = next(entry for entry in service.source.entries("lobby") if entry["blocked"])
+    assert blocked["size_bytes"] is None and blocked["modified_utc"] is None
+
+
+@pytest.mark.parametrize("folder", ["../outside", "/etc", "escape"])
+def test_folder_endpoint_enforces_the_same_source_boundary(app, service, tmp_path, folder):
+    (service.source.root / "escape").symlink_to(tmp_path, target_is_directory=True)
+    response = app.test_client().get("/folders", query_string={"folder": folder})
+    assert response.status_code == 400
+    assert b"source root" in response.data
+
+
+@pytest.mark.parametrize("query,kind,expected", [
+    ("CLIP", "videos", ["lobby/clip.MP4"]),
+    ("", "folders", ["lobby/clips"]),
+    ("", "all", ["lobby/clips", "lobby/clip.MP4", "lobby/readme.txt"]),
+    ("missing", "all", []),
+])
+def test_explorer_filters_current_folder_without_filtering_navigation(app, service, query, kind, expected):
+    (service.source.root / "lobby/clips").mkdir()
+    (service.source.root / "lobby/clip.MP4").write_bytes(b"video")
+    (service.source.root / "lobby/readme.txt").write_text("notes")
+    response = app.test_client().get("/", query_string={"folder": "lobby", "q": query, "kind": kind})
+    assert response.status_code == 200
+    for path in ["lobby/clips", "lobby/clip.MP4", "lobby/readme.txt"]:
+        assert (f'data-entry-path="{path}"'.encode() in response.data) == (path in expected)
+    assert response.data.count(b"data-entry-path=") == len(expected)
+    assert b'aria-label="Folders"' in response.data
+    if not expected:
+        assert b"No matching items" in response.data
+        assert b"This folder is empty" not in response.data
+
+
+def test_explorer_rejects_unknown_file_filters(app):
+    assert app.test_client().get("/?kind=unknown").status_code == 400
+
+
+def test_explorer_distinguishes_empty_folders_from_no_filter_matches(app):
+    response = app.test_client().get("/?folder=lobby&q=anything")
+    assert response.status_code == 200
+    assert b"This folder is empty" in response.data
+    assert b"No matching items" not in response.data
+
+
+def test_explorer_reports_unavailable_file_metadata(service, monkeypatch, caplog):
+    path = service.source.root / "unavailable.mp4"
+    path.write_bytes(b"video")
+
+    def denied():
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(service.source, "_children", lambda folder: [
+        SimpleNamespace(name=path.name, path=str(path), stat=denied),
+    ])
+    row = service.source.entries("")[0]
+    assert row["error"] == "Metadata unavailable: permission denied"
+    assert row["video"] is False and row["size_bytes"] is None and row["modified_utc"] is None
+    assert "Cannot inspect footage entry" in caplog.text
+
+
+def test_explorer_reports_entry_resolution_errors_without_losing_row_shape(service, monkeypatch, caplog):
+    path = service.source.root / "bad-link"
+    original = Path.resolve
+
+    def resolve(candidate, *args, **kwargs):
+        if candidate == path:
+            raise RuntimeError("symlink loop")
+        return original(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(service.source, "_children", lambda folder: [
+        SimpleNamespace(name=path.name, path=str(path)),
+    ])
+    monkeypatch.setattr(Path, "resolve", resolve)
+    row = service.source.entries("")[0]
+    assert row == {
+        "name": "bad-link", "path": "bad-link", "blocked": False, "directory": False,
+        "video": False, "size_bytes": None, "modified_utc": None,
+        "error": "Metadata unavailable: symlink loop",
+    }
+    assert "Cannot inspect footage entry" in caplog.text
+
+
+def test_lazy_folder_inspection_errors_are_logged_and_reported(service, monkeypatch, caplog):
+    path = service.source.root / "unavailable"
+    path.mkdir()
+
+    def denied():
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(service.source, "_children", lambda folder: [
+        SimpleNamespace(name=path.name, path=str(path), is_dir=denied),
+    ])
+    with pytest.raises(ValueError, match="Cannot load folders: permission denied"):
+        service.source.folders("")
+    assert "Cannot inspect folder" in caplog.text
+
+
+def test_explorer_does_not_inspect_metadata_outside_the_source(service, tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = service.source.root / "outside"
+    link.symlink_to(outside, target_is_directory=True)
+
+    def forbidden():
+        pytest.fail("Blocked entries must not expose external metadata")
+
+    monkeypatch.setattr(service.source, "_children", lambda folder: [
+        SimpleNamespace(name=link.name, path=str(link), stat=forbidden, is_dir=forbidden),
+    ])
+    row = service.source.entries("")[0]
+    assert row["blocked"] is True and row["size_bytes"] is None and row["modified_utc"] is None
+    assert service.source.folders("") == []
+
+
+def test_explorer_surfaces_directory_read_errors(app, caplog):
+    with patch.object(portal_module.os, "scandir", side_effect=PermissionError(13, "permission denied")):
+        response = app.test_client().get("/?folder=lobby")
+    assert response.status_code == 400
+    assert b"Cannot read folder" in response.data
+    assert "Cannot read footage folder" in caplog.text
+
+
+def test_folder_endpoint_cannot_list_a_video_file(app, service):
+    (service.source.root / "clip.mp4").write_bytes(b"video")
+    response = app.test_client().get("/folders?folder=clip.mp4")
+    assert response.status_code == 400
+    assert b"Select a footage folder" in response.data
+
+
+def test_explorer_reports_a_folder_changed_during_navigation(service, monkeypatch):
+    monkeypatch.setattr(service.source, "folders", lambda folder: [])
+    with pytest.raises(ValueError, match="changed while browsing"):
+        service.source.folder_tree("lobby")
 
 
 def test_jobs_persist_and_interrupted_work_is_not_reported_success(service):

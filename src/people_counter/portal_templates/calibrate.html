@@ -55,7 +55,7 @@
           </div>
           <div class="field"><label for="camera-id">Camera</label><select id="camera-id" name="camera_id" required data-selected="{{ values.get('camera_id','') }}" disabled><option value="">Select a location first</option></select>
             <template id="camera-options">{% for camera in camera_registry %}<option value="{{ camera.id }}" data-location="{{ camera.location_id }}">{{ camera.display_name }} ({{ camera.id }})</option>{% endfor %}</template>
-            <p class="help" id="camera-choice-help"><a href="{{ url_for('cameras') }}">Register a camera</a> if it is not listed.</p>
+            <p class="help" id="camera-choice-help"><a href="{{ url_for('cameras', create='1') }}">Register a camera</a> if it is not listed.</p>
           </div>
           <div class="field"><label for="camera-timezone">Camera timezone</label><select id="camera-timezone" name="camera_timezone" required>{% for timezone in timezones %}<option value="{{ timezone }}" {% if values.get('camera_timezone','UTC') == timezone %}selected{% endif %}>{{ timezone }}</option>{% endfor %}</select><p class="help">IANA timezones include daylight-saving rules; choose the camera's recording timezone.</p></div>
         </div>

@@ -1,5 +1,6 @@
 import json
 import zipfile
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -11,12 +12,98 @@ from playwright.sync_api import expect
 pytestmark = pytest.mark.ui
 
 
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
+def test_folder_explorer_lazy_navigation_filters_metadata_and_context(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    portal.make_video("site/east/clip.mp4")
+    (portal.source / "site/east/nested").mkdir()
+    (portal.source / "site/east/readme.txt").write_text("notes")
+    (portal.source / "unopened/deep").mkdir(parents=True)
+    requested = []
+    page.on("request", lambda request: requested.append(request.url) if urlsplit(request.url).path == "/folders" else None)
+    page.goto(portal.url + "/")
+    assert requested == []
+    if viewport["width"] < 1024:
+        page.get_by_role("button", name="Folders", exact=True).click()
+    folders = page.get_by_role("navigation", name="Folders", exact=True)
+    site = folders.locator('details[data-folder="site"] > summary')
+    site.focus()
+    with page.expect_response(lambda response: urlsplit(response.url).path == "/folders"):
+        site.press("Enter")
+    expect(folders.get_by_role("link", name="east", exact=True)).to_be_visible()
+    east = folders.locator('details[data-folder="site/east"] > summary')
+    east.focus()
+    with page.expect_response(lambda response: urlsplit(response.url).path == "/folders"):
+        east.press("Enter")
+    expect(folders.get_by_role("link", name="nested", exact=True)).to_be_visible()
+    east.press("Enter")
+    east.press("Enter")
+    assert [parse_qs(urlsplit(url).query)["folder"][0] for url in requested] == ["site", "site/east"]
+    folders.get_by_role("link", name="east", exact=True).click()
+    expect(page.get_by_role("navigation", name="Folder path")).to_contain_text("site")
+    expect(page.get_by_role("navigation", name="Folder path")).to_contain_text("east")
+    page.get_by_label("Filter files by name", exact=True).fill("CLIP")
+    page.get_by_label("File type", exact=True).select_option("videos")
+    page.get_by_role("button", name="Apply filters", exact=True).click()
+    table = page.get_by_role("table", name="Folder contents", exact=True)
+    expect(table.locator("tbody tr[data-entry-path]")).to_have_count(1)
+    row = table.locator('tr[data-entry-path="site/east/clip.mp4"]')
+    expect(row).to_contain_text("Video")
+    expect(row).to_contain_text("UTC")
+    expect(row).not_to_contain_text("Unavailable")
+    expect(page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True)).to_have_attribute(
+        "href", "/calibrate?video=site/east/clip.mp4&folder=site/east",
+    )
+    expect(page.get_by_role("link", name="Generate manifest package", exact=True)).to_have_attribute(
+        "href", "/packages?folder=site/east",
+    )
+    page.get_by_label("Filter files by name", exact=True).fill("no-such-file")
+    page.get_by_role("button", name="Apply filters", exact=True).click()
+    expect(page.get_by_text("No matching items", exact=True)).to_be_visible()
+    page.get_by_role("link", name="Clear filters", exact=True).click()
+    expect(table.locator("tbody tr[data-entry-path]")).to_have_count(3)
+    page.get_by_role("link", name="Open folder nested", exact=True).click()
+    expect(page.get_by_text("This folder is empty.", exact=True)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert portal.calls == []
+
+
+@pytest.mark.parametrize("failure", [503, 200])
+def test_folder_explorer_reports_lazy_load_failures_and_retries(page, portal, failure):
+    (portal.source / "unopened/child").mkdir(parents=True)
+    unsafe_name = '<img src=x onerror="alert(1)">'
+    (portal.source / "unopened" / unsafe_name).mkdir()
+    attempts = []
+
+    def folders_response(route):
+        attempts.append(route.request.url)
+        if len(attempts) == 1:
+            route.fulfill(status=failure, content_type="application/json", body='{"unexpected": []}')
+        else:
+            route.continue_()
+
+    page.route("**/folders?folder=unopened", folders_response)
+    page.goto(portal.url + "/")
+    folders = page.get_by_role("navigation", name="Folders", exact=True)
+    node = folders.locator('details[data-folder="unopened"] > summary')
+    node.focus()
+    node.press("Enter")
+    expect(folders.get_by_role("alert")).to_contain_text("Unable to load folders")
+    folders.get_by_role("button", name="Retry folder unopened", exact=True).click()
+    expect(folders.get_by_role("link", name="child", exact=True)).to_be_visible()
+    expect(folders.get_by_role("link", name=unsafe_name, exact=True)).to_be_visible()
+    expect(folders.locator("img")).to_have_count(0)
+    expect(folders.get_by_role("alert")).to_have_count(0)
+    assert len(attempts) == 2
+
+
 def ensure_location(page, portal, location):
     page.goto(portal.url + "/locations")
     row = page.locator(f'tr[data-location-id="{location}"]')
     if row.count() == 0:
-        page.get_by_label("Location name", exact=True).fill(location)
         page.get_by_role("button", name="Add location", exact=True).click()
+        page.get_by_label("Location name", exact=True).fill(location)
+        page.get_by_role("dialog", name="Add a location", exact=True).get_by_role("button", name="Add location", exact=True).click()
     return row
 
 
@@ -25,9 +112,10 @@ def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-ent
     registered_id = f"{location}-{camera_id}"
     page.goto(portal.url + "/cameras")
     if page.locator(f'tr[data-camera-id="{registered_id}"]').count() == 0:
+        page.get_by_role("button", name="Add camera", exact=True).click()
         page.get_by_label("Location", exact=True).select_option(location)
         page.get_by_label("Camera name", exact=True).fill(camera_id)
-        page.get_by_role("button", name="Add camera", exact=True).click()
+        page.get_by_role("dialog", name="Add a camera", exact=True).get_by_role("button", name="Add camera", exact=True).click()
     page.goto(portal.url + "/?folder=" + folder)
     page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True).click()
     page.wait_for_load_state("load")
@@ -57,7 +145,9 @@ def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-ent
 
 def prepare_package(page, portal):
     page.goto(portal.url + "/packages?folder=lobby")
-    page.get_by_role("button", name="Generate manifest package", exact=True).click()
+    expect(page.get_by_role("dialog", name="Generate a package", exact=True)).to_be_visible()
+    expect(page.get_by_label("Folder within source root", exact=True)).to_have_value("lobby")
+    page.get_by_role("dialog", name="Generate a package", exact=True).get_by_role("button", name="Generate manifest package", exact=True).click()
     expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
     return page.url.rsplit("/", 1)[-1]
 
@@ -115,7 +205,7 @@ def test_background_job_continues_after_browser_leaves_and_errors_are_visible(pa
     calibrate_camera(page, portal)
     (portal.source / "lobby/broken.mp4").write_bytes(b"not a video")
     page.goto(portal.url + "/packages?folder=lobby")
-    page.get_by_role("button", name="Generate manifest package").click()
+    page.get_by_role("dialog", name="Generate a package", exact=True).get_by_role("button", name="Generate manifest package", exact=True).click()
     identity = page.url.rsplit("/", 1)[-1]
     page.goto(portal.url + "/")
     page.goto(portal.url + "/jobs/" + identity)
@@ -124,9 +214,24 @@ def test_background_job_continues_after_browser_leaves_and_errors_are_visible(pa
     expect(page.locator("#job-log")).to_be_visible()
     expect(page.get_by_role("link", name="rejection-report.csv")).to_be_visible()
     assert portal.service.store.job(identity)["status"] == "FAILED"
+    original = portal.service.store.job(identity)["payload"]
+    page.get_by_role("button", name="Resume with retained state", exact=True).click()
+    expect(page.get_by_role("dialog", name="Resume safely", exact=True)).to_be_visible()
+    with page.expect_response(
+        lambda response: response.request.method == "POST" and response.url.endswith("/resume"),
+    ) as resumed:
+        page.get_by_role("dialog", name="Resume safely", exact=True).get_by_role("button", name="Resume with retained state", exact=True).click()
+    assert resumed.value.status == 302
+    assert page.url.endswith("/jobs/" + identity)
+    assert portal.service.store.job(identity)["payload"] == original
+    assert len(portal.service.store.jobs()) == 1
 
 
 def test_cloud_gate_csrf_and_source_boundaries_are_enforced_in_browser(page, portal):
+    for route, label in (("/cameras", "Add camera"), ("/packages", "Generate manifest package")):
+        page.goto(portal.url + route)
+        page.wait_for_load_state("load")
+        expect(page.get_by_role("button", name=label, exact=True)).to_be_disabled()
     page.goto(portal.url + "/cloud")
     expect(page.get_by_role("button", name="Start cloud action")).to_be_disabled()
     token = page.locator("[name=csrf]").input_value()
@@ -219,18 +324,23 @@ def test_named_camera_registration_and_location_filtered_calibration(page, porta
     page.set_viewport_size(viewport)
     for location, identity in (("North Store", "north-store"), ("South Store", "south-store")):
         page.goto(portal.url + "/locations")
+        page.get_by_role("button", name="Add location", exact=True).click()
         page.get_by_label("Location name", exact=True).fill("S\u00e3o Paulo North")
         expect(page.locator("[data-generated-id]")).to_have_text("sao-paulo-north")
         page.get_by_label("Location name", exact=True).fill(location)
         expect(page.locator("[data-generated-id]")).to_have_text(identity)
-        page.get_by_role("button", name="Add location", exact=True).click()
+        page.get_by_role("dialog", name="Add a location", exact=True).get_by_role("button", name="Add location", exact=True).click()
         row = page.locator(f'tr[data-location-id="{identity}"]')
         expect(row).to_have_attribute("data-camera-count", "0")
         row.get_by_role("link", name="Add camera", exact=True).click()
         expect(page.get_by_label("Location", exact=True)).to_have_value(identity)
+        page.get_by_role("button", name="Cancel", exact=True).click()
+        expect(page.locator("#open-camera-dialog")).to_be_focused()
+        page.get_by_role("button", name="Add camera", exact=True).click()
+        expect(page.get_by_label("Location", exact=True)).to_have_value(identity)
         page.get_by_label("Camera name", exact=True).fill("Main Entrance")
         expect(page.locator("[data-generated-id]")).to_have_text(f"{identity}-main-entrance")
-        page.get_by_role("button", name="Add camera", exact=True).click()
+        page.get_by_role("dialog", name="Add a camera", exact=True).get_by_role("button", name="Add camera", exact=True).click()
         registered = page.locator(f'tr[data-camera-id="{identity}-main-entrance"]')
         expect(registered).to_contain_text("Main Entrance")
         expect(registered).to_contain_text("Not calibrated")
@@ -269,10 +379,12 @@ def test_named_camera_registration_and_location_filtered_calibration(page, porta
 def test_progressive_disclosure_keeps_primary_tasks_and_safety_visible(page, portal, viewport):
     page.set_viewport_size(viewport)
     page.goto(portal.url + "/")
-    expect(page.get_by_label("Folder within source root", exact=True)).to_be_visible()
+    expect(page.get_by_role("navigation", name="Folder path", exact=True)).to_be_visible()
+    expect(page.get_by_label("Filter files by name", exact=True)).to_be_visible()
     expect(page.get_by_label("Source implementation", exact=True)).not_to_be_visible()
     page.get_by_text("Source configuration", exact=True).click()
     expect(page.get_by_label("Source implementation", exact=True)).to_be_visible()
+    expect(page.get_by_label("Folder within source root", exact=True)).to_be_visible()
     calibrate_camera(page, portal)
     expect(page.get_by_text("Frame", exact=True)).not_to_be_visible()
     page.get_by_text("Geometry and effective dates", exact=True).click()
@@ -313,6 +425,7 @@ def test_progressive_disclosure_keeps_primary_tasks_and_safety_visible(page, por
     advanced.press("Enter")
     expect(page.get_by_label("Batch size override", exact=True)).to_be_visible()
     page.goto(portal.url + "/cloud")
+    page.get_by_role("button", name="Start cloud action", exact=True).click()
     action = page.get_by_label("Action", exact=True)
     wait = page.get_by_label("Wait for processing after submission", exact=True)
     expect(wait).not_to_be_visible()
@@ -324,7 +437,7 @@ def test_progressive_disclosure_keeps_primary_tasks_and_safety_visible(page, por
     expect(wait).not_to_be_visible()
     expect(wait).not_to_be_checked()
     expect(wait).to_be_disabled()
-    page.goto(portal.url + "/packages?folder=lobby")
+    page.goto(portal.url + "/packages")
     expect(page.get_by_role("button", name="Generate manifest package", exact=True)).to_be_visible()
     expect(page.get_by_text("1. Inspect and validate", exact=True)).not_to_be_visible()
     page.get_by_text("How package preparation works", exact=True).click()
@@ -368,7 +481,7 @@ def test_profile_dialog_is_compact_accessible_and_preserves_drafts_without_submi
     trigger.click()
     expect(target).to_have_value("draft-target")
     submit = page.get_by_role("button", name="Generate profiles", exact=True)
-    close = page.get_by_role("button", name="Close profile form", exact=True)
+    close = page.get_by_role("button", name="Close dialog", exact=True)
     close.focus()
     page.keyboard.press("Tab")
     expect(target).to_be_focused()
@@ -401,6 +514,87 @@ def test_profile_dialog_is_compact_accessible_and_preserves_drafts_without_submi
 
 
 @pytest.mark.portal_cloud
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
+def test_shared_form_dialogs_preserve_context_and_require_fresh_cloud_approval(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    calibrate_camera(page, portal)
+    cases = [
+        ("/locations", "Add location", "Add a location", "Location name"),
+        ("/cameras", "Add camera", "Add a camera", "Camera name"),
+        ("/packages", "Generate manifest package", "Generate a package", "Folder within source root"),
+        ("/cloud", "Start cloud action", "Start a cloud job", "Prepared package"),
+        ("/profiles", "Add target and profiles", "Generate approved profiles", "Target name"),
+    ]
+    for route, label, title, field_label in cases:
+        page.goto(portal.url + route)
+        field = page.get_by_label(field_label, exact=True)
+        expect(field).not_to_be_visible()
+        trigger = page.get_by_role("button", name=label, exact=True)
+        trigger.click()
+        dialog = page.get_by_role("dialog", name=title, exact=True)
+        expect(dialog).to_be_visible()
+        assert dialog.evaluate("element => element.matches(':modal')")
+        bounds = dialog.bounding_box()
+        assert bounds is not None
+        assert 0 <= bounds["x"] and bounds["x"] + bounds["width"] <= viewport["width"]
+        assert 0 <= bounds["y"] and bounds["y"] + bounds["height"] <= viewport["height"]
+        assert dialog.evaluate("element => element.scrollWidth <= element.clientWidth")
+        if route != "/cloud":
+            field.fill("unsaved-draft")
+        page.get_by_role("button", name="Cancel", exact=True).click()
+        expect(dialog).not_to_be_visible()
+        expect(trigger).to_be_focused()
+        trigger.click()
+        if route != "/cloud":
+            expect(field).to_have_value("unsaved-draft")
+        else:
+            expect(dialog).to_contain_text("Publishing can trigger arrival automation.")
+            approval = page.get_by_label("I reviewed the target and intake policy and approve this cloud action.")
+            approval.check()
+        page.keyboard.press("Escape")
+        expect(dialog).not_to_be_visible()
+        expect(trigger).to_be_focused()
+        trigger.click()
+        if route == "/cloud":
+            expect(approval).not_to_be_checked()
+        page.get_by_role("button", name="Close dialog", exact=True).click()
+        expect(dialog).not_to_be_visible()
+    assert portal.service.store.jobs() == []
+    assert portal.calls == []
+
+
+@pytest.mark.portal_cloud
+def test_resume_dialog_requires_new_approval_and_keeps_retained_work_unchanged(page, portal):
+    identity = "d" * 32
+    with portal.service.store.connection() as db:
+        db.execute(
+            "INSERT INTO jobs(id,kind,payload,status,error) VALUES (?,'submit',?,'FAILED',?)",
+            (identity, json.dumps({"retained": "original-inputs"}), "Interrupted registration"),
+        )
+    page.goto(portal.url + "/jobs/" + identity)
+    expect(page.get_by_role("alert")).to_contain_text("Interrupted registration")
+    trigger = page.get_by_role("button", name="Resume with retained state", exact=True)
+    trigger.click()
+    dialog = page.get_by_role("dialog", name="Resume safely", exact=True)
+    expect(dialog).to_be_visible()
+    approval = page.get_by_label("I approve resuming this cloud action with its retained state.")
+    expect(approval).not_to_be_checked()
+    dialog.get_by_role("button", name="Resume with retained state", exact=True).click()
+    expect(approval).to_be_focused()
+    approval.check()
+    page.get_by_role("button", name="Cancel", exact=True).click()
+    trigger.click()
+    expect(approval).not_to_be_checked()
+    page.keyboard.press("Escape")
+    expect(dialog).not_to_be_visible()
+    retained = portal.service.store.job(identity)
+    assert retained["status"] == "FAILED"
+    assert retained["payload"] == {"retained": "original-inputs"}
+    assert len(portal.service.store.jobs()) == 1
+    assert portal.calls == []
+
+
+@pytest.mark.portal_cloud
 def test_profile_generation_publication_and_submit_wait_use_shared_backends(page, portal):
     calibrate_camera(page, portal)
     package_id = prepare_package(page, portal)
@@ -426,13 +620,14 @@ def test_profile_generation_publication_and_submit_wait_use_shared_backends(page
     assert profile["batch_size"] == 2 and profile["sample_fps"] == 2.0
     for action, wait in (("publish", False), ("submit", False), ("submit", True)):
         page.goto(portal.url + "/cloud")
+        page.get_by_role("button", name="Start cloud action", exact=True).click()
         page.get_by_label("Prepared package", exact=True).select_option(package_id)
         page.get_by_label("Target and profile", exact=True).select_option("ci::rtdetr-r18-onnx-cpu")
         page.get_by_label("Action", exact=True).select_option(action)
         if wait:
             page.get_by_label("Wait for processing after submission").check()
         page.get_by_label("I reviewed the target and intake policy and approve this cloud action.").check()
-        page.get_by_role("button", name="Start cloud action", exact=True).click()
+        page.get_by_role("dialog", name="Start a cloud job", exact=True).get_by_role("button", name="Start cloud action", exact=True).click()
         expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
     expect(page.get_by_role("heading", name="Result", exact=True)).to_be_visible()
     page.get_by_text("Completed job log", exact=False).click()

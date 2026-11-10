@@ -1,21 +1,26 @@
 {% extends "base.html" %}
-{% from "components.html" import icon, heading, badge %}
+{% from "components.html" import icon, heading, badge, dialog_button, form_dialog %}
 {% block title %}Manifest packages{% endblock %}
 {% block content %}
 {% call heading('Manifest packages', 'Prepare destination-independent metadata with validated geometry, recording times, and content hashes. No cloud access is used.', 'Offline preparation') %}
+{{ dialog_button('package-dialog', 'Generate manifest package', 'package', enabled=cameras|length > 0) }}
 <a class="btn btn-secondary" href="{{ url_for('jobs') }}">{{ icon('jobs', 'size-4') }}View package jobs</a>
 {% endcall %}
-{% if not cameras %}<div class="alert alert-warning">{{ icon('info', 'size-5 shrink-0') }}<p><a href="{{ url_for('cameras') }}">Register a camera</a>, then <a href="{{ url_for('footage') }}">calibrate its footage</a> before generating a package.</p></div>{% endif %}
-<div class="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
-  <form method="post" class="card">
-    <div class="card-header"><div><h2>Generate a package</h2><p class="card-description">Metadata is snapshotted when you start the job.</p></div>{{ badge('Offline', 'success') }}</div>
+{% if not cameras %}<div class="alert alert-warning">{{ icon('info', 'size-5 shrink-0') }}<p><a href="{{ url_for('cameras', create='1') }}">Register a camera</a> if needed, then <a href="{{ url_for('footage') }}">calibrate its footage</a> before generating a package.</p></div>{% endif %}
+<section class="card">
+  <div class="card-header"><div><h2>Offline preparation</h2><p class="card-description">Choose Generate manifest package when you are ready.</p></div>{{ badge(cameras|length ~ ' calibrations') }}</div>
+  <div class="card-body"><p>Packages contain metadata only. Source videos remain unchanged and are not copied.</p><p class="text-sm text-slate-500">Safety bound: 10,000 videos per package. Camera metadata is snapshotted when the job starts.</p></div>
+</section>
+{% call form_dialog('package-dialog', 'Generate a package', 'Metadata is snapshotted when you start the job.', auto_open=(request.args.get('create') == '1' or 'folder' in request.args) and cameras) %}
+  <form method="post">
     <div class="card-body">
       <input type="hidden" name="csrf" value="{{ session.csrf }}">
-      <div class="field"><label for="package-folder">Folder within source root</label><input id="package-folder" name="folder" value="{{ folder }}" placeholder="Leave blank for the whole source root"><p class="help">Select a camera folder, or leave blank to inspect the entire mounted source.</p></div>
+      <div class="field"><label for="package-folder">Folder within source root</label><input id="package-folder" name="folder" value="{{ folder }}" placeholder="Leave blank for the whole source root" autofocus><p class="help">Select a camera folder, or leave blank to inspect the entire mounted source.</p></div>
       <div class="workflow-note">{{ icon('lock', 'size-5 shrink-0') }}<p>The package contains metadata only. Source videos remain unchanged and are not copied.</p></div>
     </div>
-    <div class="card-footer"><p class="text-xs text-slate-500">Safety bound: 10,000 videos per package.</p><button {% if not cameras %}disabled{% endif %}>{{ icon('package', 'size-4') }}Generate manifest package</button></div>
+    <div class="card-footer"><p class="text-xs text-slate-500">Safety bound: 10,000 videos per package.</p><div class="flex flex-wrap gap-2"><button type="button" class="btn-secondary" data-dialog-close>Cancel</button><button {% if not cameras %}disabled{% endif %}>{{ icon('package', 'size-4') }}Generate manifest package</button></div></div>
   </form>
+{% endcall %}
   <details class="card">
     <summary class="px-5 py-4 sm:px-6">How package preparation works</summary>
     <ol class="card-body space-y-5">
@@ -24,6 +29,5 @@
       <li><p class="font-semibold text-slate-900">3. Download or publish</p><p class="mt-1 text-slate-500">Download the metadata ZIP or explicitly select a cloud action after approval.</p></li>
     </ol>
   </details>
-</div>
 <div class="alert alert-info">{{ icon('info', 'size-5 shrink-0') }}<p>After changing camera metadata, generate a new package. Never edit a prepared package in place.</p></div>
 {% endblock %}

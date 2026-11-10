@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components.html" import icon, heading, badge %}
+{% from "components.html" import icon, heading, badge, dialog_button, form_dialog %}
 {% block head %}{% if job.status in ['QUEUED','RUNNING'] %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
 {% block title %}{{ job.kind|capitalize }} job{% endblock %}
 {% block content %}
@@ -42,14 +42,22 @@
   </div>
 </section>
 {% if job.status in ['FAILED','INTERRUPTED'] %}
-<form method="post" action="{{ url_for('resume', identity=job.id) }}" class="card">
+<section class="card">
   <div class="card-header"><div><h2>Resume safely</h2><p class="card-description">Reuse the same identity, input snapshot, checkpoints, and remote job locations.</p></div>{{ badge('Review required', 'warning') }}</div>
+  <div class="card-body">
+    <div class="alert alert-warning">{{ icon('info', 'size-5 shrink-0') }}<p>After editing camera metadata, generate a new package instead. A resume keeps the original saved inputs and state.</p></div>
+    {{ dialog_button('resume-dialog', 'Resume with retained state', 'arrow') }}
+  </div>
+</section>
+{% call form_dialog('resume-dialog', 'Resume safely', 'Reuse the same identity, saved inputs, checkpoints and remote job locations.') %}
+<form method="post" action="{{ url_for('resume', identity=job.id) }}">
   <div class="card-body">
     <input type="hidden" name="csrf" value="{{ session.csrf }}">
     <div class="alert alert-warning">{{ icon('info', 'size-5 shrink-0') }}<p>After editing camera metadata, generate a new package instead. A resume keeps the original saved inputs and state.</p></div>
     {% if job.kind in ['publish','submit'] %}<label class="check"><input type="checkbox" name="confirm" value="yes" required>I approve resuming this cloud action with its retained state.</label>{% endif %}
-    <button>Resume with retained state{{ icon('arrow', 'size-4') }}</button>
   </div>
+  <div class="card-footer"><button type="button" class="btn-secondary" data-dialog-close autofocus>Cancel</button><button>Resume with retained state{{ icon('arrow', 'size-4') }}</button></div>
 </form>
+{% endcall %}
 {% endif %}
 {% endblock %}

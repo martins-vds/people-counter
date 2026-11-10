@@ -3,7 +3,7 @@
 {% block title %}Jobs{% endblock %}
 {% block content %}
 {% call heading('Jobs', 'Follow background work, review reports, and resume interrupted operations with their retained inputs and state.', 'Activity & recovery') %}
-<a class="btn btn-secondary" href="{{ url_for('packages') }}">{{ icon('package', 'size-4') }}Prepare a package</a>
+<a class="btn btn-secondary" href="{{ url_for('packages', create='1') }}">{{ icon('package', 'size-4') }}Prepare a package</a>
 {% endcall %}
 <section class="card">
   <div class="card-header"><div><h2>Recent activity</h2><p class="card-description">The most recent 100 jobs. Closing the browser never cancels accepted Fabric work.</p></div>{{ badge(jobs|length ~ ' shown') }}</div>
@@ -14,7 +14,7 @@
       <td><span class="cell-title capitalize">{{ item.kind }}</span></td>
       <td>{{ state(item.status) }}</td>
       <td><a class="inline-flex items-center gap-2" href="{{ url_for('job', identity=item.id) }}"><span class="break-all">Open job {{ item.id }}</span>{{ icon('arrow', 'size-4 shrink-0') }}</a></td>
-    </tr>{% else %}<tr><td colspan="4"><div class="empty-state"><span class="empty-icon">{{ icon('jobs', 'size-6') }}</span><p class="empty-title">No jobs yet</p><p class="empty-copy">Generate a package or approved profile catalog to create your first background job.</p><a class="btn btn-secondary" href="{{ url_for('packages') }}">Start with a package</a></div></td></tr>{% endfor %}</tbody>
+    </tr>{% else %}<tr><td colspan="4"><div class="empty-state"><span class="empty-icon">{{ icon('jobs', 'size-6') }}</span><p class="empty-title">No jobs yet</p><p class="empty-copy">Generate a package or approved profile catalog to create your first background job.</p><a class="btn btn-secondary" href="{{ url_for('packages', create='1') }}">Start with a package</a></div></td></tr>{% endfor %}</tbody>
   </table></div>
 </section>
 {% endblock %}

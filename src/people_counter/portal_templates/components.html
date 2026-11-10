@@ -28,6 +28,31 @@
 
 {% macro badge(label, tone='neutral') -%}<span class="badge badge-{{ tone }}">{{ label }}</span>{%- endmacro %}
 
+{% macro folder_nodes(nodes, current, query='', kind='all') -%}
+{% for node in nodes %}
+<li>
+  <details class="folder-node" data-folder="{{ node.path }}" {% if node.children is not none %}data-loaded="true"{% endif %} {% if current == node.path or current.startswith(node.path ~ '/') %}open{% endif %}>
+    <summary><a class="folder-link" href="{{ url_for('footage', folder=node.path, q=query, kind=kind) }}" {% if current == node.path %}aria-current="page"{% endif %}>{{ icon('folder', 'size-4 shrink-0') }}<span>{{ node.name }}</span></a></summary>
+    <ul data-folder-children>{% if node.children is not none %}{% if node.children %}{{ folder_nodes(node.children, current, query, kind) }}{% else %}<li class="folder-message">No subfolders</li>{% endif %}{% endif %}</ul>
+  </details>
+</li>
+{% endfor %}
+{%- endmacro %}
+
+{% macro dialog_button(identity, label, glyph='settings', enabled=true) -%}
+<button type="button" id="open-{{ identity }}" {% if enabled %}data-dialog-open="{{ identity }}"{% endif %} aria-haspopup="dialog" aria-controls="{{ identity }}" disabled>{{ icon(glyph, 'size-4') }}{{ label }}</button>
+{%- endmacro %}
+
+{% macro form_dialog(identity, title, description, wide=false, auto_open=false) -%}
+<noscript><p class="alert alert-warning">Enable JavaScript to open action forms.</p></noscript>
+<dialog id="{{ identity }}" class="portal-dialog{% if wide %} portal-dialog-wide{% endif %}" data-form-dialog {% if auto_open %}data-auto-open="true"{% endif %} aria-labelledby="{{ identity }}-title" aria-describedby="{{ identity }}-description">
+  <section class="card">
+    <div class="card-header"><div><h2 id="{{ identity }}-title">{{ title }}</h2><p class="card-description" id="{{ identity }}-description">{{ description }}</p></div><button type="button" class="btn-secondary btn-sm" data-dialog-close aria-label="Close dialog">Close</button></div>
+    {{ caller() }}
+  </section>
+</dialog>
+{%- endmacro %}
+
 {% macro stat(label, value, note, glyph='jobs') -%}
 <div class="stat-card">
   <div><p class="stat-label">{{ label }}</p><p class="stat-value">{{ value }}</p><p class="stat-note">{{ note }}</p></div>

@@ -6,21 +6,113 @@ document.addEventListener("invalid", (event) => {
   }
 }, true);
 
-const profileDialog = document.querySelector("#profile-dialog");
-if (profileDialog) {
-  const openProfileDialog = document.querySelector("#open-profile-dialog");
-  openProfileDialog.addEventListener("click", () => profileDialog.showModal());
-  profileDialog.querySelectorAll("[data-close-profile-dialog]").forEach((button) => {
-    button.addEventListener("click", () => profileDialog.close());
+const folderNavigation = document.querySelector("#folder-navigation");
+if (folderNavigation) {
+  const sidebar = document.querySelector("#folder-sidebar");
+  const toggle = document.querySelector("#toggle-folders");
+  toggle.addEventListener("click", () => {
+    const expanded = toggle.getAttribute("aria-expanded") !== "true";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    sidebar.classList.toggle("hidden", !expanded);
   });
-  profileDialog.addEventListener("keydown", (event) => {
+  const folderIcon = folderNavigation.querySelector(".folder-link svg");
+  const message = (text) => {
+    const item = document.createElement("li");
+    item.className = "folder-message";
+    item.textContent = text;
+    return item;
+  };
+  const bindFolder = (node) => {
+    node.addEventListener("toggle", () => { if (node.open) loadFolders(node); });
+  };
+  const makeFolder = (folder) => {
+    const item = document.createElement("li");
+    const node = document.createElement("details");
+    node.className = "folder-node";
+    node.dataset.folder = folder.path;
+    const summary = document.createElement("summary");
+    const link = document.createElement("a");
+    const url = new URL(folderNavigation.dataset.browseUrl, location.origin);
+    url.searchParams.set("folder", folder.path);
+    url.searchParams.set("q", folderNavigation.dataset.query);
+    url.searchParams.set("kind", folderNavigation.dataset.kind);
+    link.href = url.toString();
+    link.className = "folder-link";
+    if (folder.path === folderNavigation.dataset.currentFolder) link.setAttribute("aria-current", "page");
+    const label = document.createElement("span");
+    label.textContent = folder.name;
+    link.append(folderIcon.cloneNode(true), label);
+    summary.append(link);
+    const children = document.createElement("ul");
+    children.dataset.folderChildren = "";
+    node.append(summary, children);
+    item.append(node);
+    bindFolder(node);
+    return item;
+  };
+  const loadFolders = async (node) => {
+    if (node.dataset.loaded === "true" || node.dataset.loading === "true") return;
+    const children = node.querySelector(":scope > [data-folder-children]");
+    node.dataset.loading = "true";
+    const loading = message("Loading folders...");
+    loading.setAttribute("role", "status");
+    children.replaceChildren(loading);
+    let folders;
+    try {
+      const url = new URL(folderNavigation.dataset.foldersUrl, location.origin);
+      url.searchParams.set("folder", node.dataset.folder);
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+      if (!Array.isArray(body.folders) || !body.folders.every(folder => typeof folder.name === "string" && typeof folder.path === "string")) {
+        throw new Error("Unexpected folder response");
+      }
+      folders = body.folders;
+    } catch (error) {
+      const failure = message(`Unable to load folders: ${error.message}`);
+      failure.setAttribute("role", "alert");
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "btn-secondary btn-sm";
+      retry.textContent = "Retry";
+      retry.setAttribute("aria-label", `Retry folder ${node.dataset.folder}`);
+      retry.addEventListener("click", async () => {
+        await loadFolders(node);
+        node.querySelector(":scope > summary").focus();
+      });
+      failure.append(document.createElement("br"), retry);
+      children.replaceChildren(failure);
+      return;
+    } finally {
+      node.dataset.loading = "false";
+    }
+    children.replaceChildren(...(folders.length ? folders.map(makeFolder) : [message("No subfolders")]));
+    node.dataset.loaded = "true";
+  };
+  folderNavigation.querySelectorAll("details[data-folder]").forEach(bindFolder);
+}
+
+document.querySelectorAll("dialog[data-form-dialog]").forEach((dialog) => {
+  const triggers = document.querySelectorAll(`[data-dialog-open="${dialog.id}"]`);
+  dialog.querySelectorAll("[data-dialog-close]").forEach((button) => {
+    button.addEventListener("click", () => dialog.close());
+  });
+  dialog.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing) {
       event.preventDefault();
-      profileDialog.close();
+      dialog.close();
     }
   });
-  openProfileDialog.disabled = false;
-}
+  dialog.addEventListener("close", () => {
+    dialog.querySelectorAll("input[name=confirm]").forEach((approval) => { approval.checked = false; });
+    if (triggers.length) triggers[0].focus();
+  });
+  triggers.forEach((trigger) => {
+    trigger.addEventListener("click", () => dialog.showModal());
+    trigger.disabled = false;
+  });
+  if (dialog.dataset.autoOpen === "true" && triggers.length) dialog.showModal();
+});
 
 document.querySelectorAll("[data-name-form]").forEach((form) => {
   const name = form.querySelector("[name=display_name]");

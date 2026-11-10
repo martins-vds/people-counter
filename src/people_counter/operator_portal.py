@@ -123,11 +123,30 @@ def create_app(service: PortalService) -> Flask:
         folder = request.args.get("folder", "")
         canonical = service.source.resolve(folder).relative_to(service.source.root).as_posix()
         folder = "" if canonical == "." else canonical
+        query = request.args.get("q", "")
+        kind = request.args.get("kind", "all")
+        if kind not in {"all", "videos", "folders"}:
+            raise ValueError("Select All types, Videos, or Folders")
+        entries = service.source.entries(folder)
+        visible = [
+            entry for entry in entries
+            if query.casefold() in entry["name"].casefold()
+            and (kind == "all" or (kind == "videos" and entry["video"]) or (kind == "folders" and entry["directory"]))
+        ]
         return render_template(
-            "footage.html", folder=folder, entries=service.source.entries(folder),
-            root=service.source.root,
+            "footage.html", folder=folder, entries=visible, total=len(entries),
+            root=service.source.root, query=query, kind=kind,
+            folder_tree=service.source.folder_tree(folder),
+            breadcrumbs=[
+                {"name": name, "path": Path(*Path(folder).parts[:index + 1]).as_posix()}
+                for index, name in enumerate(Path(folder).parts)
+            ],
             parent=Path(folder).parent.as_posix() if folder else "",
         )
+
+    @app.get("/folders")
+    def folders():
+        return {"folders": service.source.folders(request.args.get("folder", ""))}
 
     @app.get("/frame")
     def frame():

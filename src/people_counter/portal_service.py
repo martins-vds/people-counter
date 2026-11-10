@@ -7,8 +7,10 @@ import io
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
+import stat
 import threading
 import traceback
 import unicodedata
@@ -17,6 +19,7 @@ import zipfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -97,19 +100,70 @@ class LocalFootageSource:
             raise ValueError("Select a footage folder")
         return path.relative_to(self.video_root).as_posix() + "/"
 
-    def entries(self, folder: str) -> list[dict[str, Any]]:
+    def _children(self, folder: str) -> list[os.DirEntry[str]]:
         path = self.resolve(folder)
         if not path.is_dir():
             raise ValueError("Select a footage folder")
+        try:
+            with os.scandir(path) as children:
+                return list(children)
+        except OSError as error:
+            logging.getLogger(__name__).warning("Cannot read footage folder %s", folder, exc_info=True)
+            raise ValueError(f"Cannot read folder: {error.strerror or error}") from error
+
+    def entries(self, folder: str) -> list[dict[str, Any]]:
         entries = []
-        for child in sorted(path.iterdir(), key=lambda item: item.name.lower()):
-            blocked = not child.resolve().is_relative_to(self.root)
-            entries.append({
-                "name": child.name, "path": child.relative_to(self.root).as_posix(),
-                "blocked": blocked, "directory": not blocked and child.is_dir(),
-                "video": not blocked and child.suffix.lower() in CONTENT_TYPES and child.is_file(),
-            })
-        return entries
+        for child in self._children(folder):
+            path = Path(child.path)
+            row: dict[str, Any] = {
+                "name": child.name, "path": path.relative_to(self.root).as_posix(),
+                "blocked": False, "directory": False, "video": False,
+                "size_bytes": None, "modified_utc": None, "error": None,
+            }
+            try:
+                row["blocked"] = not path.resolve().is_relative_to(self.root)
+                if not row["blocked"]:
+                    metadata = child.stat()
+                    row["directory"] = stat.S_ISDIR(metadata.st_mode)
+                    regular = stat.S_ISREG(metadata.st_mode)
+                    row["video"] = regular and path.suffix.lower() in CONTENT_TYPES
+                    row["size_bytes"] = metadata.st_size if regular else None
+                    row["modified_utc"] = datetime.fromtimestamp(
+                        metadata.st_mtime, timezone.utc,
+                    ).strftime("%Y-%m-%d %H:%M UTC")
+            except (OSError, RuntimeError, OverflowError, ValueError) as error:
+                logging.getLogger(__name__).warning("Cannot inspect footage entry %s", path, exc_info=True)
+                row["error"] = f"Metadata unavailable: {error}"
+            entries.append(row)
+        return sorted(entries, key=lambda row: (row["blocked"], not row["directory"], row["name"].casefold()))
+
+    def folders(self, folder: str) -> list[dict[str, Any]]:
+        nodes = []
+        for child in self._children(folder):
+            path = Path(child.path)
+            try:
+                if path.resolve().is_relative_to(self.root) and child.is_dir():
+                    nodes.append({
+                        "name": child.name, "path": path.relative_to(self.root).as_posix(),
+                        "children": None,
+                    })
+            except (OSError, RuntimeError) as error:
+                logging.getLogger(__name__).warning("Cannot inspect folder %s", path, exc_info=True)
+                raise ValueError(f"Cannot load folders: {error}") from error
+        return sorted(nodes, key=lambda node: node["name"].casefold())
+
+    def folder_tree(self, folder: str) -> list[dict[str, Any]]:
+        relative = self.resolve(folder).relative_to(self.root)
+        tree = self.folders("")
+        branch = tree
+        for depth in range(1, len(relative.parts) + 1):
+            path = Path(*relative.parts[:depth]).as_posix()
+            node = next((item for item in branch if item["path"] == path), None)
+            if node is None:
+                raise ValueError("The folder changed while browsing. Refresh and try again.")
+            node["children"] = self.folders(path)
+            branch = node["children"]
+        return tree
 
     def frame(self, video: str, seconds: float = 0) -> tuple[bytes, int, int]:
         import cv2
