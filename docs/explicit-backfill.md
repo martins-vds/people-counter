@@ -7,12 +7,55 @@ profile setup, and controlled publication/submission, use the
 The [manifest package notebook](../notebooks/manifest_package_operator_tutorial.ipynb)
 only prepares local packages. It never uploads videos or submits work.
 
-Before opening the notebook, run `uv sync --extra experiments` and select the
+After its step 9, continue with the
+[explicit backfill operator notebook](../notebooks/explicit_backfill_operator_tutorial.ipynb)
+for a guided **Fabric PySpark notebook** workflow. Attach the deployed default
+Lakehouse and matching published SDK Environment. Set its `PACKAGE_DIR`,
+`VIDEO_ROOT`, and `MODELS_DIR` to Python-accessible mounted Lakehouse paths,
+for example `/lakehouse/default/Files/...`, preserving relative video paths.
+Set the real Environment/Control SJD IDs and source ADLS account/filesystem.
+Workspace and Lakehouse IDs come from the default Lakehouse runtime context.
+
+The notebook generates its catalog from the actual files under `MODELS_DIR`,
+prints every required artifact's SHA-256, previews the package, and triggers
+publication/Control registration only after explicit confirmation. No zero-hash
+sample catalog or repository checkout is used. Catalog generation is not model
+approval; use the same reviewed bytes deployed under `Files/models/`.
+Missing artifacts and changed existing catalog definitions fail rather than
+substituting hashes or overwriting approvals. Use a new catalog for a reviewed
+revision. Submission remains disabled by default.
+
+With `--fabric`, the shared command uses `notebookutils` storage/Fabric tokens
+instead of `DefaultAzureCredential`/Azure CLI. It refuses to submit to a different
+default Lakehouse. Optional `--wait` uses the active Spark session and preflights
+the production work Delta table before publication; it does not need DuckDB.
+Publish the matching SDK (including `--fabric` support), `azure-identity`, and
+`azure-storage-file-datalake` in the attached Environment before running.
+Service-principal/pipeline token permissions can differ from interactive user
+permissions; failures propagate without a credential fallback.
+
+Keep `STATE_DIR` on the Lakehouse, outside the immutable package, with exclusive
+operator access. Job locations, registration plans/partitions, and publication
+evidence remain there across sessions. Fabric mode uses a temporary local SQLite
+publication cache to avoid SQLite file locking on a OneLake mount; on retry it
+revalidates remote publications and reuses retained registration jobs. Do not
+delete persistent state. This is an attended tutorial: enable `RUN_SUBMISSION`
+and set `SUBMISSION_CONFIRMATION` to `SUBMIT <target>` in its options cell.
+Fabric mode does not request interactive stdin. Do not schedule the tutorial
+with submission enabled.
+
+For the **local preparation notebook**, run `uv sync --extra experiments` and select the
 repository's `.venv` as its kernel. Preparation subprocesses use the kernel's
 Python interpreter without syncing the environment. Do not replace or sync
 that environment while the kernel is running. If an earlier preparation run
 recreated `.venv`, restart the kernel, select the current `.venv`, and rerun
 the notebook from step 1.
+
+For local use of the backfill notebook, set `FABRIC_MODE = False`, supply real
+workspace/Lakehouse IDs and local paths, and install extras before starting its
+kernel: `uv sync --extra experiments --extra publisher --extra demo`.
+The `demo` extra supplies the local processing monitor. The local CLI examples
+below remain unchanged; omit `--fabric` outside Fabric.
 
 The separate operator command publishes the package and registers explicit work
 with the deployed **Control SJD**. It does not use the local SQLite Control CLI,

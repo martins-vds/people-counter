@@ -1,0 +1,43 @@
+{
+  "schema": "people-counter-backfill-catalog-v1",
+  "targets": {
+    "tutorial": {
+      "binding": {
+        "control_sjd_id": "00000000-0000-0000-0000-000000000004",
+        "environment_id": "00000000-0000-0000-0000-000000000003",
+        "filesystem": "tutorial-videos",
+        "intake_mode": "explicit",
+        "lakehouse_id": "00000000-0000-0000-0000-000000000002",
+        "shortcut_path": "Files/videos",
+        "storage_account": "tutorialaccount",
+        "table_directory": "Tables/dbo",
+        "workspace_id": "00000000-0000-0000-0000-000000000001"
+      },
+      "profiles": {
+        "rtdetr-r18-onnx-cpu": {
+          "batch_size": 1,
+          "detection_threshold": 0.6,
+          "detector_model": "r18",
+          "device": "cpu",
+          "device_variant": "cpu",
+          "model_artifact_sha256": {
+            "rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx": "0000000000000000000000000000000000000000000000000000000000000000",
+            "rtdetr_osnet/rtdetr_v2_r18vd/config.json": "0000000000000000000000000000000000000000000000000000000000000000",
+            "rtdetr_osnet/rtdetr_v2_r18vd/model.onnx": "0000000000000000000000000000000000000000000000000000000000000000",
+            "rtdetr_osnet/rtdetr_v2_r18vd/preprocessor_config.json": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "model_format": "onnx",
+          "pipeline": "rtdetr-osnet",
+          "profile_id": "rtdetr-r18-onnx-cpu",
+          "profile_overrides": {},
+          "profile_schema": "people-counter-inference-profile-v1",
+          "profile_sha256": "8f3c5503b5ce9d71690c13946ce338d84c654a40a0696a18e57b048a6ed8e0a9",
+          "runtime_key": "c9276a5bd1a9ef0e5d72ca7c49eb31af7131357c6ca598862828df872c19a04d",
+          "sample_fps": 1.0,
+          "use_fp16": false
+        }
+      }
+    }
+  },
+  "tutorial_only": true
+}

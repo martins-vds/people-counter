@@ -349,8 +349,13 @@ the worker notebook is not sufficient.
 For a preparation-only walkthrough from camera catalog creation to a validated
 offline package, use the
 [manifest package operator tutorial](notebooks/manifest_package_operator_tutorial.ipynb).
-Then use the separate [explicit backfill command](docs/explicit-backfill.md)
-to preview, publish, and register that package with the deployed Control SJD.
+Continue with the [explicit backfill operator tutorial](notebooks/explicit_backfill_operator_tutorial.ipynb)
+in Fabric to generate a catalog from real model files in your Lakehouse, preview,
+explicitly confirm publication/registration with the deployed Control SJD,
+and optionally monitor committed processing through Spark. Submission is disabled
+by default; configure the mounted package, video, and model folders first.
+The [explicit backfill guide](docs/explicit-backfill.md) covers the equivalent CLI
+workflow and administrator setup.
 
 ### Publish backfill manifests
 

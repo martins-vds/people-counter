@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -11,12 +12,16 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from azure.core.credentials import AccessToken, TokenCredential
 
 from people_counter.adls import AzureDataLakeStorage
 from people_counter.customer_demo import read_demo_delta
@@ -89,6 +94,49 @@ class BackfillConfig:
     shortcut_path: str
     profile: dict[str, Any]
     table_directory: str = "Tables/dbo"
+
+
+class NotebookStorageCredential:
+    """Request renewable storage tokens from the current Fabric notebook identity."""
+
+    def get_token(self, *scopes: str, **kwargs: Any) -> AccessToken:
+        import notebookutils  # pyright: ignore[reportMissingImports]
+        from azure.core.credentials import AccessToken
+
+        token = notebookutils.credentials.getToken("storage")
+        try:
+            payload = token.split(".")[1]
+            expiration = json.loads(base64.urlsafe_b64decode(
+                payload + "=" * (-len(payload) % 4)
+            ))["exp"]
+            if type(expiration) is not int or expiration <= time.time():
+                raise ValueError("Invalid expiration")
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            raise RuntimeError("Fabric returned an invalid or expired storage token") from None
+        return AccessToken(token, expiration)
+
+
+class NotebookFabricTokenProvider:
+    """Acquire Fabric API tokens without a local Azure CLI session."""
+
+    def get_token(self) -> str:
+        import notebookutils  # pyright: ignore[reportMissingImports]
+
+        token = notebookutils.credentials.getToken("pbi")
+        if not isinstance(token, str) or not token.strip():
+            raise RuntimeError("Fabric returned an empty API token")
+        return token
+
+
+def _validate_notebook_target(config: BackfillConfig) -> None:
+    import notebookutils  # pyright: ignore[reportMissingImports]
+
+    context = notebookutils.runtime.context
+    if (
+        context.get("defaultLakehouseWorkspaceId") != config.workspace_id
+        or context.get("defaultLakehouseId") != config.lakehouse_id
+    ):
+        raise ValueError("Backfill target must match the notebook's attached default Lakehouse")
 
 
 def load_config(path: Path) -> BackfillConfig:
@@ -288,7 +336,9 @@ def registration_records(
 class OneLakeFiles:
     """OneLake access under one explicit workspace and Lakehouse binding."""
 
-    def __init__(self, config: BackfillConfig) -> None:
+    def __init__(
+        self, config: BackfillConfig, *, credential: TokenCredential | None = None,
+    ) -> None:
         from azure.core.exceptions import ResourceExistsError
         from azure.identity import DefaultAzureCredential
         from azure.storage.filedatalake import DataLakeServiceClient
@@ -297,7 +347,7 @@ class OneLakeFiles:
         self._lakehouse = config.lakehouse_id
         service = DataLakeServiceClient(
             "https://onelake.dfs.fabric.microsoft.com",
-            credential=DefaultAzureCredential(),
+            credential=credential if credential is not None else DefaultAzureCredential(),
         )
         self._filesystem = service.get_file_system_client(config.workspace_id)
 
@@ -353,7 +403,20 @@ _WORK_COLUMNS = ["work_id", "status", "committed_attempt_id", "last_error"]
 
 
 @contextmanager
-def processing_reader(config: BackfillConfig) -> Iterator[Any]:
+def processing_reader(config: BackfillConfig, *, fabric: bool = False) -> Iterator[Any]:
+    if fabric:
+        from pyspark.sql import SparkSession
+
+        _validate_notebook_target(config)
+        spark = SparkSession.getActiveSession()
+        if spark is None:
+            raise RuntimeError("--fabric --wait requires an active Fabric Spark session")
+        _progress("Checking processing monitor access through the Fabric Spark session...")
+        spark.read.format("delta").load(_table_prefix(config) + "work").select(
+            *_WORK_COLUMNS
+        ).limit(0).collect()
+        yield spark
+        return
     try:
         import duckdb
     except ImportError as error:
@@ -427,7 +490,7 @@ def processing_progress(
 
 
 def wait_for_processing(
-    connection: Any, config: BackfillConfig, state_dir: Path,
+    connection: Any, config: BackfillConfig, state_dir: Path, *, fabric: bool = False,
 ) -> dict[str, Any]:
     plan = json.loads((state_dir / "registration-plan.json").read_text(encoding="utf-8"))
     work_ids = [record["work_id"] for record in plan["items"]]
@@ -435,10 +498,18 @@ def wait_for_processing(
     while True:
         rows = []
         for offset in range(0, len(work_ids), PARTITION_SIZE):
-            rows.extend(read_demo_delta(
-                connection, _table_prefix(config), "work", _WORK_COLUMNS,
-                [("work_id", "in", work_ids[offset:offset + PARTITION_SIZE])],
-            ))
+            selected = work_ids[offset:offset + PARTITION_SIZE]
+            if fabric:
+                from pyspark.sql.functions import col
+
+                rows.extend(row.asDict() for row in connection.read.format("delta").load(
+                    _table_prefix(config) + "work"
+                ).select(*_WORK_COLUMNS).where(col("work_id").isin(selected)).collect())
+            else:
+                rows.extend(read_demo_delta(
+                    connection, _table_prefix(config), "work", _WORK_COLUMNS,
+                    [("work_id", "in", selected)],
+                ))
         report = processing_progress(work_ids, rows)
         report["status"] = (
             "failed" if report["failures"]
@@ -527,9 +598,15 @@ def submit(
     publication: ManifestPackagePublishConfig,
     config: BackfillConfig,
     state_dir: Path,
+    *,
+    fabric: bool = False,
 ) -> dict[str, Any]:
+    credentials = {}
+    if fabric:
+        _validate_notebook_target(config)
+        credentials["credential"] = NotebookStorageCredential()
     _progress("Verifying published release and model artifacts...")
-    files = OneLakeFiles(config)
+    files = OneLakeFiles(config, **credentials)
     release = resolve_published_release(files.read_text)
     if release.manifest.environment_id != config.environment_id:
         raise ValueError("published release Environment does not match the configured Environment")
@@ -555,10 +632,16 @@ def submit(
         raise ValueError("state directory belongs to a different package, target, profile, or release")
     _save(plan_path, plan)
     storage = AzureDataLakeStorage(
-        config.storage_account, config.filesystem, chunk_size=publication.chunk_size
+        config.storage_account, config.filesystem, chunk_size=publication.chunk_size,
+        **credentials,
     )
     _progress(f"Publishing {len(records)} videos and manifests (or verifying existing publications)...")
-    summary = publish_manifest_package(publication, storage, validated_package=package)
+    with (TemporaryDirectory(prefix="pc-backfill-") if fabric else nullcontext()) as directory:
+        active_publication = (
+            replace(publication, checkpoint_path=Path(directory) / "publication.sqlite3")
+            if directory is not None else publication
+        )
+        summary = publish_manifest_package(active_publication, storage, validated_package=package)
     if summary.rejected or summary.published + summary.already_published != len(records):
         raise RuntimeError("publication incomplete; inspect publication-rejections.csv before retrying")
     _progress(
@@ -591,7 +674,8 @@ def submit(
         _progress(f"Verified Lakehouse source {len(evidence)}/{len(package.plans)}: {source.relative_path}")
     _save(state_dir / "publication-evidence.json", evidence)
     client = FabricAutomationClient(
-        AzureCliResourceTokenProvider("https://api.fabric.microsoft.com"),
+        NotebookFabricTokenProvider() if fabric
+        else AzureCliResourceTokenProvider("https://api.fabric.microsoft.com"),
         transport=UrllibTransport(),
     )
     jobs = []
@@ -634,6 +718,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, choices=[1, 2, 4], help="Explicit advanced profile override.")
     parser.add_argument("--sample-fps", type=float, help="Explicit advanced profile override.")
     parser.add_argument("--state-dir", type=Path)
+    parser.add_argument(
+        "--fabric", action="store_true",
+        help="Use the attached Fabric notebook identity and Spark processing monitor, not Azure CLI.",
+    )
     parser.add_argument(
         "--submit", action="store_true",
         help="Publish videos/manifests and register explicit backfill work (default: offline preview).",
@@ -692,13 +780,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not count:
         raise ValueError("backfill package must contain at least one video")
     if args.submit:
+        runtime = {"fabric": True} if args.fabric else {}
         try:
             if args.wait:
-                with processing_reader(config) as connection:
-                    report = submit(package, publication, config, state)
-                    report.update(wait_for_processing(connection, config, state))
+                with processing_reader(config, **runtime) as connection:
+                    report = submit(package, publication, config, state, **runtime)
+                    report.update(wait_for_processing(connection, config, state, **runtime))
             else:
-                report = submit(package, publication, config, state)
+                report = submit(package, publication, config, state, **runtime)
         except KeyboardInterrupt:
             _progress(
                 "Local monitoring stopped. Accepted Fabric jobs continue; no cancellation was sent. "

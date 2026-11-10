@@ -239,11 +239,11 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
         202, {"Location": "https://api.fabric.microsoft.com/v1/jobs/job-1"}, b""
     )
     fabric.request_json.return_value = {"id": "job-1", "status": "Completed"}
-    with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
+    with patch.object(operator, "AzureDataLakeStorage", return_value=storage) as storage_client, patch.object(
         operator, "OneLakeFiles", return_value=files
-    ), patch.object(
+    ) as onelake_client, patch.object(
         operator, "resolve_published_release", return_value=release
-    ), patch.object(operator, "FabricAutomationClient", return_value=fabric):
+    ) as resolver, patch.object(operator, "FabricAutomationClient", return_value=fabric) as client:
         assert operator.main(setup.args + ["--submit"]) == 0
         assert operator.main(setup.args + ["--submit"]) == 0
     assert fabric.request_response.call_count == 1
@@ -260,12 +260,42 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     report = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert report["status"] == "registered"
     assert report["item_count"] == 1
+    assert report["partition_count"] == 1
     assert report["processing_complete"] is False
+    assert json.loads((setup.root / "state/registration-summary.json").read_text()) == report
+    config = operator.load_config(setup.config_path)
+    onelake_client.assert_called_with(config)
+    resolver.assert_called_with(files.read_text)
+    storage_client.assert_called_with("account", "footage", chunk_size=8 * 1024 * 1024)
+    assert client.call_args.args[0] == operator.AzureCliResourceTokenProvider(
+        "https://api.fabric.microsoft.com",
+    )
+    assert isinstance(client.call_args.kwargs["transport"], operator.UrllibTransport)
+    assert (setup.root / "state/publication.sqlite3").is_file()
+    plan = json.loads((setup.root / "state/registration-plan.json").read_text())
+    assert plan["target"] == {
+        name: setup.config[name] for name in (
+            "workspace_id", "lakehouse_id", "environment_id", "control_sjd_id",
+            "storage_account", "filesystem",
+        )
+    }
+    assert plan["package_sha256"] == hashlib.sha256(
+        (setup.package / "manifest-package.json").read_bytes()
+    ).hexdigest()
     for path in setup.config["profile"]["model_artifact_sha256"]:
         files.verify_video.assert_any_call(f"Files/models/{path}", None, "a" * 64)
     evidence = json.loads((setup.root / "state/publication-evidence.json").read_text())
     assert evidence[0]["work_id"] == record["work_id"]
     assert evidence[0]["source_manifest"]["source_etag"] == '"video-etag"'
+    publication = operator.publication_config(setup.package, setup.root, setup.root / "state", config)
+    video = validate_manifest_package(publication).plans[0]
+    assert evidence[0]["manifest_path"] == f"{config.shortcut_path}/{video.incoming_manifest_path}"
+    files.read_bytes.assert_called_with(evidence[0]["manifest_path"])
+    files.verify_video.assert_any_call(
+        f"{config.shortcut_path}/{video.incoming_video_path}",
+        video.inspection.size_bytes, video.inspection.sha256,
+    )
+    assert files.write_partition.call_args.args[0].startswith(operator.INTAKE_ROOT + "/")
 
 
 @pytest.mark.parametrize("failure", ["publication", "shortcut", "release"])
@@ -354,6 +384,209 @@ def test_notebook_preparation_uses_kernel_interpreter():
     )
     assert "--catalog" in result.stdout
     assert "--output-dir" in result.stdout
+
+
+@pytest.fixture
+def backfill_notebook():
+    path = Path(__file__).parents[1] / "notebooks/explicit_backfill_operator_tutorial.ipynb"
+    notebook = json.loads(path.read_text())
+    assert notebook["nbformat"] == 4
+    cells = {}
+    for cell in notebook["cells"]:
+        if cell["cell_type"] == "code":
+            assert cell["execution_count"] is None
+            assert cell["outputs"] == []
+            cells[cell["id"]] = compile("".join(cell["source"]), str(path), "exec")
+    return cells
+
+
+@pytest.fixture
+def notebookutils_module(setup):
+    return SimpleNamespace(
+        runtime=SimpleNamespace(context={
+            "defaultLakehouseWorkspaceId": setup.config["workspace_id"],
+            "defaultLakehouseId": setup.config["lakehouse_id"],
+        }),
+        credentials=Mock(),
+    )
+
+
+@pytest.fixture
+def backfill_notebook_run(backfill_notebook, setup, notebookutils_module):
+    namespace = {}
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
+        exec(backfill_notebook["workspace-setup"], namespace)
+    binding = {key: value for key, value in setup.config.items() if key != "profile"}
+    catalog = setup.root / "backfill-catalog.json"
+    models = setup.root / "models"
+    for relative in artifact_paths(setup.config["profile"]["profile_id"]):
+        path = models / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"test artifact {relative}".encode())
+    namespace.update(
+        PACKAGE_DIR=setup.package, VIDEO_ROOT=setup.root,
+        CATALOG_PATH=catalog, STATE_DIR=setup.root / "state", MODELS_DIR=models,
+        TARGET_BINDING=binding, TARGET="production",
+    )
+    for cell_id in (
+        "create-catalog", "list-targets", "select-target", "select-profile",
+        "preview-package", "submission-options",
+    ):
+        exec(backfill_notebook[cell_id], namespace)
+    return namespace
+
+
+def test_backfill_notebook_defaults_use_lakehouse_paths(backfill_notebook, notebookutils_module):
+    namespace = {}
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
+        exec(backfill_notebook["workspace-setup"], namespace)
+    assert namespace["PACKAGE_DIR"] == Path("/lakehouse/default/Files/backfill/manifest-package-tutorial")
+    assert namespace["MODELS_DIR"] == Path("/lakehouse/default/Files/models")
+    assert namespace["VIDEO_ROOT"] == Path("/lakehouse/default/Files/backfill/source-videos")
+    assert not namespace["STATE_DIR"].is_relative_to(namespace["PACKAGE_DIR"])
+    assert namespace["FABRIC_MODE"] is True
+    assert namespace["TARGET_BINDING"]["workspace_id"] == notebookutils_module.runtime.context[
+        "defaultLakehouseWorkspaceId"
+    ]
+
+
+def test_backfill_notebook_generates_catalog_from_real_model_bytes(backfill_notebook_run, setup):
+    namespace = backfill_notebook_run
+    catalog = json.loads(namespace["CATALOG_PATH"].read_text())
+    assert "tutorial_only" not in catalog
+    assert list(catalog["targets"]) == ["production"]
+    config = operator.load_target(namespace["CATALOG_PATH"], "production", namespace["PROFILE"])
+    hashes = config.profile["model_artifact_sha256"]
+    assert hashes == {
+        relative: hashlib.sha256((namespace["MODELS_DIR"] / relative).read_bytes()).hexdigest()
+        for relative in artifact_paths(namespace["PROFILE"])
+    }
+    assert namespace["preview"]["workspace_id"] == config.workspace_id
+    assert namespace["preview"]["effective_profile"]["model_artifact_sha256"] == hashes
+    assert namespace["preview"]["status"] == "preview"
+    assert namespace["preview"]["item_count"] == 1
+    assert not (setup.root / "state").exists()
+
+
+def test_backfill_notebook_catalog_is_retry_safe(
+    backfill_notebook, backfill_notebook_run,
+):
+    namespace = backfill_notebook_run
+    path = namespace["CATALOG_PATH"]
+    before = path.read_bytes()
+    exec(backfill_notebook["create-catalog"], namespace)
+    assert path.read_bytes() == before
+    (namespace["MODELS_DIR"] / artifact_paths(namespace["PROFILE"])[0]).write_bytes(b"changed")
+    with pytest.raises(ValueError, match="overwrite"):
+        exec(backfill_notebook["create-catalog"], namespace)
+    assert namespace["CATALOG_PATH"].read_bytes() == before
+
+
+def test_backfill_notebook_missing_model_stops_catalog_creation(
+    backfill_notebook, backfill_notebook_run,
+):
+    namespace = backfill_notebook_run
+    namespace["CATALOG_PATH"].unlink()
+    (namespace["MODELS_DIR"] / artifact_paths(namespace["PROFILE"])[0]).unlink()
+    with pytest.raises(FileNotFoundError):
+        exec(backfill_notebook["create-catalog"], namespace)
+    assert not namespace["CATALOG_PATH"].exists()
+
+
+def test_backfill_notebook_catalog_cannot_be_written_inside_package(
+    backfill_notebook, backfill_notebook_run,
+):
+    namespace = backfill_notebook_run
+    namespace["CATALOG_PATH"] = namespace["PACKAGE_DIR"] / "catalog.json"
+    with pytest.raises(ValueError, match="outside"):
+        exec(backfill_notebook["create-catalog"], namespace)
+    assert not namespace["CATALOG_PATH"].exists()
+
+
+def test_backfill_notebook_run_all_is_offline(backfill_notebook, backfill_notebook_run, setup):
+    before = {p: p.read_bytes() for p in setup.package.rglob("*") if p.is_file()}
+    with patch.object(operator, "submit") as submit, patch("builtins.input") as confirmation:
+        exec(backfill_notebook["submit-backfill"], backfill_notebook_run)
+        exec(backfill_notebook["inspect-evidence"], backfill_notebook_run)
+    submit.assert_not_called()
+    confirmation.assert_not_called()
+    assert backfill_notebook_run["preview"]["status"] == "preview"
+    assert backfill_notebook_run["preview"]["item_count"] == 1
+    assert "--fabric" in backfill_notebook_run["backfill_args"]
+    assert not (setup.root / "state").exists()
+    assert before == {p: p.read_bytes() for p in setup.package.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_backfill_notebook_submission_reuses_reviewed_arguments(
+    backfill_notebook, backfill_notebook_run, wait,
+):
+    namespace = backfill_notebook_run
+    namespace["RUN_SUBMISSION"] = True
+    namespace["WAIT_FOR_PROCESSING"] = wait
+    namespace["SUBMISSION_CONFIRMATION"] = "SUBMIT production"
+    report = {"status": "processed" if wait else "registered", "processing_complete": wait}
+    run = Mock(side_effect=[namespace["preview"], report])
+    namespace["run_backfill"] = run
+    with patch("builtins.input", side_effect=AssertionError("Fabric must not request stdin")):
+        exec(backfill_notebook["submit-backfill"], namespace)
+    flags = ["--submit", "--wait"] if wait else ["--submit"]
+    assert run.call_args_list[0].args[0] == namespace["backfill_args"]
+    assert run.call_args_list[1].args[0] == [*namespace["backfill_args"], *flags]
+    assert namespace["submission_report"] == report
+
+
+def test_backfill_notebook_confirmation_rejects_submission(backfill_notebook, backfill_notebook_run):
+    namespace = backfill_notebook_run
+    namespace["RUN_SUBMISSION"] = True
+    run = Mock(return_value=namespace["preview"])
+    namespace["run_backfill"] = run
+    with patch("builtins.input", side_effect=AssertionError("Fabric must not request stdin")), pytest.raises(
+        ValueError, match="confirmation",
+    ):
+        exec(backfill_notebook["submit-backfill"], namespace)
+    assert run.call_count == 1
+
+
+def test_backfill_notebook_requires_new_review_after_changes(backfill_notebook, backfill_notebook_run):
+    namespace = backfill_notebook_run
+    namespace["RUN_SUBMISSION"] = True
+    run = Mock(return_value={**namespace["preview"], "package_sha256": "changed"})
+    namespace["run_backfill"] = run
+    with patch("builtins.input") as confirmation, pytest.raises(RuntimeError, match="preview"):
+        exec(backfill_notebook["submit-backfill"], namespace)
+    confirmation.assert_not_called()
+    assert run.call_count == 1
+
+
+@pytest.mark.parametrize("code", [1, 130])
+def test_backfill_notebook_command_failure_is_not_success(
+    backfill_notebook, notebookutils_module, code,
+):
+    namespace = {}
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
+        exec(backfill_notebook["workspace-setup"], namespace)
+    with patch.object(operator, "main", return_value=code), pytest.raises(
+        RuntimeError, match=str(code),
+    ):
+        namespace["run_backfill"]([])
+
+
+def test_backfill_notebook_keeps_progress_visible(backfill_notebook, notebookutils_module, capsys):
+    namespace = {}
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
+        exec(backfill_notebook["workspace-setup"], namespace)
+
+    def command(arguments):
+        operator._progress("Processing: 1/1 committed")
+        print('{"status": "processed", "processing_complete": true}')
+        return 0
+
+    with patch.object(operator, "main", side_effect=command):
+        assert namespace["run_backfill"](["--submit", "--wait"]) == {
+            "status": "processed", "processing_complete": True,
+        }
+    assert "Processing: 1/1 committed" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("bad_size,bad_digest", [(True, False), (False, True)])
@@ -647,6 +880,223 @@ def test_processing_reader_preflights_table_and_closes_connection(setup):
     assert "LOAD delta" in setup_sql
     assert "CHAIN 'cli'" in setup_sql
     assert "onelake.blob.fabric.microsoft.com" in setup_sql
+
+
+def test_fabric_storage_credential_refreshes_notebook_tokens(notebookutils_module):
+    import base64
+
+    def token(expiration):
+        body = base64.urlsafe_b64encode(json.dumps({"exp": expiration}).encode()).decode().rstrip("=")
+        return f"header.{body}.signature"
+
+    first, second = token(4102444800), token(4102444900)
+    notebookutils_module.credentials.getToken.side_effect = [first, second]
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
+        credential = operator.NotebookStorageCredential()
+        observed = [
+            credential.get_token("https://storage.azure.com/.default"),
+            credential.get_token("https://storage.azure.com/.default"),
+        ]
+    assert [(value.token, value.expires_on) for value in observed] == [
+        (first, 4102444800), (second, 4102444900),
+    ]
+    assert [call.args for call in notebookutils_module.credentials.getToken.call_args_list] == [
+        ("storage",), ("storage",),
+    ]
+
+
+@pytest.mark.parametrize("token", [
+    "", "invalid", "header.e30.signature",
+    "header.eyJleHAiOjF9.signature", "header.eyJleHAiOnRydWV9.signature",
+])
+def test_fabric_storage_credential_rejects_invalid_tokens(notebookutils_module, token):
+    notebookutils_module.credentials.getToken.return_value = token
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}), pytest.raises(
+        RuntimeError, match="storage token",
+    ):
+        operator.NotebookStorageCredential().get_token("https://storage.azure.com/.default")
+
+
+def test_fabric_api_token_uses_notebook_identity(notebookutils_module):
+    notebookutils_module.credentials.getToken.return_value = "fabric-test-token"
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
+        assert operator.NotebookFabricTokenProvider().get_token() == "fabric-test-token"
+    notebookutils_module.credentials.getToken.assert_called_once_with("pbi")
+
+
+def test_fabric_api_token_failure_has_no_cli_fallback(notebookutils_module):
+    notebookutils_module.credentials.getToken.return_value = ""
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}), pytest.raises(
+        RuntimeError, match="empty API token",
+    ):
+        operator.NotebookFabricTokenProvider().get_token()
+
+
+@pytest.mark.parametrize("padding", ["", "x", "xx", "xxx"])
+def test_fabric_storage_token_padding_and_expiration_boundary(notebookutils_module, padding):
+    import base64
+
+    expiration = 4102444800
+    payload = base64.urlsafe_b64encode(json.dumps({
+        "exp": expiration, "padding": padding,
+    }).encode()).decode().rstrip("=")
+    notebookutils_module.credentials.getToken.return_value = f"header.{payload}.signature"
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}), patch.object(
+        operator.time, "time", return_value=expiration - 1,
+    ):
+        assert operator.NotebookStorageCredential().get_token().expires_on == expiration
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}), patch.object(
+        operator.time, "time", return_value=expiration,
+    ), pytest.raises(RuntimeError, match="expired storage token"):
+        operator.NotebookStorageCredential().get_token()
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_fabric_submit_uses_notebook_credentials_and_local_sqlite(setup, notebookutils_module, wait):
+    storage, files, release = cloud_mocks(setup)
+    fabric = Mock()
+    fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
+    fabric.request_json.return_value = {"status": "Completed"}
+    checkpoints = []
+    spark = Mock()
+
+    def committed_rows():
+        plan = json.loads((setup.root / "state/registration-plan.json").read_text())
+        return [
+            SimpleNamespace(asDict=lambda item=item: {
+                "work_id": item["work_id"], "status": "SUCCEEDED",
+                "committed_attempt_id": "fabric-attempt", "last_error": None,
+            })
+            for item in plan["items"]
+        ]
+
+    spark.read.format.return_value.load.return_value.select.return_value.where.return_value.collect.side_effect = (
+        committed_rows
+    )
+
+    def publish(config, *args, **kwargs):
+        checkpoints.append(config.checkpoint_path)
+        assert not config.checkpoint_path.is_relative_to(setup.root / "state")
+        return operator_publish(config, *args, **kwargs)
+
+    operator_publish = operator.publish_manifest_package
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}), patch.object(
+        operator, "AzureDataLakeStorage", return_value=storage,
+    ) as adls, patch.object(
+        operator, "OneLakeFiles", return_value=files,
+    ) as onelake, patch.object(
+        operator, "resolve_published_release", return_value=release,
+    ), patch.object(
+        operator, "FabricAutomationClient", return_value=fabric,
+    ) as client, patch.object(
+        operator, "publish_manifest_package", side_effect=publish,
+    ), patch.object(
+        operator, "AzureCliResourceTokenProvider", side_effect=AssertionError("Must not use CLI"),
+    ), patch(
+        "pyspark.sql.SparkSession.getActiveSession", return_value=spark,
+    ), patch(
+        "pyspark.sql.functions.col", return_value=Mock(),
+    ):
+        args = setup.args + ["--fabric", "--submit"] + (["--wait"] if wait else [])
+        assert operator.main(args) == 0
+        assert operator.main(args) == 0
+    assert adls.call_args.args == ("account", "footage")
+    assert adls.call_args.kwargs["chunk_size"] == 8 * 1024 * 1024
+    assert isinstance(adls.call_args.kwargs["credential"], operator.NotebookStorageCredential)
+    assert onelake.call_args.args == (operator.load_config(setup.config_path),)
+    assert onelake.call_args.kwargs["credential"] is adls.call_args.kwargs["credential"]
+    assert isinstance(client.call_args.args[0], operator.NotebookFabricTokenProvider)
+    assert (setup.root / "state/registration-summary.json").is_file()
+    assert len(set(checkpoints)) == 2
+    assert not any(path.exists() for path in checkpoints)
+    assert fabric.request_response.call_count == 1
+    if wait:
+        summary = json.loads((setup.root / "state/processing-summary.json").read_text())
+        assert summary["status"] == "processed"
+        assert summary["processing_complete"] is True
+        assert set(summary["committed_attempts"].values()) == {"fabric-attempt"}
+
+
+def test_onelake_supports_supplied_credential(setup, monkeypatch):
+    credential = Mock()
+    monkeypatch.undo()
+    with patch("azure.storage.filedatalake.DataLakeServiceClient") as service, patch(
+        "azure.identity.DefaultAzureCredential", side_effect=AssertionError("Must not use default"),
+    ):
+        operator.OneLakeFiles(operator.load_config(setup.config_path), credential=credential)
+    assert service.call_args.kwargs["credential"] is credential
+
+
+@pytest.mark.parametrize("field", ["defaultLakehouseId", "defaultLakehouseWorkspaceId"])
+def test_fabric_target_mismatch_stops_before_writes(setup, notebookutils_module, field):
+    notebookutils_module.runtime.context[field] = "wrong-target"
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}), patch.object(
+        operator, "AzureDataLakeStorage",
+    ) as storage, pytest.raises(ValueError, match="attached default Lakehouse"):
+        operator.main(setup.args + ["--fabric", "--submit"])
+    storage.assert_not_called()
+    assert not (setup.root / "state").exists()
+
+
+def test_fabric_processing_reader_preflights_spark_without_duckdb(setup, notebookutils_module):
+    spark = Mock()
+    config = operator.load_config(setup.config_path)
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module, "duckdb": None}), patch(
+        "pyspark.sql.SparkSession.getActiveSession", return_value=spark,
+    ):
+        with operator.processing_reader(config, fabric=True) as actual:
+            assert actual is spark
+    spark.read.format.assert_called_with("delta")
+    spark.read.format.return_value.load.assert_called_once_with(operator._table_prefix(config) + "work")
+    table = spark.read.format.return_value.load.return_value
+    table.select.assert_called_once_with(*operator._WORK_COLUMNS)
+    table.select.return_value.limit.assert_called_once_with(0)
+    table.select.return_value.limit.return_value.collect.assert_called_once_with()
+    spark.stop.assert_not_called()
+
+
+def test_fabric_processing_table_error_prevents_publication(setup, notebookutils_module):
+    spark = Mock()
+    spark.read.format.return_value.load.side_effect = PermissionError("Work table access denied")
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}), patch(
+        "pyspark.sql.SparkSession.getActiveSession", return_value=spark,
+    ), patch.object(operator, "submit") as submit, pytest.raises(PermissionError, match="denied"):
+        operator.main(setup.args + ["--fabric", "--submit", "--wait"])
+    submit.assert_not_called()
+
+
+def test_fabric_wait_reads_fresh_delta_and_filters_exact_ids(setup):
+    state = processing_state(setup, ("work",))
+    spark = Mock()
+    table = spark.read.format.return_value.load.return_value
+    table.select.return_value.where.return_value.collect.side_effect = [
+        [SimpleNamespace(asDict=lambda: {
+            "work_id": "work", "status": "LEASED", "committed_attempt_id": None,
+        })],
+        [SimpleNamespace(asDict=lambda: {
+            "work_id": "work", "status": "SUCCEEDED", "committed_attempt_id": "attempt",
+        })],
+    ]
+    column = Mock()
+    with patch("pyspark.sql.functions.col", return_value=column) as col, patch.object(
+        operator.time, "sleep",
+    ):
+        report = operator.wait_for_processing(
+            spark, operator.load_config(setup.config_path), state, fabric=True,
+        )
+    assert report["processing_complete"] is True
+    assert report["committed_attempts"] == {"work": "attempt"}
+    assert spark.read.format.return_value.load.call_count == 2
+    col.assert_called_with("work_id")
+    column.isin.assert_called_with(["work"])
+
+
+def test_fabric_wait_preflight_failure_prevents_publication(setup, notebookutils_module):
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}), patch(
+        "pyspark.sql.SparkSession.getActiveSession", return_value=None,
+    ), patch.object(operator, "submit") as submit, pytest.raises(RuntimeError, match="Spark session"):
+        operator.main(setup.args + ["--fabric", "--submit", "--wait"])
+    submit.assert_not_called()
 
 
 def test_wait_dependency_failure_prevents_submission(setup):
