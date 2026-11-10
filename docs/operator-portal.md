@@ -59,7 +59,7 @@ The separate `portal-css` volume contains only generated public styles.
 ## Live Tailwind design
 
 The UI follows the reference repository's Python-served HTML plus standalone
-Tailwind watcher pattern, without a SPA, runtime CSS CDN, or Node package tree.
+Tailwind watcher pattern, without a SPA, runtime CSS CDN, or runtime Node package tree.
 Tailwind v4.3.0 is pinned and its Linux x64/arm64 downloads are SHA-256 verified.
 
 - Design tokens and shared form/table/button/badge styles:
@@ -93,6 +93,39 @@ docker compose --profile portal run --rm --no-deps \
 
 CI compares the running compiler's output against that committed asset, so stale
 production styles fail validation instead of shipping silently.
+
+## JavaScript tests and change risk
+
+Node 24 and npm are needed only for development checks, not to run the portal.
+From the repository root:
+
+```bash
+npm ci --ignore-scripts --no-audit --no-fund
+npm run test:portal
+npm run test:portal:mutation
+```
+
+Jest runs DOM behavior tests and collects Istanbul coverage for every JavaScript
+file under `src/people_counter/portal_static/`, including untested files.
+[`crap-score`](https://github.com/ahilke/js-crap-score) combines each function's
+cyclomatic complexity and statement coverage. The check fails if any function
+scores **10 or higher**, has an invalid score, or the report has no functions.
+Adding behavior tests lowers coverage-related risk; functions with complexity
+10 or higher need refactoring even with full coverage.
+
+[`StrykerJS`](https://github.com/stryker-mutator/stryker-js) mutates every portal
+JavaScript source with its default mutation operators and runs the related Jest
+tests. The mutation gate requires **at least 96%**, which is strictly above 95%.
+No production files or mutation operators are excluded to raise the score.
+The sandbox contains only JavaScript sources, tests, and their configuration.
+Node resolves dependencies from `node_modules` at the repository root;
+automatic dependency symlinking is disabled to avoid recursively scanning
+unrelated local Spark data directories.
+
+JSON/HTML coverage, CRAP, and mutation reports are written under
+`evidence/portal-js/`; open `mutation.html` to inspect surviving mutants.
+PR validation runs both commands and uploads these reports for 14 days.
+The existing Playwright tests remain responsible for real-browser integration.
 
 ## VS Code and Codespaces
 

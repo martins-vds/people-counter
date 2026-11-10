@@ -7,6 +7,11 @@ it safely.
 - Ruff checks changed Python files.
 - Pyright checks changed production and utility files.
 - Pytest runs the non-Compose suite with branch coverage and CRAP results.
+- Jest tests the portal JavaScript with Istanbul coverage. `crap-score` generates
+  per-function CRAP results; every function must score strictly below 10.
+  StrykerJS mutates all portal JavaScript with its default operators and requires
+  at least a 96% mutation score (strictly above 95%). JavaScript coverage and
+  JSON/HTML CRAP and mutation reports are uploaded as evidence.
 - Python validation installs the `demo` extra for the real DuckDB/Delta tests.
   Test and mutation jobs use Temurin Java 21 for local Spark/Delta tests rather
   than the runner's default Java runtime.

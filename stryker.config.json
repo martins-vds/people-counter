@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "mutate": ["src/people_counter/portal_static/**/*.js"],
+  "ignorePatterns": [
+    "**",
+    "!package.json",
+    "!scripts/check-portal-crap.cjs",
+    "!src/people_counter/portal_static/**/*.js",
+    "!tests/js/**/*.test.cjs"
+  ],
+  "symlinkNodeModules": false,
+  "testRunner": "jest",
+  "jest": {
+    "configFile": "package.json"
+  },
+  "coverageAnalysis": "perTest",
+  "concurrency": 2,
+  "reporters": ["clear-text", "progress", "json", "html"],
+  "jsonReporter": {
+    "fileName": "evidence/portal-js/mutation.json"
+  },
+  "htmlReporter": {
+    "fileName": "evidence/portal-js/mutation.html"
+  },
+  "thresholds": {
+    "high": 100,
+    "low": 96,
+    "break": 96
+  }
+}

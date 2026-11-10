@@ -46,3 +46,7 @@ None/
 .ruff_cache/
 .test-artifacts/
 test-results/
+
+# Portal JavaScript development dependencies
+node_modules/
+.stryker-tmp/

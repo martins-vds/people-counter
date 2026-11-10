@@ -1,5 +1,7 @@
 .git
 .venv
+node_modules
+.stryker-tmp
 .pytest_cache
 .coverage
 mutants
