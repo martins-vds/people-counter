@@ -123,6 +123,7 @@ def create_app(service: PortalService) -> Flask:
             folder=request.args.get("folder", Path(video).parent.as_posix()),
             config_id=config_id, values=values,
             scope=request.args.get("scope", "camera"), seconds=request.args.get("seconds", "0"),
+            locations=service.store.locations(),
         )
 
     @app.post("/calibrate")
@@ -136,6 +137,14 @@ def create_app(service: PortalService) -> Flask:
             "cameras.html", cameras=service.store.entries("camera"),
             exceptions=service.store.entries("exception"),
         )
+
+    @app.route("/locations", methods=["GET", "POST"])
+    def locations():
+        if request.method == "POST":
+            service.store.add_location(request.form.get("location_id", ""))
+            flash("Location added. Cameras can be associated with it now or later.")
+            return redirect(url_for("locations"))
+        return render_template("locations.html", locations=service.store.locations())
 
     @app.get("/cameras.csv")
     def camera_csv():

@@ -56,15 +56,24 @@ Do not use `docker compose down --volumes` unless you intend to delete that stat
 
 ## Operator workflow
 
+Start on **Locations** to add location IDs independently of footage and cameras.
+A location may have zero cameras indefinitely. Location counts show distinct
+camera IDs, not the number of effective-dated configurations. The camera form
+selects an existing location instead of accepting arbitrary location text.
+
 1. **Footage:** open a folder and select a video. Previews decode a frame on the
    server, so browser video-codec support is not required.
 2. **Counting line:** select the preview time, then click two endpoints or enter
    their coordinates. Drawing uses the original frame's pixel coordinates,
    including when the canvas is scaled on a small screen. The arrow shows
    endpoint order, not walking direction; reversing endpoints swaps in/out.
-3. **Camera metadata:** enter camera/location IDs, timezone, timestamp rules,
+3. **Camera metadata:** enter a camera ID, select an existing location, and set timezone, timestamp rules,
    and effective dates. A camera default applies to matching videos in that
    folder. Review the Cameras page or download its CSV.
+   All configurations sharing a camera ID must use one location. A save that
+   would split that camera across locations is rejected without changing data.
+   A camera with a single configuration can be moved by editing its location;
+   moving multiple configurations together is not an implicit side effect.
 4. **Video exceptions:** choose "This video only" to override that video's line
    and frame dimensions. An optional authoritative UTC timestamp overrides
    capture time; a blank timestamp retains normal embedded/filename resolution.
@@ -130,6 +139,12 @@ See the [explicit backfill runbook](explicit-backfill.md) for those prerequisite
 The UI does not provision infrastructure, grant permissions, or upload models.
 
 ## Job lifetime and recovery
+
+On upgrade, existing camera location IDs are backfilled into the independent
+location registry automatically. Existing job snapshots and package files are
+not rewritten. Conflicting legacy assignments for the same camera ID fail
+closed with an explicit error and no partial migration; correct those
+assignments before upgrading rather than guessing which location owns a camera.
 
 One background worker owns the durable SQLite queue; the app holds an exclusive
 process lock. Do not scale this Compose service or share its state with another

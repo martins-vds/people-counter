@@ -26,6 +26,7 @@ def portal(tmp_path, monkeypatch, request):
     (source / "lobby").mkdir(parents=True)
 
     def make_video(name, width=320, height=180):
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([
             "ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"testsrc=size={width}x{height}:rate=5",
             "-t", "1", "-c:v", "mpeg4", "-pix_fmt", "yuv420p",

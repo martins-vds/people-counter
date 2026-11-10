@@ -11,8 +11,18 @@ from playwright.sync_api import expect
 pytestmark = pytest.mark.ui
 
 
-def calibrate_camera(page, portal):
-    page.goto(portal.url + "/?folder=lobby")
+def ensure_location(page, portal, location):
+    page.goto(portal.url + "/locations")
+    row = page.get_by_role("row").filter(has=page.get_by_role("cell", name=location, exact=True))
+    if row.count() == 0:
+        page.get_by_label("Location ID", exact=True).fill(location)
+        page.get_by_role("button", name="Add location", exact=True).click()
+    return row
+
+
+def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-entrance", folder="lobby"):
+    ensure_location(page, portal, location)
+    page.goto(portal.url + "/?folder=" + folder)
     page.get_by_role("link", name="Calibrate camera using clip.mp4", exact=True).click()
     page.wait_for_load_state("load")
     expect(page.locator("#preview-image")).to_have_js_property("naturalWidth", 320)
@@ -25,16 +35,17 @@ def calibrate_camera(page, portal):
     expect(page.get_by_label("X1", exact=True)).to_have_value("32")
     expect(page.get_by_label("X2", exact=True)).to_have_value("288")
     expect(page.get_by_label("Y1", exact=True)).to_have_value("90")
-    page.get_by_label("Camera ID", exact=True).fill("camera-17")
-    page.get_by_label("Location ID", exact=True).fill("north-entrance")
+    page.get_by_label("Camera ID", exact=True).fill(camera_id)
+    page.get_by_label("Location ID", exact=True).select_option(location)
     page.get_by_label("Camera timezone", exact=True).fill("America/Denver")
     page.get_by_label("Preview time in seconds", exact=True).fill("0.2")
     page.get_by_role("button", name="Show frame", exact=True).click()
-    expect(page.get_by_label("Camera ID", exact=True)).to_have_value("camera-17")
+    expect(page.get_by_label("Camera ID", exact=True)).to_have_value(camera_id)
     expect(page.get_by_label("X1", exact=True)).to_have_value("32")
     page.get_by_role("button", name="Save calibration", exact=True).click()
     expect(page.get_by_role("heading", name="Camera metadata", exact=True)).to_be_visible()
-    expect(page.get_by_role("cell", name="camera-17 / north-entrance America/Denver")).to_be_visible()
+    row = page.get_by_role("row").filter(has=page.get_by_role("cell", name=folder, exact=True))
+    expect(row.get_by_role("cell", name=f"{camera_id} / {location} America/Denver")).to_be_visible()
 
 
 def prepare_package(page, portal):
@@ -111,6 +122,40 @@ def test_cloud_gate_csrf_and_source_boundaries_are_enforced_in_browser(page, por
     assert response.status == 400
     expect(page.get_by_role("alert")).to_contain_text("source root")
     assert portal.calls == []
+
+
+def test_locations_support_zero_many_cameras_and_reject_split_assignments(page, portal):
+    empty = ensure_location(page, portal, "empty-warehouse")
+    expect(empty).to_have_attribute("data-camera-count", "0")
+    expect(empty.get_by_role("cell", name="No cameras yet", exact=True)).to_be_visible()
+    calibrate_camera(page, portal)
+    portal.make_video("side/clip.mp4")
+    calibrate_camera(page, portal, camera_id="camera-18", folder="side")
+    portal.make_video("later/clip.mp4")
+    calibrate_camera(page, portal, folder="later")
+    page.get_by_role("link", name="Locations", exact=True).click()
+    north = page.get_by_role("row").filter(
+        has=page.get_by_role("cell", name="north-entrance", exact=True),
+    )
+    expect(north).to_have_attribute("data-camera-count", "2")
+    expect(north.get_by_role("cell", name="2", exact=True)).to_be_visible()
+    expect(north).to_contain_text("camera-17, camera-18")
+    expect(page.get_by_role("row").filter(
+        has=page.get_by_role("cell", name="empty-warehouse", exact=True),
+    )).to_have_attribute("data-camera-count", "0")
+    page.get_by_role("link", name="Cameras", exact=True).click()
+    page.get_by_role("link", name="Edit camera-17", exact=True).first.click()
+    page.get_by_label("Location ID", exact=True).select_option("empty-warehouse")
+    page.get_by_role("button", name="Save calibration", exact=True).click()
+    expect(page.get_by_role("alert")).to_contain_text("locations")
+    assert all(
+        item["catalog"]["location_id"] == "north-entrance"
+        for item in portal.service.store.entries("camera")
+    )
+    page.get_by_role("link", name="Locations", exact=True).click()
+    expect(page.get_by_role("row").filter(
+        has=page.get_by_role("cell", name="north-entrance", exact=True),
+    )).to_have_attribute("data-camera-count", "2")
 
 
 @pytest.mark.portal_cloud

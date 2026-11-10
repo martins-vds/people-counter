@@ -46,6 +46,24 @@ def csv_text(fields: tuple[str, ...], rows: list[dict[str, Any]]) -> str:
     return stream.getvalue()
 
 
+def _identifier(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} is required")
+    return value.strip()
+
+
+def _camera_data(data: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    catalog = data.get("catalog")
+    if not isinstance(catalog, Mapping):
+        raise ValueError("Camera configuration must contain catalog metadata")
+    camera = _identifier(catalog.get("camera_id"), "Camera ID")
+    location = _identifier(catalog.get("location_id"), "Location ID")
+    normalized = {
+        **data, "catalog": {**catalog, "camera_id": camera, "location_id": location},
+    }
+    return camera, location, normalized
+
+
 class LocalFootageSource:
     """Filesystem boundary; cloud sources can later materialize behind this boundary."""
 
@@ -124,6 +142,30 @@ class PortalStore:
                 CREATE TABLE IF NOT EXISTS events (
                     sequence INTEGER PRIMARY KEY, job_id TEXT NOT NULL, message TEXT NOT NULL);
             """)
+        self._migrate_locations()
+
+    def _migrate_locations(self) -> None:
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            locations: dict[str, str] = {}
+            updates = []
+            for row in db.execute("SELECT id,data FROM entries WHERE kind='camera'"):
+                original = json.loads(row["data"])
+                camera, location, normalized = _camera_data(original)
+                previous = locations.setdefault(camera, location)
+                if previous != location:
+                    raise ValueError(
+                        f"Camera {camera!r} must have one location; existing configurations conflict. "
+                        "Correct those assignments before upgrading; no metadata was changed."
+                    )
+                if normalized != original:
+                    updates.append((json.dumps(normalized, allow_nan=False), row["id"]))
+            for location in sorted(set(locations.values())):
+                db.execute(
+                    "INSERT INTO entries VALUES ('location',?,'{}') "
+                    "ON CONFLICT(kind,id) DO NOTHING", (location,),
+                )
+            db.executemany("UPDATE entries SET data=? WHERE kind='camera' AND id=?", updates)
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -143,11 +185,55 @@ class PortalStore:
             ]
 
     def put(self, kind: str, identity: str, data: Mapping[str, Any]) -> None:
+        normalized = dict(data)
+        if kind == "location":
+            identity = _identifier(identity, "Location ID")
         with self.connection() as db:
+            if kind == "camera":
+                db.execute("BEGIN IMMEDIATE")
+                camera, location, normalized = _camera_data(data)
+                if db.execute(
+                    "SELECT 1 FROM entries WHERE kind='location' AND id=?", (location,),
+                ).fetchone() is None:
+                    raise ValueError("Select an existing location before assigning a camera")
+                for row in db.execute("SELECT id,data FROM entries WHERE kind='camera' AND id<>?", (identity,)):
+                    other_camera, other_location, _ = _camera_data(json.loads(row["data"]))
+                    if camera == other_camera and location != other_location:
+                        raise ValueError(
+                            f"Camera {camera!r} must have one location; it is already associated "
+                            f"with {other_location!r}."
+                        )
             db.execute(
                 "INSERT INTO entries VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
-                (kind, identity, json.dumps(dict(data), allow_nan=False)),
+                (kind, identity, json.dumps(normalized, allow_nan=False)),
             )
+
+    def add_location(self, identity: str) -> None:
+        identity = _identifier(identity, "Location ID")
+        try:
+            with self.connection() as db:
+                db.execute("INSERT INTO entries VALUES ('location',?,'{}')", (identity,))
+        except sqlite3.IntegrityError as error:
+            raise ValueError(f"Location {identity!r} already exists") from error
+
+    def locations(self) -> list[dict[str, Any]]:
+        with self.connection() as db:
+            rows = db.execute(
+                "SELECT kind,id,data FROM entries WHERE kind IN ('location','camera') ORDER BY id"
+            ).fetchall()
+        cameras: dict[str, set[str]] = {
+            row["id"]: set() for row in rows if row["kind"] == "location"
+        }
+        for row in rows:
+            if row["kind"] == "camera":
+                camera, location, _ = _camera_data(json.loads(row["data"]))
+                if location not in cameras:
+                    raise ValueError(f"Camera {camera!r} references an unknown location")
+                cameras[location].add(camera)
+        return [
+            {"id": location, "camera_ids": sorted(identities), "camera_count": len(identities)}
+            for location, identities in sorted(cameras.items())
+        ]
 
     def enqueue(self, kind: str, payload: Mapping[str, Any]) -> str:
         identity = uuid.uuid4().hex

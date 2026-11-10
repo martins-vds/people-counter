@@ -2,13 +2,14 @@ import json
 import sqlite3
 import threading
 from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 pytest.importorskip("flask")
 
 from people_counter.operator_portal import create_app
-from people_counter.portal_service import PortalService
+from people_counter.portal_service import PortalService, PortalStore
 from people_counter.manifest import CatalogError, build_manifest_plan, load_camera_catalog, load_video_inventory
 from tests.test_manifest_publisher import inspection, write_catalog
 from people_counter import portal_service as portal_module
@@ -148,6 +149,7 @@ def test_partial_calibration_override_is_rejected(tmp_path):
 
 
 def save_camera(service, monkeypatch):
+    service.store.add_location("north-entrance")
     video = service.source.root / "lobby/20260101T120000Z.mp4"
     video.write_bytes(b"video")
     monkeypatch.setattr(service.source, "frame", lambda *args: (b"jpeg", 1920, 1080))
@@ -199,6 +201,7 @@ def test_preparation_snapshots_camera_metadata_and_archive_has_no_footage(servic
 def test_video_exception_and_camera_edit_are_validated(service, monkeypatch):
     form = save_camera(service, monkeypatch)
     identity = service.store.entries("camera")[0]["id"]
+    service.store.add_location("updated")
     service.save_calibration({**form, "config_id": identity, "location_id": "updated"})
     assert len(service.store.entries("camera")) == 1
     assert service.store.entries("camera")[0]["catalog"]["location_id"] == "updated"
@@ -312,3 +315,129 @@ def test_invalid_video_capture_override_does_not_save_exception(service, monkeyp
     with pytest.raises(CatalogError):
         service.save_calibration({**form, "scope": "video", "captured_at_utc": "not-a-UTC-time"})
     assert service.store.entries("exception") == []
+
+
+def camera_record(camera, location):
+    return {"catalog": {"camera_id": camera, "location_id": location}, "folder": "lobby", "video": "lobby/clip.mp4"}
+
+
+def test_locations_exist_without_cameras_and_persist(service):
+    service.store.add_location("empty-warehouse")
+    assert service.store.locations() == [{"id": "empty-warehouse", "camera_ids": [], "camera_count": 0}]
+    restored = PortalStore(service.store.path)
+    assert restored.locations() == service.store.locations()
+    assert restored.entries("camera") == []
+
+
+def test_location_has_many_cameras_but_counts_ids_not_configurations(service):
+    service.store.add_location("north")
+    service.store.add_location("empty")
+    for config, camera in (("config-1", "cam-1"), ("config-2", "cam-2"), ("config-3", "cam-1")):
+        service.store.put("camera", config, camera_record(camera, "north"))
+    assert service.store.locations() == [
+        {"id": "empty", "camera_ids": [], "camera_count": 0},
+        {"id": "north", "camera_ids": ["cam-1", "cam-2"], "camera_count": 2},
+    ]
+
+
+@pytest.mark.parametrize("value", ["", "  ", None, 123])
+def test_invalid_or_duplicate_locations_are_rejected(service, value):
+    with pytest.raises(ValueError):
+        service.store.add_location(value)
+    service.store.add_location(" north ")
+    with pytest.raises(ValueError, match="already exists"):
+        service.store.add_location("north")
+    assert len(service.store.locations()) == 1
+
+
+def test_camera_requires_an_existing_location(service):
+    with pytest.raises(ValueError, match="existing location"):
+        service.store.put("camera", "config-1", camera_record("cam-1", "missing"))
+    assert service.store.entries("camera") == []
+    assert service.store.locations() == []
+
+
+def test_camera_cannot_be_assigned_to_two_locations_and_failed_edit_is_atomic(service):
+    service.store.add_location("north")
+    service.store.add_location("south")
+    original = camera_record("cam-1", "north")
+    service.store.put("camera", "early", original)
+    service.store.put("camera", "late", original)
+    for config in ("new", "late"):
+        with pytest.raises(ValueError, match="one location"):
+            service.store.put("camera", config, camera_record(" cam-1 ", "south"))
+    assert len(service.store.entries("camera")) == 2
+    assert all(row["catalog"]["location_id"] == "north" for row in service.store.entries("camera"))
+    assert service.store.locations()[0]["camera_count"] == 1
+    assert service.store.locations()[1]["camera_count"] == 0
+
+
+def test_concurrent_camera_saves_cannot_split_ownership(service):
+    service.store.add_location("north")
+    service.store.add_location("south")
+    ready = threading.Barrier(2)
+
+    def save(location):
+        ready.wait(timeout=5)
+        try:
+            service.store.put("camera", location, camera_record("cam-1", location))
+            return "saved"
+        except ValueError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert sorted(executor.map(save, ["north", "south"])) == ["rejected", "saved"]
+    assert len(service.store.entries("camera")) == 1
+    assert sum(row["camera_count"] for row in service.store.locations()) == 1
+
+
+def test_single_configuration_can_move_without_rewriting_package_snapshot(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    identity = service.enqueue_preparation("lobby")
+    config = service.store.entries("camera")[0]
+    service.store.add_location("south")
+    service.save_calibration({**form, "config_id": config["id"], "location_id": "south"})
+    assert service.store.job(identity)["payload"]["cameras"][0]["location_id"] == "north-entrance"
+    assert service.store.locations() == [
+        {"id": "north-entrance", "camera_ids": [], "camera_count": 0},
+        {"id": "south", "camera_ids": ["camera-17"], "camera_count": 1},
+    ]
+
+
+def insert_legacy_camera(store, identity, record):
+    with store.connection() as db:
+        db.execute("INSERT INTO entries VALUES ('camera',?,?)", (identity, json.dumps(record)))
+
+
+def test_legacy_locations_migrate_idempotently_without_changing_jobs(service):
+    legacy = camera_record(" cam-1 ", " north ")
+    insert_legacy_camera(service.store, "legacy-1", legacy)
+    insert_legacy_camera(service.store, "legacy-2", legacy)
+    job = service.store.enqueue("prepare", {"cameras": [legacy["catalog"]]})
+    restored = PortalStore(service.store.path)
+    assert restored.locations() == [{"id": "north", "camera_ids": ["cam-1"], "camera_count": 1}]
+    assert restored.job(job)["payload"]["cameras"] == [legacy["catalog"]]
+    assert all(row["catalog"]["camera_id"] == "cam-1" for row in restored.entries("camera"))
+    assert PortalStore(service.store.path).locations() == restored.locations()
+
+
+def test_conflicting_legacy_camera_locations_fail_without_partial_migration(service):
+    insert_legacy_camera(service.store, "legacy-1", camera_record("cam-1", "north"))
+    insert_legacy_camera(service.store, "legacy-2", camera_record("cam-1", "south"))
+    before = service.store.entries("camera")
+    with pytest.raises(ValueError, match="one location"):
+        PortalStore(service.store.path)
+    assert service.store.entries("camera") == before
+    assert service.store.entries("location") == []
+
+
+def test_locations_form_requires_csrf_and_creates_empty_location(app, service, monkeypatch):
+    client = app.test_client()
+    assert client.post("/locations", data={"location_id": "warehouse"}).status_code == 403
+    with patch.object(service.source, "frame", side_effect=AssertionError("No footage is required")):
+        response = client.post("/locations", data={"csrf": csrf(client), "location_id": "warehouse"})
+    assert response.status_code == 302
+    page = client.get("/locations")
+    assert page.status_code == 200 and b"warehouse" in page.data
+    assert b'data-camera-count="0"' in page.data
+    assert service.store.entries("camera") == []

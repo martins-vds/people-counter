@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Locations{% endblock %}
+{% block content %}
+<h1>Locations</h1>
+<p>A location can have no cameras, one camera, or many cameras. A camera ID can belong to only one location across its configurations.</p>
+<form method="post" class="card">
+  <h2>Add a location</h2>
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <label for="location-id">Location ID</label>
+  <input id="location-id" name="location_id" required placeholder="For example: north-entrance">
+  <button>Add location</button>
+</form>
+<section><h2>Registered locations</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Location ID</th><th>Camera count</th><th>Camera IDs</th></tr></thead>
+<tbody>{% for location in locations %}
+<tr data-location-id="{{ location.id }}" data-camera-count="{{ location.camera_count }}">
+  <td>{{ location.id }}</td><td>{{ location.camera_count }}</td>
+  <td>{{ location.camera_ids|join(', ') if location.camera_ids else 'No cameras yet' }}</td>
+</tr>
+{% else %}<tr><td colspan="3">No locations yet. Locations can be added before footage or cameras.</td></tr>{% endfor %}</tbody>
+</table></div>
+<p>Counts represent distinct camera IDs, not the number of effective-dated configurations.</p>
+<a href="{{ url_for('footage') }}">Browse footage to add or configure cameras</a>
+</section>
+{% endblock %}

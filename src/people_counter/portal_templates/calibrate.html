@@ -40,7 +40,16 @@
     <legend>Camera metadata</legend>
     <div class="grid">
       <label>Camera ID <input name="camera_id" required value="{{ values.get('camera_id', '') }}"></label>
-      <label>Location ID <input name="location_id" required value="{{ values.get('location_id', '') }}"></label>
+      <div>
+        <label for="camera-location">Location ID</label>
+        <select id="camera-location" name="location_id" required>
+          <option value="">Select an existing location</option>
+          {% for location in locations %}
+          <option value="{{ location.id }}" {% if values.get('location_id') == location.id %}selected{% endif %}>{{ location.id }}</option>
+          {% endfor %}
+        </select>
+        <p><a href="{{ url_for('locations') }}">Add a location</a> before assigning a camera.</p>
+      </div>
       <label>Camera timezone <input name="camera_timezone" required value="{{ values.get('camera_timezone', 'UTC') }}"></label>
       <label>Capture time source <select name="capture_time_source">
         {% for name in ['auto','embedded','filename_utc','inventory'] %}
