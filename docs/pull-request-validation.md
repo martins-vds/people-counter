@@ -5,7 +5,8 @@ request to `main`. The workflow uses read-only repository access. Forks can run
 it safely.
 
 - Ruff checks changed Python files.
-- Pyright checks changed production and utility files.
+- Pyright checks changed production and utility files using the locked uv
+  environment's interpreter, including its installed optional dependencies.
 - Pytest runs the non-Compose suite with branch coverage and CRAP results.
 - Jest tests portal behavior with accessible queries, user interactions, semantic
   state assertions, and Istanbul coverage. `crap-score` generates
@@ -25,6 +26,14 @@ it safely.
   every workflow, including deployment and drift workflows.
 - shell regression tests for SDK version preparation and rollback, release
   version validation, tag conflicts, draft recovery, and idempotent publication.
+
+Commit tutorial notebooks with cleared outputs and execution counts. The
+backfill notebook tests reject saved execution state; clear it before pushing:
+
+```bash
+uv run --no-sync jupyter nbconvert --clear-output --inplace \
+  notebooks/explicit_backfill_operator_tutorial.ipynb
+```
 
 Pull requests from `releases/` branches also run **Release version and unused
 tag**. The branch must be named `releases/vMAJOR.MINOR.PATCH`, its version must
