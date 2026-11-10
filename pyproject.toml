@@ -26,6 +26,7 @@ dev = [
     "pytest-crap>=0.3.0",
     "toml>=0.10.2",
 ]
+ui = ["pytest-playwright>=0.7,<1"]
 
 [project.scripts]
 people-counter = "people_counter.cli:main"
@@ -50,13 +51,14 @@ prepare-manifests = "people_counter.manifest_publisher:prepare_main"
 publish-manifests = "people_counter.manifest_publisher:publish_main"
 pc-reconcile-fabric-runtime = "people_counter.fabric_reconcilers:main"
 pc-validate-fabric-deployment = "people_counter.fabric_acceptance:main"
+pc-admin = "people_counter.operator_portal:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["people_counter*"]
 
 [tool.setuptools.package-data]
-people_counter = ["py.typed", "data/*.json", "data/deploy/*.json"]
+people_counter = ["py.typed", "data/*.json", "data/deploy/*.json", "portal_templates/*.html", "portal_static/*"]
 
 [tool.mutmut]
 source_paths = [
@@ -77,6 +79,8 @@ also_copy = [
     "notebooks/fabric/",
     "notebooks/customer_end_to_end_demo.ipynb",
     "notebooks/manifest_package_operator_tutorial.ipynb",
+    "src/people_counter/portal_templates/",
+    "src/people_counter/portal_static/",
     "samples/",
     "scripts/",
     "src/people_counter/data/sjd_release_identity.json",
@@ -87,6 +91,7 @@ also_copy = [
 on_dependency_change = "rerun"
 
 [project.optional-dependencies]
+portal = ["flask>=3.1,<4", "waitress>=3,<4", "filelock>=3,<4"]
 cpu = [
     "libreyolo==1.5.0",
     "rfdetr==1.10.1",
@@ -132,6 +137,8 @@ local-spark = [
 [tool.pytest.ini_options]
 markers = [
     "compose: requires the local Docker Compose Spark cluster",
+    "ui: opt-in Playwright operator portal browser tests",
+    "portal_cloud: portal E2E using credential-free fake cloud adapters",
 ]
 
 [tool.uv]

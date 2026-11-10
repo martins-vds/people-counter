@@ -26,6 +26,49 @@ x-common: &common
     - spark
 
 services:
+  portal:
+    profiles: ["portal"]
+    image: ${PEOPLE_COUNTER_PORTAL_IMAGE:-people-counter-portal:local}
+    build:
+      context: .
+      dockerfile: docker/portal/Dockerfile
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 2.0
+    mem_limit: 1g
+    pids_limit: 256
+    ports:
+      - "127.0.0.1:${PC_PORTAL_PORT:-8088}:8088"
+    environment:
+      PC_PORTAL_ALLOW_CLOUD: ${PC_PORTAL_ALLOW_CLOUD:-0}
+    tmpfs:
+      - /tmp:uid=10001,gid=10001,mode=1777
+    volumes:
+      - type: bind
+        source: ${PC_PORTAL_FOOTAGE_DIR:-./samples}
+        target: /data/videos
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PC_PORTAL_MODELS_DIR:-./docker/portal/empty-models}
+        target: /data/models
+        read_only: true
+        bind:
+          create_host_path: false
+      - portal-state:/var/lib/people-counter/portal
+      - portal-azure:/var/lib/people-counter/azure
+    networks: ["portal"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/healthz', timeout=3).read()"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 15s
+
   spark-master:
     <<: *common
     hostname: spark-master
@@ -168,10 +211,13 @@ services:
       start_period: 15s
 
 networks:
+  portal:
   spark:
     internal: true
 
 volumes:
+  portal-state:
+  portal-azure:
   spark-control:
   spark-worker-1-work:
   spark-worker-1-scratch:

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Unable to complete this action</h1>
+<p class="error" role="alert">{{ message }}</p>
+<p>Correct the input and try again. No successful result is assumed.</p>
+<a href="{{ url_for('footage') }}">Back to footage</a>
+{% endblock %}

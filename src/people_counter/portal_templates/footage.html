@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Operator portal</h1>
+<p>Browse footage, calibrate a camera, then generate a package. Nothing is uploaded automatically.</p>
+<section>
+  <h2>Footage source</h2>
+  <label>Source implementation
+    <select disabled><option>Local disk</option><option disabled>Cloud storage (future adapter)</option></select>
+  </label>
+  <p>Allowed source root: <code>{{ root }}</code>. Change the Compose footage mount to use another local folder.</p>
+  <form method="get">
+    <label>Folder within source root <input name="folder" value="{{ folder }}" placeholder="For example: lobby/camera-17"></label>
+    <button>Browse folder</button>
+  </form>
+</section>
+<section>
+  <div class="section-heading"><h2>{{ folder or 'Source root' }}</h2>
+  <a href="{{ url_for('packages', folder=folder) }}">Prepare this folder</a></div>
+  {% if folder %}<p><a href="{{ url_for('footage', folder=parent) }}">Parent folder</a></p>{% endif %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Name</th><th>Actions</th></tr></thead>
+    <tbody>{% for entry in entries %}
+      <tr><td>{{ entry.name }}</td><td>
+        {% if entry.blocked %}Blocked: outside source root
+        {% elif entry.directory %}<a href="{{ url_for('footage', folder=entry.path) }}">Open folder {{ entry.name }}</a>
+        {% elif entry.video %}
+          <a href="{{ url_for('calibrate', video=entry.path, folder=folder) }}">Calibrate camera using {{ entry.name }}</a>
+          <a href="{{ url_for('calibrate', video=entry.path, folder=folder, scope='video') }}">Video exception for {{ entry.name }}</a>
+        {% else %}Not a supported video{% endif %}
+      </td></tr>
+    {% else %}<tr><td colspan="2">This folder is empty.</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

@@ -8,7 +8,7 @@ import json
 import math
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from collections.abc import Callable
@@ -111,7 +111,10 @@ class CameraCatalogEntry:
 
 @dataclass(frozen=True)
 class InventoryEntry:
-    captured_at_utc: datetime
+    captured_at_utc: datetime | None
+    frame_width: int | None = None
+    frame_height: int | None = None
+    counting_line: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -256,9 +259,7 @@ def _compile_capture_pattern(
     return pattern, format_text
 
 
-def _parse_catalog_row(row: dict[str, str], line: int) -> CameraCatalogEntry:
-    if _positive_int(row, "catalog_version", line) != 1:
-        raise CatalogError(f"Catalog row {line}: unsupported catalog_version")
+def _calibration(row: dict[str, str], line: int) -> tuple[int, int, tuple[int, int, int, int]]:
     width = _positive_int(row, "frame_width", line)
     height = _positive_int(row, "frame_height", line)
     counting_line = tuple(
@@ -275,7 +276,13 @@ def _parse_catalog_row(row: dict[str, str], line: int) -> CameraCatalogEntry:
         raise CatalogError(f"Catalog row {line}: counting line is outside the frame")
     if (x1, y1) == (x2, y2):
         raise CatalogError(f"Catalog row {line}: counting-line endpoints must differ")
+    return width, height, (x1, y1, x2, y2)
 
+
+def _parse_catalog_row(row: dict[str, str], line: int) -> CameraCatalogEntry:
+    if _positive_int(row, "catalog_version", line) != 1:
+        raise CatalogError(f"Catalog row {line}: unsupported catalog_version")
+    width, height, counting_line = _calibration(row, line)
     camera_timezone = _required_text(row, "camera_timezone", line)
     try:
         ZoneInfo(camera_timezone)
@@ -406,11 +413,27 @@ def load_video_inventory(path: Path | None) -> dict[str, InventoryEntry]:
                 raise CatalogError(
                     f"Video inventory row {line}: duplicate path {relative_path!r}"
                 )
-            inventory[relative_path] = InventoryEntry(
-                captured_at_utc=parse_utc_timestamp(
+            calibration_fields = (
+                "frame_width", "frame_height", "counting_line_x1", "counting_line_y1",
+                "counting_line_x2", "counting_line_y2",
+            )
+            has_calibration = any(row.get(name) for name in calibration_fields)
+            width = height = counting_line = None
+            if has_calibration:
+                if not all(row.get(name) for name in calibration_fields):
+                    raise CatalogError(f"Video inventory row {line}: complete calibration required")
+                width, height, counting_line = _calibration(row, line)
+            captured_at = (
+                parse_utc_timestamp(
                     row["captured_at_utc"],
                     f"Video inventory row {line} captured_at_utc",
-                ),
+                ) if row["captured_at_utc"] else None
+            )
+            if captured_at is None and not has_calibration:
+                raise CatalogError(f"Video inventory row {line}: timestamp or calibration required")
+            inventory[relative_path] = InventoryEntry(
+                captured_at_utc=captured_at, frame_width=width, frame_height=height,
+                counting_line=counting_line,
             )
     return inventory
 
@@ -530,7 +553,10 @@ def _resolve_capture_time(
     embedded_capture_times: tuple[str, ...],
 ) -> tuple[datetime, str]:
     source = entry.capture_time_source
-    if inventory_entry is not None and source in {"auto", "inventory"}:
+    if (
+        inventory_entry is not None and inventory_entry.captured_at_utc is not None
+        and source in {"auto", "inventory"}
+    ):
         return inventory_entry.captured_at_utc, "inventory_override"
     if source == "inventory":
         raise _missing_capture_time(
@@ -705,6 +731,8 @@ def _probe_duration(probe: dict[str, object], path: Path) -> float:
     if isinstance(file_format, dict):
         candidates.append(file_format.get("duration"))
     for candidate in candidates:
+        if not isinstance(candidate, (str, int, float)):
+            continue
         try:
             duration = float(candidate)
         except (TypeError, ValueError):
@@ -804,6 +832,14 @@ def build_manifest_plan(
         inventory,
         inspection.embedded_capture_times,
     )
+    override = inventory.get(relative_path)
+    if override is not None and override.counting_line is not None:
+        if override.frame_width is None or override.frame_height is None:
+            raise CatalogError("Video calibration override requires frame dimensions")
+        entry = replace(
+            entry, frame_width=override.frame_width, frame_height=override.frame_height,
+            counting_line=override.counting_line,
+        )
     if (inspection.width, inspection.height) != (
         entry.frame_width,
         entry.frame_height,

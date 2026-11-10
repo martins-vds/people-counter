@@ -10,8 +10,9 @@ import shlex
 import sys
 import time
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -57,8 +58,24 @@ def _digest(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+_PROGRESS: ContextVar[Callable[[str], None] | None] = ContextVar("backfill_progress", default=None)
+
+
+@contextmanager
+def progress_reporter(callback: Callable[[str], None]) -> Iterator[None]:
+    token = _PROGRESS.set(callback)
+    try:
+        yield
+    finally:
+        _PROGRESS.reset(token)
+
+
 def _progress(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    callback = _PROGRESS.get()
+    if callback is not None:
+        callback(message)
+    else:
+        print(message, file=sys.stderr, flush=True)
 
 
 @dataclass(frozen=True)
@@ -175,32 +192,44 @@ def prepare_catalog_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--profile", action="append", choices=sorted(PRESETS), required=True)
     parser.add_argument("--output", type=Path, default=DEFAULT_CATALOG)
     args = parser.parse_args(argv)
-    if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", args.target) is None:
+    report = prepare_catalog(
+        args.target, json.loads(args.target_config.read_text(encoding="utf-8")),
+        args.models_dir, args.profile, args.output,
+    )
+    print(json.dumps(report, sort_keys=True))
+    return 0
+
+
+def prepare_catalog(
+    target: str, binding: object, models_dir: Path, profile_names: Sequence[str], output: Path,
+    *, overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", target) is None:
         raise ValueError("target names must contain lowercase letters, digits, underscores, or hyphens")
-    binding = json.loads(args.target_config.read_text(encoding="utf-8"))
     if not isinstance(binding, dict) or "profile" in binding:
         raise ValueError("target configuration must contain deployment binding fields only")
+    if not profile_names:
+        raise ValueError("Select at least one approved profile")
     profiles = {}
-    for name in args.profile:
-        profile = prepare_profile(name, args.models_dir)
+    for name in profile_names:
+        profile = prepare_profile(name, models_dir, overrides=overrides)
         _parse_config({**binding, "profile": profile})
         profiles[name] = profile
     entry = {"binding": binding, "profiles": profiles}
     catalog = (
-        _read_catalog(args.output) if args.output.exists()
+        _read_catalog(output) if output.exists()
         else {"schema": CATALOG_SCHEMA, "targets": {}}
     )
-    previous = catalog["targets"].get(args.target)
+    previous = catalog["targets"].get(target)
     if previous is not None and previous != entry:
         raise ValueError("Refusing to overwrite a different approved target/profile; generate a new catalog")
-    catalog["targets"][args.target] = entry
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    _save(args.output, catalog)
-    print(json.dumps({
-        "catalog": str(args.output), "target": args.target,
+    catalog["targets"][target] = entry
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _save(output, catalog)
+    return {
+        "catalog": str(output), "target": target,
         "profiles": sorted(profiles),
-    }, sort_keys=True))
-    return 0
+    }
 
 
 def publication_config(

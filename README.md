@@ -40,6 +40,19 @@ Start with the [GitHub deployment runbook](docs/github-deployment.md).
 
 - [Local Spark development](docs/local-spark-development.md)
 
+### Operator portal
+
+Start the local browser-based camera, package, profile, and backfill tools:
+
+```bash
+docker compose --profile portal up --build --wait portal
+```
+
+Open **http://127.0.0.1:8088**. Only the portal starts, not Spark. Footage and
+models are mounted read-only, state persists in named volumes, and cloud
+actions are disabled by default. See the [operator portal guide](docs/operator-portal.md)
+for source-folder configuration, Azure sign-in, recovery, and Playwright/CI tests.
+
 ### Development container
 
 Open the repository in VS Code and select **Dev Containers: Rebuild and Reopen

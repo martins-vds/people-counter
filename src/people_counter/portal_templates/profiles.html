@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Profiles and targets</h1>
+<p>Model requirements and hashes are calculated automatically. This does not download or approve model files.</p>
+<section><h2>Approved target catalog</h2>
+{% for target, entry in catalog.targets.items() %}
+<h3>{{ target }}</h3><ul>{% for name, profile in entry.profiles.items() %}
+<li>{{ name }}: {{ profile.detector_model }} / {{ profile.model_format }} / {{ profile.device_variant }},
+batch {{ profile.batch_size }}, {{ profile.sample_fps }} FPS</li>{% endfor %}</ul>
+{% else %}<p>No target profiles have been generated yet.</p>{% endfor %}
+</section>
+<form method="post" class="card">
+  <h2>Generate approved profiles</h2>
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <p>Administrator setup. Use the same reviewed model bytes deployed to Fabric. Models root: <code>{{ models }}</code>.</p>
+  <div class="grid">
+    <label>Target name <input name="target" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="production"></label>
+    <label>Workspace ID <input name="workspace_id" required></label>
+    <label>Lakehouse ID <input name="lakehouse_id" required></label>
+    <label>Environment ID <input name="environment_id" required></label>
+    <label>Control SJD ID <input name="control_sjd_id" required></label>
+    <label>Storage account <input name="storage_account" required></label>
+    <label>Filesystem <input name="filesystem" required></label>
+    <label>Shortcut path <input name="shortcut_path" value="Files/videos" required></label>
+    <label>Table directory <input name="table_directory" value="Tables/dbo" required></label>
+  </div>
+  <fieldset><legend>Select profiles to generate</legend>
+  {% for name in presets %}<label class="check"><input type="checkbox" name="profiles" value="{{ name }}"> {{ name }}</label>{% endfor %}
+  </fieldset>
+  <details><summary>Advanced inference overrides (optional)</summary>
+    <label for="profile-batch-size">Batch size override</label>
+    <select name="batch_size" id="profile-batch-size">
+      <option value="">Use preset default (1)</option>
+      <option value="1">1</option><option value="2">2</option><option value="4">4</option>
+    </select>
+    <label>Sampling FPS override <input name="sample_fps" type="number" min="0" step="any" placeholder="Use preset default (1.0)"></label>
+    <p>FPS must be positive and finite. The same overrides apply to all selected presets. Identities are recalculated automatically.</p>
+  </details>
+  <p>Changing an existing target definition requires a new target name/catalog revision. Unsupported Fabric pipelines, including RF-DETR/BoT-SORT, are not offered.</p>
+  <button>Generate profiles</button>
+</form>
+{% endblock %}

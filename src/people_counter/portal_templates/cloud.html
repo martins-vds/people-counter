@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Cloud publication and pipeline submission</h1>
+{% if not cloud_enabled %}<p class="notice" role="status">Cloud actions are disabled. Set PC_PORTAL_ALLOW_CLOUD=1 and authenticate inside the portal container before enabling them.</p>{% endif %}
+<p>Publishing can trigger arrival automation. Coordinate competing intake before explicitly registering the same footage.</p>
+<form method="post" class="card">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <fieldset {% if not cloud_enabled %}disabled{% endif %}><legend>Explicit cloud action</legend>
+    <label for="package-id">Prepared package</label><select id="package-id" name="package_id" required>
+      <option value="">Select a completed package</option>
+      {% for item in packages %}<option value="{{ item.id }}">{{ item.created_at }} - {{ item.id }}</option>{% endfor %}
+    </select>
+    <label for="target-profile">Target and profile</label><select id="target-profile" name="selection" required>
+      <option value="">Select an approved target/profile</option>
+      {% for item in choices %}<option value="{{ item.value }}">{{ item.target }} / {{ item.profile.profile_id }} - batch {{ item.profile.batch_size }}, {{ item.profile.sample_fps }} FPS</option>{% endfor %}
+    </select>
+    <label for="cloud-action">Action</label><select name="action" id="cloud-action" required>
+      <option value="">Choose an action</option>
+      <option value="publish">Upload/publish only (does not explicitly register work)</option>
+      <option value="submit">Publish and register explicit backfill work</option>
+    </select>
+    <label class="check"><input type="checkbox" name="wait" value="yes" id="wait-processing"> Wait for processing after submission</label>
+    <label class="check"><input type="checkbox" name="confirm" value="yes" required> I reviewed the target and intake policy and approve this cloud action.</label>
+    <button>Start cloud action</button>
+  </fieldset>
+</form>
+<p>Submission jobs preserve the exact registration records and remote job locations. Waiting confirms committed processing, not Gold/report refresh.</p>
+{% endblock %}

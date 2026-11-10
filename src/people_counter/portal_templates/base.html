@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Operator portal{% endblock %} - People Counter</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+  <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<header>
+  <a class="brand" href="{{ url_for('footage') }}">People Counter</a>
+  <span>Local operator portal</span>
+  <nav aria-label="Main navigation">
+    <a href="{{ url_for('footage') }}">Footage</a>
+    <a href="{{ url_for('cameras') }}">Cameras</a>
+    <a href="{{ url_for('packages') }}">Packages</a>
+    <a href="{{ url_for('profiles') }}">Profiles</a>
+    <a href="{{ url_for('cloud') }}">Cloud work</a>
+    <a href="{{ url_for('jobs') }}">Jobs</a>
+  </nav>
+</header>
+<main>
+  {% if worker_error %}<p class="error" role="alert">{{ worker_error }} Restart the portal after correcting the problem.</p>{% endif %}
+  {% for message in get_flashed_messages() %}<p class="notice" role="status">{{ message }}</p>{% endfor %}
+  {% block content %}{% endblock %}
+</main>
+<footer>Local files are read-only. Jobs continue when you close this page.
+  Cloud actions are {{ 'enabled; explicit confirmation is still required' if cloud_enabled else 'disabled' }}.
+</footer>
+</body>
+</html>

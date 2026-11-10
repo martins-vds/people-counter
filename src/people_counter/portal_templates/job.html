@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block head %}{% if job.status in ['QUEUED','RUNNING'] %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
+{% block content %}
+<h1>{{ job.kind|capitalize }} job</h1>
+<p><code>{{ job.id }}</code></p>
+<p class="notice" data-job-status="{{ job.status }}" role="status">{{ job.status }}</p>
+{% if job.error %}<p class="error" role="alert">{{ job.error }}</p>{% endif %}
+<p>Inputs are snapshotted. Closing this page does not stop the job. Server interruption never cancels accepted Fabric work.</p>
+{% if job.result %}<section><h2>Result</h2>
+{% if job.kind == 'prepare' %}<p>{{ job.result.planned }} video(s) prepared; {{ job.result.rejected }} rejected. Download the metadata below.</p>
+{% elif job.kind == 'profiles' %}<p>Generated {{ job.result.profiles|join(', ') }} for target {{ job.result.target }}.</p>
+{% elif job.kind == 'publish' %}<p>{{ job.result.published }} published; {{ job.result.already_published }} existing publications verified.</p>
+{% elif job.result.processing_complete %}<p>Processing finished for all submitted work. Verify Gold and report refresh separately.</p>
+{% else %}<p>Registration finished. Processing and reporting are not yet confirmed.</p>{% endif %}
+<details><summary>Technical details</summary><pre>{{ job.result|tojson(indent=2) }}</pre></details>
+</section>{% endif %}
+<section><h2>Progress</h2><pre id="job-log">{{ events|join('\n') }}</pre></section>
+<section><h2>Reports</h2><ul>
+{% for name in reports %}<li><a href="{{ url_for('report', identity=job.id, name=name) }}">{{ name }}</a></li>{% else %}<li>No reports available yet.</li>{% endfor %}
+{% if job.kind == 'prepare' and job.status == 'SUCCEEDED' %}<li><a href="{{ url_for('package_zip', identity=job.id) }}">Download manifest package ZIP</a></li>{% endif %}
+</ul></section>
+{% if job.status in ['FAILED','INTERRUPTED'] %}
+<form method="post" action="{{ url_for('resume', identity=job.id) }}" class="card">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <p>Resume reuses the saved inputs and state. After editing camera metadata, generate a new package instead.</p>
+  {% if job.kind in ['publish','submit'] %}
+  <label class="check"><input type="checkbox" name="confirm" value="yes" required> I approve resuming this cloud action with its retained state.</label>
+  {% endif %}
+  <button>Resume with retained state</button>
+</form>
+{% endif %}
+{% endblock %}

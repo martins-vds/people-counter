@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Manifest packages</h1>
+<p>Preparation is offline. It probes videos, hashes their bytes, and saves an immutable metadata snapshot. Source footage is not copied.</p>
+{% if not cameras %}<p class="notice">Add camera metadata first. <a href="{{ url_for('footage') }}">Browse footage</a>.</p>{% endif %}
+<form method="post" class="card">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <label>Folder within source root <input name="folder" value="{{ folder }}" placeholder="Leave blank for the whole source root"></label>
+  <button {% if not cameras %}disabled{% endif %}>Generate manifest package</button>
+</form>
+<p>After changing camera metadata, generate a new package rather than editing a prepared package.</p>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Jobs</h1>
+<p>The most recent 100 jobs. Closing the browser does not cancel local jobs or accepted Fabric work.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Created</th><th>Kind</th><th>Status</th><th>Details</th></tr></thead>
+<tbody>{% for item in jobs %}<tr>
+<td>{{ item.created_at }}</td><td>{{ item.kind }}</td><td>{{ item.status }}</td>
+<td><a href="{{ url_for('job', identity=item.id) }}">Open job {{ item.id }}</a></td>
+</tr>{% else %}<tr><td colspan="4">No jobs yet.</td></tr>{% endfor %}</tbody>
+</table></div>
+{% endblock %}

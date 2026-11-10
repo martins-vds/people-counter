@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Calibrate counting line{% endblock %}
+{% block content %}
+<h1>Calibrate counting line</h1>
+<p><code>{{ video }}</code> &middot; native frame: {{ width }} &times; {{ height }}</p>
+<section>
+  <form method="get" id="preview-form">
+    <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="folder" value="{{ folder }}">
+    <input type="hidden" name="scope" value="{{ scope }}"><input type="hidden" name="config_id" value="{{ config_id }}">
+    <label>Preview time in seconds <input name="seconds" type="number" min="0" step="0.1" value="{{ seconds }}"></label>
+    <button>Show frame</button>
+  </form>
+  <img id="preview-image" hidden src="{{ url_for('frame', video=video, seconds=seconds) }}" alt="Source video frame">
+  <canvas id="line-canvas" width="{{ width }}" height="{{ height }}" tabindex="0" aria-label="Counting line editor"></canvas>
+  <p id="line-instructions" role="status">Click the first endpoint, then the second. You can also edit the coordinates below.</p>
+  <p>The arrow shows endpoint order, not walking direction. Reversing endpoints swaps in/out. Confirm the physical entry direction for this camera.</p>
+  <button type="button" id="redraw-line">Redraw line</button>
+</section>
+<form method="post" class="card" id="calibration-form">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}">
+  <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="folder" value="{{ folder }}">
+  <input type="hidden" name="config_id" value="{{ config_id }}">
+  <label>Apply calibration to
+    <select name="scope" id="calibration-scope">
+      <option value="camera" {% if scope == 'camera' %}selected{% endif %}>Camera default for this folder and effective dates</option>
+      <option value="video" {% if scope == 'video' %}selected{% endif %}>This video only</option>
+    </select>
+  </label>
+  {% set defaults = [width // 5, height // 2, width * 4 // 5, height // 2] %}
+  <fieldset class="coordinates"><legend>Directed line in original frame pixels</legend>
+    {% for name in line_fields %}
+      <label>{{ ['X1','Y1','X2','Y2'][loop.index0] }}
+        <input id="{{ name }}" name="{{ name }}" type="number" required min="0"
+          max="{{ width - 1 if loop.index0 in [0,2] else height - 1 }}"
+          value="{{ values.get(name, defaults[loop.index0]) }}">
+      </label>
+    {% endfor %}
+  </fieldset>
+  <fieldset id="camera-fields" {% if scope == 'video' %}disabled{% endif %}>
+    <legend>Camera metadata</legend>
+    <div class="grid">
+      <label>Camera ID <input name="camera_id" required value="{{ values.get('camera_id', '') }}"></label>
+      <label>Location ID <input name="location_id" required value="{{ values.get('location_id', '') }}"></label>
+      <label>Camera timezone <input name="camera_timezone" required value="{{ values.get('camera_timezone', 'UTC') }}"></label>
+      <label>Capture time source <select name="capture_time_source">
+        {% for name in ['auto','embedded','filename_utc','inventory'] %}
+        <option {% if values.get('capture_time_source','auto') == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select></label>
+      <label>Effective from (UTC) <input name="effective_from_utc" value="{{ values.get('effective_from_utc','1970-01-01T00:00:00Z') }}"></label>
+      <label>Effective until (UTC, optional) <input name="effective_to_utc" value="{{ values.get('effective_to_utc','') }}"></label>
+      <label>Filename timestamp regex (optional) <input name="capture_time_regex" value="{{ values.get('capture_time_regex','') }}"></label>
+      <label>Filename timestamp format (optional) <input name="capture_time_format" value="{{ values.get('capture_time_format','') }}"></label>
+    </div>
+  </fieldset>
+  <fieldset id="video-fields" {% if scope != 'video' %}disabled{% endif %}>
+    <legend>Video exception</legend>
+    <label>Authoritative capture time override (UTC, optional)
+      <input name="captured_at_utc" placeholder="2026-01-01T12:00:00Z">
+    </label>
+    <p>Leave blank to retain normal embedded/filename timestamp resolution. This line does not change the camera default.</p>
+  </fieldset>
+  <button>Save calibration</button>
+</form>
+{% endblock %}

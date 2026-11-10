@@ -1,5 +1,9 @@
 # Explicit backfill: prepare, preview, submit
 
+For browser-based camera calibration, metadata editing, package generation,
+profile setup, and controlled publication/submission, use the
+[local operator portal](operator-portal.md). The CLI workflow below remains available.
+
 The [manifest package notebook](../notebooks/manifest_package_operator_tutorial.ipynb)
 only prepares local packages. It never uploads videos or submits work.
 
