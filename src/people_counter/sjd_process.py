@@ -32,6 +32,7 @@ from people_counter.fabric_executor_partition import (
 )
 from people_counter.fabric_executor_production import select_production_line_counts
 from people_counter.local_spark import ProbeRuntimeProcessor, _config_from_work
+from people_counter.inference_profiles import validate_registration_profile
 from people_counter.sjd_control import (
     BatchValidationError,
     ImmutableConflictError,
@@ -349,6 +350,9 @@ def verify_envelope(
         item_runtime = str(raw.get("runtime_key", runtime_key))
         if item_runtime != runtime_key:
             raise BatchValidationError("claim contains mixed runtime affinity")
+        validate_registration_profile(
+            payload_dict, item_runtime, raw.get("config_sha256"),
+        )
         batch_size = payload_dict.get("batch_size", 1)
         if type(batch_size) is not int or batch_size not in DETECTOR_BATCH_SIZES:
             raise ProcessValidationError(

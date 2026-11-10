@@ -22,6 +22,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from people_counter.local_storage import ContentAddressedStore
+from people_counter.inference_profiles import validate_registration_profile
 
 
 SCHEMA_VERSION = 1
@@ -2440,6 +2441,9 @@ def normalize_registration_requests(
         payload = raw.get("payload")
         if not isinstance(payload, Mapping):
             raise ValueError(f"registration item {index} payload must be an object")
+        validate_registration_profile(
+            payload, raw.get("runtime_key"), raw.get("config_sha256"),
+        )
         max_attempts = raw.get("max_attempts", 3)
         if type(max_attempts) is not int or not 1 <= max_attempts <= 100:
             raise ValueError("max_attempts must be between 1 and 100")

@@ -12,7 +12,7 @@ import time
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
@@ -35,14 +35,18 @@ from people_counter.manifest_publisher import (
     validate_manifest_package,
 )
 from people_counter.sjd_control import normalize_registration_requests
+from people_counter.inference_profiles import (
+    PRESETS,
+    configuration_sha256,
+    prepare_profile,
+    resolve_profile,
+    validate_profile,
+)
 
 PARTITION_SIZE = 1000
 INTAKE_ROOT = "Files/people-counter/sjd/v1/intake/backfill"
-_DIGEST = re.compile(r"[0-9a-f]{64}")
-_SOURCE_FIELDS = {
-    "source_video", "source_sha256", "line", "counting_line",
-    "camera_id", "location_id", "captured_at_utc", "camera_timezone",
-}
+CATALOG_SCHEMA = "people-counter-backfill-catalog-v1"
+DEFAULT_CATALOG = Path("config/backfill-catalog.json")
 
 
 def _json_bytes(value: object) -> bytes:
@@ -66,13 +70,16 @@ class BackfillConfig:
     storage_account: str
     filesystem: str
     shortcut_path: str
-    config_sha256: str
     profile: dict[str, Any]
     table_directory: str = "Tables/dbo"
 
 
 def load_config(path: Path) -> BackfillConfig:
     raw = json.loads(path.read_text(encoding="utf-8"))
+    return _parse_config(raw)
+
+
+def _parse_config(raw: object) -> BackfillConfig:
     if not isinstance(raw, dict) or raw.get("intake_mode") != "explicit":
         raise ValueError("configuration must declare intake_mode=explicit; disable competing arrival intake")
     values = dict(raw)
@@ -80,7 +87,11 @@ def load_config(path: Path) -> BackfillConfig:
     values.setdefault("table_directory", "Tables/dbo")
     expected = set(BackfillConfig.__dataclass_fields__)
     if set(values) != expected:
-        raise ValueError(f"configuration must contain {sorted(expected - {'table_directory'})} and intake_mode; table_directory is optional")
+        raise ValueError(
+            "Use a generated target/profile catalog; handwritten config_sha256 "
+            "and runtime identities are no longer accepted. Required target fields: "
+            f"{sorted(expected - {'table_directory'})}, intake_mode."
+        )
     directory = values["table_directory"]
     if not isinstance(directory, str) or re.fullmatch(
         r"Tables(?:/[A-Za-z0-9][A-Za-z0-9._=-]*)?", directory
@@ -93,7 +104,6 @@ def load_config(path: Path) -> BackfillConfig:
     for name, pattern in (
         ("storage_account", STORAGE_ACCOUNT_NAME),
         ("filesystem", FILESYSTEM_NAME),
-        ("config_sha256", _DIGEST),
     ):
         if not isinstance(values[name], str) or pattern.fullmatch(values[name]) is None:
             raise ValueError(f"invalid {name}")
@@ -103,35 +113,94 @@ def load_config(path: Path) -> BackfillConfig:
     normalize_relative_path(shortcut)
     values["shortcut_path"] = shortcut.rstrip("/")
     profile = values["profile"]
-    required = {
-        "pipeline", "detector_model", "model_format", "device_variant",
-        "batch_size", "sample_fps", "profile_id", "runtime_key",
-        "model_artifact_sha256",
-    }
-    if not isinstance(profile, dict) or not required.issubset(profile):
-        raise ValueError(f"profile must contain {sorted(required)}")
-    if _SOURCE_FIELDS.intersection(profile):
-        raise ValueError("profile cannot override per-video source metadata")
-    for name in (
-        "pipeline", "detector_model", "model_format", "device_variant",
-        "profile_id", "runtime_key",
-    ):
-        if not isinstance(profile[name], str) or not profile[name].strip():
-            raise ValueError(f"profile.{name} must be nonempty text")
-    if type(profile["batch_size"]) is not int or profile["batch_size"] < 1:
-        raise ValueError("profile.batch_size must be a positive integer")
-    fps = profile["sample_fps"]
-    if type(fps) not in (int, float) or not 0 < fps < float("inf"):
-        raise ValueError("profile.sample_fps must be positive and finite")
-    artifacts = profile["model_artifact_sha256"]
-    if not isinstance(artifacts, dict) or not artifacts:
-        raise ValueError("profile.model_artifact_sha256 must contain approved model hashes")
-    for name, digest in artifacts.items():
-        normalize_relative_path(name)
-        if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
-            raise ValueError(f"invalid model artifact digest: {name}")
-    _json_bytes(values)
+    if not isinstance(profile, dict):
+        raise ValueError("profile must be generated from an approved preset")
+    resolved = validate_profile(profile)
+    if resolved is None or profile != resolved:
+        raise ValueError("profile must contain only the generated inference profile fields")
+    values["profile"] = resolved
     return BackfillConfig(**values)
+
+
+def _read_catalog(path: Path) -> dict[str, Any]:
+    catalog = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(catalog, dict) or catalog.get("schema") != CATALOG_SCHEMA
+        or not isinstance(catalog.get("targets"), dict) or not catalog["targets"]
+    ):
+        raise ValueError("Invalid generated backfill catalog")
+    return catalog
+
+
+def _catalog_target(catalog: Mapping[str, Any], target: str) -> Mapping[str, Any]:
+    selected = catalog["targets"].get(target)
+    if not isinstance(selected, dict):
+        raise ValueError(f"Unknown backfill target {target!r}; available: {sorted(catalog['targets'])}")
+    if not isinstance(selected.get("binding"), dict) or not isinstance(selected.get("profiles"), dict):
+        raise ValueError(f"Invalid target entry {target!r}")
+    if not selected["profiles"]:
+        raise ValueError(f"No approved profiles for target {target!r}")
+    return selected
+
+
+def load_target(
+    path: Path, target: str, profile: str,
+    *, overrides: Mapping[str, Any] | None = None,
+) -> BackfillConfig:
+    selected = _catalog_target(_read_catalog(path), target)
+    entry = selected["profiles"].get(profile)
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"Unknown approved profile {profile!r} for target {target!r}; "
+            f"available: {sorted(selected['profiles'])}"
+        )
+    if entry.get("profile_id") != profile:
+        raise ValueError("catalog profile name differs from its profile_id")
+    config = _parse_config({**selected["binding"], "profile": entry})
+    if overrides:
+        config = replace(config, profile=resolve_profile(
+            profile, entry["model_artifact_sha256"],
+            overrides={**entry["profile_overrides"], **overrides},
+        ))
+    return config
+
+
+def prepare_catalog_main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Administrator: generate approved targets/profiles and model hashes from deployed model bytes."
+    )
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--target-config", type=Path, required=True)
+    parser.add_argument("--models-dir", type=Path, required=True)
+    parser.add_argument("--profile", action="append", choices=sorted(PRESETS), required=True)
+    parser.add_argument("--output", type=Path, default=DEFAULT_CATALOG)
+    args = parser.parse_args(argv)
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", args.target) is None:
+        raise ValueError("target names must contain lowercase letters, digits, underscores, or hyphens")
+    binding = json.loads(args.target_config.read_text(encoding="utf-8"))
+    if not isinstance(binding, dict) or "profile" in binding:
+        raise ValueError("target configuration must contain deployment binding fields only")
+    profiles = {}
+    for name in args.profile:
+        profile = prepare_profile(name, args.models_dir)
+        _parse_config({**binding, "profile": profile})
+        profiles[name] = profile
+    entry = {"binding": binding, "profiles": profiles}
+    catalog = (
+        _read_catalog(args.output) if args.output.exists()
+        else {"schema": CATALOG_SCHEMA, "targets": {}}
+    )
+    previous = catalog["targets"].get(args.target)
+    if previous is not None and previous != entry:
+        raise ValueError("Refusing to overwrite a different approved target/profile; generate a new catalog")
+    catalog["targets"][args.target] = entry
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    _save(args.output, catalog)
+    print(json.dumps({
+        "catalog": str(args.output), "target": args.target,
+        "profiles": sorted(profiles),
+    }, sort_keys=True))
+    return 0
 
 
 def publication_config(
@@ -172,7 +241,7 @@ def registration_records(
             "payload": payload,
             "runtime_key": config.profile["runtime_key"],
             "duration_seconds": plan.inspection.duration_seconds,
-            "config_sha256": config.config_sha256,
+            "config_sha256": configuration_sha256(payload),
             "release_digest": release_digest,
             "max_attempts": 3,
         }
@@ -519,11 +588,23 @@ def submit(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["prepare-catalog"]:
+        return prepare_catalog_main(arguments[1:])
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest-package-dir", type=Path, required=True)
-    parser.add_argument("--video-root", type=Path, required=True)
-    parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--manifest-package-dir", type=Path)
+    parser.add_argument("--video-root", type=Path)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--config", type=Path, help="Advanced: generated single-profile configuration.")
+    source.add_argument("--target", help="Approved deployment target name.")
+    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    parser.add_argument("--profile", help="Approved inference profile name.")
+    listing = parser.add_mutually_exclusive_group()
+    listing.add_argument("--list-targets", action="store_true")
+    listing.add_argument("--list-profiles", action="store_true")
+    parser.add_argument("--batch-size", type=int, choices=[1, 2, 4], help="Explicit advanced profile override.")
+    parser.add_argument("--sample-fps", type=float, help="Explicit advanced profile override.")
+    parser.add_argument("--state-dir", type=Path)
     parser.add_argument(
         "--submit", action="store_true",
         help="Publish videos/manifests and register explicit backfill work (default: offline preview).",
@@ -533,8 +614,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="With --submit, monitor every registered work ID until processing commits. "
         "Ignored for offline preview. Ctrl+C stops monitoring, not Fabric jobs.",
     )
-    args = parser.parse_args(argv)
-    config = load_config(args.config)
+    args = parser.parse_args(arguments)
+    if args.list_targets or args.list_profiles:
+        if any((
+            args.config, args.submit, args.wait, args.profile,
+            args.manifest_package_dir, args.video_root, args.state_dir,
+            args.batch_size is not None, args.sample_fps is not None,
+        )):
+            parser.error("listing cannot be combined with submission, preview, or override arguments")
+        catalog = _read_catalog(args.catalog)
+        if args.list_targets:
+            print("\n".join(sorted(catalog["targets"])))
+        else:
+            if not args.target:
+                parser.error("--list-profiles requires --target")
+            selected = _catalog_target(catalog, args.target)
+            print(f"Target: {args.target}")
+            print(f"{'PROFILE':<30} {'DETECTOR':<8} {'FORMAT':<8} {'DEVICE':<8} {'BATCH':<6} FPS")
+            for name in sorted(selected["profiles"]):
+                profile = load_target(args.catalog, args.target, name).profile
+                print(
+                    f"{name:<30} {profile['detector_model']:<8} {profile['model_format']:<8} "
+                    f"{profile['device_variant']:<8} {profile['batch_size']:<6} {profile['sample_fps']:g}"
+                )
+        return 0
+    if not all((args.manifest_package_dir, args.video_root, args.state_dir)):
+        parser.error("--manifest-package-dir, --video-root, and --state-dir are required")
+    overrides = {
+        name: value for name, value in (
+            ("batch_size", args.batch_size), ("sample_fps", args.sample_fps)
+        ) if value is not None
+    }
+    if args.config:
+        if args.profile or overrides:
+            parser.error("--profile and overrides require a named --target")
+        config = load_config(args.config)
+    else:
+        if not args.target or not args.profile:
+            parser.error("--target and --profile are required")
+        config = load_target(args.catalog, args.target, args.profile, overrides=overrides)
     package_dir = args.manifest_package_dir.resolve()
     state = args.state_dir.resolve()
     if state == package_dir or state.is_relative_to(package_dir):
@@ -561,6 +679,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"status": "monitoring_stopped", "processing_complete": False}))
             return 130
     else:
+        _progress(
+            f"Offline preview: {count} videos; profile {config.profile['profile_id']}; "
+            f"{config.profile['detector_model']} {config.profile['model_format']} "
+            f"{config.profile['device_variant']}, batch {config.profile['batch_size']}, "
+            f"{config.profile['sample_fps']:g} FPS. Nothing will be uploaded or submitted."
+        )
         report = {
             "status": "preview", "item_count": count,
             "partition_count": (count + PARTITION_SIZE - 1) // PARTITION_SIZE,
@@ -568,6 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "control_sjd_id": config.control_sjd_id,
             "destination": f"abfss://{config.filesystem}@{config.storage_account}.dfs.core.windows.net/incoming/",
             "profile_id": config.profile["profile_id"],
+            "effective_profile": config.profile,
             "package_sha256": _digest(package.index_bytes),
             "next_step": "Review the target and profile, then repeat with --submit. Cloud checks run only on submission.",
         }

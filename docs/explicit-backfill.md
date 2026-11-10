@@ -20,11 +20,9 @@ run inference, enable schedules, or provision infrastructure.
    Verify that the Fabric runtime identity can read both. Local operator access
    does not establish runtime access.
 4. Copy [backfill-target.example.json](../samples/backfill-target.example.json)
-   to an operator configuration file. Replace its placeholders with the actual
-   workspace, Lakehouse, Environment, Control SJD, storage target, and approved
-   inference profile. Use the reviewed effective configuration hash and runtime
-   key for that profile. Include every required model artifact and its SHA-256.
-   Do not copy demonstration timestamps, video paths, or work IDs into it.
+   to an **administrator-only deployment binding**. Replace its placeholders
+   with the actual workspace, Lakehouse, Environment, Control SJD, and storage
+   target. It contains no inference settings or manually calculated hashes.
    For monitoring, `table_directory` defaults to `Tables/dbo` for schema-enabled
    Lakehouses. Set it to `Tables` for a non-schema Lakehouse, or `Tables/<schema>`
    if production tables use another schema.
@@ -35,6 +33,71 @@ run inference, enable schedules, or provision infrastructure.
    uv sync --extra publisher
    az login
    ```
+
+6. Generate the operator's approved catalog from the **same reviewed model
+   bytes deployed under `Files/models/`**, not a different download or export:
+
+   ```bash
+   uv run python -m people_counter.backfill_operator prepare-catalog \
+     --target production \
+     --target-config config/production-binding.json \
+     --models-dir /mnt/approved-models \
+     --profile rtdetr-r18-onnx-cpu \
+     --profile rtdetr-r50-onnx-cpu \
+     --output config/backfill-catalog.json
+   ```
+
+   Repeat `--profile` for each approved preset. Generation requires all four
+   artifacts for every selected profile, computes their SHA-256 values by
+   streaming the files, expands defaults, and derives profile/runtime
+   identities. Missing files fail generation. It does not download, export,
+   upload, or approve models automatically. The deployment administrator reviews
+   the bytes and distributes the resulting catalog; **operators do not edit it**.
+   The command can add another named target to the same catalog, but refuses to
+   overwrite a different existing target/profile definition. Generate a new
+   catalog for an intentional revision.
+
+Supported presets are:
+
+| Name | Detector | Format | Device | Default batch | Default sampling |
+|---|---|---|---|---|---|
+| `rtdetr-r18-onnx-cpu` | R18 + OSNet | ONNX | CPU | 1 | 1 FPS |
+| `rtdetr-r50-onnx-cpu` | R50 + OSNet | ONNX | CPU | 1 | 1 FPS |
+| `rtdetr-r18-pytorch-cpu` | R18 + OSNet | PyTorch | CPU | 1 | 1 FPS |
+| `rtdetr-r50-pytorch-cpu` | R50 + OSNet | PyTorch | CPU | 1 | 1 FPS |
+
+These are supported configurations, not performance or quality certifications
+for a particular camera or deployment. All presets use FP32 and detection
+threshold 0.6. CPU thread allocation continues to follow the worker's existing
+placement-safe policy; the names do not promise a fixed thread count.
+
+Supervision is a library, not a model preset. RF-DETR/BoT-SORT is supported by
+the broader SDK but not the current production Fabric model localizer.
+Unsupported names, GPU settings, and incomplete artifact sets are rejected,
+not silently mapped to R50 or another implementation.
+
+### Automatically derived identities
+
+The shared [inference profile resolver](../src/people_counter/inference_profiles.py)
+is used by catalog generation, operator selection, registration validation,
+and worker execution. A profile name resolves to authoritative settings rather
+than encoding settings that the worker must guess from a string.
+
+- **Model hashes:** generated from the approved artifact bytes; checked against
+  the target's actual model bytes again before publication.
+- **Profile hash:** hashes the canonical effective settings, explicit defaults,
+  and required model hashes.
+- **Runtime key:** a separate, domain-tagged digest of those effective inference
+  settings and model hashes. It groups compatible work; per-video lines and
+  source paths do not split runtime groups.
+- **Configuration hash:** generated for each work item from the resolved profile
+  hash and that video's directed counting line. Changing inference settings,
+  model bytes, or line direction changes the configuration identity.
+
+Operators never calculate or supply these values. Registration and claim
+validation reject mismatched identities; workers reject resolved settings that
+disagree with the selected profile. Existing legacy registered work retains its
+original execution behavior.
 
 Storage operations use `DefaultAzureCredential`; Fabric job operations use the
 attended Azure CLI identity. Both identities must belong to the intended tenant.
@@ -57,6 +120,17 @@ and [manual deployment guide](manual-portal-deployment.md) for deployment detail
 Keep the notebook's complete package directory and unchanged source videos.
 Relative video paths under `--video-root` must remain unchanged.
 
+Discover approved choices without selecting videos or contacting Azure:
+
+```bash
+uv run python -m people_counter.backfill_operator --list-targets
+uv run python -m people_counter.backfill_operator --target production --list-profiles
+```
+
+By default the command reads `config/backfill-catalog.json`. Use
+`--catalog /path/to/approved-catalog.json` when the administrator distributes it
+elsewhere. All listing and preview operations remain offline.
+
 ### 1. Preview (offline)
 
 From the repository root:
@@ -65,14 +139,23 @@ From the repository root:
 uv run python -m people_counter.backfill_operator \
   --manifest-package-dir prepared/camera-17 \
   --video-root /mnt/source-videos \
-  --config config/backfill-target.json \
+  --target production \
+  --profile rtdetr-r50-onnx-cpu \
   --state-dir state/camera-17-backfill
 ```
 
 The command validates the package and rehashes the videos. It prints the target,
 profile, package digest, video count, and partition count. It does not authenticate,
 contact Azure/Fabric, or write submission state. Review these values before
-proceeding. Cloud readiness and release checks occur only on submission.
+proceeding. The preview includes the complete effective profile, so batch size,
+sampling, model format, device, overrides, and identities are visible together.
+Cloud readiness and release checks occur only on submission.
+
+Advanced operators can explicitly add `--batch-size 1|2|4` and
+`--sample-fps <positive-finite-number>`. These overrides are recorded in the
+resolved profile and automatically change its identities; they do not edit the
+catalog. Repeat the identical overrides for submission and retries. The default
+workflow requires no overrides or JSON editing.
 
 ### 2. Submit
 
@@ -82,7 +165,8 @@ Repeat the same command with `--submit`:
 uv run --extra publisher python -m people_counter.backfill_operator \
   --manifest-package-dir prepared/camera-17 \
   --video-root /mnt/source-videos \
-  --config config/backfill-target.json \
+  --target production \
+  --profile rtdetr-r50-onnx-cpu \
   --state-dir state/camera-17-backfill \
   --submit
 ```
@@ -117,7 +201,8 @@ Add **both** `--submit --wait` to the same command:
 uv run --extra publisher --extra demo python -m people_counter.backfill_operator \
   --manifest-package-dir prepared/camera-17 \
   --video-root /mnt/source-videos \
-  --config config/backfill-target.json \
+  --target production \
+  --profile rtdetr-r50-onnx-cpu \
   --state-dir state/camera-17-backfill \
   --submit --wait
 ```
@@ -164,6 +249,17 @@ wait timeout: if schedules are paused or capacity is unavailable, progress can
 remain pending until the deployment is repaired or the operator leaves the wait.
 
 ### 4. Retry and recovery
+
+**Migration from handwritten configuration:** raw `config_sha256`/`runtime_key`
+inputs are no longer accepted for new backfills. Use an administrator-generated
+catalog. The advanced `--config` option accepts only a generated single-profile
+document with the same resolved fields, not the former handwritten template.
+Managed-profile payloads have new identities: do not switch an existing
+backfill's state directory or re-register the same processing run during
+migration. Complete/recover previously registered work with its original
+operator version and retained state, then use the new catalog for new runs.
+Upgrade the published SDK/Environment through the normal release process so
+registration and execution use the same resolver.
 
 Repeat the **same command with the same state directory** after interruption.
 Verified publications are reused. Existing job locations are polled instead

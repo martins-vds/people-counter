@@ -28,6 +28,7 @@ from people_counter.fabric_input_resolver import (
     stream_sha256,
 )
 from people_counter.models import RunResult
+from people_counter.inference_profiles import validate_profile
 
 
 ProcessorMode = Literal["probe", "sdk"]
@@ -400,6 +401,7 @@ def _process_partition(
 def _config_from_work(
     work: Mapping[str, Any],
 ) -> RTDetrOsnetConfig | RFDetrBotsortConfig:
+    validate_profile(work)
     video = _verified_video(work)
     localized_models = _localized_models_dir(work)
     common: dict[str, Any] = {

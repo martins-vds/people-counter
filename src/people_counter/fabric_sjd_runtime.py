@@ -784,6 +784,14 @@ def _model_artifact_paths(
     payload: Mapping[str, Any], *, validation_error: type[Exception]
 ) -> tuple[str, ...]:
     """Build the four fixed RT-DETR/OSNet artifact paths for one item."""
+    from people_counter.inference_profiles import artifact_paths, validate_profile
+
+    try:
+        managed_profile = validate_profile(payload)
+    except ValueError as error:
+        raise validation_error(str(error)) from error
+    if managed_profile is not None:
+        return artifact_paths(managed_profile["profile_id"])
     if payload.get("pipeline", "rtdetr-osnet") != "rtdetr-osnet":
         raise validation_error(
             "Fabric SJD v1 localizer supports RT-DETR/OSNet only"

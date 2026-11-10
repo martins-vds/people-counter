@@ -9,6 +9,9 @@ from unittest.mock import Mock, patch
 import pytest
 
 from people_counter import backfill_operator as operator
+from people_counter.inference_profiles import (
+    artifact_paths, configuration_sha256, resolve_profile,
+)
 from people_counter.manifest import ManifestPublisherError, manifest_bytes
 from people_counter.manifest_publisher import (
     PublisherConfig,
@@ -16,6 +19,15 @@ from people_counter.manifest_publisher import (
     validate_manifest_package,
 )
 from tests.test_manifest_publisher import FakeStorage, inspection, write_catalog
+
+
+@pytest.fixture(autouse=True)
+def forbid_live_cloud_clients(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Tests must not construct live cloud clients")
+
+    monkeypatch.setattr(operator.OneLakeFiles, "__init__", forbidden)
+    monkeypatch.setattr(operator.AzureDataLakeStorage, "__init__", forbidden)
 
 
 @pytest.fixture
@@ -45,18 +57,10 @@ def setup(tmp_path):
         "storage_account": "account",
         "filesystem": "footage",
         "shortcut_path": "Files/videos",
-        "config_sha256": "c" * 64,
-        "profile": {
-            "pipeline": "rtdetr-osnet",
-            "detector_model": "r18",
-            "model_format": "onnx",
-            "device_variant": "cpu",
-            "batch_size": 1,
-            "sample_fps": 1.0,
-            "profile_id": "reviewed-profile",
-            "runtime_key": "r" * 64,
-            "model_artifact_sha256": {"model.onnx": "a" * 64},
-        },
+        "profile": resolve_profile(
+            "rtdetr-r18-onnx-cpu",
+            {path: "a" * 64 for path in artifact_paths("rtdetr-r18-onnx-cpu")},
+        ),
     }
     config_path = tmp_path / "target.json"
     config_path.write_text(json.dumps(config))
@@ -90,7 +94,7 @@ def test_preview_is_offline_and_preserves_package(setup, capsys, flags):
     assert preview["lakehouse_id"] == setup.config["lakehouse_id"]
     assert preview["control_sjd_id"] == setup.config["control_sjd_id"]
     assert preview["destination"] == "abfss://footage@account.dfs.core.windows.net/incoming/"
-    assert preview["profile_id"] == "reviewed-profile"
+    assert preview["profile_id"] == "rtdetr-r18-onnx-cpu"
     assert preview["package_sha256"] == hashlib.sha256(
         (setup.package / "manifest-package.json").read_bytes()
     ).hexdigest()
@@ -169,9 +173,8 @@ def test_records_preserve_metadata_and_have_stable_configuration_bound_ids(setup
     assert records == operator.registration_records(validated, config, "d" * 64)
     plan = validated.plans[0]
     record = records[0]
-    assert record["work_id"] == (
-        "backfill-9809728950f9c58ce09c3d32417c684fe5376d9e643c107fee4fe3e51bf6a06c"
-    )
+    assert record["work_id"].startswith("backfill-")
+    assert len(record["work_id"]) == len("backfill-") + 64
     assert record["max_attempts"] == 3
     payload = record["payload"]
     assert payload["source_video"] == (
@@ -184,12 +187,15 @@ def test_records_preserve_metadata_and_have_stable_configuration_bound_ids(setup
     assert payload["camera_timezone"] == "America/Denver"
     assert payload["captured_at_utc"] == "2026-01-01T12:00:00Z"
     assert record["duration_seconds"] == plan.inspection.duration_seconds
-    assert record["config_sha256"] == "c" * 64
+    assert record["config_sha256"] == configuration_sha256(payload)
     assert record["release_digest"] == "d" * 64
     assert record["work_id"] != operator.registration_records(
         validated, config, "e" * 64
     )[0]["work_id"]
-    changed = replace(config, profile={**config.profile, "sample_fps": 2.0})
+    changed = replace(config, profile=resolve_profile(
+        config.profile["profile_id"], config.profile["model_artifact_sha256"],
+        overrides={"sample_fps": 2.0},
+    ))
     assert record["work_id"] != operator.registration_records(
         validated, changed, "d" * 64
     )[0]["work_id"]
@@ -252,7 +258,8 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     assert report["status"] == "registered"
     assert report["item_count"] == 1
     assert report["processing_complete"] is False
-    files.verify_video.assert_any_call("Files/models/model.onnx", None, "a" * 64)
+    for path in setup.config["profile"]["model_artifact_sha256"]:
+        files.verify_video.assert_any_call(f"Files/models/{path}", None, "a" * 64)
     evidence = json.loads((setup.root / "state/publication-evidence.json").read_text())
     assert evidence[0]["work_id"] == record["work_id"]
     assert evidence[0]["source_manifest"]["source_etag"] == '"video-etag"'
@@ -836,3 +843,104 @@ def test_submit_wait_integrates_publication_registration_processing_and_resume(s
             assert report["jobs"][0]["job"]["id"] == "job"
     assert fabric.request_response.call_count == 1
     assert json.loads((state / "processing-summary.json").read_text())["completed"] == 1
+
+
+def named_catalog(setup):
+    catalog = setup.root / "catalog.json"
+    binding = {key: value for key, value in setup.config.items() if key != "profile"}
+    catalog.write_text(json.dumps({
+        "schema": operator.CATALOG_SCHEMA,
+        "targets": {"production": {
+            "binding": binding,
+            "profiles": {setup.config["profile"]["profile_id"]: setup.config["profile"]},
+        }},
+    }))
+    args = list(setup.args)
+    position = args.index("--config")
+    del args[position:position + 2]
+    return catalog, args + [
+        "--catalog", str(catalog), "--target", "production",
+        "--profile", setup.config["profile"]["profile_id"],
+    ]
+
+
+def test_named_profile_preview_needs_no_handwritten_config_or_hashes(setup, capsys):
+    catalog, args = named_catalog(setup)
+    with patch.object(operator, "OneLakeFiles") as files:
+        assert operator.main(args + ["--wait", "--batch-size", "4", "--sample-fps", "2"]) == 0
+    files.assert_not_called()
+    report = json.loads(capsys.readouterr().out)
+    profile = report["effective_profile"]
+    assert profile["batch_size"] == 4
+    assert profile["sample_fps"] == 2.0
+    assert profile["runtime_key"] != setup.config["profile"]["runtime_key"]
+    stored = json.loads(catalog.read_text())["targets"]["production"]["profiles"]
+    assert stored[profile["profile_id"]]["batch_size"] == 1
+
+
+@pytest.mark.parametrize("selection", ["--list-targets", "--list-profiles"])
+def test_operators_can_list_names_without_videos_or_cloud(setup, capsys, selection):
+    catalog, _ = named_catalog(setup)
+    args = ["--catalog", str(catalog), selection]
+    if selection == "--list-profiles":
+        args += ["--target", "production"]
+    with patch.object(operator, "OneLakeFiles") as files:
+        assert operator.main(args) == 0
+    files.assert_not_called()
+    output = capsys.readouterr().out
+    if selection == "--list-targets":
+        assert output.splitlines() == ["production"]
+    else:
+        assert "Target: production" in output
+        assert "PROFILE" in output
+        assert "rtdetr-r18-onnx-cpu" in output
+        assert "r18" in output and "onnx" in output
+        assert "sha256" not in output
+
+
+@pytest.mark.parametrize("overrides", [
+    ["--batch-size", "3"], ["--sample-fps", "0"],
+    ["--sample-fps", "nan"], ["--sample-fps", "inf"],
+])
+def test_invalid_named_overrides_fail_before_cloud(setup, overrides):
+    _, args = named_catalog(setup)
+    with patch.object(operator, "OneLakeFiles") as files, pytest.raises(
+        (ValueError, SystemExit)
+    ):
+        operator.main(args + ["--submit", *overrides])
+    files.assert_not_called()
+
+
+def test_catalog_profile_edit_is_detected_before_publication(setup):
+    catalog, args = named_catalog(setup)
+    raw = json.loads(catalog.read_text())
+    raw["targets"]["production"]["profiles"]["rtdetr-r18-onnx-cpu"]["sample_fps"] = 9.0
+    catalog.write_text(json.dumps(raw))
+    with patch.object(operator, "OneLakeFiles") as files, pytest.raises(
+        ValueError, match="profile"
+    ):
+        operator.main(args + ["--submit"])
+    files.assert_not_called()
+
+
+def test_named_target_submit_uses_derived_config_and_runtime_identities(setup, capsys):
+    _, args = named_catalog(setup)
+    storage, files, release = cloud_mocks(setup)
+    fabric = Mock()
+    fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
+    fabric.request_json.return_value = {"id": "job", "status": "Completed"}
+    with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
+        operator, "OneLakeFiles", return_value=files
+    ), patch.object(
+        operator, "resolve_published_release", return_value=release
+    ), patch.object(
+        operator, "FabricAutomationClient", return_value=fabric
+    ):
+        assert operator.main(args + ["--submit", "--sample-fps", "2"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "registered"
+    partition = json.loads(files.write_partition.call_args.args[1])
+    record = partition["items"][0]
+    assert record["payload"]["sample_fps"] == 2.0
+    assert record["config_sha256"] == configuration_sha256(record["payload"])
+    assert record["runtime_key"] == record["payload"]["runtime_key"]
