@@ -397,6 +397,18 @@ def backfill_notebook():
             assert cell["execution_count"] is None
             assert cell["outputs"] == []
             cells[cell["id"]] = compile("".join(cell["source"]), str(path), "exec")
+            if cell["id"] == "workspace-setup":
+                for fabric in (True, False):
+                    tree = ast.parse("".join(cell["source"]))
+                    assignment = next(
+                        node for node in tree.body if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "FABRIC_MODE"
+                                for target in node.targets)
+                    )
+                    assignment.value = ast.Constant(fabric)
+                    cells["setup-fabric" if fabric else "setup-local"] = compile(
+                        ast.fix_missing_locations(tree), str(path), "exec",
+                    )
     return cells
 
 
@@ -415,7 +427,7 @@ def notebookutils_module(setup):
 def backfill_notebook_run(backfill_notebook, setup, notebookutils_module):
     namespace = {}
     with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
-        exec(backfill_notebook["workspace-setup"], namespace)
+        exec(backfill_notebook["setup-fabric"], namespace)
     binding = {key: value for key, value in setup.config.items() if key != "profile"}
     catalog = setup.root / "backfill-catalog.json"
     models = setup.root / "models"
@@ -439,7 +451,7 @@ def backfill_notebook_run(backfill_notebook, setup, notebookutils_module):
 def test_backfill_notebook_defaults_use_lakehouse_paths(backfill_notebook, notebookutils_module):
     namespace = {}
     with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
-        exec(backfill_notebook["workspace-setup"], namespace)
+        exec(backfill_notebook["setup-fabric"], namespace)
     assert namespace["PACKAGE_DIR"] == Path("/lakehouse/default/Files/backfill/manifest-package-tutorial")
     assert namespace["MODELS_DIR"] == Path("/lakehouse/default/Files/models")
     assert namespace["VIDEO_ROOT"] == Path("/lakehouse/default/Files/backfill/source-videos")
@@ -448,6 +460,51 @@ def test_backfill_notebook_defaults_use_lakehouse_paths(backfill_notebook, noteb
     assert namespace["TARGET_BINDING"]["workspace_id"] == notebookutils_module.runtime.context[
         "defaultLakehouseWorkspaceId"
     ]
+    assert namespace["CATALOG_PATH"] == Path("/lakehouse/default/Files/backfill/config/backfill-catalog.json")
+    assert namespace["STATE_DIR"] == Path("/lakehouse/default/Files/backfill/state/manifest-package-tutorial")
+    assert namespace["TARGET"] == "production"
+    assert namespace["PROFILE"] == "rtdetr-r18-onnx-cpu"
+
+
+@pytest.mark.parametrize("subdirectory", ["", "notebooks"])
+def test_backfill_notebook_local_defaults_match_manifest_tutorial(
+    backfill_notebook, monkeypatch, subdirectory,
+):
+    root = Path(__file__).parents[1]
+    monkeypatch.chdir(root / subdirectory)
+    namespace = {}
+    with patch.dict(sys.modules, {"notebookutils": None}):
+        exec(backfill_notebook["setup-local"], namespace)
+    assert namespace["REPO_ROOT"] == root
+    assert namespace["PACKAGE_DIR"] == root / "samples/manifest-package-tutorial"
+    assert namespace["VIDEO_ROOT"] == root
+    assert namespace["MODELS_DIR"] == root / "offline-models"
+    assert namespace["CATALOG_PATH"] == root / "config/backfill-catalog.json"
+    assert namespace["STATE_DIR"] == root / "state/manifest-package-tutorial-backfill"
+    assert namespace["TARGET"] == "production"
+    assert namespace["PROFILE"] == "rtdetr-r18-onnx-cpu"
+
+
+def test_backfill_notebook_switching_to_local_replaces_all_fabric_paths(
+    backfill_notebook, notebookutils_module,
+):
+    namespace = {}
+    with patch.dict(sys.modules, {"notebookutils": notebookutils_module}):
+        exec(backfill_notebook["setup-fabric"], namespace)
+    with patch.dict(sys.modules, {"notebookutils": None}):
+        exec(backfill_notebook["setup-local"], namespace)
+    for name in ("PACKAGE_DIR", "VIDEO_ROOT", "MODELS_DIR", "CATALOG_PATH", "STATE_DIR"):
+        assert not namespace[name].is_relative_to(Path("/lakehouse"))
+    assert namespace["TARGET_BINDING"]["workspace_id"] == "<workspace-uuid>"
+    assert namespace["TARGET_BINDING"]["lakehouse_id"] == "<lakehouse-uuid>"
+
+
+def test_backfill_notebook_local_mode_rejects_working_directory_outside_repository(
+    backfill_notebook, monkeypatch, tmp_path,
+):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RuntimeError, match="repository"):
+        exec(backfill_notebook["setup-local"], {})
 
 
 def test_backfill_notebook_generates_catalog_from_real_model_bytes(backfill_notebook_run, setup):

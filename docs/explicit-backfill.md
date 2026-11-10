@@ -51,8 +51,14 @@ that environment while the kernel is running. If an earlier preparation run
 recreated `.venv`, restart the kernel, select the current `.venv`, and rerun
 the notebook from step 1.
 
-For local use of the backfill notebook, set `FABRIC_MODE = False`, supply real
-workspace/Lakehouse IDs and local paths, and install extras before starting its
+For local use of the backfill notebook, set `FABRIC_MODE = False` and run it
+from the repository root or a subfolder. Its local branch finds the repository
+root and defaults to the manifest tutorial's package/video tree, `offline-models`,
+`config/backfill-catalog.json`, and persistent local state. With `True`, the
+Fabric branch instead sets all paths to the mounted Lakehouse layout.
+Edit paths, target, and profile in the branch you use; changing modes replaces
+all path defaults together. Supply real workspace/Lakehouse IDs and deployment
+bindings in local mode, and install extras before starting its
 kernel: `uv sync --extra experiments --extra publisher --extra demo`.
 The `demo` extra supplies the local processing monitor. The local CLI examples
 below remain unchanged; omit `--fabric` outside Fabric.
