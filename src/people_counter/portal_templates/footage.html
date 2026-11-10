@@ -2,7 +2,7 @@
 {% from "components.html" import icon, heading, badge, folder_nodes %}
 {% block title %}Footage library{% endblock %}
 {% block content %}
-{% call heading('Footage library', 'Assign recordings to cameras, review saved camera counting lines, or prepare the current folder. Source files remain read-only.', 'Operator portal') %}
+{% call heading('Footage library', 'Browse recordings, assign them to cameras, or prepare the current folder. Source files remain read-only.', 'Operator portal') %}
 {{ badge('Read-only source', 'success') }}
 <a class="btn" href="{{ url_for('packages', folder=folder) }}">{{ icon('package', 'size-4') }}Generate manifest package</a>
 {% endcall %}
@@ -27,32 +27,37 @@
       </nav>
     </aside>
     <div class="min-w-0">
-      <form method="get" class="explorer-toolbar">
+      <form method="get" class="footage-filters">
         <input type="hidden" name="folder" value="{{ folder }}">
         <div class="field min-w-0 flex-1"><label for="file-query">Filter files by name</label><input id="file-query" name="q" value="{{ query }}" placeholder="Filter names in this folder"></div>
-        <div class="field w-full sm:w-36"><label for="file-kind">File type</label><select id="file-kind" name="kind">{% for value, label in [('all','All types'),('videos','Videos'),('folders','Folders')] %}<option value="{{ value }}" {% if kind == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+        <div class="field"><label for="file-kind">File type</label><select id="file-kind" name="kind">{% for value, label in [('all','All types'),('videos','Videos'),('folders','Folders')] %}<option value="{{ value }}" {% if kind == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
         <button class="btn-secondary shrink-0">Apply filters</button>
-        {% if query or kind != 'all' %}<a class="text-xs" href="{{ url_for('footage', folder=folder) }}">Clear filters</a>{% endif %}
+        {% if query or kind != 'all' %}<a class="text-xs sm:col-span-3" href="{{ url_for('footage', folder=folder) }}">Clear filters</a>{% endif %}
       </form>
-      <form method="post" action="{{ url_for('assign_footage') }}" id="assign-footage" class="explorer-toolbar">
+      <form method="post" action="{{ url_for('assign_footage') }}" id="assign-footage" class="footage-assignment">
         <input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="folder" value="{{ folder }}">
-        <div class="field"><label for="assign-camera">Assign selected footage to camera</label><select id="assign-camera" name="camera_id" required><option value="">Select a camera</option>{% for camera in camera_registry %}<option value="{{ camera.id }}">{{ camera.display_name }} ({{ camera.id }})</option>{% endfor %}</select><p class="help">Select multiple video files below. Reassigning changes ownership, not the counting line.</p></div>
-        <button class="btn-secondary" {% if not camera_registry %}disabled{% endif %}>Assign selected footage</button>
+        <div class="footage-assignment-controls">
+          <div class="field"><label for="assign-camera">Assign selected footage to camera</label><select id="assign-camera" name="camera_id" required aria-describedby="assignment-help"><option value="">Select a camera</option>{% for camera in camera_registry %}<option value="{{ camera.id }}">{{ camera.display_name }} ({{ camera.id }})</option>{% endfor %}</select></div>
+          <button class="btn-secondary" {% if not camera_registry %}disabled{% endif %}>Assign selected footage</button>
+        </div>
+        <p class="help" id="assignment-help">Select one or more video files below, then choose their camera. Reassigning updates ownership only.</p>
       </form>
       <div class="table-wrap">
         <table class="explorer-table" aria-label="Folder contents">
-          <thead><tr><th>Select</th><th>Name</th><th>Type</th><th>Size</th><th>Modified (UTC)</th><th>Camera / calibration</th><th>Action</th></tr></thead>
+          <thead><tr><th class="footage-select">Select</th><th>Name</th><th class="hidden xl:table-cell">Type</th><th class="hidden xl:table-cell">Size</th><th class="hidden xl:table-cell">Modified (UTC)</th><th>Camera</th></tr></thead>
           <tbody>{% for entry in entries %}
             <tr data-entry-path="{{ entry.path }}">
-              <td>{% if entry.video and not entry.blocked and not entry.error %}<label class="check"><input type="checkbox" name="videos" value="{{ entry.path }}" form="assign-footage" aria-label="Select {{ entry.name }}"></label>{% endif %}</td>
-              <td><span class="flex min-w-0 items-center gap-2"><span class="shrink-0 text-slate-400">{{ icon('lock' if entry.blocked else 'folder' if entry.directory else 'camera' if entry.video else 'info', 'size-4') }}</span>{% if entry.directory %}<a class="break-all" aria-label="Open folder {{ entry.name }}" href="{{ url_for('footage', folder=entry.path, q=query, kind=kind) }}">{{ entry.name }}/</a>{% else %}<span class="cell-title break-all">{{ entry.name }}</span>{% endif %}</span></td>
-              <td class="text-xs text-slate-500">{{ 'Blocked' if entry.blocked else 'Unavailable' if entry.error else 'Folder' if entry.directory else 'Video' if entry.video else 'Other file' }}</td>
-              <td class="whitespace-nowrap text-xs text-slate-500">{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else '&mdash;'|safe }}</td>
-              <td class="whitespace-nowrap text-xs text-slate-500">{{ entry.modified_utc or '&mdash;'|safe }}</td>
-              <td>{% if entry.video and not entry.blocked %}{% if entry.camera_id %}<a href="{{ url_for('camera_footage', camera_id=entry.camera_id) }}">{{ entry.camera_id }}</a><br>{{ badge('Counting line saved' if entry.calibrated else 'Not calibrated', 'success' if entry.calibrated else 'warning') }}{% else %}{{ badge('No camera assigned') }}{% endif %}{% endif %}</td>
-              <td>{% if entry.blocked %}{{ badge('Outside source root', 'danger') }}{% elif entry.error %}<span class="text-xs text-red-700">{{ entry.error }}</span>{% elif entry.video %}{% if entry.camera_id %}<a class="inline-flex items-center gap-1 whitespace-nowrap text-xs" aria-label="{{ 'Review' if entry.calibrated else 'Calibrate' }} counting line for {{ entry.name }}" href="{{ url_for('calibrate', video=entry.path, folder=folder, camera_id=entry.camera_id) }}">{{ 'Review camera line' if entry.calibrated else 'Calibrate counting line' }}{{ icon('arrow', 'size-4') }}</a>{% else %}<span class="text-xs text-slate-500">Select above to assign camera</span>{% endif %}{% elif not entry.directory %}<span class="text-xs text-slate-400">Not a supported video</span>{% endif %}</td>
+              <td class="footage-select">{% if entry.video and not entry.blocked and not entry.error %}<label class="check"><input type="checkbox" name="videos" value="{{ entry.path }}" form="assign-footage" aria-label="Select {{ entry.name }}"></label>{% endif %}</td>
+              <td><span class="flex min-w-0 items-center gap-2"><span class="shrink-0 text-slate-400">{{ icon('lock' if entry.blocked else 'folder' if entry.directory else 'camera' if entry.video else 'info', 'size-4') }}</span>{% if entry.directory %}<a class="break-all" aria-label="Open folder {{ entry.name }}" href="{{ url_for('footage', folder=entry.path, q=query, kind=kind) }}">{{ entry.name }}/</a>{% else %}<span class="cell-title break-all">{{ entry.name }}</span>{% endif %}</span>
+                {% if entry.blocked %}<p class="text-xs text-red-700">Outside source root</p>{% elif entry.error %}<p class="text-xs text-red-700">{{ entry.error }}</p>{% endif %}
+                <details class="mt-2 text-xs xl:hidden"><summary>File details</summary><dl><dt>Type</dt><dd>{{ 'Blocked' if entry.blocked else 'Unavailable' if entry.error else 'Folder' if entry.directory else 'Video' if entry.video else 'Other file' }}</dd><dt>Size</dt><dd>{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else 'Not available' }}</dd><dt>Modified (UTC)</dt><dd>{{ entry.modified_utc or 'Not available' }}</dd></dl></details>
+              </td>
+              <td class="hidden text-xs text-slate-500 xl:table-cell">{{ 'Blocked' if entry.blocked else 'Unavailable' if entry.error else 'Folder' if entry.directory else 'Video' if entry.video else 'Other file' }}</td>
+              <td class="hidden whitespace-nowrap text-xs text-slate-500 xl:table-cell">{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else '&mdash;'|safe }}</td>
+              <td class="hidden whitespace-nowrap text-xs text-slate-500 xl:table-cell">{{ entry.modified_utc or '&mdash;'|safe }}</td>
+              <td class="footage-camera">{% if entry.video and not entry.blocked %}{% if entry.camera_id %}<a class="break-all" aria-label="Camera {{ entry.camera_id }}" href="{{ url_for('camera_footage', camera_id=entry.camera_id) }}">{{ camera_names.get(entry.camera_id, entry.camera_id) }}</a><code class="cell-meta hidden xl:block">{{ entry.camera_id }}</code>{% else %}<span class="text-xs text-slate-500">Unassigned</span>{% endif %}{% endif %}</td>
             </tr>
-          {% else %}<tr><td colspan="7"><div class="empty-state">{{ icon('folder', 'size-8 text-slate-400') }}{% if total %}<p class="empty-title">No matching items</p><p class="empty-copy">Change the name or type filter. Other folders remain available in the folder pane.</p>{% else %}<p class="empty-title">This folder is empty.</p><p class="empty-copy">Choose another folder or add footage to the mounted source directory.</p>{% endif %}</div></td></tr>{% endfor %}</tbody>
+          {% else %}<tr><td colspan="6"><div class="empty-state">{{ icon('folder', 'size-8 text-slate-400') }}{% if total %}<p class="empty-title">No matching items</p><p class="empty-copy">Change the name or type filter. Other folders remain available in the folder pane.</p>{% else %}<p class="empty-title">This folder is empty.</p><p class="empty-copy">Choose another folder or add footage to the mounted source directory.</p>{% endif %}</div></td></tr>{% endfor %}</tbody>
         </table>
       </div>
       <div class="explorer-footer"><span>Showing {{ entries|length }} of {{ total }} items</span><span>Filesystem modification time is not recording time.</span></div>

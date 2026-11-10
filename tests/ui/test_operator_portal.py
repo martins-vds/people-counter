@@ -53,7 +53,7 @@ def test_folder_explorer_lazy_navigation_filters_metadata_and_context(page, port
     expect(row).to_contain_text("UTC")
     expect(row).not_to_contain_text("Unavailable")
     expect(page.get_by_label("Select clip.mp4", exact=True)).to_be_visible()
-    expect(row).to_contain_text("No camera assigned")
+    expect(row).to_contain_text("Unassigned")
     expect(page.get_by_role("link", name="Generate manifest package", exact=True)).to_have_attribute(
         "href", "/packages?folder=site/east",
     )
@@ -107,6 +107,53 @@ def ensure_location(page, portal, location):
     return row
 
 
+def open_camera_line_for_footage(page, video, camera_id):
+    row = page.locator("tr[data-entry-path]").filter(has=page.get_by_text(video.rsplit("/", 1)[-1], exact=True))
+    row.get_by_role("link", name="Camera " + camera_id, exact=True).click()
+    page.get_by_role("table", name="Associated footage", exact=True).get_by_role("row").filter(
+        has=page.get_by_role("cell", name=video, exact=True),
+    ).get_by_role("link", name=re.compile(r"^(Calibrate|Review) counting line$")).click()
+
+
+@pytest.mark.parametrize("width", [375, 768, 1024, 1440])
+def test_footage_assignment_layout_and_camera_only_semantics(page, portal, width):
+    page.set_viewport_size({"width": width, "height": 1000})
+    location = portal.service.store.add_location("Entrance")
+    camera = portal.service.store.add_camera("Main Entrance", location)
+    portal.service.assign_footage(camera, ["lobby/clip.mp4"])
+    page.goto(portal.url + "/?folder=lobby")
+    expect(page.get_by_role("columnheader", name="Camera", exact=True)).to_be_visible()
+    expect(page.get_by_role("columnheader", name="Camera / calibration", exact=True)).to_have_count(0)
+    expect(page.get_by_role("link", name="Camera " + camera, exact=True)).to_have_text("Main Entrance")
+    expect(page.get_by_text("Counting line saved", exact=True)).to_have_count(0)
+    expect(page.get_by_text("Not calibrated", exact=True)).to_have_count(0)
+    expect(page.locator('a[href^="/calibrate"]')).to_have_count(0)
+    select = page.get_by_label("Assign selected footage to camera", exact=True).bounding_box()
+    button = page.get_by_role("button", name="Assign selected footage", exact=True).bounding_box()
+    assert select is not None and button is not None
+    if width >= 640:
+        assert abs(select["y"] + select["height"] - button["y"] - button["height"]) <= 2
+        assert button["x"] >= select["x"] + select["width"]
+    else:
+        assert button["y"] >= select["y"] + select["height"]
+        assert abs(button["width"] - select["width"]) <= 2
+        expect(page.get_by_text("File details", exact=True)).to_be_visible()
+    table = page.get_by_role("table", name="Folder contents", exact=True)
+    assert table.evaluate("element => element.scrollWidth <= element.clientWidth")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert portal.calls == []
+
+
+def test_profiles_explains_local_background_job_before_submission(page, portal):
+    page.goto(portal.url + "/profiles")
+    page.get_by_role("button", name="Add target and profiles", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Generate approved profiles", exact=True)
+    expect(dialog).to_contain_text("local background job")
+    expect(dialog).to_contain_text("does not deploy")
+    assert portal.service.store.jobs() == []
+    assert portal.calls == []
+
+
 def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-entrance", folder="lobby"):
     ensure_location(page, portal, location)
     registered_id = f"{location}-{camera_id}"
@@ -120,7 +167,7 @@ def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-ent
     page.get_by_label("Select clip.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option(registered_id)
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
-    page.get_by_role("link", name=re.compile(r"^(Calibrate|Review) counting line for clip\.mp4$")).click()
+    open_camera_line_for_footage(page, folder + "/clip.mp4", registered_id)
     page.wait_for_load_state("load")
     expect(page.locator("#preview-image")).to_have_js_property("naturalWidth", 320)
     editor = page.get_by_label("Counting line editor")
@@ -168,8 +215,8 @@ def test_camera_owns_multiple_recordings_and_reports_open_inline(page, portal, v
     page.get_by_label("Select tomorrow.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option(camera)
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
-    expect(page.get_by_text("Not calibrated", exact=True)).to_have_count(2)
-    page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True).click()
+    expect(page.get_by_text("Not calibrated", exact=True)).to_have_count(0)
+    open_camera_line_for_footage(page, "lobby/clip.mp4", camera)
     page.get_by_role("button", name="Save calibration", exact=True).click()
     page.get_by_role("link", name="2 video files / manage footage", exact=True).click()
     table = page.get_by_role("table", name="Associated footage", exact=True)
@@ -219,7 +266,7 @@ def test_per_video_exception_preserves_camera_defaults_and_original_timestamp(pa
     page.get_by_label("Select wide.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option("north-entrance-camera-17")
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
-    page.get_by_role("link", name="Review counting line for wide.mp4", exact=True).click()
+    open_camera_line_for_footage(page, "lobby/wide.mp4", "north-entrance-camera-17")
     page.get_by_label("Apply calibration to", exact=True).select_option("video")
     expect(page.get_by_label("Location", exact=True)).to_be_disabled()
     expect(page.get_by_label("Camera timezone", exact=True)).to_be_disabled()
@@ -393,9 +440,9 @@ def test_named_camera_registration_and_location_filtered_calibration(page, porta
     page.get_by_label("Select clip.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option("south-store-main-entrance")
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
-    expect(page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True)).to_have_count(1)
+    expect(page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True)).to_have_count(0)
     expect(page.get_by_role("link", name="Video exception for clip.mp4", exact=True)).to_have_count(0)
-    page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True).click()
+    open_camera_line_for_footage(page, "lobby/clip.mp4", "south-store-main-entrance")
     location = page.get_by_label("Location", exact=True)
     camera = page.get_by_label("Camera", exact=True)
     expect(camera).to_have_value("south-store-main-entrance")

@@ -7,6 +7,7 @@
 <a class="btn btn-secondary" href="{{ url_for('jobs') }}">&larr; All jobs</a>
 {% endcall %}
 {% if job.kind == 'prepare' %}<div class="alert alert-info"><p><strong>Offline preparation only.</strong> This job inspects and hashes videos and writes a local manifest package and reports. It does not upload videos, publish to cloud storage, submit Fabric work, or run inference.</p></div>{% endif %}
+{% if job.kind == 'profiles' %}<div class="alert alert-info"><p><strong>Local profile generation only.</strong> This job hashes model files and writes the target/profile catalog. It does not deploy resources, upload footage, submit backfill, or run inference.</p></div>{% endif %}
 {% set tone = {'SUCCEEDED':'success','RUNNING':'info','QUEUED':'neutral','FAILED':'danger','INTERRUPTED':'warning'}.get(job.status,'neutral') %}
 <section class="card">
   <div class="card-body flex flex-col justify-between gap-4 sm:flex-row sm:items-center">

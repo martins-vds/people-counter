@@ -10,7 +10,7 @@
 <form method="post">
   <div class="card-body">
     <input type="hidden" name="csrf" value="{{ session.csrf }}">
-    <div class="alert alert-info">{{ icon('folder', 'size-5 shrink-0') }}<div><p class="font-medium">Use the same reviewed model bytes deployed to Fabric.</p><p class="mt-1 break-all text-xs">Models root: <code>{{ models }}</code>. This tool does not download or approve files.</p></div></div>
+    <div class="alert alert-info">{{ icon('folder', 'size-5 shrink-0') }}<div><p class="font-medium">Generate profiles starts a local background job.</p><p class="mt-1 text-xs">It hashes the reviewed model files and writes the target/profile catalog. It does not deploy resources, upload footage, submit backfill, or run inference.</p><p class="mt-1 break-all text-xs">Use the same reviewed model bytes deployed to Fabric. Models root: <code>{{ models }}</code>. This tool does not download or approve files.</p></div></div>
     <fieldset><legend>Deployment binding</legend><div class="form-grid">
       <div class="field"><label for="target-name">Target name</label><input id="target-name" name="target" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="production" autofocus></div>
       {% for name, label in [('workspace_id','Workspace ID'),('lakehouse_id','Lakehouse ID'),('environment_id','Environment ID'),('control_sjd_id','Control SJD ID'),('storage_account','Storage account'),('filesystem','Filesystem')] %}

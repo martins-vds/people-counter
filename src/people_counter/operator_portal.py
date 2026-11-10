@@ -131,13 +131,9 @@ def create_app(service: PortalService) -> Flask:
             raise ValueError("Select All types, Videos, or Folders")
         entries = service.source.entries(folder)
         assignments = service.footage_assignments()
-        configs = service.store.entries("camera")
+        directory = service.store.entries("camera_identity")
         for entry in entries:
-            camera_id = assignments.get(entry["path"])
-            entry["camera_id"] = camera_id
-            entry["calibrated"] = any(
-                item["catalog"]["camera_id"] == camera_id for item in configs
-            ) if camera_id else False
+            entry["camera_id"] = assignments.get(entry["path"])
         visible = [
             entry for entry in entries
             if query.casefold() in entry["name"].casefold()
@@ -152,7 +148,10 @@ def create_app(service: PortalService) -> Flask:
                 for index, name in enumerate(Path(folder).parts)
             ],
             parent=Path(folder).parent.as_posix() if folder else "",
-            camera_registry=service.store.entries("camera_identity"),
+            camera_registry=directory,
+            camera_names={
+                item["id"]: item["display_name"] for item in directory
+            },
         )
 
     @app.post("/footage/assign")

@@ -32,8 +32,11 @@ def test_assign_many_videos_without_counting_line_and_restore(service):
     assert not restored.store.entries("camera")
     client = create_app(restored).test_client()
     page = client.get("/?folder=lobby").data
-    assert b"Main" in page and b"Not calibrated" in page
-    assert b"Calibrate counting line" in page
+    assert b"Main" in page
+    assert b"Camera / calibration" not in page
+    assert b"Not calibrated" not in page
+    assert b"Calibrate counting line" not in page
+    assert b"Not calibrated" in client.get(f"/cameras/{camera}/footage").data
     identity = restored.enqueue_preparation("lobby")
     assert restored.run_next_job()
     assert restored.store.job(identity)["status"] == "FAILED"

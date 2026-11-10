@@ -219,7 +219,12 @@ are not exported as fabricated camera-catalog rows.
    recordings from different days/folders. Repeating assignment updates ownership
    without changing the saved counting line. The camera's footage page lists all
    associated files and identifies the calibration example separately.
-   Assignment is allowed before calibration: the UI says **Not calibrated** until
+   The footage library shows camera ownership only, without calibration badges or
+   counting-line actions. Follow the camera link to manage its geometry. Assignment
+   controls align beside each other on larger screens and stack at full width on
+   phones. Narrow layouts keep selection, filename, and camera visible; type, size,
+   and modification time remain available under **File details**.
+   Assignment is allowed before calibration: the camera pages say **Not calibrated** until
    a counting line is saved. Package preparation rejects selected footage assigned
    to an uncalibrated camera; association alone never creates a synthetic line.
    Existing calibration example files are retained as assignments on upgrade.
@@ -268,10 +273,13 @@ are not exported as fabricated camera-catalog rows.
    Escape, Close, and Cancel return to the catalog without creating a job;
    entered values remain available until navigating away.
    An administrator enters target binding fields in the form and
-   selects supported presets. The background job hashes the approved local model
+   selects supported presets. Opening the form creates no job. Submitting
+   **Generate profiles** creates a local background job, which hashes the approved local model
    files and generates the target catalog. Nobody enters model/config/runtime
    hashes. Missing models fail explicitly. All selected model bytes must match
    the artifacts deployed in Fabric.
+   This job does not deploy resources, upload footage, submit backfill, or run
+   inference; those actions are not implied by adding a target.
    Optional advanced controls select batch size and sampling FPS; the shared
    resolver validates them and recalculates identities automatically.
 7. **Cloud work:** choose **Start cloud action** to review a completed package,
