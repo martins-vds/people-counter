@@ -443,24 +443,27 @@ The archive is shared by both architectures; OpenVINO conversions are not
 included.
 
 Create a release branch using the stable `releases/vMAJOR.MINOR.PATCH` format.
-Branch creation alone does not run the release workflow. Update the package
-version and lockfile, then open a pull request to `main`:
+Branch creation alone does not run the release workflow. Prepare all release
+metadata with uv and the Python standard library, then open a pull request to
+`main`:
 
 ```bash
 git switch -c releases/v1.0.0
-uv version 1.0.0
-uv lock
+bash scripts/bump-sdk-version.sh 1.0.0
 ```
 
-Also update `src/people_counter/data/sjd_release_identity.json`: set
-`package_version` to the new version and update the version suffix in
-`release_evidence_root`. After finalizing the release source, compute the new
-`build_input_sha256` with the existing provenance helper and copy its output
-into the identity file:
+The script updates `pyproject.toml`, resolves `uv.lock`, and synchronizes
+`src/people_counter/data/sjd_release_identity.json`: `package_version`,
+the version suffix in `release_evidence_root`, and `build_input_sha256`.
+It preserves Fabric target IDs and other identity fields, then runs the same
+release validator as the PR check. On failure it restores the original three
+files. No SDK dependencies are installed. Run it again with the same version
+after finalizing source, package data, build configuration, or this README,
+because those files contribute to the build-input digest.
 
-```bash
-uv run python -c 'from pathlib import Path; from people_counter.fabric_release_provenance import release_build_input_sha256; print(release_build_input_sha256(Path(".")))'
-```
+The script does not switch branches, create commits or tags, fetch remote
+tags, or rewrite historical release evidence. Fetch tags before preparation
+(`git fetch origin --tags`) and use the matching release branch for the PR.
 
 The identity is shipped in the wheel; its version must match the installed
 package. Commit it with the version and lockfile changes:
@@ -477,8 +480,8 @@ does not exactly match `pyproject.toml`, the branch name is malformed, or the
 tag already exists. It also checks that `uv.lock` is current and the embedded
 release identity's version, evidence root, and source/build-input digest match
 the release source. These checks run without installing SDK dependencies and
-run again before a merge creates a tag. A human must fix stale release files;
-CI does not edit files or open a PR. Make this check required in the `main`
+run again before a merge creates a tag. Rerun the preparation script to fix stale
+release files; CI does not edit files or open a PR. Make this check required in the `main`
 branch ruleset to prevent merging a failing release PR.
 
 Merging a release PR creates the matching tag at the exact merged commit and
