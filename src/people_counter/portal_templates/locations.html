@@ -12,21 +12,22 @@
   <section class="card">
     <div class="card-header"><div><h2>Registered locations</h2><p class="card-description">A durable directory of your sites and their cameras.</p></div>{{ badge(locations|length ~ ' locations') }}</div>
     <div class="table-wrap"><table>
-      <thead><tr><th>Location ID</th><th>Camera count</th><th>Camera IDs</th></tr></thead>
+      <thead><tr><th>Location</th><th>Camera count</th><th>Cameras</th><th>Action</th></tr></thead>
       <tbody>{% for location in locations %}
       <tr data-location-id="{{ location.id }}" data-camera-count="{{ location.camera_count }}">
-        <td class="cell-title break-all">{{ location.id }}</td><td><span class="badge badge-{{ 'info' if location.camera_count else 'neutral' }}">{{ location.camera_count }}</span></td>
-        <td>{% if location.camera_ids %}<span class="break-words text-slate-600">{{ location.camera_ids|join(', ') }}</span>{% else %}<span class="text-slate-400">No cameras yet</span>{% endif %}</td>
+        <td class="break-all"><span class="cell-title">{{ location.display_name }}</span><br><code class="cell-meta">{{ location.id }}</code></td><td><span class="badge badge-{{ 'info' if location.camera_count else 'neutral' }}">{{ location.camera_count }}</span></td>
+        <td>{% if location.camera_ids %}{% for camera in location.camera_ids %}<div class="mb-1 break-all"><span>{{ camera_names[camera] }}</span><br><code class="cell-meta">{{ camera }}</code></div>{% endfor %}{% else %}<span class="text-slate-400">No cameras yet</span>{% endif %}</td>
+        <td><a class="btn btn-secondary btn-sm" href="{{ url_for('cameras', location_id=location.id) }}#add-camera">Add camera</a></td>
       </tr>
-      {% else %}<tr><td colspan="3"><div class="empty-state"><span class="empty-icon">{{ icon('location', 'size-6') }}</span><p class="empty-title">No locations yet</p><p class="empty-copy">Add your first location. No footage or cameras are required.</p></div></td></tr>{% endfor %}</tbody>
+      {% else %}<tr><td colspan="4"><div class="empty-state"><span class="empty-icon">{{ icon('location', 'size-6') }}</span><p class="empty-title">No locations yet</p><p class="empty-copy">Add your first location. No footage or cameras are required.</p></div></td></tr>{% endfor %}</tbody>
     </table></div>
-    <div class="card-footer"><p class="text-xs text-slate-500">Camera counts stay unique across effective-dated configurations.</p><a href="{{ url_for('footage') }}">Browse footage to add or configure cameras &rarr;</a></div>
+    <div class="card-footer"><p class="text-xs text-slate-500">Camera counts include registered cameras that are not calibrated yet.</p><a href="{{ url_for('cameras') }}">Manage cameras &rarr;</a></div>
   </section>
-  <form method="post" class="card">
+  <form method="post" class="card" data-name-form>
     <div class="card-header"><div><h2>Add a location</h2><p class="card-description">Register a site now; associate cameras later.</p></div></div>
     <div class="card-body">
       <input type="hidden" name="csrf" value="{{ session.csrf }}">
-      <div class="field"><label for="location-id">Location ID</label><input id="location-id" name="location_id" required placeholder="For example: north-entrance"><p class="help">Use a stable, recognizable identifier for this location.</p></div>
+      <div class="field"><label for="location-name">Location name</label><input id="location-name" name="display_name" required placeholder="For example: North Store"><p class="help">Generated ID: <output data-generated-id aria-live="polite">Enter a name</output></p><p class="help">IDs are generated from names and remain stable. Existing IDs are preserved.</p></div>
       <button class="w-full">{{ icon('location', 'size-4') }}Add location</button>
       <div class="workflow-note">{{ icon('info', 'size-4 shrink-0') }}<p class="text-xs leading-5">Empty locations are kept. Camera assignments are checked when configurations are saved.</p></div>
     </div>

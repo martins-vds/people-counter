@@ -119,6 +119,12 @@
   .technical-details summary { @apply px-4 py-3 text-sm transition hover:bg-slate-50; }
   .technical-details[open] summary { @apply border-b border-slate-200; }
   .technical-details pre { @apply m-3; }
+  .profile-dialog {
+    width: calc(100% - 2rem);
+    max-height: calc(100dvh - 2rem);
+    @apply m-auto max-w-4xl overflow-y-auto rounded-2xl border-0 bg-transparent p-0 text-slate-800 shadow-2xl;
+  }
+  .profile-dialog::backdrop { @apply bg-ink-950/60; }
   .report-list { @apply grid gap-3 sm:grid-cols-2; }
   .report-link { @apply flex min-w-0 items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 transition hover:border-brand-600 hover:bg-brand-50/40; }
   .footer-inner { @apply mx-auto flex max-w-7xl flex-col justify-between gap-2 px-4 py-5 text-xs text-slate-500 sm:flex-row sm:px-6 lg:px-8; }

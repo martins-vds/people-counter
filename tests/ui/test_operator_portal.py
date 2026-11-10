@@ -13,17 +13,23 @@ pytestmark = pytest.mark.ui
 
 def ensure_location(page, portal, location):
     page.goto(portal.url + "/locations")
-    row = page.get_by_role("row").filter(has=page.get_by_role("cell", name=location, exact=True))
+    row = page.locator(f'tr[data-location-id="{location}"]')
     if row.count() == 0:
-        page.get_by_label("Location ID", exact=True).fill(location)
+        page.get_by_label("Location name", exact=True).fill(location)
         page.get_by_role("button", name="Add location", exact=True).click()
     return row
 
 
 def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-entrance", folder="lobby"):
     ensure_location(page, portal, location)
+    registered_id = f"{location}-{camera_id}"
+    page.goto(portal.url + "/cameras")
+    if page.locator(f'tr[data-camera-id="{registered_id}"]').count() == 0:
+        page.get_by_label("Location", exact=True).select_option(location)
+        page.get_by_label("Camera name", exact=True).fill(camera_id)
+        page.get_by_role("button", name="Add camera", exact=True).click()
     page.goto(portal.url + "/?folder=" + folder)
-    page.get_by_role("link", name="Calibrate camera using clip.mp4", exact=True).click()
+    page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True).click()
     page.wait_for_load_state("load")
     expect(page.locator("#preview-image")).to_have_js_property("naturalWidth", 320)
     editor = page.get_by_label("Counting line editor")
@@ -35,17 +41,18 @@ def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-ent
     expect(page.get_by_label("X1", exact=True)).to_have_value("32")
     expect(page.get_by_label("X2", exact=True)).to_have_value("288")
     expect(page.get_by_label("Y1", exact=True)).to_have_value("90")
-    page.get_by_label("Camera ID", exact=True).fill(camera_id)
-    page.get_by_label("Location ID", exact=True).select_option(location)
-    page.get_by_label("Camera timezone", exact=True).fill("America/Denver")
+    page.get_by_label("Location", exact=True).select_option(location)
+    page.get_by_label("Camera", exact=True).select_option(registered_id)
+    page.get_by_label("Camera timezone", exact=True).select_option("America/Denver")
     page.get_by_label("Preview time in seconds", exact=True).fill("0.2")
     page.get_by_role("button", name="Show frame", exact=True).click()
-    expect(page.get_by_label("Camera ID", exact=True)).to_have_value(camera_id)
+    expect(page.get_by_label("Camera", exact=True)).to_have_value(registered_id)
     expect(page.get_by_label("X1", exact=True)).to_have_value("32")
     page.get_by_role("button", name="Save calibration", exact=True).click()
     expect(page.get_by_role("heading", name="Camera metadata", exact=True)).to_be_visible()
     row = page.get_by_role("row").filter(has=page.get_by_role("cell", name=folder, exact=True))
-    expect(row.get_by_role("cell", name=f"{camera_id} / {location} America/Denver")).to_be_visible()
+    expect(row).to_contain_text(registered_id)
+    expect(row).to_contain_text("America/Denver")
 
 
 def prepare_package(page, portal):
@@ -69,7 +76,7 @@ def test_draw_camera_line_prepare_and_download_metadata_only_package(page, porta
         assert index["complete"] is True and index["prepared"] == 1
         manifest = json.loads(package.read(index["entries"][0]["prepared_manifest_path"]))
         assert manifest["counting_line"] == [32, 90, 288, 90]
-        assert manifest["camera_id"] == "camera-17"
+        assert manifest["camera_id"] == "north-entrance-camera-17"
         assert manifest["camera_timezone"] == "America/Denver"
         assert not any(name.endswith(".mp4") for name in package.namelist())
     assert portal.service.store.job(identity)["status"] == "SUCCEEDED"
@@ -79,7 +86,13 @@ def test_draw_camera_line_prepare_and_download_metadata_only_package(page, porta
 def test_per_video_exception_preserves_camera_defaults_and_original_timestamp(page, portal):
     calibrate_camera(page, portal)
     portal.make_video("lobby/wide.mp4", width=640, height=360)
-    page.goto(portal.url + "/calibrate?video=lobby/wide.mp4&folder=lobby&scope=video")
+    page.goto(portal.url + "/?folder=lobby")
+    page.get_by_role("link", name="Calibrate counting line for wide.mp4", exact=True).click()
+    page.get_by_label("Apply calibration to", exact=True).select_option("video")
+    expect(page.get_by_label("Location", exact=True)).to_be_disabled()
+    expect(page.get_by_label("Camera timezone", exact=True)).to_be_disabled()
+    expect(page.get_by_label("Authoritative capture time override (UTC, optional)", exact=True)).to_be_enabled()
+    page.get_by_text("Manual line coordinates", exact=True).click()
     page.get_by_label("X1", exact=True).fill("12")
     page.get_by_label("Y1", exact=True).fill("30")
     page.get_by_label("X2", exact=True).fill("620")
@@ -108,6 +121,7 @@ def test_background_job_continues_after_browser_leaves_and_errors_are_visible(pa
     page.goto(portal.url + "/jobs/" + identity)
     expect(page.locator("[data-job-status]")).to_have_text("FAILED", timeout=15000)
     expect(page.get_by_role("alert")).to_contain_text("rejected")
+    expect(page.locator("#job-log")).to_be_visible()
     expect(page.get_by_role("link", name="rejection-report.csv")).to_be_visible()
     assert portal.service.store.job(identity)["status"] == "FAILED"
 
@@ -134,28 +148,27 @@ def test_locations_support_zero_many_cameras_and_reject_split_assignments(page, 
     portal.make_video("later/clip.mp4")
     calibrate_camera(page, portal, folder="later")
     page.get_by_role("link", name="Locations", exact=True).click()
-    north = page.get_by_role("row").filter(
-        has=page.get_by_role("cell", name="north-entrance", exact=True),
-    )
+    north = page.locator('tr[data-location-id="north-entrance"]')
     expect(north).to_have_attribute("data-camera-count", "2")
     expect(north.get_by_role("cell", name="2", exact=True)).to_be_visible()
-    expect(north).to_contain_text("camera-17, camera-18")
-    expect(page.get_by_role("row").filter(
-        has=page.get_by_role("cell", name="empty-warehouse", exact=True),
-    )).to_have_attribute("data-camera-count", "0")
+    expect(north).to_contain_text("north-entrance-camera-17")
+    expect(north).to_contain_text("north-entrance-camera-18")
+    expect(page.locator('tr[data-location-id="empty-warehouse"]')).to_have_attribute("data-camera-count", "0")
     page.get_by_role("link", name="Cameras", exact=True).click()
-    page.get_by_role("link", name="Edit camera-17", exact=True).first.click()
-    page.get_by_label("Location ID", exact=True).select_option("empty-warehouse")
+    page.get_by_role("link", name="Edit north-entrance-camera-17", exact=True).first.click()
+    page.get_by_label("Location", exact=True).select_option("empty-warehouse")
+    expect(page.get_by_label("Camera", exact=True)).to_be_disabled()
+    page.get_by_label("Location", exact=True).select_option("north-entrance")
+    page.get_by_label("Camera", exact=True).select_option("north-entrance-camera-17")
+    page.locator("#camera-location").evaluate("element => element.value = 'empty-warehouse'")
     page.get_by_role("button", name="Save calibration", exact=True).click()
-    expect(page.get_by_role("alert")).to_contain_text("locations")
+    expect(page.get_by_role("alert")).to_contain_text("location")
     assert all(
         item["catalog"]["location_id"] == "north-entrance"
         for item in portal.service.store.entries("camera")
     )
     page.get_by_role("link", name="Locations", exact=True).click()
-    expect(page.get_by_role("row").filter(
-        has=page.get_by_role("cell", name="north-entrance", exact=True),
-    )).to_have_attribute("data-camera-count", "2")
+    expect(page.locator('tr[data-location-id="north-entrance"]')).to_have_attribute("data-camera-count", "2")
 
 
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
@@ -179,7 +192,11 @@ def test_tailwind_design_covers_every_page_and_accessible_controls(page, portal,
         if headers.count():
             assert headers.first.evaluate("(element) => parseFloat(getComputedStyle(element).paddingLeft)") >= 12
     page.goto(portal.url + "/profiles")
-    field = page.get_by_label("Target name", exact=True)
+    creation = page.get_by_role("button", name="Add target and profiles", exact=True).bounding_box()
+    catalog = page.get_by_role("heading", name="Approved target catalog", exact=True).bounding_box()
+    assert creation is not None and catalog is not None and creation["y"] < catalog["y"]
+    page.get_by_role("button", name="Add target and profiles", exact=True).click()
+    field = page.get_by_label("Workspace ID", exact=True)
     assert field.evaluate("(element) => parseFloat(getComputedStyle(element).borderRadius)") >= 8
     initial_shadow = field.evaluate("(element) => getComputedStyle(element).boxShadow")
     field.focus()
@@ -197,11 +214,198 @@ def test_tailwind_design_covers_every_page_and_accessible_controls(page, portal,
     expect(page.get_by_role("link", name="Skip to main content", exact=True)).to_be_focused()
 
 
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
+def test_named_camera_registration_and_location_filtered_calibration(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    for location, identity in (("North Store", "north-store"), ("South Store", "south-store")):
+        page.goto(portal.url + "/locations")
+        page.get_by_label("Location name", exact=True).fill("S\u00e3o Paulo North")
+        expect(page.locator("[data-generated-id]")).to_have_text("sao-paulo-north")
+        page.get_by_label("Location name", exact=True).fill(location)
+        expect(page.locator("[data-generated-id]")).to_have_text(identity)
+        page.get_by_role("button", name="Add location", exact=True).click()
+        row = page.locator(f'tr[data-location-id="{identity}"]')
+        expect(row).to_have_attribute("data-camera-count", "0")
+        row.get_by_role("link", name="Add camera", exact=True).click()
+        expect(page.get_by_label("Location", exact=True)).to_have_value(identity)
+        page.get_by_label("Camera name", exact=True).fill("Main Entrance")
+        expect(page.locator("[data-generated-id]")).to_have_text(f"{identity}-main-entrance")
+        page.get_by_role("button", name="Add camera", exact=True).click()
+        registered = page.locator(f'tr[data-camera-id="{identity}-main-entrance"]')
+        expect(registered).to_contain_text("Main Entrance")
+        expect(registered).to_contain_text("Not calibrated")
+    assert portal.service.store.entries("camera") == []
+    page.goto(portal.url + "/?folder=lobby")
+    expect(page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True)).to_have_count(1)
+    expect(page.get_by_role("link", name="Video exception for clip.mp4", exact=True)).to_have_count(0)
+    page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True).click()
+    location = page.get_by_label("Location", exact=True)
+    camera = page.get_by_label("Camera", exact=True)
+    expect(camera).to_be_disabled()
+    location.select_option("north-store")
+    expect(camera.locator('option:not([value=""])')).to_have_count(1)
+    camera.select_option("north-store-main-entrance")
+    location.select_option("south-store")
+    expect(camera).to_have_value("")
+    expect(camera.locator('option[value="north-store-main-entrance"]')).to_have_count(0)
+    camera.select_option("south-store-main-entrance")
+    timezone = page.get_by_label("Camera timezone", exact=True)
+    expect(timezone).to_have_js_property("tagName", "SELECT")
+    timezone.select_option("America/Denver")
+    page.get_by_role("button", name="Save calibration", exact=True).click()
+    expect(page.get_by_role("heading", name="Camera metadata", exact=True)).to_be_visible()
+    saved = portal.service.store.entries("camera")[0]["catalog"]
+    assert saved["camera_id"] == "south-store-main-entrance"
+    assert saved["location_id"] == "south-store"
+    assert saved["camera_timezone"] == "America/Denver"
+    page.get_by_role("link", name="Edit south-store-main-entrance", exact=True).click()
+    expect(page.get_by_label("Location", exact=True)).to_have_value("south-store")
+    expect(page.get_by_label("Camera", exact=True)).to_have_value("south-store-main-entrance")
+    expect(page.get_by_label("Camera timezone", exact=True)).to_have_value("America/Denver")
+
+
+@pytest.mark.portal_cloud
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
+def test_progressive_disclosure_keeps_primary_tasks_and_safety_visible(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    page.goto(portal.url + "/")
+    expect(page.get_by_label("Folder within source root", exact=True)).to_be_visible()
+    expect(page.get_by_label("Source implementation", exact=True)).not_to_be_visible()
+    page.get_by_text("Source configuration", exact=True).click()
+    expect(page.get_by_label("Source implementation", exact=True)).to_be_visible()
+    calibrate_camera(page, portal)
+    expect(page.get_by_text("Frame", exact=True)).not_to_be_visible()
+    page.get_by_text("Geometry and effective dates", exact=True).click()
+    expect(page.get_by_text("Frame", exact=True)).to_be_visible()
+    page.get_by_role("link", name="Edit north-entrance-camera-17", exact=True).click()
+    expect(page.get_by_label("Location", exact=True)).to_be_visible()
+    expect(page.get_by_label("Camera timezone", exact=True)).to_be_visible()
+    expect(page.get_by_label("X2", exact=True)).not_to_be_visible()
+    expect(page.get_by_label("Effective from (UTC)", exact=True)).not_to_be_visible()
+    coordinates = page.get_by_text("Manual line coordinates", exact=True)
+    coordinates.click()
+    page.get_by_label("X2", exact=True).fill("320")
+    coordinates.click()
+    page.get_by_role("button", name="Save calibration", exact=True).click()
+    expect(page.get_by_label("X2", exact=True)).to_be_visible()
+    expect(page.get_by_label("X2", exact=True)).to_be_focused()
+    page.get_by_label("X2", exact=True).fill("288")
+    recording = page.get_by_text("Recording time and effective dates", exact=True)
+    recording.click()
+    page.get_by_label("Effective from (UTC)", exact=True).fill("2025-01-01T00:00:00Z")
+    recording.click()
+    page.get_by_role("button", name="Save calibration", exact=True).click()
+    page.get_by_role("link", name="Edit north-entrance-camera-17", exact=True).click()
+    expect(page.get_by_label("Effective from (UTC)", exact=True)).to_be_visible()
+    expect(page.get_by_label("Effective from (UTC)", exact=True)).to_have_value("2025-01-01T00:00:00Z")
+    page.get_by_label("Apply calibration to", exact=True).select_option("video")
+    expect(page.get_by_label("Location", exact=True)).not_to_be_visible()
+    expect(page.get_by_label("Authoritative capture time override (UTC, optional)", exact=True)).to_be_visible()
+    page.get_by_label("Apply calibration to", exact=True).select_option("camera")
+    expect(page.get_by_label("Camera timezone", exact=True)).to_have_value("America/Denver")
+    expect(page.get_by_label("Authoritative capture time override (UTC, optional)", exact=True)).not_to_be_visible()
+    page.goto(portal.url + "/profiles")
+    page.get_by_role("button", name="Add target and profiles", exact=True).click()
+    expect(page.get_by_label("Target name", exact=True)).to_be_visible()
+    expect(page.get_by_label("Batch size override", exact=True)).not_to_be_visible()
+    advanced = page.get_by_text("Advanced inference overrides (optional)", exact=True)
+    advanced.focus()
+    advanced.press("Enter")
+    expect(page.get_by_label("Batch size override", exact=True)).to_be_visible()
+    page.goto(portal.url + "/cloud")
+    action = page.get_by_label("Action", exact=True)
+    wait = page.get_by_label("Wait for processing after submission", exact=True)
+    expect(wait).not_to_be_visible()
+    expect(page.get_by_label("I reviewed the target and intake policy and approve this cloud action.")).to_be_visible()
+    action.select_option("submit")
+    expect(wait).to_be_visible()
+    wait.check()
+    action.select_option("publish")
+    expect(wait).not_to_be_visible()
+    expect(wait).not_to_be_checked()
+    expect(wait).to_be_disabled()
+    page.goto(portal.url + "/packages?folder=lobby")
+    expect(page.get_by_role("button", name="Generate manifest package", exact=True)).to_be_visible()
+    expect(page.get_by_text("1. Inspect and validate", exact=True)).not_to_be_visible()
+    page.get_by_text("How package preparation works", exact=True).click()
+    expect(page.get_by_text("1. Inspect and validate", exact=True)).to_be_visible()
+    prepare_package(page, portal)
+    expect(page.locator("#job-log")).not_to_be_visible()
+    expect(page.get_by_role("link", name="Download manifest package ZIP", exact=True)).to_be_visible()
+    page.get_by_text("Completed job log", exact=False).click()
+    expect(page.locator("#job-log")).to_be_visible()
+
+
+@pytest.mark.portal_cloud
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
+def test_profile_dialog_is_compact_accessible_and_preserves_drafts_without_submitting(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    pending_scripts = []
+    page.route("**/portal.js", lambda route: pending_scripts.append(route))
+    page.goto(portal.url + "/profiles", wait_until="commit")
+    trigger = page.get_by_role("button", name="Add target and profiles", exact=True)
+    dialog = page.locator("#profile-dialog")
+    expect(page.get_by_role("heading", name="Approved target catalog", exact=True)).to_be_visible()
+    expect(page.get_by_label("Target name", exact=True)).not_to_be_visible()
+    expect(trigger).to_be_disabled()
+    assert len(pending_scripts) == 1
+    pending_scripts[0].continue_()
+    page.wait_for_load_state("load")
+    expect(trigger).to_be_enabled()
+    trigger.click()
+    expect(page.get_by_role("dialog", name="Generate approved profiles", exact=True)).to_be_visible()
+    target = page.get_by_label("Target name", exact=True)
+    expect(target).to_be_focused()
+    target.fill("draft-target")
+    bounds = dialog.bounding_box()
+    assert bounds is not None
+    assert bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= viewport["width"]
+    assert bounds["y"] >= 0 and bounds["y"] + bounds["height"] <= viewport["height"]
+    assert dialog.evaluate("element => element.scrollWidth <= element.clientWidth")
+    page.keyboard.press("Escape")
+    expect(dialog).not_to_be_visible()
+    expect(trigger).to_be_focused()
+    trigger.click()
+    expect(target).to_have_value("draft-target")
+    submit = page.get_by_role("button", name="Generate profiles", exact=True)
+    close = page.get_by_role("button", name="Close profile form", exact=True)
+    close.focus()
+    page.keyboard.press("Tab")
+    expect(target).to_be_focused()
+    page.keyboard.press("Shift+Tab")
+    expect(close).to_be_focused()
+    assert dialog.evaluate("element => element.matches(':modal')")
+    trigger.evaluate("element => element.focus()")
+    expect(close).to_be_focused()
+    dialog.dispatch_event("keydown", {"key": "Escape", "isComposing": True})
+    expect(dialog).to_be_visible()
+    # Embedded browsers can deliver Escape without invoking the native close action.
+    dialog.dispatch_event("keydown", {"key": "Escape"})
+    expect(dialog).not_to_be_visible()
+    expect(trigger).to_be_focused()
+    trigger.click()
+    close.click()
+    expect(dialog).not_to_be_visible()
+    expect(trigger).to_be_focused()
+    trigger.click()
+    page.get_by_role("button", name="Cancel", exact=True).click()
+    expect(dialog).not_to_be_visible()
+    expect(trigger).to_be_focused()
+    trigger.click()
+    target.fill("")
+    submit.click()
+    expect(dialog).to_be_visible()
+    expect(target).to_be_focused()
+    assert portal.service.store.jobs() == []
+    assert not portal.service.catalog.exists()
+
+
 @pytest.mark.portal_cloud
 def test_profile_generation_publication_and_submit_wait_use_shared_backends(page, portal):
     calibrate_camera(page, portal)
     package_id = prepare_package(page, portal)
     page.get_by_role("link", name="Profiles", exact=True).click()
+    page.get_by_role("button", name="Add target and profiles", exact=True).click()
     fields = {
         "Target name": "ci",
         "Workspace ID": "11111111-1111-1111-1111-111111111111",
@@ -231,5 +435,6 @@ def test_profile_generation_publication_and_submit_wait_use_shared_backends(page
         page.get_by_role("button", name="Start cloud action", exact=True).click()
         expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
     expect(page.get_by_role("heading", name="Result", exact=True)).to_be_visible()
+    page.get_by_text("Completed job log", exact=False).click()
     expect(page.locator("#job-log")).to_contain_text("1/1 committed")
     assert len(portal.calls) == 2

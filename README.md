@@ -52,6 +52,8 @@ Open **http://127.0.0.1:8088**. The portal and live Tailwind watcher start, not 
 models are mounted read-only, state persists in named volumes, and cloud
 actions are disabled by default. See the [operator portal guide](docs/operator-portal.md)
 for source-folder configuration, Azure sign-in, recovery, and Playwright/CI tests.
+Register named locations and cameras without footage; IDs are generated from
+their names. Calibration selects a location, one of its cameras, and an IANA timezone.
 
 ### Development container
 

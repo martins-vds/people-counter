@@ -14,7 +14,7 @@
         <div class="field"><label for="package-id">Prepared package</label><select id="package-id" name="package_id" required><option value="">Select a completed package</option>{% for item in packages %}<option value="{{ item.id }}">{{ item.created_at }} - {{ item.id }}</option>{% endfor %}</select><p class="help">Only successfully prepared packages are eligible.</p></div>
         <div class="field"><label for="target-profile">Target and profile</label><select id="target-profile" name="selection" required><option value="">Select an approved target/profile</option>{% for item in choices %}<option value="{{ item.value }}">{{ item.target }} / {{ item.profile.profile_id }} - batch {{ item.profile.batch_size }}, {{ item.profile.sample_fps }} FPS</option>{% endfor %}</select></div>
         <div class="field"><label for="cloud-action">Action</label><select name="action" id="cloud-action" required><option value="">Choose an action</option><option value="publish">Upload/publish only (does not explicitly register work)</option><option value="submit">Publish and register explicit backfill work</option></select></div>
-        <label class="check"><input type="checkbox" name="wait" value="yes" id="wait-processing">Wait for processing after submission</label>
+        <div id="wait-options" hidden><label class="check"><input type="checkbox" name="wait" value="yes" id="wait-processing">Wait for processing after submission</label><p class="help">Wait mode checks each exact work ID for successful processing and a committed attempt. Gold, reconciliation, and report refresh remain separate checks.</p></div>
         <div class="rounded-xl border border-amber-200 bg-amber-50 p-4"><label class="check"><input type="checkbox" name="confirm" value="yes" required>I reviewed the target and intake policy and approve this cloud action.</label></div>
         <button class="w-full sm:w-auto">{{ icon('cloud', 'size-4') }}Start cloud action</button>
       </fieldset>
@@ -25,8 +25,8 @@
       <div class="flex items-center justify-between gap-3"><span>Completed packages</span>{{ badge(packages|length, 'success' if packages else 'warning') }}</div>
       <div class="flex items-center justify-between gap-3"><span>Approved target profiles</span>{{ badge(choices|length, 'success' if choices else 'warning') }}</div>
       <div class="border-t border-slate-100 pt-4 text-sm text-slate-500">Missing a prerequisite? <a href="{{ url_for('packages') }}">Prepare a package</a> or <a href="{{ url_for('profiles') }}">generate approved profiles</a>.</div>
+      <p class="text-sm text-slate-500">Closing this page never cancels accepted Fabric work. Registration records and remote job locations are retained.</p>
     </div></section>
-    <section class="card"><div class="card-body"><h2>What waiting means</h2><p class="mt-2 text-sm text-slate-500">Wait mode checks each exact work ID for successful processing and a committed attempt. Gold, reconciliation, and report refresh remain separate checks.</p><p class="mt-3 text-sm text-slate-500">Closing this page never cancels accepted Fabric work. Registration records and remote job locations are retained.</p></div></section>
   </div>
 </div>
 {% endblock %}

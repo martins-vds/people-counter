@@ -36,23 +36,31 @@
         </select>
       </div>
       {% set defaults = [width // 5, height // 2, width * 4 // 5, height // 2] %}
+      <details class="technical-details" id="manual-coordinates"><summary>Manual line coordinates</summary><div class="p-4">
       <fieldset class="coordinates"><legend>Directed line in original frame pixels</legend>
         {% for name in line_fields %}<div class="field"><label for="{{ name }}">{{ ['X1','Y1','X2','Y2'][loop.index0] }}</label>
           <input id="{{ name }}" name="{{ name }}" type="number" required min="0" max="{{ width - 1 if loop.index0 in [0,2] else height - 1 }}" value="{{ values.get(name, defaults[loop.index0]) }}">
         </div>{% endfor %}
       </fieldset>
-      <fieldset id="camera-fields" {% if scope == 'video' %}disabled{% endif %}>
+      </div></details>
+      <fieldset id="camera-fields" {% if scope == 'video' %}disabled hidden{% endif %}>
         <legend>Camera metadata</legend>
         <div class="form-grid">
-          <div class="field"><label for="camera-id">Camera ID</label><input id="camera-id" name="camera_id" required value="{{ values.get('camera_id', '') }}" placeholder="camera-17"></div>
-          <div class="field"><label for="camera-location">Location ID</label>
+          <div class="field"><label for="camera-location">Location</label>
             <select id="camera-location" name="location_id" required>
               <option value="">Select an existing location</option>
-              {% for location in locations %}<option value="{{ location.id }}" {% if values.get('location_id') == location.id %}selected{% endif %}>{{ location.id }}</option>{% endfor %}
+              {% for location in locations %}<option value="{{ location.id }}" {% if values.get('location_id') == location.id %}selected{% endif %}>{{ location.display_name }} ({{ location.id }})</option>{% endfor %}
             </select>
-            <p class="help"><a href="{{ url_for('locations') }}">Add a location</a> before assigning a camera.</p>
+            <p class="help"><a href="{{ url_for('locations') }}">Manage locations</a>.</p>
           </div>
-          <div class="field"><label for="camera-timezone">Camera timezone</label><input id="camera-timezone" name="camera_timezone" required value="{{ values.get('camera_timezone', 'UTC') }}" placeholder="America/Denver"></div>
+          <div class="field"><label for="camera-id">Camera</label><select id="camera-id" name="camera_id" required data-selected="{{ values.get('camera_id','') }}" disabled><option value="">Select a location first</option></select>
+            <template id="camera-options">{% for camera in camera_registry %}<option value="{{ camera.id }}" data-location="{{ camera.location_id }}">{{ camera.display_name }} ({{ camera.id }})</option>{% endfor %}</template>
+            <p class="help" id="camera-choice-help"><a href="{{ url_for('cameras') }}">Register a camera</a> if it is not listed.</p>
+          </div>
+          <div class="field"><label for="camera-timezone">Camera timezone</label><select id="camera-timezone" name="camera_timezone" required>{% for timezone in timezones %}<option value="{{ timezone }}" {% if values.get('camera_timezone','UTC') == timezone %}selected{% endif %}>{{ timezone }}</option>{% endfor %}</select><p class="help">IANA timezones include daylight-saving rules; choose the camera's recording timezone.</p></div>
+        </div>
+        <details class="technical-details" {% if values.get('capture_time_source','auto') != 'auto' or values.get('capture_time_regex') or values.get('capture_time_format') or values.get('effective_from_utc','1970-01-01T00:00:00Z') != '1970-01-01T00:00:00Z' or values.get('effective_to_utc') %}open{% endif %}><summary>Recording time and effective dates</summary>
+        <div class="form-grid p-4">
           <div class="field"><label for="capture-source">Capture time source</label><select id="capture-source" name="capture_time_source">
             {% for name in ['auto','embedded','filename_utc','inventory'] %}<option {% if values.get('capture_time_source','auto') == name %}selected{% endif %}>{{ name }}</option>{% endfor %}
           </select></div>
@@ -61,9 +69,10 @@
           <div class="field"><label for="capture-regex">Filename timestamp regex (optional)</label><input id="capture-regex" name="capture_time_regex" value="{{ values.get('capture_time_regex','') }}"></div>
           <div class="field"><label for="capture-format">Filename timestamp format (optional)</label><input id="capture-format" name="capture_time_format" value="{{ values.get('capture_time_format','') }}"></div>
         </div>
-        <p class="help">Effective dates select the camera configuration. They are never substituted for recording time.</p>
+        <p class="help px-4 pb-4">Effective dates select the camera configuration. They are never substituted for recording time.</p>
+        </details>
       </fieldset>
-      <fieldset id="video-fields" {% if scope != 'video' %}disabled{% endif %}>
+      <fieldset id="video-fields" {% if scope != 'video' %}disabled hidden{% endif %}>
         <legend>Video exception</legend>
         <label for="capture-override">Authoritative capture time override (UTC, optional)</label>
         <input id="capture-override" name="captured_at_utc" placeholder="2026-01-01T12:00:00Z">

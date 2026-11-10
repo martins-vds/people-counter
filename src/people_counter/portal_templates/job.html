@@ -25,10 +25,13 @@
     <details class="technical-details"><summary>Technical details</summary><pre>{{ job.result|tojson(indent=2) }}</pre></details>
   </div>
 </section>{% endif %}
-<section class="card">
+{% if job.status == 'SUCCEEDED' %}<details class="card">
+  <summary class="px-5 py-4 sm:px-6">Completed job log ({{ events|length }} events)</summary>
+{% else %}<section class="card">
   <div class="card-header"><div><h2>Progress</h2><p class="card-description">Persisted job events, in execution order.</p></div>{{ badge(events|length ~ ' events') }}</div>
+{% endif %}
   <div class="p-3 sm:p-4"><pre id="job-log" class="max-h-96 overflow-y-auto">{{ events|join('\n') if events else 'Waiting for the worker to start this job...' }}</pre></div>
-</section>
+{% if job.status == 'SUCCEEDED' %}</details>{% else %}</section>{% endif %}
 <section class="card">
   <div class="card-header"><div><h2>Reports</h2><p class="card-description">Review validation results and retain package evidence.</p></div></div>
   <div class="card-body">

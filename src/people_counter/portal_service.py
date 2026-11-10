@@ -7,9 +7,11 @@ import io
 import json
 import logging
 import math
+import re
 import sqlite3
 import threading
 import traceback
+import unicodedata
 import uuid
 import zipfile
 from collections.abc import Iterator, Mapping
@@ -50,6 +52,14 @@ def _identifier(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} is required")
     return value.strip()
+
+
+def _name_slug(display_name: str) -> str:
+    ascii_name = unicodedata.normalize("NFKD", display_name).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
+    if not slug:
+        raise ValueError("The display name must contain at least one ASCII letter or digit")
+    return slug
 
 
 def _camera_data(data: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]:
@@ -149,21 +159,38 @@ class PortalStore:
             db.execute("BEGIN IMMEDIATE")
             locations: dict[str, str] = {}
             updates = []
-            for row in db.execute("SELECT id,data FROM entries WHERE kind='camera'"):
+            for row in db.execute("SELECT kind,id,data FROM entries WHERE kind IN ('camera','camera_identity')"):
                 original = json.loads(row["data"])
-                camera, location, normalized = _camera_data(original)
+                if row["kind"] == "camera":
+                    camera, location, normalized = _camera_data(original)
+                    if normalized != original:
+                        updates.append((json.dumps(normalized, allow_nan=False), row["id"]))
+                else:
+                    camera = row["id"]
+                    location = _identifier(original.get("location_id"), "Location ID")
                 previous = locations.setdefault(camera, location)
                 if previous != location:
                     raise ValueError(
                         f"Camera {camera!r} must have one location; existing configurations conflict. "
                         "Correct those assignments before upgrading; no metadata was changed."
                     )
-                if normalized != original:
-                    updates.append((json.dumps(normalized, allow_nan=False), row["id"]))
             for location in sorted(set(locations.values())):
                 db.execute(
-                    "INSERT INTO entries VALUES ('location',?,'{}') "
-                    "ON CONFLICT(kind,id) DO NOTHING", (location,),
+                    "INSERT INTO entries VALUES ('location',?,?) "
+                    "ON CONFLICT(kind,id) DO NOTHING",
+                    (location, json.dumps({"display_name": location})),
+                )
+            for row in db.execute("SELECT id,data FROM entries WHERE kind='location'").fetchall():
+                data = json.loads(row["data"])
+                if "display_name" not in data:
+                    db.execute(
+                        "UPDATE entries SET data=? WHERE kind='location' AND id=?",
+                        (json.dumps({**data, "display_name": row["id"]}), row["id"]),
+                    )
+            for camera, location in locations.items():
+                db.execute(
+                    "INSERT INTO entries VALUES ('camera_identity',?,?) ON CONFLICT(kind,id) DO NOTHING",
+                    (camera, json.dumps({"display_name": camera, "location_id": location})),
                 )
             db.executemany("UPDATE entries SET data=? WHERE kind='camera' AND id=?", updates)
 
@@ -196,42 +223,73 @@ class PortalStore:
                     "SELECT 1 FROM entries WHERE kind='location' AND id=?", (location,),
                 ).fetchone() is None:
                     raise ValueError("Select an existing location before assigning a camera")
-                for row in db.execute("SELECT id,data FROM entries WHERE kind='camera' AND id<>?", (identity,)):
-                    other_camera, other_location, _ = _camera_data(json.loads(row["data"]))
-                    if camera == other_camera and location != other_location:
-                        raise ValueError(
-                            f"Camera {camera!r} must have one location; it is already associated "
-                            f"with {other_location!r}."
-                        )
+                registered = db.execute(
+                    "SELECT data FROM entries WHERE kind='camera_identity' AND id=?", (camera,),
+                ).fetchone()
+                if registered is None:
+                    raise ValueError("Select an existing registered camera before saving calibration")
+                if json.loads(registered["data"])["location_id"] != location:
+                    raise ValueError(f"Camera {camera!r} must have one location; select its registered location")
             db.execute(
                 "INSERT INTO entries VALUES (?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
                 (kind, identity, json.dumps(normalized, allow_nan=False)),
             )
 
-    def add_location(self, identity: str) -> None:
-        identity = _identifier(identity, "Location ID")
+    def add_location(self, display_name: str) -> str:
+        display_name = _identifier(display_name, "Location name")
+        identity = _name_slug(display_name)
         try:
             with self.connection() as db:
-                db.execute("INSERT INTO entries VALUES ('location',?,'{}')", (identity,))
+                db.execute(
+                    "INSERT INTO entries VALUES ('location',?,?)",
+                    (identity, json.dumps({"display_name": display_name})),
+                )
         except sqlite3.IntegrityError as error:
             raise ValueError(f"Location {identity!r} already exists") from error
+        return identity
+
+    def add_camera(self, display_name: str, location_id: str) -> str:
+        display_name = _identifier(display_name, "Camera name")
+        location_id = _identifier(location_id, "Location ID")
+        identity = f"{location_id}-{_name_slug(display_name)}"
+        try:
+            with self.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                if db.execute(
+                    "SELECT 1 FROM entries WHERE kind='location' AND id=?", (location_id,),
+                ).fetchone() is None:
+                    raise ValueError("Select an existing location before adding a camera")
+                db.execute(
+                    "INSERT INTO entries VALUES ('camera_identity',?,?)",
+                    (identity, json.dumps({"display_name": display_name, "location_id": location_id})),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ValueError(f"Camera {identity!r} already exists; choose a different camera name") from error
+        return identity
 
     def locations(self) -> list[dict[str, Any]]:
         with self.connection() as db:
             rows = db.execute(
-                "SELECT kind,id,data FROM entries WHERE kind IN ('location','camera') ORDER BY id"
+                "SELECT kind,id,data FROM entries WHERE kind IN ('location','camera_identity') ORDER BY id"
             ).fetchall()
-        cameras: dict[str, set[str]] = {
-            row["id"]: set() for row in rows if row["kind"] == "location"
+        names = {
+            row["id"]: json.loads(row["data"])["display_name"]
+            for row in rows if row["kind"] == "location"
         }
+        cameras: dict[str, set[str]] = {location: set() for location in names}
         for row in rows:
-            if row["kind"] == "camera":
-                camera, location, _ = _camera_data(json.loads(row["data"]))
+            if row["kind"] == "camera_identity":
+                camera = row["id"]
+                location = json.loads(row["data"])["location_id"]
                 if location not in cameras:
                     raise ValueError(f"Camera {camera!r} references an unknown location")
                 cameras[location].add(camera)
         return [
-            {"id": location, "camera_ids": sorted(identities), "camera_count": len(identities)}
+            {
+                "id": location,
+                "display_name": names[location],
+                "camera_ids": sorted(identities), "camera_count": len(identities),
+            }
             for location, identities in sorted(cameras.items())
         ]
 

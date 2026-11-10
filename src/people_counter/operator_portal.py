@@ -9,6 +9,7 @@ import secrets
 import threading
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import available_timezones
 from werkzeug.exceptions import SecurityError
 
 from flask import (
@@ -153,7 +154,8 @@ def create_app(service: PortalService) -> Flask:
             folder=request.args.get("folder", Path(video).parent.as_posix()),
             config_id=config_id, values=values,
             scope=request.args.get("scope", "camera"), seconds=request.args.get("seconds", "0"),
-            locations=service.store.locations(),
+            locations=service.store.locations(), camera_registry=service.store.entries("camera_identity"),
+            timezones=sorted(available_timezones()),
         )
 
     @app.post("/calibrate")
@@ -161,20 +163,36 @@ def create_app(service: PortalService) -> Flask:
         flash(service.save_calibration(request.form))
         return redirect(url_for("cameras"))
 
-    @app.get("/cameras")
+    @app.route("/cameras", methods=["GET", "POST"])
     def cameras():
+        if request.method == "POST":
+            service.store.add_camera(
+                request.form.get("display_name", ""), request.form.get("location_id", ""),
+            )
+            flash("Camera added. Calibrate it later using footage from its folder.")
+            return redirect(url_for("cameras"))
+        directory = service.store.entries("camera_identity")
+        locations = service.store.locations()
         return render_template(
             "cameras.html", cameras=service.store.entries("camera"),
-            exceptions=service.store.entries("exception"),
+            exceptions=service.store.entries("exception"), camera_registry=directory,
+            locations=locations, selected_location=request.args.get("location_id", ""),
+            camera_names={row["id"]: row["display_name"] for row in directory},
+            location_names={row["id"]: row["display_name"] for row in locations},
         )
 
     @app.route("/locations", methods=["GET", "POST"])
     def locations():
         if request.method == "POST":
-            service.store.add_location(request.form.get("location_id", ""))
+            service.store.add_location(request.form.get("display_name", ""))
             flash("Location added. Cameras can be associated with it now or later.")
             return redirect(url_for("locations"))
-        return render_template("locations.html", locations=service.store.locations())
+        return render_template(
+            "locations.html", locations=service.store.locations(),
+            camera_names={
+                row["id"]: row["display_name"] for row in service.store.entries("camera_identity")
+            },
+        )
 
     @app.get("/cameras.csv")
     def camera_csv():

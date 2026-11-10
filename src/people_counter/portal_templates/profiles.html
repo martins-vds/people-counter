@@ -3,25 +3,18 @@
 {% block title %}Profiles and targets{% endblock %}
 {% block content %}
 {% call heading('Profiles and targets', 'Select approved inference presets and let the shared resolver calculate model requirements, configuration hashes, and runtime identities.', 'Deployment configuration') %}
+<button type="button" id="open-profile-dialog" aria-haspopup="dialog" aria-controls="profile-dialog" disabled>{{ icon('settings', 'size-4') }}Add target and profiles</button>
 <a class="btn btn-secondary" href="{{ url_for('jobs') }}">{{ icon('jobs', 'size-4') }}View profile jobs</a>
 {% endcall %}
-<section class="card">
-  <div class="card-header"><div><h2>Approved target catalog</h2><p class="card-description">These resolved profiles are available for explicit cloud actions.</p></div>{{ badge(catalog.targets|length ~ ' targets') }}</div>
-  {% if catalog.targets %}<div class="table-wrap"><table>
-    <thead><tr><th>Target</th><th>Profile</th><th>Model / format</th><th>Device</th><th>Batch</th><th>Sampling</th></tr></thead><tbody>
-    {% for target, entry in catalog.targets.items() %}{% for name, profile in entry.profiles.items() %}<tr>
-      <td class="cell-title">{{ target }}</td><td><code>{{ name }}</code></td><td>{{ profile.detector_model }} / {{ profile.model_format }}</td><td>{{ badge(profile.device_variant|upper) }}</td><td>{{ profile.batch_size }}</td><td class="whitespace-nowrap">{{ profile.sample_fps }} FPS</td>
-    </tr>{% endfor %}{% endfor %}
-    </tbody></table></div>
-  {% else %}<div class="empty-state"><span class="empty-icon">{{ icon('settings', 'size-6') }}</span><p class="empty-title">No target profiles yet</p><p class="empty-copy">Use the form below to generate a catalog from reviewed local model files.</p></div>{% endif %}
-</section>
+<noscript><p class="alert alert-warning">Enable JavaScript to open the profile creation form.</p></noscript>
+<dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-dialog-title" aria-describedby="profile-dialog-description">
 <form method="post" class="card">
-  <div class="card-header"><div><h2>Generate approved profiles</h2><p class="card-description">Administrator setup &middot; no JSON editing or hash calculation required.</p></div>{{ badge('Automatic identities', 'info') }}</div>
+  <div class="card-header"><div><h2 id="profile-dialog-title">Generate approved profiles</h2><p class="card-description" id="profile-dialog-description">Administrator setup &middot; no JSON editing or hash calculation required.</p></div><button type="button" class="btn-secondary btn-sm" data-close-profile-dialog aria-label="Close profile form">Close</button></div>
   <div class="card-body">
     <input type="hidden" name="csrf" value="{{ session.csrf }}">
     <div class="alert alert-info">{{ icon('folder', 'size-5 shrink-0') }}<div><p class="font-medium">Use the same reviewed model bytes deployed to Fabric.</p><p class="mt-1 break-all text-xs">Models root: <code>{{ models }}</code>. This tool does not download or approve files.</p></div></div>
     <fieldset><legend>Deployment binding</legend><div class="form-grid">
-      <div class="field"><label for="target-name">Target name</label><input id="target-name" name="target" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="production"></div>
+      <div class="field"><label for="target-name">Target name</label><input id="target-name" name="target" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="production" autofocus></div>
       {% for name, label in [('workspace_id','Workspace ID'),('lakehouse_id','Lakehouse ID'),('environment_id','Environment ID'),('control_sjd_id','Control SJD ID'),('storage_account','Storage account'),('filesystem','Filesystem')] %}
       <div class="field"><label for="{{ name }}">{{ label }}</label><input id="{{ name }}" name="{{ name }}" required placeholder="{{ 'Deployment UUID' if name.endswith('_id') else '' }}"></div>
       {% endfor %}
@@ -40,6 +33,17 @@
       </div>
     </details>
   </div>
-  <div class="card-footer"><p class="max-w-2xl text-xs text-slate-500">Existing target definitions are immutable. Use a new target name/catalog revision when changing an approved definition.</p><button>{{ icon('settings', 'size-4') }}Generate profiles</button></div>
+  <div class="card-footer"><p class="max-w-2xl text-xs text-slate-500">Existing target definitions are immutable. Use a new target name/catalog revision when changing an approved definition.</p><div class="flex flex-wrap gap-2"><button type="button" class="btn-secondary" data-close-profile-dialog>Cancel</button><button>{{ icon('settings', 'size-4') }}Generate profiles</button></div></div>
 </form>
+</dialog>
+<section class="card">
+  <div class="card-header"><div><h2>Approved target catalog</h2><p class="card-description">These resolved profiles are available for explicit cloud actions.</p></div>{{ badge(catalog.targets|length ~ ' targets') }}</div>
+  {% if catalog.targets %}<div class="table-wrap"><table>
+    <thead><tr><th>Target</th><th>Profile</th><th>Model / format</th><th>Device</th><th>Batch</th><th>Sampling</th></tr></thead><tbody>
+    {% for target, entry in catalog.targets.items() %}{% for name, profile in entry.profiles.items() %}<tr>
+      <td class="cell-title">{{ target }}</td><td><code>{{ name }}</code></td><td>{{ profile.detector_model }} / {{ profile.model_format }}</td><td>{{ badge(profile.device_variant|upper) }}</td><td>{{ profile.batch_size }}</td><td class="whitespace-nowrap">{{ profile.sample_fps }} FPS</td>
+    </tr>{% endfor %}{% endfor %}
+    </tbody></table></div>
+  {% else %}<div class="empty-state"><span class="empty-icon">{{ icon('settings', 'size-6') }}</span><p class="empty-title">No target profiles yet</p><p class="empty-copy">Choose Add target and profiles to generate a catalog from reviewed local model files.</p></div>{% endif %}
+</section>
 {% endblock %}

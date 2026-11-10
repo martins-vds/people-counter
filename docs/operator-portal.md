@@ -112,24 +112,41 @@ covered by request tests.
 
 ## Operator workflow
 
-Start on **Locations** to add location IDs independently of footage and cameras.
-A location may have zero cameras indefinitely. Location counts show distinct
-camera IDs, not the number of effective-dated configurations. The camera form
-selects an existing location instead of accepting arbitrary location text.
+Start on **Locations** to add a display name independently of footage and cameras.
+The portal previews and generates its ID: `North Store` becomes
+`north-store`. Names are trimmed, accented Latin characters are normalized,
+and IDs use lowercase ASCII letters, digits, and hyphens. Names without a usable
+letter/digit and duplicate derived IDs are rejected explicitly.
 
-1. **Footage:** open a folder and select a video. Previews decode a frame on the
-   server, so browser video-codec support is not required.
+Use **Add camera** on a location row or the **Cameras** page to register a camera
+without opening footage. Choose its location and display name. For example,
+`North Store` / `Main Entrance` produces `north-store-main-entrance`. The location
+prefix allows different sites to use the same camera display name. Each camera
+belongs to one location, even before calibration. A location may have zero or
+many cameras; counts include registered cameras that are not calibrated.
+
+Existing IDs, calibration records, and queued/completed job snapshots are never
+re-slugged. On upgrade, legacy locations/cameras acquire their existing IDs as
+display names. Registration is separate from calibration; uncalibrated cameras
+are not exported as fabricated camera-catalog rows.
+
+1. **Footage:** open a folder and use its single **Calibrate counting line**
+   action. The editor's scope selector distinguishes camera defaults from
+   video-only exceptions. Previews decode a frame on the server, so browser
+   video-codec support is not required.
 2. **Counting line:** select the preview time, then click two endpoints or enter
-   their coordinates. Drawing uses the original frame's pixel coordinates,
+   their coordinates under **Manual line coordinates**. Drawing uses the original frame's pixel coordinates,
    including when the canvas is scaled on a small screen. The arrow shows
    endpoint order, not walking direction; reversing endpoints swaps in/out.
-3. **Camera metadata:** enter a camera ID, select an existing location, and set timezone, timestamp rules,
-   and effective dates. A camera default applies to matching videos in that
-   folder. Review the Cameras page or download its CSV.
-   All configurations sharing a camera ID must use one location. A save that
-   would split that camera across locations is rejected without changing data.
-   A camera with a single configuration can be moved by editing its location;
-   moving multiple configurations together is not an implicit side effect.
+3. **Camera metadata:** select a location, then select one of that location's
+   registered cameras. Changing location clears the previous camera selection.
+   Choose the camera timezone from the IANA timezone list and set timestamp rules
+   and effective dates under **Recording time and effective dates**. Editing a
+   calibration restores its saved selections and expands nondefault recording rules.
+   A camera default applies to matching videos in that folder.
+   Review the Cameras page or download its catalog CSV. Calibration cannot
+   create an unregistered camera or move one to another location; forged requests
+   are rejected without changing metadata.
 4. **Video exceptions:** choose "This video only" to override that video's line
    and frame dimensions. An optional authoritative UTC timestamp overrides
    capture time; a blank timestamp retains normal embedded/filename resolution.
@@ -139,7 +156,11 @@ selects an existing location instead of accepting arbitrary location text.
    and rejection reports. The safety bound is 10,000 videos per package; larger
    folders fail explicitly rather than being truncated. Use the CLI for a
    deliberately different bound. Resolve rejections before publication.
-6. **Profiles:** an administrator enters target binding fields in the form and
+6. **Profiles:** the page keeps the approved target catalog visible. Choose
+   **Add target and profiles** to open the creation form in a modal dialog.
+   Escape, Close, and Cancel return to the catalog without creating a job;
+   entered values remain available until navigating away.
+   An administrator enters target binding fields in the form and
    selects supported presets. The background job hashes the approved local model
    files and generates the target catalog. Nobody enters model/config/runtime
    hashes. Missing models fail explicitly. All selected model bytes must match
@@ -153,6 +174,22 @@ selects an existing location instead of accepting arbitrary location text.
 Package ZIP downloads contain metadata, not source videos. Retain the unchanged
 footage. Changing camera metadata requires a new package. Changing a profile or
 release is a new processing run, not recovery of an existing run.
+
+### Progressive disclosure
+
+Primary tasks stay visible: folder browsing, camera/location/timezone selection,
+drawing, package generation, job status, downloads, errors, and cloud approval.
+Source configuration, manual coordinates, recording rules, camera geometry/date
+details, package explanations, inference overrides, completed-job logs, and raw
+result JSON are available through labeled native disclosures. They work with a
+keyboard without changing pages or losing entered values.
+
+The calibration scope shows only the applicable camera or video-exception fields.
+Wait controls and their explanation appear only for submission; switching to
+publication clears the wait selection. Active/failed job progress, safety warnings,
+and resume confirmations are never collapsed automatically. If native form
+validation finds an invalid field in a closed disclosure, it opens before the
+browser focuses the field.
 
 ### Per-video calibration CSV
 

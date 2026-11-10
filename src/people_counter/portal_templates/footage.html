@@ -12,10 +12,10 @@
 <section class="card">
   <div class="card-header"><div><h2>Footage source</h2><p class="card-description">Choose a folder inside the configured source root.</p></div>{{ badge('Local disk') }}</div>
   <div class="card-body">
-    <div class="form-grid">
+    <details class="technical-details"><summary>Source configuration</summary><div class="form-grid p-4">
       <div class="field"><label for="source-type">Source implementation</label><select id="source-type" disabled><option>Local disk</option><option disabled>Cloud storage (future adapter)</option></select><p class="help">Cloud-source adapters are not implemented yet.</p></div>
       <div class="field"><p class="text-sm font-medium text-slate-700">Allowed source root</p><div class="mt-2 rounded-lg border border-slate-200 bg-slate-50 p-3"><code>{{ root }}</code></div><p class="help">Use the Compose footage mount to select another local folder.</p></div>
-    </div>
+    </div></details>
     <form method="get" class="flex flex-col items-start gap-3 sm:flex-row sm:items-end">
       <div class="field w-full"><label for="browse-folder">Folder within source root</label><input id="browse-folder" name="folder" value="{{ folder }}" placeholder="For example: lobby/camera-17"></div>
       <button class="shrink-0">{{ icon('folder', 'size-4') }}Browse folder</button>
@@ -32,8 +32,7 @@
         {% if entry.blocked %}{{ badge('Blocked: outside source root', 'danger') }}
         {% elif entry.directory %}<a class="btn btn-secondary btn-sm" href="{{ url_for('footage', folder=entry.path) }}">Open folder {{ entry.name }}{{ icon('arrow', 'size-4') }}</a>
         {% elif entry.video %}<div class="cell-actions">
-          <a class="btn btn-secondary btn-sm" href="{{ url_for('calibrate', video=entry.path, folder=folder) }}">Calibrate camera using {{ entry.name }}</a>
-          <a class="text-xs" href="{{ url_for('calibrate', video=entry.path, folder=folder, scope='video') }}">Video exception for {{ entry.name }}</a>
+          <a class="btn btn-secondary btn-sm" href="{{ url_for('calibrate', video=entry.path, folder=folder) }}">Calibrate counting line for {{ entry.name }}</a>
         </div>{% else %}<span class="text-xs text-slate-500">Not a supported video</span>{% endif %}
       </td></tr>
     {% else %}<tr><td colspan="2"><div class="empty-state"><span class="empty-icon">{{ icon('folder', 'size-6') }}</span><p class="empty-title">This folder is empty.</p><p class="empty-copy">Choose another folder or add footage to the mounted source directory.</p></div></td></tr>{% endfor %}</tbody>
