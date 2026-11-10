@@ -44,6 +44,80 @@ expect_failure() {
   grep -F "${message}" "${temp}/error"
 }
 
+mkdir -p scripts .github/scripts original-release
+cp "${scripts}/../../scripts/bump-sdk-version.sh" scripts/
+cp "${scripts}/validate-release.sh" .github/scripts/
+cp pyproject.toml uv.lock src/people_counter/data/sjd_release_identity.json original-release/
+release_files=(pyproject.toml uv.lock src/people_counter/data/sjd_release_identity.json)
+sha256sum "${release_files[@]}" > "${temp}/original-release.sha256"
+expect_failure "Usage:" bash scripts/bump-sdk-version.sh
+for version in v1.2.4 1.2 01.2.4 1.2.4-rc1 '1.2.4 '; do
+  expect_failure "MAJOR.MINOR.PATCH" bash scripts/bump-sdk-version.sh "${version}"
+done
+expect_failure "Usage:" bash scripts/bump-sdk-version.sh 1.2.4 extra
+sha256sum --check "${temp}/original-release.sha256"
+git tag v1.2.4
+expect_failure "already exists" bash scripts/bump-sdk-version.sh 1.2.4
+sha256sum --check "${temp}/original-release.sha256"
+git tag -d v1.2.4
+
+# Exercise the command from outside the repository, without SDK dependencies.
+(cd /; bash "${temp}/scripts/bump-sdk-version.sh" 1.2.4)
+[[ "$(uv version --short)" == 1.2.4 ]]
+bash "${scripts}/validate-release.sh" pr releases/v1.2.4
+uv run --no-project python - <<'PY'
+import json
+from pathlib import Path
+
+original = json.loads(Path("original-release/sjd_release_identity.json").read_text())
+path = Path("src/people_counter/data/sjd_release_identity.json")
+updated = json.loads(path.read_text())
+assert updated["package_version"] == "1.2.4"
+assert updated["release_evidence_root"] == "Files/releases/1.2.4"
+assert updated["build_input_sha256"] != original["build_input_sha256"]
+for key in original.keys() - {"package_version", "release_evidence_root", "build_input_sha256"}:
+    assert updated[key] == original[key], key
+assert path.read_text() == json.dumps(updated, sort_keys=True, separators=(",", ":")) + "\n"
+PY
+sha256sum "${release_files[@]}" > "${temp}/bumped-release.sha256"
+bash scripts/bump-sdk-version.sh 1.2.4
+sha256sum --check "${temp}/bumped-release.sha256"
+printf 'Changed release fixture\n' > README.md
+bash scripts/bump-sdk-version.sh 1.2.4
+bash "${scripts}/validate-release.sh" pr releases/v1.2.4
+
+mkdir failing-uv
+real_uv="$(command -v uv)"
+cat > failing-uv/uv <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == lock ]]; then
+  echo "Lock resolution failed" >&2
+  exit 23
+fi
+exec "${REAL_UV}" "$@"
+MOCK
+chmod +x failing-uv/uv
+sha256sum "${release_files[@]}" > "${temp}/before-failure.sha256"
+expect_failure "Lock resolution failed" \
+  env REAL_UV="${real_uv}" PATH="${temp}/failing-uv:${PATH}" \
+  bash scripts/bump-sdk-version.sh 1.2.5
+sha256sum --check "${temp}/before-failure.sha256"
+
+cat > .github/scripts/validate-release.sh <<'MOCK'
+#!/usr/bin/env bash
+echo "Final release validation failed" >&2
+exit 42
+MOCK
+expect_failure "Final release validation failed" bash scripts/bump-sdk-version.sh 1.2.5
+sha256sum --check "${temp}/before-failure.sha256"
+cp "${scripts}/validate-release.sh" .github/scripts/
+
+cp original-release/pyproject.toml pyproject.toml
+cp original-release/uv.lock uv.lock
+cp original-release/sjd_release_identity.json src/people_counter/data/
+printf 'Release fixture\n' > README.md
+
 uv run --no-project python -S src/people_counter/fabric_release_provenance.py 1.2.3
 printf 'Changed release fixture\n' > README.md
 expect_failure "release identity build_input_sha256" \

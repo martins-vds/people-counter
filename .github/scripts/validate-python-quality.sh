@@ -53,6 +53,7 @@ if ((${#type_targets[@]} > 0)); then
   printf '%s\n' "${type_targets[@]}" > "${evidence_dir}/typechecked-python.txt"
   PYRIGHT_PYTHON_FORCE_VERSION=1.1.406 \
     uvx --from pyright==1.1.406 pyright \
+      --pythonpath "$(uv run --no-sync python -c 'import sys; print(sys.executable)')" \
       --level error "${type_targets[@]}" \
       2>&1 | tee "${evidence_dir}/pyright.txt"
 else

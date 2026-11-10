@@ -28,6 +28,7 @@ while IFS= read -r workflow; do
 done < <(find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
 
 mapfile -t shell_scripts < <(find .github/scripts -type f -name '*.sh' | sort)
+shell_scripts+=(scripts/bump-sdk-version.sh)
 if ((${#shell_scripts[@]} > 0)); then
   shellcheck -x "${shell_scripts[@]}"
 fi
