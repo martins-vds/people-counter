@@ -1,0 +1,4 @@
+catalog_version,source_path_prefix,camera_id,location_id,camera_timezone,frame_width,frame_height,counting_line_x1,counting_line_y1,counting_line_x2,counting_line_y2,capture_time_source,capture_time_regex,capture_time_format,effective_from_utc,effective_to_utc
+1,samples/,sample-camera,sample-location,UTC,3626,1994,0,997,3625,997,auto,,,2023-01-01T00:00:00Z,2023-09-28T00:00:00Z
+1,samples/,sample-camera,sample-location,UTC,3840,2160,0,1080,3839,1080,auto,,,2023-09-28T00:00:00Z,2023-10-01T00:00:00Z
+1,samples/,sample-camera,sample-location,UTC,1920,1080,0,540,1919,540,auto,,,2023-10-01T00:00:00Z,

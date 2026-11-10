@@ -1,0 +1,24 @@
+{
+  "asset_id": "5b300380f4ea792bf57f1ee1ff6a015258b9da63f5ccdd34bdfbcfb8d3564468",
+  "asset_version": "d5bd760178a4ae0d429a52c2c46ae6ec567fea2d55608e982293bfc001a8f750",
+  "camera_id": "sample-camera",
+  "camera_timezone": "UTC",
+  "capture_time_source": "embedded",
+  "captured_at_utc": "2023-09-29T16:03:17Z",
+  "content_type": "video/mp4",
+  "counting_line": [
+    0,
+    1080,
+    3839,
+    1080
+  ],
+  "duration_seconds": 31.396667,
+  "expected_sha256": "d5bd760178a4ae0d429a52c2c46ae6ec567fea2d55608e982293bfc001a8f750",
+  "expected_size_bytes": 98758271,
+  "frame_height": 2160,
+  "frame_width": 3840,
+  "location_id": "sample-location",
+  "prepared_manifest_version": 1,
+  "relative_video_path": "samples/subway.mp4",
+  "source_path_prefix": "samples/"
+}

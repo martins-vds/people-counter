@@ -1,0 +1,35 @@
+{
+  "catalog_sha256": "eabfd7c1a78a096b95e3b3287f723ab95fac4436a2fe4c92de91186003e61662",
+  "complete": true,
+  "created_at_utc": "2026-11-10T16:32:03.611088Z",
+  "discovered": 3,
+  "entries": [
+    {
+      "prepared_manifest_path": "prepared-manifests/c82ea5ff393efd0de50e7d2fa9f0620829b39caee5dd3e5f92b684ffe74e0f9c/4a780417943542a7d0e72d4f91f30751b8fad304f911936ce7c07ee5a49584c5.json",
+      "prepared_manifest_sha256": "2aca05aa406d98a555ee0e3e25285fa23eda45b32ce7a29618b3a8a2d4409706",
+      "video_relative_path": "samples/people_crossing.mp4",
+      "video_sha256": "4a780417943542a7d0e72d4f91f30751b8fad304f911936ce7c07ee5a49584c5",
+      "video_size_bytes": 211622638
+    },
+    {
+      "prepared_manifest_path": "prepared-manifests/5b300380f4ea792bf57f1ee1ff6a015258b9da63f5ccdd34bdfbcfb8d3564468/d5bd760178a4ae0d429a52c2c46ae6ec567fea2d55608e982293bfc001a8f750.json",
+      "prepared_manifest_sha256": "637d8a773ff7bd71d51842098f23b1f11e755d7969b26722540cf3e52fcd3d7e",
+      "video_relative_path": "samples/subway.mp4",
+      "video_sha256": "d5bd760178a4ae0d429a52c2c46ae6ec567fea2d55608e982293bfc001a8f750",
+      "video_size_bytes": 98758271
+    },
+    {
+      "prepared_manifest_path": "prepared-manifests/cbc645f15a90197b2fb3c6d43eed72085c0d32f6ed9acd0cb00826ab04e445b9/0e70fed4fcdc59334f16dc1eac1a5f433403af4fb53a348a26d24b07404b58d4.json",
+      "prepared_manifest_sha256": "6214013d8312fe21345834dc960d8cbd0a870af5a72f9c2701d5f2c28da64a5c",
+      "video_relative_path": "samples/three_people_walking.mp4",
+      "video_sha256": "0e70fed4fcdc59334f16dc1eac1a5f433403af4fb53a348a26d24b07404b58d4",
+      "video_size_bytes": 3458119
+    }
+  ],
+  "generator_version": "0.9.62",
+  "inventory_sha256": "306f89cfe98d4066491c1a48ee56775a3ebb3a24c92915808d0ae652e4752d3b",
+  "manifest_package_version": 1,
+  "planning_contract_version": "2",
+  "prepared": 3,
+  "rejected": 0
+}

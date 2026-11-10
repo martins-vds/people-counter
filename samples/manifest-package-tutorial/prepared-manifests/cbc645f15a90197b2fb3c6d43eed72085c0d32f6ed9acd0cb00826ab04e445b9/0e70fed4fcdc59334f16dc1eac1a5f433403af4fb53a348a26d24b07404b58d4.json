@@ -1,0 +1,24 @@
+{
+  "asset_id": "cbc645f15a90197b2fb3c6d43eed72085c0d32f6ed9acd0cb00826ab04e445b9",
+  "asset_version": "0e70fed4fcdc59334f16dc1eac1a5f433403af4fb53a348a26d24b07404b58d4",
+  "camera_id": "sample-camera",
+  "camera_timezone": "UTC",
+  "capture_time_source": "inventory_override",
+  "captured_at_utc": "2023-10-01T01:00:00Z",
+  "content_type": "video/mp4",
+  "counting_line": [
+    0,
+    540,
+    1919,
+    540
+  ],
+  "duration_seconds": 7.0,
+  "expected_sha256": "0e70fed4fcdc59334f16dc1eac1a5f433403af4fb53a348a26d24b07404b58d4",
+  "expected_size_bytes": 3458119,
+  "frame_height": 1080,
+  "frame_width": 1920,
+  "location_id": "sample-location",
+  "prepared_manifest_version": 1,
+  "relative_video_path": "samples/three_people_walking.mp4",
+  "source_path_prefix": "samples/"
+}

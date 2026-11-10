@@ -1,0 +1,24 @@
+{
+  "asset_id": "c82ea5ff393efd0de50e7d2fa9f0620829b39caee5dd3e5f92b684ffe74e0f9c",
+  "asset_version": "4a780417943542a7d0e72d4f91f30751b8fad304f911936ce7c07ee5a49584c5",
+  "camera_id": "sample-camera",
+  "camera_timezone": "UTC",
+  "capture_time_source": "embedded",
+  "captured_at_utc": "2023-09-26T12:18:09Z",
+  "content_type": "video/mp4",
+  "counting_line": [
+    0,
+    997,
+    3625,
+    997
+  ],
+  "duration_seconds": 68.466667,
+  "expected_sha256": "4a780417943542a7d0e72d4f91f30751b8fad304f911936ce7c07ee5a49584c5",
+  "expected_size_bytes": 211622638,
+  "frame_height": 1994,
+  "frame_width": 3626,
+  "location_id": "sample-location",
+  "prepared_manifest_version": 1,
+  "relative_video_path": "samples/people_crossing.mp4",
+  "source_path_prefix": "samples/"
+}

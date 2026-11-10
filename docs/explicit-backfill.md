@@ -7,6 +7,13 @@ profile setup, and controlled publication/submission, use the
 The [manifest package notebook](../notebooks/manifest_package_operator_tutorial.ipynb)
 only prepares local packages. It never uploads videos or submits work.
 
+Before opening the notebook, run `uv sync --extra experiments` and select the
+repository's `.venv` as its kernel. Preparation subprocesses use the kernel's
+Python interpreter without syncing the environment. Do not replace or sync
+that environment while the kernel is running. If an earlier preparation run
+recreated `.venv`, restart the kernel, select the current `.venv`, and rerun
+the notebook from step 1.
+
 The separate operator command publishes the package and registers explicit work
 with the deployed **Control SJD**. It does not use the local SQLite Control CLI,
 run inference, enable schedules, or provision infrastructure.

@@ -1,5 +1,8 @@
+import ast
 import hashlib
 import json
+import subprocess
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -316,10 +319,41 @@ def test_notebook_only_prepares_packages():
     assert "RUN_PUBLICATION" not in code
     assert '"publish-manifests"' not in code
     assert "bulk-register" not in code
-    assert "prepare-manifests" in code
+    assert "prepare_main" in code
     text = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
     assert "backfill_operator" in text
     assert "10.3 Translate" not in text
+
+
+def test_notebook_preparation_uses_kernel_interpreter():
+    path = Path(__file__).parents[1] / "notebooks/manifest_package_operator_tutorial.ipynb"
+    notebook = json.loads(path.read_text())
+    cell = next(cell for cell in notebook["cells"] if cell["id"] == "prepare-first-pass")
+    tree = ast.parse("".join(cell["source"]))
+    assignment = ast.Module(body=[tree.body[0]], type_ignores=[])
+    namespace = {
+        "sys": sys,
+        "CATALOG_PATH": Path("catalog.csv"),
+        "VIDEO_ROOT": Path("videos"),
+        "PARTITION_PREFIX": "samples/",
+        "PACKAGE_DIR": Path("package"),
+    }
+    exec(compile(assignment, str(path), "exec"), namespace)
+    command = namespace["prepare_base"]
+    assert command[0] == sys.executable
+    assert command[1] == "-c"
+    assert command[3:] == [
+        "--catalog", "catalog.csv",
+        "--video-root", "videos",
+        "--partition-prefix", "samples/",
+        "--output-dir", "package",
+        "--max-files", "10",
+    ]
+    result = subprocess.run(
+        command[:3] + ["--help"], check=True, capture_output=True, text=True,
+    )
+    assert "--catalog" in result.stdout
+    assert "--output-dir" in result.stdout
 
 
 @pytest.mark.parametrize("bad_size,bad_digest", [(True, False), (False, True)])
