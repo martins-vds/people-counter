@@ -107,6 +107,19 @@ npm run test:portal:mutation
 
 Jest runs DOM behavior tests and collects Istanbul coverage for every JavaScript
 file under `src/people_counter/portal_static/`, including untested files.
+The tests use intent-based assertions: accessible roles and labels identify
+controls, `user-event` performs supported user interactions, and `jest-dom`
+matchers describe visible, enabled, checked, and focused states. Async tests
+wait for observable results with `findBy` or `waitFor`, not fixed sleeps.
+Fixtures retain the production controls' labels and semantics. Direct events
+remain appropriate for native validation, image loading, and malformed inputs.
+
+Assert behavior rather than internal loading flags, CSS class names, or incidental
+URL parameter order. Request counts still verify lazy loading and caching.
+Canvas API assertions verify the graphics boundary; independent geometry tests
+check arrow direction, symmetry, and scaling. These mocked-canvas tests do not
+prove actual browser rendering; the Playwright suite covers browser integration.
+
 [`crap-score`](https://github.com/ahilke/js-crap-score) combines each function's
 cyclomatic complexity and statement coverage. The check fails if any function
 scores **10 or higher**, has an invalid score, or the report has no functions.
@@ -121,6 +134,8 @@ The sandbox contains only JavaScript sources, tests, and their configuration.
 Node resolves dependencies from `node_modules` at the repository root;
 automatic dependency symlinking is disabled to avoid recursively scanning
 unrelated local Spark data directories.
+The mutation timeout includes a 15-second margin so multiple asynchronous
+assertions can report failures before Stryker classifies a mutant as timed out.
 
 JSON/HTML coverage, CRAP, and mutation reports are written under
 `evidence/portal-js/`; open `mutation.html` to inspect surviving mutants.

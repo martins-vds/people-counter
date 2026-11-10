@@ -14,6 +14,7 @@
     "configFile": "package.json"
   },
   "coverageAnalysis": "perTest",
+  "timeoutMS": 15000,
   "concurrency": 2,
   "reporters": ["clear-text", "progress", "json", "html"],
   "jsonReporter": {

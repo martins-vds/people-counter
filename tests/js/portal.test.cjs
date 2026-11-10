@@ -1,8 +1,10 @@
 "use strict";
 
+require("@testing-library/jest-dom");
+const { fireEvent, screen, waitFor, within } = require("@testing-library/dom");
+const userEvent = require("@testing-library/user-event").default;
+
 const loadPortal = () => require("../../src/people_counter/portal_static/portal.js");
-const change = (element, type = "change") => element.dispatchEvent(new Event(type, { bubbles: true }));
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 beforeEach(() => {
   jest.resetModules();
@@ -23,41 +25,42 @@ test("loads on pages without optional portal controls", () => {
 });
 
 test("opens all enclosing disclosures for invalid controls", () => {
-  document.body.innerHTML = "<details><details><input required></details></details><input id=outside>";
+  document.body.innerHTML = '<details><summary>Settings</summary><details><summary>Coordinates</summary><input aria-label="X1" required></details></details><input aria-label="Outside">';
   loadPortal();
-  document.querySelector("details input").dispatchEvent(new Event("invalid"));
-  expect([...document.querySelectorAll("details")].every((node) => node.open)).toBe(true);
-  change(document.querySelector("#outside"), "invalid");
+  fireEvent.invalid(screen.getByLabelText("X1"));
+  expect(screen.getByLabelText("X1")).toBeVisible();
+  for (const section of document.querySelectorAll("details")) expect(section).toHaveAttribute("open");
+  fireEvent.invalid(screen.getByLabelText("Outside"));
 });
 
 function folderPage() {
+  const user = userEvent.setup();
   document.body.innerHTML = `
-    <button id="toggle-folders" aria-expanded="false"></button>
+    <style>.hidden { display: none; }</style>
+    <button id="toggle-folders" aria-expanded="false">Folders</button>
     <aside id="folder-sidebar" class="hidden">
-      <nav id="folder-navigation" data-folders-url="/folders" data-browse-url="/"
+      <nav aria-label="Folders" id="folder-navigation" data-folders-url="/folders" data-browse-url="/"
         data-current-folder="site/east" data-query="clip" data-kind="videos">
-        <a class="folder-link"><svg><path d="M0 0h8v8H0z"></path></svg></a>
+        <a class="folder-link" href="/"><svg aria-hidden="true"><path d="M0 0h8v8H0z"></path></svg>Source root</a>
         <details data-folder="site"><summary tabindex="0">site</summary><ul data-folder-children></ul></details>
       </nav>
     </aside>`;
   loadPortal();
-  return document.querySelector("details");
+  return { user, node: document.querySelector("details") };
 }
 
-async function expand(node) {
-  node.open = true;
-  await settle();
-}
-
-test("toggles the responsive folder sidebar", () => {
-  folderPage();
-  const toggle = document.querySelector("#toggle-folders");
-  toggle.click();
-  expect(toggle.getAttribute("aria-expanded")).toBe("true");
-  expect(document.querySelector("#folder-sidebar").classList.contains("hidden")).toBe(false);
-  toggle.click();
-  expect(toggle.getAttribute("aria-expanded")).toBe("false");
-  expect(document.querySelector("#folder-sidebar").classList.contains("hidden")).toBe(true);
+test("makes folder navigation available only while its disclosure is expanded", async () => {
+  const { user } = folderPage();
+  const toggle = screen.getByRole("button", { name: "Folders" });
+  const navigation = screen.getByLabelText("Folders", { selector: "nav" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(navigation).not.toBeVisible();
+  await user.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("navigation", { name: "Folders" })).toBeVisible();
+  await user.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(navigation).not.toBeVisible();
 });
 
 test("loads folders lazily, retains filters, escapes names and caches children", async () => {
@@ -65,49 +68,48 @@ test("loads folders lazily, retains filters, escapes names and caches children",
     { name: "east", path: "site/east" },
     { name: "<img src=x onerror=alert(1)>", path: "site/unsafe" },
   ] }) });
-  const node = folderPage();
+  const { user, node } = folderPage();
+  await user.click(screen.getByRole("button", { name: "Folders" }));
   expect(fetch).not.toHaveBeenCalled();
-  change(node, "toggle");
+  fireEvent(node, new Event("toggle"));
   expect(fetch).not.toHaveBeenCalled();
-  await expand(node);
+  const summary = node.querySelector("summary");
+  await user.click(summary);
+  const link = await within(node).findByRole("link", { name: "east", current: "page" });
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(new URL(fetch.mock.calls[0][0]).searchParams.get("folder")).toBe("site");
-  const link = node.querySelector(".folder-link");
   const url = new URL(link.href);
-  expect([...url.searchParams]).toEqual([["folder", "site/east"], ["q", "clip"], ["kind", "videos"]]);
-  expect(link.getAttribute("aria-current")).toBe("page");
-  expect(link.closest("details").className).toBe("folder-node");
-  expect(link.querySelector("svg path").getAttribute("d")).toBe("M0 0h8v8H0z");
-  const unsafe = node.querySelectorAll(".folder-link")[1];
-  expect(unsafe.textContent).toBe("<img src=x onerror=alert(1)>");
-  expect(unsafe.hasAttribute("aria-current")).toBe(false);
-  expect(node.querySelector("img")).toBeNull();
-  expect(node.dataset.loaded).toBe("true");
-  expect(node.dataset.loading).toBe("false");
-  node.open = false;
-  change(node, "toggle");
-  await expand(node);
+  expect(url.pathname).toBe("/");
+  expect(url.searchParams.get("folder")).toBe("site/east");
+  expect(url.searchParams.get("q")).toBe("clip");
+  expect(url.searchParams.get("kind")).toBe("videos");
+  expect(link).toBeVisible();
+  const unsafe = within(node).getByRole("link", { name: "<img src=x onerror=alert(1)>" });
+  expect(unsafe).not.toHaveAttribute("aria-current");
+  expect(node.querySelector("img")).not.toBeInTheDocument();
+  await user.click(summary);
+  expect(link).not.toBeVisible();
+  await user.click(summary);
+  expect(link).toBeVisible();
   expect(fetch).toHaveBeenCalledTimes(1);
   fetch.mockResolvedValue({ ok: true, json: async () => ({ folders: [] }) });
-  await expand(node.querySelector("details"));
-  expect(node.querySelector("details").textContent).toContain("No subfolders");
+  await user.click(link.closest("summary"));
+  expect(await within(node).findByText("No subfolders")).toBeVisible();
   expect(fetch).toHaveBeenCalledTimes(2);
 });
 
 test("shows loading state and does not duplicate an in-flight folder request", async () => {
   let finish;
   fetch.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
-  const node = folderPage();
-  node.open = true;
-  change(node, "toggle");
-  change(node, "toggle");
-  expect(node.querySelector('[role="status"]').textContent).toBe("Loading folders...");
-  expect(node.querySelector('[role="status"]').className).toBe("folder-message");
+  const { user, node } = folderPage();
+  await user.click(screen.getByRole("button", { name: "Folders" }));
+  await user.click(node.querySelector("summary"));
+  expect(await screen.findByRole("status")).toHaveTextContent("Loading folders...");
+  fireEvent(node, new Event("toggle"));
   expect(fetch).toHaveBeenCalledTimes(1);
   finish({ ok: true, json: async () => ({ folders: [] }) });
-  await settle();
-  expect(node.textContent).toContain("No subfolders");
-  expect(node.querySelector('[role="status"]')).toBeNull();
+  expect(await screen.findByText("No subfolders")).toBeVisible();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
 
 test.each([
@@ -124,48 +126,51 @@ test.each([
 ])("reports folder failure %s and allows a focused retry", async (message, response) => {
   fetch.mockImplementationOnce(response);
   fetch.mockResolvedValue({ ok: true, json: async () => ({ folders: [] }) });
-  const node = folderPage();
-  await expand(node);
-  expect(node.querySelector('[role="alert"]').textContent).toContain(`Unable to load folders: ${message}`);
-  expect(node.dataset.loading).toBe("false");
-  expect(node.dataset.loaded).not.toBe("true");
-  const retry = node.querySelector("button");
-  expect(retry.getAttribute("aria-label")).toBe("Retry folder site");
-  expect(retry.type).toBe("button");
-  expect(retry.className).toBe("btn-secondary btn-sm");
-  expect(retry.textContent).toBe("Retry");
-  retry.click();
-  await settle();
-  expect(node.querySelector('[role="alert"]')).toBeNull();
-  expect(node.textContent).toContain("No subfolders");
-  expect(document.activeElement).toBe(node.querySelector("summary"));
+  const { user, node } = folderPage();
+  await user.click(screen.getByRole("button", { name: "Folders" }));
+  await user.click(node.querySelector("summary"));
+  expect(await screen.findByRole("alert")).toHaveTextContent(`Unable to load folders: ${message}`);
+  const retry = screen.getByRole("button", { name: "Retry folder site" });
+  expect(retry).toHaveAttribute("type", "button");
+  expect(retry).toHaveTextContent("Retry");
+  await user.click(retry);
+  expect(await screen.findByText("No subfolders")).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  await waitFor(() => expect(node.querySelector("summary")).toHaveFocus());
   expect(fetch).toHaveBeenCalledTimes(2);
 });
 
 function dialogPage(autoOpen = false, withTrigger = true) {
+  const user = userEvent.setup();
   document.body.innerHTML = `
     ${withTrigger ? '<button data-dialog-open="edit" disabled>Open</button>' : ""}
-    <dialog id="edit" data-form-dialog data-auto-open="${autoOpen}">
-      <input type="checkbox" name="confirm" checked><button data-dialog-close>Close</button>
+    <dialog id="edit" aria-labelledby="edit-title" data-form-dialog data-auto-open="${autoOpen}">
+      <h2 id="edit-title">Edit settings</h2>
+      <label><input type="checkbox" name="confirm" checked>I approve this action</label>
+      <button data-dialog-close>Close dialog</button>
     </dialog>`;
   const dialog = document.querySelector("dialog");
   dialog.showModal = jest.fn(() => { dialog.open = true; });
-  dialog.close = jest.fn(() => { dialog.open = false; change(dialog, "close"); });
+  dialog.close = jest.fn(() => { dialog.open = false; fireEvent(dialog, new Event("close")); });
   loadPortal();
-  return dialog;
+  return { user, dialog };
 }
 
-test("enables dialog triggers and clears approval and restores focus on close", () => {
-  const dialog = dialogPage();
-  const trigger = document.querySelector("[data-dialog-open]");
-  expect(trigger.disabled).toBe(false);
-  expect(dialog.showModal).not.toHaveBeenCalled();
-  trigger.click();
-  expect(dialog.open).toBe(true);
-  dialog.querySelector("button").click();
-  expect(dialog.open).toBe(false);
-  expect(dialog.querySelector("input").checked).toBe(false);
-  expect(document.activeElement).toBe(trigger);
+test("enables dialog triggers and clears approval and restores focus on close", async () => {
+  const { user, dialog } = dialogPage();
+  const trigger = screen.getByRole("button", { name: "Open" });
+  const approval = screen.getByLabelText("I approve this action");
+  expect(trigger).toBeEnabled();
+  expect(dialog).not.toHaveAttribute("open");
+  await user.click(trigger);
+  expect(screen.getByRole("dialog", { name: "Edit settings" })).toHaveAttribute("open");
+  await user.click(screen.getByRole("button", { name: "Close dialog" }));
+  expect(dialog).not.toHaveAttribute("open");
+  expect(approval).not.toBeChecked();
+  expect(trigger).toHaveFocus();
+  await user.click(trigger);
+  expect(screen.getByRole("dialog", { name: "Edit settings" })).toHaveAttribute("open");
+  expect(approval).not.toBeChecked();
 });
 
 test.each([
@@ -174,94 +179,131 @@ test.each([
   [{ key: "Escape", isComposing: true }, false],
   [{ key: "Escape", prevented: true }, false],
 ])("handles dialog keydown %j without overriding other handlers", (options, closes) => {
-  const dialog = dialogPage(true);
-  expect(dialog.showModal).toHaveBeenCalledTimes(1);
+  const { dialog } = dialogPage(true);
+  expect(screen.getByRole("dialog", { name: "Edit settings" })).toHaveAttribute("open");
   const event = new KeyboardEvent("keydown", { ...options, cancelable: true });
   if (options.prevented) event.preventDefault();
   dialog.dispatchEvent(event);
-  expect(dialog.close).toHaveBeenCalledTimes(closes ? 1 : 0);
+  if (closes) expect(dialog).not.toHaveAttribute("open");
+  else expect(dialog).toHaveAttribute("open");
   expect(event.defaultPrevented).toBe(closes || Boolean(options.prevented));
 });
 
 test("does not auto-open a dialog without a trigger and can close it safely", () => {
-  const dialog = dialogPage(true, false);
-  expect(dialog.showModal).not.toHaveBeenCalled();
+  const { dialog } = dialogPage(true, false);
+  expect(dialog).not.toHaveAttribute("open");
   dialog.close();
-  expect(dialog.querySelector("input").checked).toBe(false);
+  expect(screen.getByLabelText("I approve this action")).not.toBeChecked();
 });
 
-test.each([false, true])("generates stable name IDs with location control present: %s", (withLocation) => {
+test.each([false, true])("generates stable name IDs with location control present: %s", async (withLocation) => {
+  const user = userEvent.setup();
+  const nameLabel = withLocation ? "Camera name" : "Location name";
   document.body.innerHTML = `
-    <form data-name-form><input name="display_name">
-      ${withLocation ? '<select name="location_id"><option value="">Choose</option><option value="north">North</option></select>' : ""}
-      <output data-generated-id></output>
+    <form data-name-form><label for="display-name">${nameLabel}</label><input id="display-name" name="display_name">
+      ${withLocation ? '<label for="location">Location</label><select id="location" name="location_id"><option value="">Choose</option><option value="north">North</option></select>' : ""}
+      <output data-generated-id aria-live="polite"></output>
     </form>`;
   loadPortal();
-  const name = document.querySelector("input");
-  const output = document.querySelector("output");
-  expect(output.textContent).toBe("Enter a name with letters or digits");
-  name.value = " --Caf\u00e9 / ENTRANCE 17-- ";
-  change(name, "input");
-  expect(output.textContent).toBe(withLocation ? "Select a location" : "cafe-entrance-17");
+  const name = screen.getByRole("textbox", { name: nameLabel });
+  const output = screen.getByRole("status");
+  expect(output).toHaveTextContent(/^Enter a name with letters or digits$/);
+  await user.type(name, " --Caf\u00e9 / ENTRANCE 17-- ");
+  expect(output).toHaveTextContent(withLocation ? /^Select a location$/ : /^cafe-entrance-17$/);
   if (withLocation) {
-    const location = document.querySelector("select");
-    location.value = "north";
-    change(location);
-    expect(output.textContent).toBe("north-cafe-entrance-17");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Location" }), "north");
+    expect(output).toHaveTextContent(/^north-cafe-entrance-17$/);
   }
-  name.value = "---";
-  change(name, "input");
-  expect(output.textContent).toBe("Enter a name with letters or digits");
+  await user.clear(name);
+  await user.type(name, "---");
+  expect(output).toHaveTextContent(/^Enter a name with letters or digits$/);
 });
 
-test("filters cameras by location, preserves the initial selection and resets changes", () => {
+test("filters cameras by location, preserves the initial selection and resets changes", async () => {
+  const user = userEvent.setup();
   document.body.innerHTML = `
+    <label for="camera-location">Location</label>
     <select id="camera-location"><option value="">Choose</option><option selected>north</option><option>south</option><option>empty</option></select>
+    <label for="camera-id">Camera</label>
     <select id="camera-id" data-selected="north-2"></select>
     <template id="camera-options"><option value="north-1" data-location="north">One</option>
       <option value="north-2" data-location="north">Two</option><option value="south-1" data-location="south">South</option></template>`;
   loadPortal();
-  const camera = document.querySelector("#camera-id");
-  const location = document.querySelector("#camera-location");
-  expect(camera.value).toBe("north-2");
-  expect(camera.disabled).toBe(false);
-  expect([...camera.options].map((option) => option.value)).toEqual(["", "north-1", "north-2"]);
-  expect([...camera.options].map((option) => option.textContent)).toEqual(["Select a camera", "One", "Two"]);
-  location.value = "south";
-  change(location);
-  expect(camera.value).toBe("");
-  expect([...camera.options].map((option) => option.value)).toEqual(["", "south-1"]);
-  location.value = "empty";
-  change(location);
-  expect(camera.disabled).toBe(true);
-  expect(camera.options[0].textContent).toBe("No registered cameras at this location");
-  location.value = "";
-  change(location);
-  expect(camera.disabled).toBe(true);
-  expect(camera.options[0].textContent).toBe("Select a location first");
+  const camera = screen.getByRole("combobox", { name: "Camera" });
+  const location = screen.getByRole("combobox", { name: "Location" });
+  expect(camera).toHaveValue("north-2");
+  expect(camera).toHaveDisplayValue("Two");
+  expect(camera).toBeEnabled();
+  expect(within(camera).getAllByRole("option")).toHaveLength(3);
+  expect(within(camera).getByRole("option", { name: "Select a camera" })).toHaveValue("");
+  expect(within(camera).getByRole("option", { name: "One" })).toHaveValue("north-1");
+  expect(within(camera).getByRole("option", { name: "Two" })).toHaveValue("north-2");
+  await user.selectOptions(location, "south");
+  expect(camera).toHaveValue("");
+  expect(camera).toHaveDisplayValue("Select a camera");
+  expect(within(camera).getAllByRole("option")).toHaveLength(2);
+  expect(within(camera).getByRole("option", { name: "South" })).toHaveValue("south-1");
+  expect(within(camera).queryByRole("option", { name: "One" })).not.toBeInTheDocument();
+  await user.selectOptions(location, "empty");
+  expect(camera).toBeDisabled();
+  expect(camera).toHaveDisplayValue("No registered cameras at this location");
+  await user.selectOptions(location, "");
+  expect(camera).toBeDisabled();
+  expect(camera).toHaveDisplayValue("Select a location first");
 });
 
-test("enables only the selected calibration scope", () => {
+test("makes only the selected calibration scope visible and submittable", async () => {
+  const user = userEvent.setup();
   document.body.innerHTML = `
-    <select id="calibration-scope"><option>camera</option><option>video</option></select>
-    <fieldset id="camera-fields"></fieldset><fieldset id="video-fields"></fieldset>`;
+    <form>
+    <label for="calibration-scope">Apply calibration to</label>
+    <select id="calibration-scope" name="scope"><option>camera</option><option>video</option></select>
+    <fieldset id="camera-fields"><legend>Camera metadata</legend>
+      <label>Camera<input name="camera_id" value="north-2"></label>
+    </fieldset>
+    <fieldset id="video-fields"><legend>Video exception</legend>
+      <label>Capture time override<input name="captured_at_utc" value="2026-01-01T12:00:00Z"></label>
+    </fieldset>
+    </form>`;
   loadPortal();
-  const camera = document.querySelector("#camera-fields");
-  const video = document.querySelector("#video-fields");
-  expect([camera.disabled, camera.hidden, video.disabled, video.hidden]).toEqual([false, false, true, true]);
-  document.querySelector("select").value = "video";
-  change(document.querySelector("select"));
-  expect([camera.disabled, camera.hidden, video.disabled, video.hidden]).toEqual([true, true, false, false]);
+  const camera = screen.getByText("Camera metadata").closest("fieldset");
+  const video = screen.getByText("Video exception").closest("fieldset");
+  expect(camera).toBeEnabled();
+  expect(camera).toBeVisible();
+  expect(video).toBeDisabled();
+  expect(video).not.toBeVisible();
+  const scope = screen.getByRole("combobox", { name: "Apply calibration to" });
+  expect(Object.fromEntries(new FormData(scope.form))).toEqual({ scope: "camera", camera_id: "north-2" });
+  await user.selectOptions(scope, "video");
+  expect(camera).toBeDisabled();
+  expect(camera).not.toBeVisible();
+  expect(video).toBeEnabled();
+  expect(video).toBeVisible();
+  expect(Object.fromEntries(new FormData(scope.form))).toEqual({
+    scope: "video", captured_at_utc: "2026-01-01T12:00:00Z",
+  });
+  await user.selectOptions(scope, "camera");
+  expect(camera).toBeEnabled();
+  expect(camera).toBeVisible();
+  expect(video).toBeDisabled();
+  expect(video).not.toBeVisible();
+  expect(Object.fromEntries(new FormData(scope.form))).toEqual({ scope: "camera", camera_id: "north-2" });
 });
 
-function canvasPage({ complete = true, naturalWidth = 320 } = {}) {
+function canvasPage({ complete = true, naturalWidth = 320, width = 320 } = {}) {
+  const user = userEvent.setup();
   document.body.innerHTML = `
-    <img id="preview-image" src="http://localhost/preview?video=clip.mp4">
-    <canvas id="line-canvas" width="320" height="180" tabindex="0"></canvas>
-    <input id="counting_line_x1" value="10"><input id="counting_line_y1" value="20">
-    <input id="counting_line_x2" value="100"><input id="counting_line_y2" value="120">
-    <p id="line-instructions"></p><form id="preview-form"><input name="seconds" value="2.5"></form>
-    <button id="redraw-line"></button>`;
+    <img id="preview-image" src="http://localhost/preview?video=clip.mp4" alt="Source video frame">
+    <canvas id="line-canvas" width="${width}" height="180" tabindex="0" aria-label="Counting line editor"></canvas>
+    <label for="counting_line_x1">X1</label><input id="counting_line_x1" value="10">
+    <label for="counting_line_y1">Y1</label><input id="counting_line_y1" value="20">
+    <label for="counting_line_x2">X2</label><input id="counting_line_x2" value="100">
+    <label for="counting_line_y2">Y2</label><input id="counting_line_y2" value="120">
+    <p id="line-instructions" role="status"></p><form id="preview-form">
+      <label for="seconds">Preview time in seconds</label><input id="seconds" name="seconds" value="2.5">
+      <button>Show frame</button>
+    </form>
+    <button id="redraw-line">Redraw line</button>`;
   const canvas = document.querySelector("canvas");
   const image = document.querySelector("img");
   Object.defineProperties(image, {
@@ -274,10 +316,10 @@ function canvasPage({ complete = true, naturalWidth = 320 } = {}) {
   jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context);
   jest.spyOn(canvas, "getBoundingClientRect").mockReturnValue({ left: 10, top: 20, width: 640, height: 360 });
   loadPortal();
-  return { canvas, image, context, instructions: document.querySelector("#line-instructions") };
+  return { user, canvas, image, context, instructions: screen.getByRole("status") };
 }
 
-test("draws the saved line and direction arrow when the frame is available", () => {
+test("renders the saved directed line and arrow through the canvas API", () => {
   const { image, context } = canvasPage();
   expect(context.drawImage).toHaveBeenCalledWith(image, 0, 0, 320, 180);
   expect(HTMLCanvasElement.prototype.getContext).toHaveBeenCalledWith("2d");
@@ -298,78 +340,123 @@ test("draws the saved line and direction arrow when the frame is available", () 
   expect(context.fill).toHaveBeenCalledTimes(1);
 });
 
+test.each([
+  [10, 20, 100, 20],
+  [100, 20, 10, 20],
+  [10, 20, 10, 120],
+  [10, 120, 10, 20],
+])("keeps arrow wings symmetric and behind the directed endpoint (%s, %s -> %s, %s)", (x1, y1, x2, y2) => {
+  const { context } = canvasPage();
+  for (const [label, value] of Object.entries({ X1: x1, Y1: y1, X2: x2, Y2: y2 })) {
+    screen.getByLabelText(label).value = String(value);
+  }
+  fireEvent.input(screen.getByLabelText("Y2"));
+  const wings = context.lineTo.mock.calls.slice(-2);
+  const crossProducts = [];
+  for (const [x, y] of wings) {
+    expect(Math.hypot(x - x2, y - y2)).toBeCloseTo(12, 8);
+    expect((x - x2) * (x1 - x2) + (y - y2) * (y1 - y2)).toBeGreaterThan(0);
+    crossProducts.push((x - x2) * (y1 - y2) - (y - y2) * (x1 - x2));
+  }
+  expect(crossProducts[0]).toBeCloseTo(-crossProducts[1], 8);
+  expect(crossProducts[0]).not.toBeCloseTo(0, 8);
+});
+
+test("scales the counting-line stroke and arrow for larger frames", () => {
+  const { context } = canvasPage({ width: 900 });
+  expect(context.lineWidth).toBeCloseTo(3.6, 8);
+  for (const [x, y] of context.lineTo.mock.calls.slice(-2)) {
+    expect(Math.hypot(x - 100, y - 120)).toBeCloseTo(20, 8);
+  }
+});
+
 test.each([{ complete: false }, { naturalWidth: 0 }])("waits for a usable frame: %j", (options) => {
   const { image, context, instructions } = canvasPage(options);
   expect(context.drawImage).not.toHaveBeenCalled();
   Object.defineProperties(image, { complete: { value: true }, naturalWidth: { value: 320 } });
-  change(image, "load");
+  fireEvent.load(image);
   expect(context.stroke).toHaveBeenCalledTimes(1);
-  expect(instructions.textContent).toContain("Frame ready. Your current line is preserved");
+  expect(instructions).toHaveTextContent("Frame ready. Your current line is preserved");
 });
 
 test("redraws edited coordinates but does not draw non-finite input", () => {
   const { context } = canvasPage();
-  const x = document.querySelector("#counting_line_x1");
-  x.value = "40";
-  change(x, "input");
+  const x = screen.getByLabelText("X1");
+  fireEvent.input(x, { target: { value: "40" } });
   expect(context.moveTo).toHaveBeenCalledWith(40, 20);
   context.stroke.mockClear();
-  x.value = "not-a-number";
-  change(x, "input");
+  fireEvent.input(x, { target: { value: "not-a-number" } });
   expect(context.stroke).not.toHaveBeenCalled();
 });
 
-test("requests another preview time without losing the source and reports image errors", () => {
-  const { image, instructions } = canvasPage();
-  const form = document.querySelector("form");
-  const event = new Event("submit", { cancelable: true });
-  form.dispatchEvent(event);
-  expect(event.defaultPrevented).toBe(true);
-  expect([...new URL(image.src).searchParams]).toEqual([["video", "clip.mp4"], ["seconds", "2.5"]]);
-  expect(instructions.textContent).toBe("Loading preview frame...");
-  expect(document.querySelector("#counting_line_x1").value).toBe("10");
-  change(image, "error");
-  expect(instructions.textContent).toContain("Frame could not be loaded");
+test("requests another preview time without losing the source and reports image errors", async () => {
+  const { user, image, instructions } = canvasPage();
+  const seconds = screen.getByLabelText("Preview time in seconds");
+  await user.clear(seconds);
+  await user.type(seconds, "3.5");
+  const showFrame = screen.getByRole("button", { name: "Show frame" });
+  const submitted = jest.fn();
+  showFrame.form.addEventListener("submit", submitted);
+  await user.click(showFrame);
+  expect(submitted).toHaveBeenCalled();
+  expect(submitted.mock.calls[0][0].defaultPrevented).toBe(true);
+  const url = new URL(image.src);
+  expect(url.pathname).toBe("/preview");
+  expect(url.searchParams.get("video")).toBe("clip.mp4");
+  expect(url.searchParams.get("seconds")).toBe("3.5");
+  expect(instructions).toHaveTextContent("Loading preview frame...");
+  expect(screen.getByLabelText("X1")).toHaveValue("10");
+  fireEvent.error(image);
+  expect(instructions).toHaveTextContent("Frame could not be loaded");
 });
 
-test("maps pointer positions to clamped image coordinates and resets the endpoint", () => {
-  const { canvas, context, instructions } = canvasPage();
-  const point = (x, y) => canvas.dispatchEvent(new MouseEvent("pointerdown", { clientX: x, clientY: y }));
+test("maps pointer positions to clamped image coordinates and resets the endpoint", async () => {
+  const { user, canvas, context, instructions } = canvasPage();
+  const point = (clientX, clientY) => user.pointer({
+    target: canvas, keys: "[MouseLeft]", coords: { clientX, clientY },
+  });
   context.stroke.mockClear();
-  point(74, 200);
-  expect(context.stroke).toHaveBeenCalledTimes(1);
-  expect(document.querySelector("#counting_line_x1").value).toBe("32");
-  expect(document.querySelector("#counting_line_y1").value).toBe("90");
-  expect(instructions.textContent).toBe("Now click the second endpoint.");
-  point(1000, -50);
-  expect(document.querySelector("#counting_line_x2").value).toBe("319");
-  expect(document.querySelector("#counting_line_y2").value).toBe("0");
-  expect(instructions.textContent).toBe("Line selected. Review and save the calibration.");
-  point(100, 100);
-  document.querySelector("#redraw-line").click();
-  expect(document.activeElement).toBe(canvas);
-  expect(instructions.textContent).toBe("Click the first endpoint, then the second.");
-  point(-100, 1000);
-  expect(document.querySelector("#counting_line_x1").value).toBe("0");
-  expect(document.querySelector("#counting_line_y1").value).toBe("179");
+  await point(74, 200);
+  expect(context.stroke).toHaveBeenCalled();
+  expect(screen.getByLabelText("X1")).toHaveValue("32");
+  expect(screen.getByLabelText("Y1")).toHaveValue("90");
+  expect(instructions).toHaveTextContent("Now click the second endpoint.");
+  await point(1000, -50);
+  expect(screen.getByLabelText("X2")).toHaveValue("319");
+  expect(screen.getByLabelText("Y2")).toHaveValue("0");
+  expect(instructions).toHaveTextContent("Line selected. Review and save the calibration.");
+  await point(100, 100);
+  await user.click(screen.getByRole("button", { name: "Redraw line" }));
+  expect(canvas).toHaveFocus();
+  expect(instructions).toHaveTextContent("Click the first endpoint, then the second.");
+  await point(-100, 1000);
+  expect(screen.getByLabelText("X1")).toHaveValue("0");
+  expect(screen.getByLabelText("Y1")).toHaveValue("179");
 });
 
-test("allows processing waits only for explicit backfill submission and clears stale approval", () => {
+test("allows processing waits only for explicit backfill submission and clears stale approval", async () => {
+  const user = userEvent.setup();
   document.body.innerHTML = `
-    <select id="cloud-action"><option value="">Choose</option><option>publish</option><option>submit</option></select>
-    <input id="wait-processing" type="checkbox" checked><div id="wait-options"></div>`;
+    <label for="cloud-action">Action</label>
+    <select id="cloud-action"><option value="">Choose an action</option>
+      <option value="publish">Upload/publish only</option><option value="submit">Publish and register explicit backfill work</option>
+    </select>
+    <div id="wait-options" hidden><label><input id="wait-processing" type="checkbox" checked>Wait for processing after submission</label></div>`;
   loadPortal();
-  const action = document.querySelector("select");
-  const wait = document.querySelector("input");
-  const options = document.querySelector("#wait-options");
-  expect([wait.disabled, wait.checked, options.hidden]).toEqual([true, false, true]);
-  action.value = "submit";
-  change(action);
-  expect([wait.disabled, options.hidden]).toEqual([false, false]);
-  wait.checked = true;
-  change(action);
-  expect(wait.checked).toBe(true);
-  action.value = "publish";
-  change(action);
-  expect([wait.disabled, wait.checked, options.hidden]).toEqual([true, false, true]);
+  const action = screen.getByRole("combobox", { name: "Action" });
+  const wait = screen.getByLabelText("Wait for processing after submission");
+  expect(wait).toBeDisabled();
+  expect(wait).not.toBeChecked();
+  expect(wait).not.toBeVisible();
+  await user.selectOptions(action, "submit");
+  expect(screen.getByRole("checkbox", { name: "Wait for processing after submission" })).toBeVisible();
+  expect(wait).toBeEnabled();
+  await user.click(wait);
+  expect(wait).toBeChecked();
+  await user.selectOptions(action, "submit");
+  expect(wait).toBeChecked();
+  await user.selectOptions(action, "publish");
+  expect(wait).toBeDisabled();
+  expect(wait).not.toBeChecked();
+  expect(wait).not.toBeVisible();
 });
