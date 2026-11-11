@@ -119,8 +119,10 @@ def test_stable_reconciliation_rejects_any_other_command() -> None:
     with patch("people_counter.fabric_sjd_runtime.control_main", return_value=0) as run:
         assert reconciliation_main() == 0
         run.assert_called_once_with(["reconcile"], config=FabricSjdConfig(**TARGET_IDS))
-    with pytest.raises(ValueError, match="only the reconcile"):
-        reconciliation_main(["recover"])
+        run.reset_mock()
+        with pytest.raises(ValueError, match="only the reconcile"):
+            reconciliation_main(["recover"])
+        run.assert_not_called()
 
 
 def test_stable_config_enables_production_attempt_adapter() -> None:
