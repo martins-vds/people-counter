@@ -12,6 +12,24 @@ For **Fabric preparation**, import the first notebook as PySpark, attach the
 default Lakehouse and a compatible published SDK Environment, and ensure
 `ffprobe` is available. Set `FABRIC_MODE = True` and configure:
 
+If Fabric raises `FileNotFoundError` for `ffprobe`, add **`ffmpeg` from Conda**
+to the attached Environment under **Libraries > External repositories >
+Add library from public repository**. Select an approved version, save and
+publish, then stop and restart the notebook session with that Environment.
+Do not install the Python packages `ffmpeg` or `ffmpeg-python` as a substitute:
+they do not provide the executable. Verify the fresh session before rerunning:
+
+```python
+import shutil
+import subprocess
+
+print(shutil.which("ffprobe"))
+subprocess.run(["ffprobe", "-version"], check=True)
+```
+
+See [Fabric environment library management](https://learn.microsoft.com/en-us/fabric/data-engineering/environment-manage-library).
+The notebook checks executable availability before generating metadata.
+
 | Setting | Default mounted path | Purpose |
 |---|---|---|
 | `VIDEO_ROOT` | `/lakehouse/default/Files/backfill/source-videos` | Source-tree root containing the selected shortcut or folder |

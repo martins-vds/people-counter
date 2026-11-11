@@ -117,6 +117,20 @@ def test_missing_shortcut_fails_without_creating_source(cells, tmp_path, monkeyp
     assert not (tmp_path / "missing").exists()
 
 
+@pytest.mark.parametrize("fabric", [False, True])
+def test_missing_ffprobe_explains_environment_setup(cells, tmp_path, monkeypatch, fabric):
+    (tmp_path / "samples").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n")
+    (tmp_path / "lakehouse/Files/backfill/source-videos").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    with patch("shutil.which", return_value=None), pytest.raises(
+        RuntimeError, match="ffprobe.*Conda ffmpeg.*restart",
+    ):
+        run_setup(cells["workspace-setup"], fabric, tmp_path / "lakehouse")
+    assert not (tmp_path / "lakehouse/Files/backfill/config").exists()
+    assert not (tmp_path / "samples/manifest-package-tutorial-inputs").exists()
+
+
 def test_fabric_generates_identical_tutorial_metadata(
     cells, fabric_setup, tmp_path, monkeypatch,
 ):
