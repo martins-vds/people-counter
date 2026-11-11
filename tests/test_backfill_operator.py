@@ -649,6 +649,79 @@ def test_backfill_notebook_keeps_progress_visible(backfill_notebook, notebookuti
     assert "Processing: 1/1 committed" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("operation", ["download", "readall", "chunks"])
+@pytest.mark.parametrize("failure", ["missing", "forbidden", "connection"])
+def test_onelake_read_errors_identify_resource_and_preserve_cause(operation, failure):
+    from azure.core.exceptions import (
+        HttpResponseError, ResourceNotFoundError, ServiceRequestError,
+    )
+
+    files = operator.OneLakeFiles.__new__(operator.OneLakeFiles)
+    files._workspace = "workspace"
+    files._lakehouse = "lakehouse"
+    file = Mock()
+    files._file = Mock(return_value=file)
+    if failure == "connection":
+        error = ServiceRequestError("connection failed")
+        guidance = "connectivity"
+    else:
+        error_type = ResourceNotFoundError if failure == "missing" else HttpResponseError
+        error = error_type("The specified blob does not exist." if failure == "missing" else "Denied")
+        error.status_code = 404 if failure == "missing" else 403
+        error.response = SimpleNamespace(headers={"x-ms-request-id": "request-123"})
+        guidance = "published SDK release" if failure == "missing" else "permissions"
+    path = "Files/models/rtdetr_osnet/model.onnx"
+    if operation == "download":
+        file.download_file.side_effect = error
+    elif operation == "readall":
+        file.download_file.return_value.readall.side_effect = error
+    else:
+        def chunks():
+            yield b"partial"
+            raise error
+
+        file.download_file.return_value.chunks.return_value = chunks()
+
+    with pytest.raises(RuntimeError) as raised:
+        if operation == "chunks":
+            files.verify_video(path, None, "a" * 64)
+        else:
+            files.read_text(path)
+    message = str(raised.value)
+    action = "verify size/SHA-256" if operation == "chunks" else "read"
+    assert message.startswith(f"OneLake {action} failed:")
+    assert f"abfss://workspace@onelake.dfs.fabric.microsoft.com/lakehouse/{path}" in message
+    assert type(error).__name__ in message
+    assert guidance in message
+    files._file.assert_called_once_with(path)
+    if failure != "connection":
+        assert str(error.status_code) in message
+        assert "request-123" in message
+    assert raised.value.__cause__ is error
+
+
+def test_missing_release_evidence_stops_before_publication(setup):
+    from azure.core.exceptions import ResourceNotFoundError
+    from people_counter.fabric_release_provenance import detached_manifest_evidence_path
+
+    files = operator.OneLakeFiles.__new__(operator.OneLakeFiles)
+    files._workspace = setup.config["workspace_id"]
+    files._lakehouse = setup.config["lakehouse_id"]
+    files._filesystem = Mock()
+    files._filesystem.get_file_client.return_value.download_file.side_effect = (
+        ResourceNotFoundError("The specified blob does not exist.")
+    )
+    with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
+        operator, "AzureDataLakeStorage",
+    ) as storage, patch.object(operator, "FabricAutomationClient") as fabric, pytest.raises(
+        RuntimeError, match=detached_manifest_evidence_path(),
+    ):
+        operator.main(setup.args + ["--submit"])
+    storage.assert_not_called()
+    fabric.assert_not_called()
+    assert not (setup.root / "state").exists()
+
+
 @pytest.mark.parametrize("bad_size,bad_digest", [(True, False), (False, True)])
 def test_onelake_video_integrity_checks(bad_size, bad_digest):
     files = operator.OneLakeFiles.__new__(operator.OneLakeFiles)

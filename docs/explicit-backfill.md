@@ -227,6 +227,18 @@ detached release manifest and postpublish receipt from the target Lakehouse,
 validates them against the local SDK release, and checks the Environment binding.
 Control independently checks release compatibility before registering work.
 
+If submission fails while verifying release evidence or models, the OneLake
+error identifies the operation, full `abfss://` resource URI, Azure exception
+type, HTTP status, and request ID when available. The original Azure exception
+is retained as the cause. Release checks precede model checks and publication.
+A missing blob can be release evidence, not necessarily a model: inspect the
+reported URI before changing `MODELS_DIR`. Restore the matching published
+release's `detached-manifest.json` and `postpublish-receipt.json` through the
+deployment process, or restore the approved model at the reported `Files/models`
+path. Do not fabricate evidence or bypass hash validation. For HTTP 401/403,
+check the notebook/operator identity's OneLake access. Retain the state directory
+for retries; a later source-shortcut read failure can occur after publication.
+
 See the [SJD deployment guide](../fabric/spark-job-definitions/README.md)
 and [manual deployment guide](manual-portal-deployment.md) for deployment details.
 

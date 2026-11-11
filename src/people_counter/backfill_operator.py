@@ -344,6 +344,7 @@ class OneLakeFiles:
         from azure.storage.filedatalake import DataLakeServiceClient
 
         self._exists_error = ResourceExistsError
+        self._workspace = config.workspace_id
         self._lakehouse = config.lakehouse_id
         service = DataLakeServiceClient(
             "https://onelake.dfs.fabric.microsoft.com",
@@ -354,8 +355,39 @@ class OneLakeFiles:
     def _file(self, path: str) -> Any:
         return self._filesystem.get_file_client(f"{self._lakehouse}/{path}")
 
+    @contextmanager
+    def _read_context(self, path: str, operation: str) -> Iterator[None]:
+        from azure.core.exceptions import AzureError, ResourceNotFoundError
+
+        try:
+            yield
+        except AzureError as error:
+            status = getattr(error, "status_code", None)
+            response = getattr(error, "response", None)
+            request_id = response.headers.get("x-ms-request-id") if response is not None else None
+            uri = (
+                f"abfss://{self._workspace}@onelake.dfs.fabric.microsoft.com/"
+                f"{self._lakehouse}/{path}"
+            )
+            if isinstance(error, ResourceNotFoundError):
+                guidance = (
+                    "Check the target workspace/Lakehouse and restore the required artifact. "
+                    "Release evidence must match the published SDK release and Environment; "
+                    "models must exist under Files/models; source files must be exposed by the shortcut."
+                )
+            elif status in (401, 403):
+                guidance = "Check the notebook/operator identity's OneLake permissions and token access."
+            else:
+                guidance = "Check OneLake connectivity, service availability, and identity access."
+            raise RuntimeError(
+                f"OneLake {operation} failed: {uri} "
+                f"({type(error).__name__}; HTTP status={status}; request_id={request_id}). "
+                f"{guidance} Retain the state directory; accepted Fabric jobs are not cancelled."
+            ) from error
+
     def read_bytes(self, path: str) -> bytes:
-        return self._file(path).download_file().readall()
+        with self._read_context(path, "read"):
+            return self._file(path).download_file().readall()
 
     def read_text(self, path: str) -> str:
         return self.read_bytes(path).decode("utf-8")
@@ -363,9 +395,10 @@ class OneLakeFiles:
     def verify_video(self, path: str, expected_size: int | None, expected_sha256: str) -> None:
         digest = hashlib.sha256()
         size = 0
-        for chunk in self._file(path).download_file().chunks():
-            size += len(chunk)
-            digest.update(chunk)
+        with self._read_context(path, "verify size/SHA-256"):
+            for chunk in self._file(path).download_file().chunks():
+                size += len(chunk)
+                digest.update(chunk)
         if (expected_size is not None and size != expected_size) or digest.hexdigest() != expected_sha256:
             raise ValueError(f"OneLake video size or SHA-256 mismatch: {path}")
 
@@ -605,12 +638,14 @@ def submit(
     if fabric:
         _validate_notebook_target(config)
         credentials["credential"] = NotebookStorageCredential()
-    _progress("Verifying published release and model artifacts...")
+    _progress("Verifying published release evidence...")
     files = OneLakeFiles(config, **credentials)
     release = resolve_published_release(files.read_text)
     if release.manifest.environment_id != config.environment_id:
         raise ValueError("published release Environment does not match the configured Environment")
+    _progress("Verifying deployed model artifacts...")
     for name, digest in config.profile["model_artifact_sha256"].items():
+        _progress(f"Verifying model: Files/models/{name}")
         files.verify_video(f"Files/models/{name}", None, digest)
     records = registration_records(package, config, release.manifest_sha256)
     plan = {
