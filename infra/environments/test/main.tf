@@ -6,7 +6,6 @@ locals {
     refresh        = { display_name = "pc-sjd-test-refresh" }
     reconciliation = { display_name = "pc-sjd-test-reconciliation" }
     gold           = { display_name = "pc-sjd-test-gold" }
-    cutover        = { display_name = "pc-sjd-test-cutover" }
   }
   reporting_items = {
     analytics = {
@@ -36,6 +35,7 @@ module "fabric_foundation" {
   environment_description  = "People Counter test Spark Environment"
 
   spark_job_definitions            = local.spark_job_definitions
+  sjd_files_root                   = "Files/people-counter/test/v1/"
   reporting_items                  = local.reporting_items
   enable_activator                 = var.enable_activator
   adls_storage_account_resource_id = var.adls_storage_account_resource_id

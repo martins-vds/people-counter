@@ -57,7 +57,7 @@ Have the following:
   for the approved users/security groups.
 - Approval for the ongoing capacity and storage charges.
 - A reviewed People Counter wheel containing the **manual-binding support
-  added with this change**, and the seven role-specific `main.py` files from
+  added with this change**, and the six role-specific `main.py` files from
   the same source revision. Do not use an unmodified older SDK wheel for
   manual execution. Artifact preparation is not cloud deployment: a release
   owner can supply these files or build them locally. Browser upload requires
@@ -341,7 +341,7 @@ Eventstream metrics require their own Eventstream monitoring setting.
 ### Build the upload artifacts
 
 The release owner prepares artifacts from the same reviewed source revision
-as the seven job entry points. Run these commands from the repository root;
+as the six job entry points. Run these commands from the repository root;
 they do not create or change cloud resources:
 
 ```bash
@@ -679,7 +679,7 @@ received one executor, so it did not demonstrate the reviewed two-executor
 profile. Neither changing a concurrency flag nor rerunning more jobs resolves
 that evidence gap.
 
-## 11. Create the seven Spark Job Definitions
+## 11. Create the six Spark Job Definitions
 
 1. From the workspace list, click **New item** > **Spark Job Definition**.
 2. Create `pc_sjd_dev_control`.
@@ -747,21 +747,26 @@ Do not assume a copied or uploaded definition retained the attachment.
 | `pc_sjd_dev_reconciliation` | [`reconciliation/Main/main.py`](../fabric/spark-job-definitions/reconciliation/Main/main.py) |
 | `pc_sjd_dev_gold` | [`gold/Main/main.py`](../fabric/spark-job-definitions/gold/Main/main.py) |
 | `pc_sjd_dev_refresh` | [`refresh/Main/main.py`](../fabric/spark-job-definitions/refresh/Main/main.py) |
-| `pc_sjd_dev_cutover` | [`cutover/Main/main.py`](../fabric/spark-job-definitions/cutover/Main/main.py) |
 
 **Replacing the copied main file is mandatory.** Merely renaming a Control job
 does not make it a Dispatcher, Process, or other role.
 
-Keep all recurring schedules disabled throughout setup. Process and Cutover
-are on-demand roles. Never enable schedules to test whether an incomplete
+Keep all recurring schedules disabled throughout setup. Process is the
+on-demand role. Never enable schedules to test whether an incomplete
 deployment works.
 
-![The seven role-specific job definitions in the manual workspace.](images/manual-deployment/32-seven-jobs.png)
+![Historical role inventory, including the now-retired Cutover job.](images/manual-deployment/32-seven-jobs.png)
+
+Cutover tooling and its SJD definition have been removed. Do not create a new
+Cutover job. Removing the code does not migrate work or delete existing
+Lakehouse tables. Review any existing obsolete SJD separately before removal.
 
 ## 12. Bind the installed application to the manual artifacts
 
-Use a wheel that includes the manual-binding support added with this guide.
-Older wheels retain fixed production IDs and must not be used for this step.
+Use a portable SDK wheel with deployment-independent release identity v2.
+Older wheels retain fixed production defaults and must not be used for this
+workflow. Workspace, Lakehouse, and Environment bindings are runtime inputs;
+SJD IDs are captured only after Fabric creates or accepts the uploaded jobs.
 
 Record the **workspace**, **Lakehouse**, and **Environment** IDs from their
 Fabric browser URLs. These are not the Azure subscription, capacity, or
@@ -803,7 +808,7 @@ For reference, the captured deployment used:
    replacing all three placeholders with that deployment's IDs:
 
    ```text
-   --manual-artifacts <workspace-id> <lakehouse-id> <environment-id>
+   --artifacts <workspace-id> <lakehouse-id> <environment-id>
    ```
 
 2. Click **Save**, refresh the job editor, and check the saved value.
@@ -811,6 +816,12 @@ For reference, the captured deployment used:
    workspace.
 4. Add the role's command/release arguments only after this prefix. Do not
    invent release manifest or receipt hashes.
+
+The older `--manual-artifacts` spelling is retained as an alias. If you use
+a state root other than `Files/people-counter/sjd/v1/`, append
+`--files-root Files/<deployment-path>/` consistently to each role and set the
+same `files_root` in backfill configuration. Paths remain confined to that
+validated directory.
 
 The prefix is explicit and all-or-nothing. The application rejects malformed
 or nil UUIDs and checks the live NotebookUtils context before calling a
@@ -823,15 +834,10 @@ write-enabled role:
   Environment and workspace.
 
 Missing metadata is a failure, not permission to fall back to another
-deployment. Without the prefix, the existing fixed production behavior is
-unchanged. Never remove the prefix to work around a context error.
-
-The **Cutover** job is deliberately different: its legacy migration commands
-and stopped-writer gate are fixed to an existing migration. Leave the manual
-prefix on that job, leave it unscheduled, and do not run it in a fresh
-deployment. The unsupported prefix makes that legacy entry point reject the
-invocation before starting Spark. Greenfield table initialization uses Control,
-not the legacy Cutover migration.
+deployment. Without the prefix, the SDK derives and checks the attached
+runtime context; it never falls back to a reference workspace. Never change
+bindings to bypass a context error. Greenfield table initialization uses
+Control `bootstrap`; no Cutover or migration step is required.
 
 ### Initialize the new Lakehouse
 
@@ -1163,9 +1169,13 @@ not a model artifact and must not go into `Files/models`.
    [publication notebook](../notebooks/fabric/manual_workspace_publication.ipynb)
    in VS Code. Copy its code cells into the browser notebook in order.
    To insert below the selected browser cell, press **Esc**, then **B**.
-5. In the first cell, replace all example target IDs and the workspace name
-   with this deployment's values. Set `EXPECTED_INPUT_SHA256` to the exact
-   preparation output and `INPUT_FILE_NAME` to the uploaded filename.
+5. In the first cell, set the published inference Environment ID and expected
+   workspace name. Workspace and Lakehouse IDs come from the attached default
+   Lakehouse. Set `DEPLOYMENT_STAGE`, `SJD_NAME_PREFIX`, and
+   `DEPLOYMENT_FILES_ROOT` to this deployment's configuration.
+   Set `EXPECTED_INPUT_SHA256` to the exact fresh preparation output and
+   `INPUT_FILE_NAME` to the uploaded filename. Regenerate older prepared inputs
+   that do not contain the portable deployment templates.
 6. Click **Run cell** for the setup cell. Confirm **Workspace verified**
    identifies the intended manual workspace and the printed input hash is
    the one recorded during preparation. The live workspace check runs before
@@ -1306,8 +1316,11 @@ prove that metrics or workspace diagnostics are flowing.
 ## 17. Publish and verify the variable library
 
 1. Run **Publish typed deployment variables** in the publication notebook.
-   It resolves the seven manual job IDs from this workspace, not fixed
+   It uniquely resolves the six uploaded job IDs from this workspace, not
    IDs from another environment, then publishes `pc_dev_variables`.
+   It first retains the actual foundation and role bindings in
+   `Files/deployment/deployment.json`. Missing/duplicate roles, malformed IDs,
+   or conflicting existing state stop the run; no SDK rebuild is needed.
 2. Wait for **Variable library configured** and the typed-reference list.
    Readback compares JSON values, not formatting: Fabric reformats JSON
    during export. Changed values still fail verification.
@@ -1327,12 +1340,13 @@ prove that metrics or workspace diagnostics are flowing.
 | `RefreshSparkJob` | ItemReference | Manual Refresh job |
 | `ReconciliationSparkJob` | ItemReference | Manual Reconciliation job |
 | `GoldSparkJob` | ItemReference | Manual Gold job |
-| `CutoverSparkJob` | ItemReference | Manual Cutover item; still on-demand and not approved for greenfield migration |
 
 The walkthrough library is `d8540289-cb2d-45e8-bcc2-4998be59a757`.
-All eleven values and their types were read back successfully. The library
-records deployment references; it does not replace the explicit manual job
-arguments, SDK release identity, or immutable admission evidence.
+The historical capture read back eleven values, including the retired role.
+The current six-role library contains ten values. Verify that current set
+after publication. Reporting publication also retains the assigned semantic
+model and report IDs in the deployment state file. This file records bindings;
+it is not SDK release approval or immutable admission evidence.
 
 ![Verify the active default value set and typed item references.](images/manual-deployment/62-variable-library-default-values.png)
 
@@ -1583,7 +1597,7 @@ any gate below is unresolved.
 ### Record the new target references
 
 1. Retain the preparation input hash and source revision alongside the
-   actual workspace, Lakehouse, Environment, seven job, variable-library,
+   actual workspace, Lakehouse, Environment, six job, variable-library,
    reporting, monitoring, and RTI IDs. Use the values read back from this
    workspace, not the reference workspace.
 2. Retain the model-file hashes and the exact SDK wheel, dependency lock,
@@ -1596,34 +1610,163 @@ any gate below is unresolved.
    **configured**, **verified**, **blocked**, and **not tested**. It is not
    a substitute for the SDK's detached manifest and postpublish receipt.
 
-### Prepare and verify admission artifacts
+### Manual SDK upgrade workflow
 
-4. Have the release owner prepare a target-bound SDK build. The wheel's
-   embedded `sjd_release_identity.json` must name this manual workspace,
-   Lakehouse, Environment, and actual role IDs. Stage that identity in the
-   build inputs; do not change another deployment's installed files in place.
+Use this workflow for both first admission and later SDK upgrades. The
+backfill notebook is a consumer of a completed deployment, not its release
+installer. Assign one release owner to complete the checkpoints below before
+asking operators to switch versions.
+
+The [version bump script](../scripts/bump-sdk-version.sh) only prepares source
+metadata. Its v2 SDK identity contains no deployment IDs; it changes the versioned evidence path
+and does not publish an Environment or generate/upload admission evidence.
+Installing its resulting wheel alone leaves the new evidence path unresolved.
+This missing deployment handoff, rather than a model configuration change, can
+produce the same OneLake 404 on each version change.
+
+| Checkpoint | Release owner action | Required result before continuing |
+|---|---|---|
+| Target | Configure actual workspace, Lakehouse, Environment, and role IDs in deployment configuration and runtime bindings | No reference-deployment IDs remain in the selected runtime configuration |
+| Build | Finalize source, run version preparation, then build and approve the SDK once for all deployments | Version, release identity, build-input digest, and artifact hashes agree |
+| Review | Prepare the detached manifest from those artifacts and real review data | Reviewed, target-bound manifest; no placeholders |
+| Publish | Use the Environment UI to publish the approved wheel/dependencies and read back publication, compute, and job bindings | Successful publication observations, not just saved staging settings |
+| Evidence | Prepare the receipt from those observations; upload both immutable files through the Lakehouse UI | Exact embedded paths exist and readback validates with the matching SDK |
+| Handoff | Complete release acceptance, coordinate old work, and start a fresh notebook session with the published Environment | Backfill operators can use the release without editing evidence or calculating digests |
+
+#### Prepare once on the release owner's machine
+
+Use the [SDK release procedure](../README.md#github-sdk-releases). For example,
+when preparing a new `1.0.0` release:
+
+```bash
+git fetch origin --tags
+git switch -c releases/v1.0.0
+bash scripts/bump-sdk-version.sh 1.0.0
+```
+
+Replace the example version with the intended unused release version. The
+SDK build is independent of the target: do not put workspace, Lakehouse,
+Environment, or job IDs into its embedded release identity. Rerun the script
+with the same version after finalizing source,
+package data, or other build inputs, before committing and building. Do not
+edit the identity inside an installed wheel or publish a locally modified wheel
+under the assumption that it still matches an already reviewed release.
+
+Keep the exact wheel, locks, bundles, detached manifest, and publication
+readback together as the release handoff. Use their actual hashes, not hashes
+from another build with the same version number. Steps 4-7 below describe
+the review and browser-publication checkpoints; the existing reporting
+publication notebook does not perform SDK release admission.
+
+#### Prepare and verify admission artifacts
+
+4. Use the same approved SDK wheel in every deployment. Its v2
+   `sjd_release_identity.json` contains the package version, build-input digest,
+   and versioned evidence root, **not** workspace, Lakehouse, Environment,
+   job IDs, or deployment intent. Configure those IDs in the deployment
+   configuration and runtime bindings: use the actual IDs in the backfill
+   notebook's `TARGET_BINDING` and the SJD `--manual-artifacts` prefix.
+   The SDK validates the detached deployment evidence against that selected
+   target at runtime; a new target does not require a new wheel.
 5. Use the existing
    [release-provenance helpers](../src/people_counter/fabric_release_provenance.py)
-   to compute the staged build-input digest and canonical immutable JSON.
-   The detached manifest must bind the actual identity, wheel, dependency
+   to prepare canonical immutable JSON. The detached manifest must bind
+   the shared SDK release identity, exact wheel, dependency
    lock, bundle, dependency source hashes, reviewer, review time, and target
    references. Review data must be real, not placeholders.
 6. Publish the approved wheel/dependencies through the Environment UI.
    Wait for successful publication and read back its **published target
    version**, libraries, public-package policy, compute settings, and all
-   seven job bindings before preparing the postpublish receipt.
+   six job bindings before preparing the postpublish receipt.
 7. Bind the receipt to the detached-manifest SHA-256 and those actual
    publication observations. Upload the immutable files through the
    Lakehouse UI to the **exact paths embedded in that wheel's identity**.
-   Re-read their contents/hashes and validate them with the matching SDK.
+   Re-read their contents/hashes and validate them with the matching SDK and
+   the actual deployment configuration.
    Do not disable identity requirements or create a success-shaped receipt
    from requested settings.
 
-**Current admission gate:** the committed/candidate SDK identity still names
-a different deployment, and the headless candidate has not completed Fabric
-x86_64 executor qualification. The manual three-ID prefix does not rewrite
-that embedded identity. No target-valid immutable admission manifest/receipt
-has been demonstrated here. Dispatcher/Process must remain unscheduled.
+#### Verify the handoff before resuming backfill
+
+In the target Lakehouse's **Files** explorer, open the exact
+`release_evidence_root` embedded in the approved wheel. Confirm it contains
+both `detached-manifest.json` and `postpublish-receipt.json`. A previous
+version's directory or an unrelated `Files/deployment-evidence` record is
+not sufficient. Validate both files with the matching SDK as described above;
+existence alone is not release acceptance.
+
+After publication, start a fresh backfill notebook session attached to the
+matching Environment and intended default Lakehouse. Do not install a newer
+SDK over a running kernel. Confirm the notebook's configured Environment and
+Control SJD match the release, then resume with the retained state directory.
+Previously accepted jobs are not cancelled by a failed notebook attempt.
+For incompatible registered work, drain it or explicitly quarantine/re-register
+it before switching releases; never rewrite its immutable release digest.
+
+If evidence resolution still fails, use the
+[backfill release-evidence checklist](explicit-backfill.md#http-404-for-release-evidence).
+Do not repair an upgrade by copying the old version's evidence into the new
+directory, changing `MODELS_DIR`, deleting state, or bypassing admission.
+
+#### Optional API-assisted provisioning
+
+The browser workflow above remains supported. If API-assisted deployment is
+approved, keep the target configuration outside the SDK source. It needs the
+actual workspace, Lakehouse, and Environment IDs and the desired role names;
+leave all role `item_id` values unset before first upload.
+
+```bash
+uv run --frozen python scripts/deploy_sjd_operations.py \
+  --stage dev --config config/deployment-input.json \
+  --provision-only --output outputs/deployment.json
+```
+
+The script creates or uniquely discovers **all six** roles and records Fabric's
+returned IDs. Existing schedules are disabled before definition updates.
+Provisioning does not need a receipt and does not enable schedules. Reuse its
+output as the next `--config`; a pinned ID cannot silently change to another
+same-name item.
+
+Reporting can use the checked repository bundles without a reference/source
+workspace or copied semantic-model IDs:
+
+```bash
+uv run --frozen python scripts/deploy_sjd_analytics.py \
+  --stage dev --config outputs/deployment.json --output outputs/analytics.json
+uv run --frozen python scripts/deploy_sjd_operational_report.py \
+  --stage dev --config outputs/analytics.json --output outputs/reporting.json
+```
+
+Each reporting output retains the resolved deployment manifest, so the next
+phase can consume it directly. The workspace, Lakehouse, and report connection
+are rendered for the selected target, and model/report IDs come from Fabric.
+Existing unmanaged items still require explicit ownership approval through
+their configured target IDs.
+
+After publishing and validating the real release evidence, configure the
+disabled schedules using that same resolved target:
+
+```bash
+uv run --frozen python scripts/deploy_sjd_operations.py \
+  --stage dev --config outputs/reporting.json \
+  --release-manifest-sha256 <reviewed-manifest-sha256> \
+  --release-receipt-sha256 <actual-publication-receipt-sha256> \
+  --output outputs/configured-deployment.json
+```
+
+Only add `--enable-schedules` after acceptance. Every disabled schedule must
+read back correctly before enablement begins. If activation fails, the script
+attempts to disable all recurring schedules again and reports any disablement
+it cannot confirm. Accepted jobs are not cancelled. No command here fabricates
+review data, a publication receipt, or executor qualification.
+
+**Migration and admission gate:** older SDK wheels with a v1 embedded identity
+still contain the former fixed-target restriction. Publish a new approved
+release with the portable v2 identity and prepare new evidence binding its
+release digest to this deployment. Do not patch an installed wheel or reuse
+the old receipt. No new target-valid immutable admission manifest/receipt or
+Fabric x86_64 executor qualification is demonstrated by this documentation
+update. Dispatcher/Process must remain unscheduled until those checks pass.
 
 ### Configure recurring roles only after release arguments are valid
 
@@ -1636,11 +1779,11 @@ has been demonstrated here. Dispatcher/Process must remain unscheduled.
 | Refresh | Every 15 minutes | Disabled |
 | Reconciliation | Every 15 minutes | Disabled |
 | Gold | Every 15 minutes | Disabled |
-| Process, Cutover | On demand | No recurring schedule |
+| Process | On demand | No recurring schedule |
 
 9. Open each recurring SJD's **Schedule** settings. Use UTC, the reviewed
    cadence and date range, and keep it disabled. Reopen/read back exactly
-   one schedule per recurring role and none for Process/Cutover. An absent
+   one schedule per recurring role and none for Process. An absent
    schedule is not a configured disabled schedule.
    In the captured UI, open the job's toolbar **Setting** button, select
    **Schedule**, and expand **Show more**. For a new schedule, use
@@ -1694,7 +1837,7 @@ intake-duration alert.
 | Gold schedule | Every 15 minutes, disabled; ID `1b377c38-88a0-4c96-be45-61adfee60bf0` |
 | Refresh schedule | Every 15 minutes, disabled, both current model IDs; ID `7262ab4d-4a78-486c-ac49-cbec48a25915` |
 | Dispatcher schedule | **Absent**, not “disabled”: valid manifest/receipt arguments are unavailable |
-| Process / Cutover schedules | Absent, on demand |
+| Process schedule | Absent, on demand; the historical capture also included the retired role |
 | SDK admission / inference | **Blocked / not accepted**; no production handover |
 
 The four configured schedules and their arguments were read back, including
@@ -1743,7 +1886,7 @@ delivery. F2 remains provisioned; F4 has not been applied.
 | Monitoring | Monitoring Eventhouse/database created; logging On |
 | Environment | Updated, distinctly named wheel published successfully |
 | Job definitions | Seven canonical roles created with their own `main.py` files |
-| Runtime binding | Explicit manual arguments saved on all seven jobs |
+| Runtime binding | Historical capture saved explicit arguments on seven jobs; the current workflow requires six |
 | Bootstrap | One manual Control run; terminal Success; `bootstrapped=true` |
 | Tables | Exact expected set of 22 bootstrap tables read back through the browser |
 | Lock seed | Exactly one `global` row with no owner/acquisition time |
@@ -1773,7 +1916,7 @@ Before calling this a working application, independently verify:
 - Control `bootstrap` succeeds and the expected `people_counter_sjd_*` Delta
   tables exist. The script runs this command through the Control job; it does
   not run the inference pipeline as a substitute.
-- All seven roles have the correct source file, Environment, and default
+- All six roles have the correct source file, Environment, and default
   Lakehouse in this workspace.
 - Deployment references and release provenance contain the **new** workspace,
   Lakehouse, Environment, and job IDs, not copied IDs from another environment.
@@ -1857,11 +2000,10 @@ These checks do not replace the live release/inference gates above.
 
 ## Earlier runtime-binding validation
 
-The additional manual-binding application change was developed test-first.
-The existing fixed deployment defaults remain unchanged; the manual path
-requires explicit IDs and matching live runtime context before dispatch.
-This was exercised in the successful browser-run bootstrap, not only mocked
-locally.
+This historical record describes the earlier manual-binding change, which was
+developed test-first and exercised in a browser-run bootstrap. That version
+still had fixed defaults. The portable SDK described above removes those
+defaults; this older live result does not qualify the new build.
 
 Focused regression command:
 

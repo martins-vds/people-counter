@@ -21,10 +21,6 @@ def prepare_assets(root: Path, output: Path) -> str:
     ):
         bundles[relative] = read_definition_bundle(root / "fabric" / relative)["definition"]
     client_source = (root / "src/people_counter/fabric_rest.py").read_text()
-    binding_import = "from people_counter.fabric_sjd import WORKSPACE_ID"
-    if client_source.count(binding_import) != 1:
-        raise ValueError("Fabric REST client workspace binding changed; review preparation")
-    client_source = client_source.replace(binding_import, "WORKSPACE_ID = TARGET_WORKSPACE_ID")
     publication_source = (
         root / "src/people_counter/manual_fabric_publication.py"
     ).read_text()
@@ -36,6 +32,12 @@ def prepare_assets(root: Path, output: Path) -> str:
         "definitions": bundles,
         "clientSource": client_source,
         "publicationSource": publication_source,
+        "deploymentTemplates": {
+            stage: json.loads(
+                (root / f"src/people_counter/data/deploy/{stage}.json").read_text()
+            )
+            for stage in ("dev", "test", "prod")
+        },
         "variableSettings": json.loads((variables / "settings.json").read_text()),
         "variableTemplate": (variables / "variables.json.tmpl").read_text(),
     }

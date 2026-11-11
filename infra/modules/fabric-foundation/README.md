@@ -11,7 +11,7 @@ Provisions one environment's:
 - schema-enabled Lakehouse
 - one ADLS Gen2 shortcut
 - Fabric Environment
-- all seven canonical Spark Job Definitions
+- all six canonical Spark Job Definitions
 - a source-controlled, non-secret deployment Variable Library
 - optional Anonymous or WorkspaceIdentity Fabric connections and role assignments
 - optional governance domain, domain roles, managed tags, and workspace assignment
@@ -24,15 +24,19 @@ replacement or teardown.
 
 SJD definitions come from `fabric/spark-job-definitions`. The provider injects
 the target Lakehouse and Environment IDs through Go-template definition tokens,
-so the workspace, Lakehouse, Environment, and seven SJDs apply in one plan.
+so the workspace, Lakehouse, Environment, and six SJDs apply in one plan.
 Callers provide only per-role names and descriptions.
+`sjd_files_root` supplies the exact runtime state directory in each definition's
+saved arguments, so direct jobs and scheduled jobs use the same namespace.
+Development and Test pass their respective Files roots; Production uses the
+stable root. The root must be a safe directory below `Files/`.
 
 This module does not configure schedules or publish Environment libraries.
 The postconfiguration reconciler performs those API operations after apply.
 
 Git stores the Variable Library definition under `definitions/variable-library`.
 The definition contains the deployment stage plus item
-references for the workspace, Lakehouse, Environment, and all seven Spark Job
+references for the workspace, Lakehouse, Environment, and all six Spark Job
 Definitions. It intentionally contains no credentials. Dev, Test, and
 Production instantiate the same definition with environment-specific IDs.
 

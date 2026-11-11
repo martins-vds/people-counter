@@ -290,6 +290,36 @@ def test_per_video_exception_preserves_camera_defaults_and_original_timestamp(pa
     assert portal.service.store.entries("camera")[0]["catalog"]["counting_line_x1"] == "32"
 
 
+@pytest.mark.parametrize("viewport", [{"width": 1280, "height": 900}, {"width": 390, "height": 844}])
+def test_calendar_capture_override_reaches_manifest_in_utc(browser, portal, viewport):
+    context = browser.new_context(viewport=viewport, timezone_id="America/Los_Angeles")
+    page = context.new_page()
+    try:
+        calibrate_camera(page, portal)
+        page.goto(portal.url + "/?folder=lobby")
+        open_camera_line_for_footage(page, "lobby/clip.mp4", "north-entrance-camera-17")
+        page.get_by_label("Apply calibration to", exact=True).select_option("video")
+        capture = page.get_by_label("Authoritative capture time override (UTC, optional)", exact=True)
+        expect(capture).to_have_attribute("type", "datetime-local")
+        expect(capture).to_have_attribute("step", "any")
+        expect(capture).to_be_enabled()
+        capture.fill("2026-03-08T02:30:45")
+        capture.press("Tab")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        page.get_by_role("button", name="Save calibration", exact=True).click()
+        expect(page.get_by_text("Saved per-video exception. Camera defaults are unchanged.", exact=True)).to_be_visible()
+        assert portal.service.store.entries("exception")[0]["captured_at_utc"] == "2026-03-08T02:30:45Z"
+        identity = prepare_package(page, portal)
+        package = portal.service.job_dir(identity) / "package"
+        index = json.loads((package / "manifest-package.json").read_text())
+        manifest = json.loads((package / index["entries"][0]["prepared_manifest_path"]).read_text())
+        assert manifest["captured_at_utc"] == "2026-03-08T02:30:45Z"
+        assert manifest["camera_timezone"] == "America/Denver"
+        assert portal.calls == []
+    finally:
+        context.close()
+
+
 def test_background_job_continues_after_browser_leaves_and_errors_are_visible(page, portal):
     calibrate_camera(page, portal)
     (portal.source / "lobby/broken.mp4").write_bytes(b"not a video")

@@ -17,12 +17,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fabric_runtime_context")
+
 from people_counter.fabric_namespace import (
-    ENVIRONMENT_ID,
     FILES_ROOT,
-    LAKEHOUSE_ID,
     TABLE_PREFIX,
-    WORKSPACE_ID,
     FabricNamespaceConfig,
     build_sjd_v2_definition,
     validate_environment_library_policy,
@@ -73,6 +72,15 @@ from people_counter.sjd_process import (
     ProcessValidationError,
 )
 from people_counter.sjd_control import LeaseLostError
+
+from tests.fabric_fixtures import (
+    ENVIRONMENT_ID,
+    LAKEHOUSE_ID,
+    RUNTIME_CONTEXT,
+    TARGET_IDS,
+    TEST_TARGET,
+    WORKSPACE_ID,
+)
 
 
 class MemoryFiles:
@@ -273,7 +281,7 @@ def test_consumer_decision_is_workload_specific_immutable_and_read_back() -> Non
         "consumer open failed on every executor",
     )
     files = MemoryFiles()
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     observed_profiles: list[object] = []
 
     def probe(_spark, _executors, *, profile):
@@ -402,7 +410,7 @@ def test_consumer_decision_reuses_immutable_probe_after_executor_drift() -> None
 
     _, first = _probe_and_persist_consumer_decision(
         spark,
-        FabricNamespaceConfig.benchmark(),
+        FabricNamespaceConfig.benchmark(target=TEST_TARGET),
         "batch-drift",
         envelope,
         discover_executors=lambda _spark: next(discoveries),
@@ -411,7 +419,7 @@ def test_consumer_decision_reuses_immutable_probe_after_executor_drift() -> None
     )
     drifted, repeated = _probe_and_persist_consumer_decision(
         spark,
-        FabricNamespaceConfig.benchmark(),
+        FabricNamespaceConfig.benchmark(target=TEST_TARGET),
         "batch-drift",
         envelope,
         discover_executors=lambda _spark: next(discoveries),
@@ -504,7 +512,7 @@ def test_consumer_decision_rejects_corrupt_persistence(
         {"opened": True},
     )
     files = MemoryFiles()
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
 
     _probe_and_persist_consumer_decision(
         spark,
@@ -633,7 +641,7 @@ def test_consumer_decision_uses_default_discovery_and_probe(
     }
     _probe_and_persist_consumer_decision(
         spark,
-        FabricNamespaceConfig.benchmark(),
+        FabricNamespaceConfig.benchmark(target=TEST_TARGET),
         "default-probe",
         envelope,
         files=MemoryFiles(),
@@ -647,11 +655,11 @@ def test_consumer_decision_uses_default_discovery_and_probe(
 
 class MemoryControlStore(FabricControlStoreImpl):
     def __init__(self, files: MemoryFiles) -> None:
-        self.config = FabricNamespaceConfig()
+        self.config = FabricNamespaceConfig(**TARGET_IDS)
         self.data = {name: [] for name in _SCHEMAS}
         self.writer = ImmediateWriter()
         self.envelopes = OneLakeEnvelopeWriter(
-            FabricNamespaceConfig().file_path("control"), files
+            FabricNamespaceConfig(**TARGET_IDS).file_path("control"), files
         )
         self._clock_value = 100.0
         self._clock = lambda: self._clock_value
@@ -703,10 +711,10 @@ def test_stable_registration_rejects_old_release_before_creating_ready_work(monk
     import people_counter.fabric_release_provenance as provenance
 
     store = MemoryControlStore(MemoryFiles())
-    store.config = FabricSjdConfig()
+    store.config = FabricSjdConfig(**TARGET_IDS)
     monkeypatch.setattr(
         provenance, "resolve_published_release",
-        lambda read_text: SimpleNamespace(manifest_sha256="b" * 64),
+        lambda read_text, *, deployment: SimpleNamespace(manifest_sha256="b" * 64),
     )
     with pytest.raises(ImmutableConflictError, match="release"):
         store.register(
@@ -755,10 +763,10 @@ def test_stable_claim_validates_dispatcher_binding_before_claim(monkeypatch) -> 
     import people_counter.fabric_release_provenance as provenance
 
     store = MemoryControlStore(MemoryFiles())
-    store.config = FabricSjdConfig()
+    store.config = FabricSjdConfig(**TARGET_IDS)
     monkeypatch.setattr(
         provenance, "resolve_published_release",
-        lambda read_text: SimpleNamespace(manifest_sha256="b" * 64),
+        lambda read_text, *, deployment: SimpleNamespace(manifest_sha256="b" * 64),
     )
     with pytest.raises(ImmutableConflictError, match="release"):
         store.claim(
@@ -785,7 +793,7 @@ def test_stable_dispatcher_validates_full_release_evidence_before_claim(monkeypa
             "--release-manifest-sha256", "a" * 64,
             "--release-receipt-path", "wrong-receipt",
             "--release-receipt-sha256", "b" * 64,
-        ], config=FabricSjdConfig())
+        ], config=FabricSjdConfig(**TARGET_IDS))
     store.claim.assert_not_called()
     assert loader.call_args.kwargs["manifest_path"] == "wrong-path"
 
@@ -807,7 +815,7 @@ def test_stable_dispatcher_rejects_bad_compute_before_claim(monkeypatch) -> None
             "--release-manifest-sha256", "a" * 64,
             "--release-receipt-path", "receipt",
             "--release-receipt-sha256", "b" * 64,
-        ], config=FabricSjdConfig())
+        ], config=FabricSjdConfig(**TARGET_IDS))
     store.claim.assert_not_called()
 
 
@@ -932,7 +940,7 @@ def test_control_forwards_exact_failed_claim_recovery_evidence(capsys) -> None:
     parsed = runtime._control_parser().parse_args(arguments)
     store = MagicMock()
     store.abandon_failed_claim.return_value = {"idempotent": False, "work_ids": ["work"]}
-    assert runtime._control_dispatch(parsed, store, FabricNamespaceConfig()) == 0
+    assert runtime._control_dispatch(parsed, store, FabricNamespaceConfig(**TARGET_IDS)) == 0
     store.abandon_failed_claim.assert_called_once_with(
         **{key.replace("-", "_"): value for key, value in values.items()},
     )
@@ -1072,7 +1080,7 @@ class FakeFrame:
     def save(self, path):
         self.spark.rows[path] = copy.deepcopy(self.rows)
         relative = path.split(
-            f"/{FabricNamespaceConfig().lakehouse_id}/", 1
+            f"/{FabricNamespaceConfig(**TARGET_IDS).lakehouse_id}/", 1
         )[-1]
         self.spark.files.paths.add(f"{relative}/_delta_log")
 
@@ -1115,7 +1123,7 @@ def _decode_parts(payload):
 
 
 def test_fixed_config_and_sjd_v2_mappings() -> None:
-    config = FabricNamespaceConfig()
+    config = FabricNamespaceConfig(**TARGET_IDS)
     assert (
         config.workspace_id,
         config.lakehouse_id,
@@ -1132,14 +1140,14 @@ def test_fixed_config_and_sjd_v2_mappings() -> None:
         "2.0",
     )
     with pytest.raises(ValueError, match="fixed"):
-        FabricNamespaceConfig(runtime="1.3")
+        FabricNamespaceConfig(**TARGET_IDS, runtime="1.3")
     assert config.abfss_path(config.file_path("attempts")).endswith(
         f"/{LAKEHOUSE_ID}/{FILES_ROOT}attempts"
     )
     with pytest.raises(ValueError, match="fixed Fabric SJD root"):
         config.abfss_path("Files/production")
 
-    shadow = FabricNamespaceConfig.production_shadow()
+    shadow = FabricNamespaceConfig.production_shadow(target=TEST_TARGET)
     adapter = OneLakeDeltaAttemptAdapter(
         shadow.file_path("attempts"),
         object(),
@@ -1185,7 +1193,7 @@ def test_fixed_config_and_sjd_v2_mappings() -> None:
             route_mode=ProcessRouteMode.SHADOW_SYNTHETIC,
         )
     with pytest.raises(ProcessValidationError, match="production"):
-        production = FabricNamespaceConfig.production()
+        production = FabricNamespaceConfig.production(target=TEST_TARGET)
         OneLakeDeltaAttemptAdapter(
             production.file_path("attempts"),
             object(),
@@ -1194,7 +1202,7 @@ def test_fixed_config_and_sjd_v2_mappings() -> None:
         )
 
     for job in ("control", "process", "gold"):
-        definition = build_sjd_v2_definition(job)
+        definition = build_sjd_v2_definition(job, config=TEST_TARGET)
         assert definition["definition"]["format"] == "SparkJobDefinitionV2"
         parts = _decode_parts(definition)
         metadata = json.loads(parts["SparkJobDefinitionV1.json"])
@@ -1774,7 +1782,8 @@ def test_environment_policy_is_published_full_mode_only() -> None:
             "libraryMode": "Full",
             "published": True,
             "additionalLibraryUris": [],
-        }
+        },
+        config=TEST_TARGET,
     )
     with pytest.raises(ValueError, match="inline"):
         validate_environment_library_policy(
@@ -1784,7 +1793,8 @@ def test_environment_policy_is_published_full_mode_only() -> None:
                 "library_mode": "full",
                 "publishState": "Succeeded",
                 "inline_libraries": ["Files/wheel.whl"],
-            }
+            },
+            config=TEST_TARGET,
         )
     valid = {
         "environmentArtifactId": ENVIRONMENT_ID,
@@ -1794,13 +1804,13 @@ def test_environment_policy_is_published_full_mode_only() -> None:
         "additionalLibraryUris": [],
     }
     for field, value, message in (
-        ("environmentArtifactId", "other", "fixed Fabric Environment"),
+        ("environmentArtifactId", "other", "configured Fabric Environment"),
         ("runtimeVersion", "1.3", "Runtime 2.0"),
         ("published", False, "published Environment"),
         ("additionalLibraryUris", ["Files/wheel.whl"], "inline"),
     ):
         with pytest.raises(ValueError, match=message):
-            validate_environment_library_policy(valid | {field: value})
+            validate_environment_library_policy(valid | {field: value}, config=TEST_TARGET)
     validate_environment_library_policy(
         {
             "environment_id": ENVIRONMENT_ID,
@@ -1808,7 +1818,8 @@ def test_environment_policy_is_published_full_mode_only() -> None:
             "library_mode": "full",
             "publishState": "Succeeded",
             "inline_libraries": (),
-        }
+        },
+        config=TEST_TARGET,
     )
     with pytest.raises(ValueError, match="Full"):
         validate_environment_library_policy(
@@ -1818,7 +1829,8 @@ def test_environment_policy_is_published_full_mode_only() -> None:
                 "libraryMode": "Quick",
                 "published": True,
                 "additionalLibraryUris": [],
-            }
+            },
+            config=TEST_TARGET,
         )
 
 
@@ -1959,7 +1971,7 @@ def test_control_transitions_are_homogeneous_fenced_and_monotonic() -> None:
 def test_onelake_envelope_and_delta_attempts_are_immutable() -> None:
     files = MemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         files,
         verify_timeout_seconds=0.3,
     )
@@ -1978,7 +1990,7 @@ def test_onelake_envelope_and_delta_attempts_are_immutable() -> None:
 
     spark = FakeSpark(files)
     adapter = OneLakeDeltaAttemptAdapter(
-        FabricNamespaceConfig().file_path("attempts"), spark, files
+        FabricNamespaceConfig(**TARGET_IDS).file_path("attempts"), spark, files
     )
     records = [
         {
@@ -2043,7 +2055,7 @@ def test_onelake_envelope_write_succeeds_without_retry_logs_nothing(
     """
     files = MemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"), files
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"), files
     )
     with caplog.at_level(
         logging.WARNING, logger="people_counter.fabric_control_store"
@@ -2065,7 +2077,7 @@ def test_onelake_envelope_write_retries_transient_read_after_write_lag(
     """
     files = FlakyReadMemoryFiles(stale_reads=2)
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         files,
         verify_timeout_seconds=5.0,
     )
@@ -2107,7 +2119,7 @@ def test_onelake_envelope_write_raises_on_persistent_readback_mismatch(
 ) -> None:
     files = AlwaysStaleMemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         files,
         verify_timeout_seconds=0.05,
     )
@@ -2126,7 +2138,7 @@ def test_onelake_envelope_write_retries_before_false_immutable_conflict(
 ) -> None:
     files = FlakyReadMemoryFiles(stale_reads=1)
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         files,
         verify_timeout_seconds=2.0,
     )
@@ -2153,7 +2165,7 @@ def test_onelake_envelope_write_retries_before_false_immutable_conflict(
 def test_onelake_envelope_write_raises_immutable_conflict_on_genuine_mismatch() -> None:
     files = MemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         files,
         verify_timeout_seconds=0.05,
     )
@@ -2172,7 +2184,7 @@ def test_onelake_envelope_writer_rejects_invalid_verify_timeout(
         match=r"^verify_timeout_seconds must be finite and non-negative$",
     ):
         OneLakeEnvelopeWriter(
-            FabricNamespaceConfig().file_path("control"),
+            FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
             MemoryFiles(),
             verify_timeout_seconds=verify_timeout_seconds,
         )
@@ -2182,13 +2194,13 @@ def test_onelake_envelope_writer_accepts_zero_verify_timeout() -> None:
     # 0.0 is the boundary-valid case (pins ``< 0`` against an ``<= 0``
     # mutation) and the implicit default must be exactly 15.0 seconds.
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         MemoryFiles(),
         verify_timeout_seconds=0.0,
     )
     assert envelopes._verify_timeout_seconds == 0.0
     default_envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"), MemoryFiles()
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"), MemoryFiles()
     )
     assert default_envelopes._verify_timeout_seconds == 15.0
 
@@ -2202,7 +2214,7 @@ def test_onelake_envelope_verify_readback_stops_exactly_at_deadline_boundary(
     """
     files = AlwaysStaleMemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         files,
         verify_timeout_seconds=3.0,
     )
@@ -2237,7 +2249,7 @@ def test_onelake_envelope_verify_readback_breaks_when_remaining_hits_zero(
     """
     files = AlwaysStaleMemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         files,
         verify_timeout_seconds=5.0,
     )
@@ -2263,7 +2275,7 @@ def test_onelake_envelope_verify_readback_returns_last_observed_on_timeout() -> 
     """
     files = AlwaysStaleMemoryFiles()
     envelopes = OneLakeEnvelopeWriter(
-        FabricNamespaceConfig().file_path("control"),
+        FabricNamespaceConfig(**TARGET_IDS).file_path("control"),
         files,
         verify_timeout_seconds=0.05,
     )
@@ -2658,7 +2670,7 @@ def test_select_process_execution_harness_prefers_direct_mount_when_proven() -> 
     )
     from people_counter.sjd_process import StreamingSparkExecutionHarness
 
-    config = FabricNamespaceConfig.canary()
+    config = FabricNamespaceConfig.canary(target=TEST_TARGET)
     spark = SimpleNamespace()
 
     def fake_probe(session, executors):
@@ -2733,7 +2745,7 @@ def test_select_process_execution_harness_uses_default_executor_discovery() -> N
         CapabilityStatus,
     )
 
-    config = FabricNamespaceConfig.canary()
+    config = FabricNamespaceConfig.canary(target=TEST_TARGET)
     spark = SimpleNamespace()
     recorded_calls = []
 
@@ -2779,7 +2791,7 @@ def test_select_process_execution_harness_falls_back_when_mount_unproven() -> No
     )
     from people_counter.sjd_process import StreamingSparkExecutionHarness
 
-    config = FabricNamespaceConfig.canary()
+    config = FabricNamespaceConfig.canary(target=TEST_TARGET)
     spark = SimpleNamespace()
 
     def fake_probe(session, executors):
@@ -2829,7 +2841,7 @@ def test_select_process_execution_harness_upgrades_to_consumer_probe_when_given(
         ConsumerProbeProfile,
     )
 
-    config = FabricNamespaceConfig.canary()
+    config = FabricNamespaceConfig.canary(target=TEST_TARGET)
     spark = SimpleNamespace()
     profile = ConsumerProbeProfile()
     recorded = {}
@@ -2888,7 +2900,7 @@ def test_select_process_execution_harness_uses_bare_posix_probe_by_default() -> 
         CapabilityStatus,
     )
 
-    config = FabricNamespaceConfig.canary()
+    config = FabricNamespaceConfig.canary(target=TEST_TARGET)
     spark = SimpleNamespace()
     fake_result = CapabilityProbeResult(
         capability="direct_mounted_lakehouse_path",
@@ -2925,7 +2937,7 @@ def test_select_process_execution_harness_probe_mounted_path_wins_over_profile()
         ConsumerProbeProfile,
     )
 
-    config = FabricNamespaceConfig.canary()
+    config = FabricNamespaceConfig.canary(target=TEST_TARGET)
     spark = SimpleNamespace()
     calls = []
 
@@ -3655,7 +3667,7 @@ def test_control_main_dispatches_all_safe_commands(
         "people_counter.fabric_sjd_runtime._clear_stale_lock",
         _fake_clear_stale_lock,
     )
-    shared_config = FabricNamespaceConfig.benchmark()
+    shared_config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     partition_path = shared_config.file_path(
         "intake/backfill/run-1/partition.json"
     )
@@ -3820,7 +3832,7 @@ def test_control_main_persists_diagnostic_traceback_and_still_raises(
             written["overwrite"] = overwrite
             return True
 
-    fake_notebookutils = SimpleNamespace(fs=_FakeFs())
+    fake_notebookutils = SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT))
     monkeypatch.setitem(sys.modules, "notebookutils", fake_notebookutils)
 
     with pytest.raises(RuntimeError, match="boom from the real bug"):
@@ -3878,7 +3890,7 @@ def test_dispatcher_main_claims_one_bounded_batch_and_processes_it(
     )
     store = MagicMock()
     store.claim.return_value = claimed
-    shared_config = FabricNamespaceConfig.benchmark()
+    shared_config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     monkeypatch.setattr(
         "people_counter.sjd_control.FabricControlStore",
         lambda *_args, **_kwargs: store,
@@ -3987,7 +3999,7 @@ def test_dispatcher_main_is_a_successful_noop_when_capacity_is_full(
             "--release-receipt-sha256",
             "b" * 64,
         ],
-        config=FabricNamespaceConfig.benchmark(),
+        config=FabricNamespaceConfig.benchmark(target=TEST_TARGET),
     ) == 0
 
     process.assert_not_called()
@@ -4100,7 +4112,7 @@ def test_refresh_main_acknowledges_only_after_completed_refresh(
             "--semantic-model-id",
             "model-1",
         ],
-        config=FabricNamespaceConfig.benchmark(),
+        config=FabricNamespaceConfig.benchmark(target=TEST_TARGET),
     ) == 0
 
     assert state.acknowledge_refresh.call_args_list == [
@@ -4174,7 +4186,7 @@ def test_refresh_main_refreshes_every_model_before_acknowledging(
             "--semantic-model-id",
             "operations",
         ],
-        config=FabricNamespaceConfig.benchmark(),
+        config=FabricNamespaceConfig.benchmark(target=TEST_TARGET),
     ) == 0
 
     assert refreshed == ["analytics", "operations"]
@@ -4236,7 +4248,7 @@ def test_refresh_main_keeps_outbox_pending_when_any_model_fails(
                 "--semantic-model-id",
                 "operations",
             ],
-            config=FabricNamespaceConfig.benchmark(),
+            config=FabricNamespaceConfig.benchmark(target=TEST_TARGET),
         )
 
     state.acknowledge_refresh.assert_not_called()
@@ -4248,7 +4260,7 @@ def test_write_control_diagnostic_swallows_its_own_failures(
     """Diagnostic capture must never mask or replace the real exception."""
 
     monkeypatch.delitem(sys.modules, "notebookutils", raising=False)
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     result = _write_control_diagnostic(config, "claim", RuntimeError("original"))
     assert result is None
 

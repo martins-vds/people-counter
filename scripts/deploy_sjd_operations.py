@@ -6,7 +6,9 @@ import argparse
 import ast
 import base64
 import copy
+import dataclasses
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -15,19 +17,24 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
-from people_counter.fabric_release_provenance import RELEASE_IDENTITY
-from people_counter.fabric_sjd_definition import build_sjd_definition, reviewed_compute_settings, validate_reviewed_compute_settings
+from people_counter.fabric_deployment_manifest import (
+    DeploymentManifest, load_deployment_manifest, parse_deployment_manifest,
+)
+from people_counter.fabric_sjd_definition import (
+    ENTRY_POINTS, build_sjd_definition, reviewed_compute_settings,
+    validate_reviewed_compute_settings, validate_schedule_readback,
+)
+from people_counter.fabric_target import FabricTarget, validate_artifact_id
+from people_counter.fabric_sjd import FabricSjdConfig
 
 
 API_ROOT = "https://api.fabric.microsoft.com/v1"
-ANALYTICS_MODEL_ID = "9e6b8041-44a2-4f46-9ad8-85b7ca87b71e"
 JOB_TYPE = "sparkjob"
-ITEM_NAMES = {
-    "dispatcher": "pc-sjd-dispatcher",
-    "refresh": "pc-sjd-refresh",
-}
+ITEM_NAMES = {role: f"pc-sjd-{role}" for role in ENTRY_POINTS}
 
 
 class OperationsDeploymentError(RuntimeError):
@@ -124,6 +131,7 @@ def bind_registration_notebook(definition: Mapping[str, Any]) -> dict[str, Any]:
     assignment = assignments[0]
     expression = (
         "registration_release_digest(NotebookUtilsOneLakeFiles().read_text, "
+        "deployment=release_deployment, "
         "expected_digest=RELEASE_MANIFEST_SHA256)"
     )
     if ast.dump(assignment.value) == ast.dump(ast.parse(expression, mode="eval").body):
@@ -131,6 +139,9 @@ def bind_registration_notebook(definition: Mapping[str, Any]) -> dict[str, Any]:
     replacement = (
         "from people_counter.fabric_release_provenance import registration_release_digest\n"
         "from people_counter.fabric_control_store import NotebookUtilsOneLakeFiles\n"
+        "from people_counter.fabric_sjd import ManualFabricSjdConfig\n"
+        "import notebookutils\n"
+        "release_deployment = ManualFabricSjdConfig.from_runtime_context(notebookutils.runtime.context)\n"
         f"release_digest = {expression}\n"
     )
     lines = source.splitlines(keepends=True)
@@ -154,21 +165,30 @@ def _token() -> str:
         ],
         text=True,
     )
-    token = str(json.loads(output).get("accessToken", ""))
-    if not token:
-        raise OperationsDeploymentError("Azure CLI returned an empty Fabric token")
+    document = json.loads(output)
+    token = document.get("accessToken") if isinstance(document, dict) else None
+    if not isinstance(token, str) or not token or token != token.strip():
+        raise OperationsDeploymentError("Azure CLI returned an invalid or empty Fabric token")
     return token
 
 
 class FabricApi:
     def __init__(
         self,
-        workspace_id: str,
+        target: FabricTarget,
         *,
         token: str,
         sleep: Any = time.sleep,
     ) -> None:
-        self.workspace_id = workspace_id
+        self.target = FabricTarget(
+            workspace_id=target.workspace_id, lakehouse_id=target.lakehouse_id,
+            environment_id=target.environment_id,
+        )
+        self.config = target if isinstance(target, FabricSjdConfig) else FabricSjdConfig(
+            workspace_id=target.workspace_id, lakehouse_id=target.lakehouse_id,
+            environment_id=target.environment_id,
+        )
+        self.workspace_id = target.workspace_id
         self.token = token
         self.sleep = sleep
 
@@ -209,8 +229,6 @@ class FabricApi:
             with urllib.request.urlopen(request, timeout=120) as response:
                 content = response.read()
                 parsed = json.loads(content) if content else {}
-                if parsed is None:
-                    parsed = {}
                 if not isinstance(parsed, dict):
                     raise OperationsDeploymentError(
                         f"{method} {url} returned non-object JSON"
@@ -225,7 +243,7 @@ class FabricApi:
     def verify_compute(self) -> None:
         _, _, settings = self.request(
             "GET",
-            f"/workspaces/{self.workspace_id}/environments/{RELEASE_IDENTITY.environment_id}/sparkcompute?beta=false",
+            f"/workspaces/{self.workspace_id}/environments/{self.target.environment_id}/sparkcompute?beta=false",
         )
         validate_reviewed_compute_settings(settings)
         _, _, workspace = self.request("GET", f"/workspaces/{self.workspace_id}/spark/settings")
@@ -265,16 +283,42 @@ class FabricApi:
         raise OperationsDeploymentError("Fabric operation polling timed out")
 
     def list_sjds(self) -> list[dict[str, Any]]:
-        path = f"/workspaces/{self.workspace_id}/sparkJobDefinitions"
-        _, _, response = self.request("GET", path)
-        values = response.get("value", [])
-        if not isinstance(values, list) or not all(
-            isinstance(item, dict) for item in values
-        ):
-            raise OperationsDeploymentError("invalid Spark Job Definition listing")
-        return values
+        base = f"/workspaces/{self.workspace_id}/sparkJobDefinitions"
+        path: str | None = base
+        seen: set[str] = set()
+        items: list[dict[str, Any]] = []
+        while path is not None:
+            if path in seen:
+                raise OperationsDeploymentError("repeated SJD listing continuation")
+            seen.add(path)
+            _, _, response = self.request("GET", path)
+            values = response.get("value")
+            if not isinstance(values, list) or not all(
+                isinstance(item, dict) for item in values
+            ):
+                raise OperationsDeploymentError("invalid Spark Job Definition listing")
+            for item in values:
+                validate_artifact_id(item.get("id"), "listed SJD ID")
+                if not isinstance(item.get("displayName"), str) or not item["displayName"]:
+                    raise OperationsDeploymentError("SJD listing omitted a display name")
+            items.extend(values)
+            continuation = response.get("continuationUri")
+            if continuation is not None and (
+                not isinstance(continuation, str) or not continuation
+            ):
+                raise OperationsDeploymentError("invalid SJD listing continuation")
+            if continuation is None:
+                token = response.get("continuationToken")
+                if token is not None and not isinstance(token, str):
+                    raise OperationsDeploymentError("invalid SJD listing continuation token")
+                if token:
+                    continuation = base + "?" + urlencode({"continuationToken": token})
+            path = continuation
+        return items
 
-    def upsert_sjd(self, kind: str, display_name: str) -> str:
+    def upsert_sjd(
+        self, kind: str, display_name: str, *, expected_item_id: str | None = None,
+    ) -> str:
         matches = [
             item
             for item in self.list_sjds()
@@ -284,7 +328,16 @@ class FabricApi:
             raise OperationsDeploymentError(
                 f"multiple Spark Job Definitions named {display_name!r}"
             )
-        definition = build_sjd_definition(kind)
+        if expected_item_id is not None:
+            validate_artifact_id(expected_item_id, "configured SJD ID")
+            if not matches or matches[0].get("id") != expected_item_id:
+                raise OperationsDeploymentError(
+                    f"configured SJD ID for {display_name!r} does not match discovery"
+                )
+        definition = build_sjd_definition(
+            kind, config=self.config,
+            command_line_arguments=_command(self.config.namespace_arguments()),
+        )
         if not matches:
             path = f"/workspaces/{self.workspace_id}/sparkJobDefinitions"
             status, headers, created = self.request(
@@ -310,14 +363,15 @@ class FabricApi:
                     raise OperationsDeploymentError(
                         f"created SJD {display_name!r} has no unique readback"
                     )
-                return str(matches[0]["id"])
+                return validate_artifact_id(matches[0].get("id"), "created SJD ID")
             item_id = created.get("id")
             if status != 201 or not item_id:
                 raise OperationsDeploymentError(
                     f"create SJD {display_name!r} returned no item ID"
                 )
-            return str(item_id)
-        item_id = str(matches[0]["id"])
+            return validate_artifact_id(item_id, "created SJD ID")
+        item_id = validate_artifact_id(matches[0].get("id"), "discovered SJD ID")
+        self.disable_schedules(item_id, remove=kind == "process")
         status, headers, _ = self.request(
             "POST",
             (
@@ -333,6 +387,43 @@ class FabricApi:
                 f"update SJD {display_name!r} returned {status}"
             )
         return item_id
+
+    def disable_schedules(self, item_id: str, *, remove: bool = False) -> None:
+        base = f"/workspaces/{self.workspace_id}/items/{item_id}/jobs/{JOB_TYPE}/schedules"
+        _, _, response = self.request("GET", base)
+        schedules = response.get("value")
+        if not isinstance(schedules, list) or len(schedules) > 1:
+            raise OperationsDeploymentError("invalid or ambiguous SJD schedule listing")
+        for schedule in schedules:
+            if not isinstance(schedule, Mapping):
+                raise OperationsDeploymentError("invalid SJD schedule")
+            schedule_id = validate_artifact_id(schedule.get("id"), "schedule ID")
+            if remove:
+                status, _, _ = self.request("DELETE", f"{base}/{schedule_id}")
+                if status not in {200, 204}:
+                    raise OperationsDeploymentError("on-demand schedule deletion failed")
+                _, _, observed = self.request("GET", base)
+                if observed.get("value") != []:
+                    raise OperationsDeploymentError("on-demand role still has a schedule after deletion")
+                continue
+            if type(schedule.get("enabled")) is not bool:
+                raise OperationsDeploymentError("schedule readback omitted enabled state")
+            if schedule["enabled"]:
+                path = f"{base}/{schedule_id}"
+                configuration = schedule.get("configuration")
+                if not isinstance(configuration, Mapping) or not configuration:
+                    raise OperationsDeploymentError("schedule configuration is missing; cannot disable safely")
+                payload = {"enabled": False, "configuration": dict(configuration)}
+                if "executionData" in schedule:
+                    payload["executionData"] = schedule["executionData"]
+                self.request("PATCH", path, payload)
+                _, _, observed = self.request("GET", path)
+                if observed.get("id") != schedule_id:
+                    raise OperationsDeploymentError("schedule disable readback ID differs")
+                try:
+                    validate_schedule_readback(observed, payload)
+                except ValueError as error:
+                    raise OperationsDeploymentError("schedule disable readback differs") from error
 
     def get_definition(
         self, item_id: str, *, format_name: str | None = "SparkJobDefinitionV2",
@@ -404,25 +495,42 @@ class FabricApi:
             f"{JOB_TYPE}/schedules"
         )
         _, _, response = self.request("GET", base)
-        schedules = response.get("value", [])
-        if not isinstance(schedules, list):
+        schedules = response.get("value")
+        if not isinstance(schedules, list) or not all(
+            isinstance(schedule, Mapping) for schedule in schedules
+        ):
             raise OperationsDeploymentError("invalid schedule listing")
         if len(schedules) > 1:
             raise OperationsDeploymentError(
                 f"SJD {item_id} has multiple schedules; refusing ambiguous update"
             )
-        if not schedules:
-            _, _, schedule = self.request("POST", base, payload)
-            return schedule
-        schedule_id = str(schedules[0].get("id", ""))
-        if not schedule_id:
-            raise OperationsDeploymentError("schedule readback omitted its ID")
-        _, _, schedule = self.request(
-            "PATCH",
-            f"{base}/{schedule_id}",
-            payload,
-        )
-        return schedule
+        if schedules:
+            schedule_id = validate_artifact_id(schedules[0].get("id"), "schedule ID")
+            status, headers, _ = self.request("PATCH", f"{base}/{schedule_id}", payload)
+            allowed = {200, 202, 204}
+        else:
+            status, headers, created = self.request("POST", base, payload)
+            schedule_id = created.get("id")
+            allowed = {200, 201, 202}
+        if status not in allowed:
+            raise OperationsDeploymentError(f"schedule update returned unexpected HTTP {status}")
+        if status == 202:
+            self.wait(headers)
+        if schedule_id is None:
+            _, _, listing = self.request("GET", base)
+            discovered = listing.get("value")
+            if (
+                not isinstance(discovered, list) or len(discovered) != 1
+                or not isinstance(discovered[0], Mapping)
+            ):
+                raise OperationsDeploymentError("created schedule could not be uniquely read back")
+            schedule_id = discovered[0].get("id")
+        schedule_id = validate_artifact_id(schedule_id, "schedule ID")
+        _, _, observed = self.request("GET", f"{base}/{schedule_id}")
+        if observed.get("id") != schedule_id:
+            raise OperationsDeploymentError("schedule readback ID differs from the requested schedule")
+        _verify_schedule(item_id, observed, payload)
+        return observed
 
 
 def _command(arguments: Sequence[str]) -> str:
@@ -438,6 +546,8 @@ def schedule_payload(
 ) -> dict[str, Any]:
     if type(interval_minutes) is not int or not 1 <= interval_minutes <= 10_080:
         raise ValueError("interval_minutes must be between 1 and 10080")
+    if type(enabled) is not bool:
+        raise ValueError("schedule enabled must be a boolean")
     start = (now or datetime.now(timezone.utc)) + timedelta(minutes=5)
     end = start + timedelta(days=3650)
     return {
@@ -455,30 +565,20 @@ def schedule_payload(
     }
 
 
-def _fixed_item_ids() -> dict[str, str]:
-    required = {
-        "control": "stable-control",
-        "gold": "stable-gold",
-        "reconciliation": "stable-reconciliation",
-    }
-    values = {}
-    for kind, identity_name in required.items():
-        item_id = RELEASE_IDENTITY.sjd_ids.get(identity_name)
-        if not item_id:
-            raise OperationsDeploymentError(
-                f"release identity omitted {identity_name!r}"
-            )
-        values[kind] = item_id
-    return values
-
-
 def validate_definition_readback(
     kind: str,
     observed: Mapping[str, Any],
+    *,
+    config: FabricTarget,
 ) -> None:
     expected_parts = {
         part["path"]: part
-        for part in build_sjd_definition(kind)["definition"]["parts"]
+        for part in build_sjd_definition(
+            kind, config=config,
+            command_line_arguments=(
+                _command(config.namespace_arguments()) if isinstance(config, FabricSjdConfig) else ""
+            ),
+        )["definition"]["parts"]
     }
     definition = observed.get("definition")
     if not isinstance(definition, Mapping):
@@ -493,15 +593,18 @@ def validate_definition_readback(
             f"{kind} SJD parts readback is invalid"
         )
     observed_parts = {str(part.get("path")): part for part in parts}
+    if len(observed_parts) != len(parts):
+        raise OperationsDeploymentError(f"{kind} SJD readback has duplicate parts")
     observed_paths = set(observed_parts)
-    required_paths = {*expected_parts, ".platform"}
     if (
-        not required_paths.issubset(observed_paths)
-        or not (observed_paths - required_paths).issubset({".schedules"})
+        not set(expected_parts).issubset(observed_paths)
+        or not (observed_paths - set(expected_parts)).issubset({".platform", ".schedules"})
     ):
         raise OperationsDeploymentError(
             f"{kind} SJD definition readback has unexpected parts"
         )
+    if definition.get("format") != "SparkJobDefinitionV2":
+        raise OperationsDeploymentError(f"{kind} SJD definition readback has an invalid format")
     for path, expected in expected_parts.items():
         actual = observed_parts[path]
         if actual.get("payloadType") != "InlineBase64":
@@ -510,13 +613,17 @@ def validate_definition_readback(
             )
         try:
             expected_bytes = base64.b64decode(expected["payload"])
-            actual_bytes = base64.b64decode(str(actual["payload"]))
+            actual_bytes = base64.b64decode(str(actual["payload"]), validate=True)
         except (KeyError, ValueError) as error:
             raise OperationsDeploymentError(
                 f"{kind} SJD part {path!r} has an invalid payload"
             ) from error
         if path.endswith(".json"):
-            if json.loads(actual_bytes) != json.loads(expected_bytes):
+            try:
+                observed_json = json.loads(actual_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise OperationsDeploymentError(f"{kind} SJD metadata readback is not valid JSON") from error
+            if observed_json != json.loads(expected_bytes):
                 raise OperationsDeploymentError(
                     f"{kind} SJD metadata readback differs from deployment"
                 )
@@ -526,100 +633,179 @@ def validate_definition_readback(
             )
 
 
+def provision_operations(
+    api: FabricApi, *, manifest: DeploymentManifest,
+) -> dict[str, Any]:
+    if api.target != manifest.target():
+        raise OperationsDeploymentError("API target differs from deployment target")
+    if api.config != manifest.runtime_config():
+        raise OperationsDeploymentError("API target namespace differs from deployment configuration")
+    items: dict[str, str] = {}
+    roles = {}
+    for role in ENTRY_POINTS:
+        binding = manifest.role(role)
+        item_id = api.upsert_sjd(
+            role, binding.display_name, expected_item_id=binding.item_id,
+        )
+        validate_artifact_id(item_id, f"{role} SJD ID")
+        if item_id in items.values():
+            raise OperationsDeploymentError("Fabric returned the same SJD ID for multiple roles")
+        validate_definition_readback(
+            role, api.get_definition(item_id), config=api.config,
+        )
+        items[role] = item_id
+        roles[role] = dataclasses.replace(binding, item_id=item_id)
+    resolved = dataclasses.replace(manifest, roles=roles)
+    return {
+        "status": "provisioned",
+        "enabled": False,
+        "items": items,
+        "deployment": resolved.to_document(),
+    }
+
+
+def _release_digest(value: str, label: str) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise OperationsDeploymentError(f"{label} must be a SHA-256 digest")
+
+
+def _verify_schedule(
+    role: str, observed: object, expected: Mapping[str, Any],
+) -> None:
+    try:
+        validate_schedule_readback(observed, expected)
+    except ValueError as error:
+        raise OperationsDeploymentError(f"{role} schedule readback differs") from error
+
+
+def _activate_schedules(
+    api: FabricApi, items: Mapping[str, str], payloads: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    readbacks = {}
+    try:
+        for role, payload in payloads.items():
+            expected = {**payload, "enabled": True}
+            observed = api.reconcile_schedule(items[role], payload=expected)
+            _verify_schedule(role, observed, expected)
+            readbacks[role] = observed
+    except (OperationsDeploymentError, OSError, ValueError) as error:
+        failed = []
+        for role, payload in payloads.items():
+            try:
+                observed = api.reconcile_schedule(items[role], payload=payload)
+                _verify_schedule(role, observed, payload)
+            except (OperationsDeploymentError, OSError, ValueError):
+                failed.append(role)
+        if failed:
+            raise OperationsDeploymentError(
+                "Schedule activation failed; could not confirm disabled schedules for "
+                + ", ".join(failed) + ". Inspect the target workspace before retrying."
+            ) from error
+        raise OperationsDeploymentError(
+            "Schedule activation failed; all recurring schedules were disabled again. "
+            "Previously accepted jobs are not cancelled."
+        ) from error
+    return readbacks
+
+
+def _validate_configuration(
+    *,
+    release_manifest_sha256: str,
+    release_receipt_sha256: str,
+    semantic_model_id: str,
+    additional_semantic_model_ids: Sequence[str],
+    intake_pipeline_id: str | None,
+    registration_notebook_id: str | None,
+    enable_schedules: bool,
+) -> None:
+    _release_digest(release_manifest_sha256, "release manifest hash")
+    _release_digest(release_receipt_sha256, "release receipt hash")
+    validate_artifact_id(semantic_model_id, "semantic model ID")
+    for model_id in additional_semantic_model_ids:
+        validate_artifact_id(model_id, "additional semantic model ID")
+    if type(enable_schedules) is not bool:
+        raise ValueError("enable_schedules must be a boolean")
+    if (intake_pipeline_id is None) != (registration_notebook_id is None):
+        raise OperationsDeploymentError("intake pipeline and registration notebook IDs must be supplied together")
+    if intake_pipeline_id is not None:
+        validate_artifact_id(intake_pipeline_id, "intake pipeline ID")
+        validate_artifact_id(registration_notebook_id, "registration notebook ID")
+
+
 def deploy_operations(
     api: FabricApi,
     *,
+    manifest: DeploymentManifest,
     release_manifest_sha256: str,
     release_receipt_sha256: str,
     semantic_model_id: str,
     additional_semantic_model_ids: Sequence[str] = (),
     enable_schedules: bool,
-    intake_pipeline_id: str,
-    registration_notebook_id: str,
+    intake_pipeline_id: str | None = None,
+    registration_notebook_id: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    _validate_configuration(
+        release_manifest_sha256=release_manifest_sha256,
+        release_receipt_sha256=release_receipt_sha256,
+        semantic_model_id=semantic_model_id,
+        additional_semantic_model_ids=additional_semantic_model_ids,
+        intake_pipeline_id=intake_pipeline_id,
+        registration_notebook_id=registration_notebook_id,
+        enable_schedules=enable_schedules,
+    )
+    if api.target != manifest.target():
+        raise OperationsDeploymentError("API target differs from deployment target")
+    if api.config != manifest.runtime_config():
+        raise OperationsDeploymentError("API target namespace differs from deployment configuration")
     api.verify_compute()
-    items = _fixed_item_ids()
-    for kind, display_name in ITEM_NAMES.items():
-        items[kind] = api.upsert_sjd(kind, display_name)
-        observed = api.get_definition(items[kind])
-        validate_definition_readback(kind, observed)
-    api.reconcile_intake_release(intake_pipeline_id, release_manifest_sha256)
-    api.reconcile_registration_notebook(registration_notebook_id)
-    release_root = RELEASE_IDENTITY.release_evidence_root.rstrip("/")
-    schedules = {
-        "dispatcher": (
-            5,
-            _command(
-                [
-                    "--max-items",
-                    "64",
-                    "--maximum-active-batches",
-                    "1",
-                    "--lease-seconds",
-                    "14400",
-                    "--minimum-speed-x",
-                    "1",
-                    "--safety-factor",
-                    "1.25",
-                    "--margin-seconds",
-                    "60",
-                    "--release-manifest-path",
-                    f"{release_root}/detached-manifest.json",
-                    "--release-manifest-sha256",
-                    release_manifest_sha256,
-                    "--release-receipt-path",
-                    f"{release_root}/postpublish-receipt.json",
-                    "--release-receipt-sha256",
-                    release_receipt_sha256,
-                ]
+    result = provision_operations(api, manifest=manifest)
+    items = result["items"]
+    if intake_pipeline_id is not None and registration_notebook_id is not None:
+        api.reconcile_intake_release(intake_pipeline_id, release_manifest_sha256)
+        api.reconcile_registration_notebook(registration_notebook_id)
+    resolved = parse_deployment_manifest(result["deployment"], manifest.stage)
+    resolved = dataclasses.replace(
+        resolved,
+        release=dataclasses.replace(
+            resolved.release, manifest_sha256=release_manifest_sha256,
+            receipt_sha256=release_receipt_sha256,
+        ),
+        analytics_reporting=dataclasses.replace(
+            resolved.analytics_reporting,
+            semantic_model=dataclasses.replace(
+                resolved.analytics_reporting.semantic_model, target_item_id=semantic_model_id,
             ),
         ),
-        "control": (5, "recover"),
-        "reconciliation": (15, ""),
-        "gold": (15, "run --lookback-hours 48"),
-        "refresh": (
-            15,
-            _command(
-                [
-                    "--workspace-id",
-                    api.workspace_id,
-                    "--semantic-model-id",
-                    semantic_model_id,
-                ]
-                + [
-                    value
-                    for model_id in additional_semantic_model_ids
-                    for value in ("--semantic-model-id", model_id)
-                ]
-            ),
-        ),
-    }
+    )
+    model_ids = list(dict.fromkeys([semantic_model_id, *additional_semantic_model_ids]))
+    operational_model = manifest.operational_reporting.semantic_model.target_item_id
+    if operational_model is not None and operational_model not in model_ids:
+        model_ids.append(operational_model)
+    result["deployment"] = resolved.to_document()
+    payloads = {}
     readbacks = {}
-    for kind, (interval, arguments) in schedules.items():
+    for kind in ("dispatcher", "control", "reconciliation", "gold", "refresh"):
+        schedule = manifest.role(kind).schedule
+        if schedule is None:
+            raise OperationsDeploymentError(f"{kind} deployment schedule is missing")
         expected = schedule_payload(
-            interval_minutes=interval,
-            command_line_arguments=arguments,
-            enabled=enable_schedules,
+            interval_minutes=schedule.interval_minutes,
+            command_line_arguments=resolved.schedule_arguments(
+                kind, enabled=True, semantic_model_ids=model_ids,
+            ),
+            enabled=False,
             now=now,
         )
         observed = api.reconcile_schedule(items[kind], payload=expected)
-        if observed:
-            if observed.get("enabled") != enable_schedules:
-                raise OperationsDeploymentError(
-                    f"{kind} schedule enabled readback differs"
-                )
-            configuration = observed.get("configuration")
-            if not isinstance(configuration, Mapping):
-                raise OperationsDeploymentError(
-                    f"{kind} schedule configuration readback is invalid"
-                )
-            if configuration.get("interval") != interval:
-                raise OperationsDeploymentError(
-                    f"{kind} schedule interval readback differs"
-                )
+        _verify_schedule(kind, observed, expected)
+        payloads[kind] = expected
         readbacks[kind] = observed
+    if enable_schedules:
+        readbacks = _activate_schedules(api, items, payloads)
     return {
+        **result,
+        "status": "configured",
         "enabled": enable_schedules,
         "items": items,
         "schedules": readbacks,
@@ -631,36 +817,65 @@ def deploy_operations(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--workspace-id",
-        default=RELEASE_IDENTITY.workspace_id,
-    )
-    parser.add_argument(
-        "--semantic-model-id",
-        default=ANALYTICS_MODEL_ID,
-    )
+    parser.add_argument("--stage", choices=("dev", "test", "prod"))
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--provision-only", action="store_true")
+    parser.add_argument("--semantic-model-id")
     parser.add_argument(
         "--additional-semantic-model-id",
         action="append",
         default=[],
     )
-    parser.add_argument("--release-manifest-sha256", required=True)
-    parser.add_argument("--release-receipt-sha256", required=True)
-    parser.add_argument("--intake-pipeline-id", required=True)
-    parser.add_argument("--registration-notebook-id", required=True)
+    parser.add_argument("--release-manifest-sha256")
+    parser.add_argument("--release-receipt-sha256")
+    parser.add_argument("--intake-pipeline-id")
+    parser.add_argument("--registration-notebook-id")
     parser.add_argument("--enable-schedules", action="store_true")
     arguments = parser.parse_args(argv)
-    result = deploy_operations(
-        FabricApi(arguments.workspace_id, token=_token()),
-        release_manifest_sha256=arguments.release_manifest_sha256,
-        release_receipt_sha256=arguments.release_receipt_sha256,
-        semantic_model_id=arguments.semantic_model_id,
-        additional_semantic_model_ids=(
-            arguments.additional_semantic_model_id
-        ),
-        enable_schedules=arguments.enable_schedules,
-        intake_pipeline_id=arguments.intake_pipeline_id,
-        registration_notebook_id=arguments.registration_notebook_id,
+    env = dict(os.environ)
+    if arguments.config is not None:
+        env["PEOPLE_COUNTER_DEPLOY_CONFIG_PATH"] = str(arguments.config)
+        env.pop("PEOPLE_COUNTER_DEPLOY_CONFIG_JSON", None)
+    manifest = load_deployment_manifest(arguments.stage, env=env)
+    target = manifest.runtime_config()
+    if arguments.provision_only and arguments.enable_schedules:
+        parser.error("--provision-only cannot enable schedules")
+    if not arguments.provision_only and (
+        not arguments.release_manifest_sha256 or not arguments.release_receipt_sha256
+    ):
+        parser.error("configuration requires both release hashes; use --provision-only before release admission")
+    model_id = arguments.semantic_model_id or manifest.analytics_reporting.semantic_model.target_item_id
+    if not arguments.provision_only and model_id is None:
+        parser.error("configuration requires --semantic-model-id or a resolved reporting target ID")
+    if not arguments.provision_only:
+        _validate_configuration(
+            release_manifest_sha256=arguments.release_manifest_sha256,
+            release_receipt_sha256=arguments.release_receipt_sha256,
+            semantic_model_id=model_id,
+            additional_semantic_model_ids=arguments.additional_semantic_model_id,
+            intake_pipeline_id=arguments.intake_pipeline_id,
+            registration_notebook_id=arguments.registration_notebook_id,
+            enable_schedules=arguments.enable_schedules,
+        )
+    api = FabricApi(target, token=_token())
+    if arguments.provision_only:
+        result = provision_operations(api, manifest=manifest)
+    else:
+        result = deploy_operations(
+            api, manifest=manifest,
+            release_manifest_sha256=arguments.release_manifest_sha256,
+            release_receipt_sha256=arguments.release_receipt_sha256,
+            semantic_model_id=model_id,
+            additional_semantic_model_ids=arguments.additional_semantic_model_id,
+            enable_schedules=arguments.enable_schedules,
+            intake_pipeline_id=arguments.intake_pipeline_id,
+            registration_notebook_id=arguments.registration_notebook_id,
+        )
+    arguments.output.parent.mkdir(parents=True, exist_ok=True)
+    arguments.output.write_text(
+        json.dumps(result["deployment"], allow_nan=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
     print(json.dumps(result, allow_nan=False, indent=2, sort_keys=True))
     return 0

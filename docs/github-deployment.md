@@ -305,7 +305,7 @@ The deployment has four ownership boundaries:
 | Owner | Resources and actions |
 |---|---|
 | Bootstrap Terraform | Azure resource group, state storage, Entra applications, service principals, OIDC trust, state RBAC, Fabric capacities, and configured ADLS accounts |
-| Environment Terraform | Target workspace, workspace roles, Lakehouse, Environment, seven SJDs, Variable Library, configured shortcuts, and optional Fabric items |
+| Environment Terraform | Target workspace, workspace roles, Lakehouse, Environment, six SJDs, Variable Library, configured shortcuts, and optional Fabric items |
 | Runtime automation | Lakehouse tables, `Files/` directories, release manifest, model refreshes, supported service settings, and schedules |
 | Operator or external system | Tenant settings, GitHub configuration, approvals, Activator action evidence, and unsupported integrations |
 
@@ -474,7 +474,7 @@ successful automation.
 
 ## Source definitions and live export
 
-All seven Spark Job Definitions come from
+All six Spark Job Definitions come from
 `fabric/spark-job-definitions/`. GitHub does not supply their definitions.
 Terraform injects environment-specific Lakehouse and Environment IDs through
 the Fabric provider's Go-template definition tokens.
@@ -622,14 +622,14 @@ plan. An approval input does not bypass GitHub Environment review or Terraform
 The retained `people-counter-fabric-deployment-verification-v1` document
 validates:
 
-- all seven SJD definitions and their Environment, Lakehouse, and entry-point
+- all six SJD definitions and their Environment, Lakehouse, and entry-point
   references.
 - exactly one disabled schedule for each recurring role and no schedules for
-  Process or Cutover before the final gate.
+  Process before the final gate.
 - stable SJD bootstrap tables through the schema-aware OneLake Delta metadata
   API, configured OneLake folders, the exact Terraform shortcut set, and the
-  immutable commit-addressed release manifest. Cutover journal tables are
-  required only after the separate production cutover workflow creates them.
+  immutable commit-addressed release manifest. Cutover and its journal-table
+  initialization are no longer part of deployment.
 - both semantic-model refreshes on both deployment passes, Direct Lake
   workspace/Lakehouse bindings, and each PBIR report's semantic-model reference.
 - the managed Workspace Monitoring Eventhouse and KQL database plus the
@@ -698,7 +698,7 @@ deployment, and a successful Terraform apply alone is not acceptance.
 1. **Finish bootstrap.** Populate all eight required variables in each GitHub
    Environment, add the generated principal to the tenant-settings group, and
    verify OIDC with an authorized protected plan. Never add a client secret.
-2. **Commit deployable definitions.** Ensure all seven SJD bundles are present.
+2. **Commit deployable definitions.** Ensure all six SJD bundles are present.
    Export, review, and commit every reporting/RTI/Activator bundle whose gate
    will be enabled. Run:
 
@@ -742,7 +742,7 @@ gh workflow run promote.yml \
      `status: succeeded`.
    - the repeated Terraform plan exit code to be `0`.
    - exactly one disabled schedule for each recurring role and none for
-     Process/Cutover.
+     Process.
    - every enabled optional gate to appear as successful.
 6. **Promote the identical SHA to Production.** Confirm the Production
    variables and flags match the reviewed release, then dispatch:
@@ -769,12 +769,37 @@ gh workflow run promote.yml \
    `fabric-evidence-prod-final-gate-*` to contain successful
    `fabric-evidence.json`. Confirm it reconciled exactly one enabled schedule
    for Control, Dispatcher, Reconciliation, Gold, and Refresh, no schedules
-   for Process/Cutover, successful optional runtime gates, and the identical
+   for Process, successful optional runtime gates, and the identical
    commit/definition/output hashes.
 9. **Record completion.** Link the immutable SHA, workflow run, all retained
     artifact names, approver, optional-gate results, and any operational
     follow-up in the release record. The deployment is complete after this
     step. Missing configuration or source bundles block deployment.
+
+### Portable target and admission inputs
+
+Bundled deployment manifests have no preassigned resource IDs, including
+Production. Terraform outputs supply the workspace, Lakehouse, Environment,
+SJD and reporting IDs after creation. An explicit configuration ID that
+conflicts with those outputs is an error, not a value to silently retain.
+Postconfiguration uses the resolved target and Files root for bootstrap and
+every scheduled role.
+
+Before the final enablement gate, set the target GitHub Environment variables
+`FABRIC_RELEASE_MANIFEST_SHA256` and `FABRIC_RELEASE_RECEIPT_SHA256` to the real,
+reviewed detached admission evidence for that SDK and target. The workflow
+passes them as `PEOPLE_COUNTER_RELEASE_MANIFEST_SHA256` and
+`PEOPLE_COUNTER_RELEASE_RECEIPT_SHA256`; CLI callers can instead use
+`--release-manifest-sha256` and `--release-receipt-sha256`, or a resolved
+manifest's `release.manifest_sha256` and `release.receipt_sha256`.
+These hashes are deployment inputs, not SDK build inputs. Neither hash is
+fabricated by the version bump or postconfiguration scripts. Dispatcher and
+Refresh cannot be enabled with missing release or reporting bindings.
+Actual evidence publication and executor qualification remain release gates.
+
+Cutover code and the Terraform role were removed. Review the infrastructure
+plan for removal of a previously deployed Cutover SJD. This removal does not
+delete old Lakehouse tables or run a migration.
 
 GitHub retains Terraform, runtime, deployment verification, and smoke artifacts
 for 30 days.

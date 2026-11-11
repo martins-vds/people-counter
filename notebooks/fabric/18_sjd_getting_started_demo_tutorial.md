@@ -29,9 +29,13 @@ not submit work to a Dispatcher running a newer release; admission rejects it.
 
 ## Before the audience arrives
 
-1. Import or open the notebook in the `people-counter-dev` workspace.
-2. Attach the `people_counter_dev` Lakehouse and the published people-counter
-   Environment.
+1. Import or open the notebook in the intended deployment workspace.
+2. Attach its default Lakehouse and published people-counter Environment.
+   Retain the resolved `Files/deployment/deployment.json` from administrative
+   discovery or the deployment CLI. Set `DEPLOYMENT_STAGE` and
+   `DEPLOYMENT_CONFIG_PATH` in the parameter cell. The notebook reads actual
+   SJD/model/report IDs from that state and verifies the attached runtime;
+   it does not ship IDs from a reference workspace.
 3. Run the parameter, reviewed-input, and helper cells with every side-effect
    gate left `False`.
 4. Record the generated `RUN_LABEL`. Reuse it if the notebook session must be

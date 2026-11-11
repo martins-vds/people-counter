@@ -5,9 +5,10 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fabric_runtime_context")
+
 from people_counter.fabric_sjd import (
     BOOTSTRAP_TABLE_SUFFIXES,
-    CUTOVER_TABLE_SUFFIXES,
     FILES_ROOT,
     TABLE_PREFIX,
     TABLE_SUFFIXES,
@@ -26,19 +27,23 @@ from people_counter.fabric_sjd_definition import (
     build_sjd_definition,
 )
 
+from tests.fabric_fixtures import (
+    ENVIRONMENT_ID,
+    LAKEHOUSE_ID,
+    TARGET_IDS,
+    TEST_TARGET,
+)
+
 
 def test_stable_config_is_fixed_and_contains_no_candidate_or_shadow_tables() -> None:
-    config = FabricSjdConfig()
+    config = FabricSjdConfig(**TARGET_IDS)
     assert config.table_prefix == "people_counter_sjd_"
     assert config.files_root == "Files/people-counter/sjd/v1/"
     assert "routing_allowlist" not in TABLE_SUFFIXES
     assert "shadow_audit" not in TABLE_SUFFIXES
-    assert BOOTSTRAP_TABLE_SUFFIXES | CUTOVER_TABLE_SUFFIXES == TABLE_SUFFIXES
-    assert not BOOTSTRAP_TABLE_SUFFIXES & CUTOVER_TABLE_SUFFIXES
-    assert CUTOVER_TABLE_SUFFIXES == {
-        "migration_journal",
-        "retirement_journal",
-    }
+    assert BOOTSTRAP_TABLE_SUFFIXES == TABLE_SUFFIXES
+    assert "migration_journal" not in TABLE_SUFFIXES
+    assert "retirement_journal" not in TABLE_SUFFIXES
     assert "candidate" not in TABLE_PREFIX
     assert "candidate" not in FILES_ROOT
     assert config.table("work") == "people_counter_sjd_work"
@@ -51,17 +56,16 @@ def test_stable_config_is_fixed_and_contains_no_candidate_or_shadow_tables() -> 
     ("field", "value"),
     [
         ("table_prefix", "people_counter_ca_"),
-        ("files_root", "Files/people-counter/candidate-a/v1/"),
         ("stable_production", False),
     ],
 )
 def test_stable_config_rejects_mutable_bindings(field: str, value: object) -> None:
     with pytest.raises(ValueError, match="configuration is fixed"):
-        FabricSjdConfig(**{field: value})
+        FabricSjdConfig(**{**TARGET_IDS, **{field: value}})
 
 
 def test_stable_config_rejects_unknown_tables_and_escaped_paths() -> None:
-    config = FabricSjdConfig()
+    config = FabricSjdConfig(**TARGET_IDS)
     with pytest.raises(ValueError, match="table suffix"):
         config.table("shadow_audit")
     with pytest.raises(ValueError, match="unsafe"):
@@ -112,12 +116,9 @@ def test_stable_entry_points_bind_exact_production_config() -> None:
 
 
 def test_stable_reconciliation_rejects_any_other_command() -> None:
-    with patch(
-        "people_counter.fabric_sjd_jobs.control_main",
-        return_value=0,
-    ) as run:
+    with patch("people_counter.fabric_sjd_runtime.control_main", return_value=0) as run:
         assert reconciliation_main() == 0
-        run.assert_called_once_with(["reconcile"])
+        run.assert_called_once_with(["reconcile"], config=FabricSjdConfig(**TARGET_IDS))
     with pytest.raises(ValueError, match="only the reconcile"):
         reconciliation_main(["recover"])
 
@@ -125,7 +126,7 @@ def test_stable_reconciliation_rejects_any_other_command() -> None:
 def test_stable_config_enables_production_attempt_adapter() -> None:
     from people_counter.sjd_process import OneLakeDeltaAttemptAdapter
 
-    config = FabricSjdConfig()
+    config = FabricSjdConfig(**TARGET_IDS)
     adapter = OneLakeDeltaAttemptAdapter(
         config.file_path("attempts"),
         SimpleNamespace(),
@@ -143,7 +144,7 @@ def test_stable_sjd_definition_has_only_installed_entrypoint_and_fixed_bindings(
     import base64
     import json
 
-    definition = build_sjd_definition(kind)["definition"]
+    definition = build_sjd_definition(kind, config=TEST_TARGET)["definition"]
     assert definition["format"] == "SparkJobDefinitionV2"
     parts = {part["path"]: part for part in definition["parts"]}
     assert set(parts) == {"Main/main.py", "SparkJobDefinitionV1.json"}
@@ -156,14 +157,10 @@ def test_stable_sjd_definition_has_only_installed_entrypoint_and_fixed_bindings(
     )
     assert metadata["additionalLibraryUris"] == []
     assert metadata["commandLineArguments"] == ""
-    assert metadata["environmentArtifactId"] == (
-        "3e580f48-9ff7-4bc6-af2e-a59158029ada"
-    )
-    assert metadata["defaultLakehouseArtifactId"] == (
-        "883cff91-eaa8-40be-870f-6e9716303cb2"
-    )
+    assert metadata["environmentArtifactId"] == ENVIRONMENT_ID
+    assert metadata["defaultLakehouseArtifactId"] == LAKEHOUSE_ID
 
 
 def test_stable_sjd_definition_rejects_unknown_kind() -> None:
     with pytest.raises(ValueError, match="unsupported"):
-        build_sjd_definition("shadow")
+        build_sjd_definition("shadow", config=TEST_TARGET)

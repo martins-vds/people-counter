@@ -1,4 +1,4 @@
-"""Fixed deployment contracts for isolated Fabric namespaces.
+"""Guarded namespace contracts with explicit Fabric deployment bindings.
 
 This module is intentionally standard-library only.  It describes artifacts
 that may be built locally; it does not call Fabric or OneLake APIs.
@@ -8,20 +8,17 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping
 
 from people_counter.fabric_sjd_definition import definition_part
+from people_counter.fabric_target import FabricTarget
 
 if TYPE_CHECKING:
     from people_counter.fabric_capability_probe import ConsumerProbeProfile
 
 
-WORKSPACE_ID = "c31ee864-230d-4005-8fd5-7c7130ebf774"
-LAKEHOUSE_ID = "883cff91-eaa8-40be-870f-6e9716303cb2"
-ENVIRONMENT_ID = "3e580f48-9ff7-4bc6-af2e-a59158029ada"
 FABRIC_RUNTIME = "2.0"
 
 
@@ -79,7 +76,6 @@ _TABLE_SUFFIXES = frozenset(
         "reconciliation_findings",
         "gold_checkpoints",
         "semantic_refresh_outbox",
-        "migration_journal",
         "gold_flow_minute",
         "gold_flow_hour",
         "gold_video",
@@ -109,17 +105,14 @@ _JOB_MODULES = {
 
 
 @dataclass(frozen=True, slots=True)
-class FabricNamespaceConfig:
+class FabricNamespaceConfig(FabricTarget):
     """An immutable Fabric SJD namespace and Fabric artifact binding.
 
-    The default remains the original Phase 1 canary.  Supplying only ``mode``
-    selects that mode's reviewed namespace; explicitly supplied namespace
-    values must still match it exactly.
+    The default namespace remains the original Phase 1 canary, but the target
+    IDs are always explicit. ``mode`` selects its reviewed namespace;
+    explicitly supplied namespace values must still match it exactly.
     """
 
-    workspace_id: str = WORKSPACE_ID
-    lakehouse_id: str = LAKEHOUSE_ID
-    environment_id: str = ENVIRONMENT_ID
     table_prefix: str | None = None
     files_root: str | None = None
     runtime: str = FABRIC_RUNTIME
@@ -127,6 +120,7 @@ class FabricNamespaceConfig:
     production_enabled: bool = False
 
     def __post_init__(self) -> None:
+        FabricTarget.__post_init__(self)
         try:
             mode = FabricNamespaceMode(self.mode)
         except (TypeError, ValueError) as error:
@@ -141,9 +135,6 @@ class FabricNamespaceConfig:
             object.__setattr__(self, "files_root", expected_root)
 
         expected = {
-            "workspace_id": WORKSPACE_ID,
-            "lakehouse_id": LAKEHOUSE_ID,
-            "environment_id": ENVIRONMENT_ID,
             "table_prefix": expected_prefix,
             "files_root": expected_root,
             "runtime": FABRIC_RUNTIME,
@@ -163,45 +154,40 @@ class FabricNamespaceConfig:
                 "direct PRODUCTION adapter execution is disabled; use the "
                 "hash-bound production router after migration verification"
             )
-        for value in (self.workspace_id, self.lakehouse_id, self.environment_id):
-            if str(uuid.UUID(value)) != value:
-                raise ValueError("Fabric SJD artifact IDs must be canonical UUIDs")
 
     @classmethod
     def for_mode(
         cls,
         mode: FabricNamespaceMode | str,
         *,
-        workspace_id: str = WORKSPACE_ID,
-        lakehouse_id: str = LAKEHOUSE_ID,
-        environment_id: str = ENVIRONMENT_ID,
+        target: FabricTarget,
         runtime: str = FABRIC_RUNTIME,
     ) -> FabricNamespaceConfig:
         """Create the exact reviewed namespace for ``mode``."""
 
         return cls(
-            workspace_id=workspace_id,
-            lakehouse_id=lakehouse_id,
-            environment_id=environment_id,
+            workspace_id=target.workspace_id,
+            lakehouse_id=target.lakehouse_id,
+            environment_id=target.environment_id,
             runtime=runtime,
             mode=FabricNamespaceMode(mode),
         )
 
     @classmethod
-    def canary(cls) -> FabricNamespaceConfig:
-        return cls.for_mode(FabricNamespaceMode.CANARY)
+    def canary(cls, *, target: FabricTarget) -> FabricNamespaceConfig:
+        return cls.for_mode(FabricNamespaceMode.CANARY, target=target)
 
     @classmethod
-    def benchmark(cls) -> FabricNamespaceConfig:
-        return cls.for_mode(FabricNamespaceMode.BENCHMARK)
+    def benchmark(cls, *, target: FabricTarget) -> FabricNamespaceConfig:
+        return cls.for_mode(FabricNamespaceMode.BENCHMARK, target=target)
 
     @classmethod
-    def production_shadow(cls) -> FabricNamespaceConfig:
-        return cls.for_mode(FabricNamespaceMode.PRODUCTION_SHADOW)
+    def production_shadow(cls, *, target: FabricTarget) -> FabricNamespaceConfig:
+        return cls.for_mode(FabricNamespaceMode.PRODUCTION_SHADOW, target=target)
 
     @classmethod
-    def production(cls) -> FabricNamespaceConfig:
-        return cls.for_mode(FabricNamespaceMode.PRODUCTION)
+    def production(cls, *, target: FabricTarget) -> FabricNamespaceConfig:
+        return cls.for_mode(FabricNamespaceMode.PRODUCTION, target=target)
 
     def require_write_enabled(self) -> None:
         """Reject direct production writes; routing owns production enablement."""
@@ -337,8 +323,10 @@ class FabricNamespaceConfig:
         )
 
 
-def validate_environment_library_policy(metadata: Mapping[str, Any]) -> None:
-    """Require the one published Full-mode Runtime 2.0 Environment.
+def validate_environment_library_policy(
+    metadata: Mapping[str, Any], *, config: FabricTarget,
+) -> None:
+    """Require the selected published Full-mode Runtime 2.0 Environment.
 
     Fabric SJD jobs import the installed wheel.  Inline libraries, session
     installs, and source fallbacks are deliberately forbidden.
@@ -351,8 +339,8 @@ def validate_environment_library_policy(metadata: Mapping[str, Any]) -> None:
     mode = metadata.get("libraryMode", metadata.get("library_mode"))
     inline = metadata.get("additionalLibraryUris", metadata.get("inline_libraries", []))
     published = metadata.get("published", metadata.get("publishState") == "Succeeded")
-    if environment_id != ENVIRONMENT_ID:
-        raise ValueError("Fabric SJD requires the fixed Fabric Environment")
+    if environment_id != config.environment_id:
+        raise ValueError("Fabric SJD requires the configured Fabric Environment")
     if str(runtime) != FABRIC_RUNTIME:
         raise ValueError("Fabric SJD requires Fabric Runtime 2.0")
     if str(mode).lower() != "full":
@@ -438,9 +426,10 @@ def thin_main_source(job: str) -> bytes:
 def build_sjd_v2_definition(
     job: str,
     *,
+    config: FabricTarget,
     command_line_arguments: str = "",
 ) -> dict[str, object]:
-    """Build a deterministic SJD V2 definition bound to the fixed artifacts."""
+    """Build a deterministic SJD V2 definition bound to the selected artifacts."""
 
     if "\x00" in command_line_arguments:
         raise ValueError("command_line_arguments contains NUL")
@@ -448,8 +437,8 @@ def build_sjd_v2_definition(
         "additionalLakehouseIds": [],
         "additionalLibraryUris": [],
         "commandLineArguments": command_line_arguments,
-        "defaultLakehouseArtifactId": LAKEHOUSE_ID,
-        "environmentArtifactId": ENVIRONMENT_ID,
+        "defaultLakehouseArtifactId": config.lakehouse_id,
+        "environmentArtifactId": config.environment_id,
         "executableFile": "main.py",
         "language": "Python",
         "mainClass": "",

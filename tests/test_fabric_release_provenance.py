@@ -4,10 +4,20 @@ import dataclasses
 import json
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from people_counter import fabric_release_provenance as provenance
+from people_counter.fabric_sjd import ManualFabricSjdConfig
+
+
+def _deployment() -> ManualFabricSjdConfig:
+    return ManualFabricSjdConfig(
+        workspace_id="11111111-1111-1111-1111-111111111111",
+        lakehouse_id="22222222-2222-2222-2222-222222222222",
+        environment_id="33333333-3333-3333-3333-333333333333",
+    )
 
 
 def _manifest() -> dict[str, object]:
@@ -27,10 +37,10 @@ def _manifest() -> dict[str, object]:
         ),
         "cpu_bundle_sha256": "3" * 64,
         "build_input_sha256": identity.build_input_sha256,
-        "workspace_id": identity.workspace_id,
-        "lakehouse_id": identity.lakehouse_id,
-        "environment_id": identity.environment_id,
-        "sjd_ids": dict(identity.sjd_ids),
+        "workspace_id": _deployment().workspace_id,
+        "lakehouse_id": _deployment().lakehouse_id,
+        "environment_id": _deployment().environment_id,
+        "sjd_ids": {"stable-control": "44444444-4444-4444-4444-444444444444"},
         "public_dependencies": {
             "trackers": {
                 "version": "2.6.0",
@@ -44,7 +54,7 @@ def _manifest() -> dict[str, object]:
         },
         "reviewer": "independent-gpt-5.6-sol",
         "reviewed_at": "2026-10-07T15:00:00Z",
-        "deployment_intent": identity.deployment_intent,
+        "deployment_intent": "Reviewed deployment",
     }
 
 
@@ -54,7 +64,7 @@ def _receipt(manifest_sha256: str) -> dict[str, object]:
         "schema": "people-counter-sjd-postpublish-receipt-v1",
         "detached_manifest_sha256": manifest_sha256,
         "package_version": identity.package_version,
-        "environment_id": identity.environment_id,
+        "environment_id": _deployment().environment_id,
         "environment_target_version": "4" * 32,
         "public_package_policy_sha256": "5" * 64,
         "library_readback_sha256": "6" * 64,
@@ -88,10 +98,36 @@ def test_embedded_identity_contains_no_final_artifact_hashes() -> None:
     assert "cpu_bundle_sha256" not in raw
     assert "environment_target_version" not in raw
     assert provenance.RELEASE_IDENTITY.release_evidence_root.endswith("/" + raw["package_version"])
-    assert all(
-        str(uuid.UUID(item_id)) == item_id
-        for item_id in provenance.RELEASE_IDENTITY.sjd_ids.values()
-    )
+    assert set(raw) == {
+        "schema", "package_version", "build_input_sha256", "release_evidence_root",
+    }
+    assert raw["schema"] == "people-counter-sjd-release-identity-v2"
+
+
+def test_release_identity_round_trip_preserves_every_release_field(tmp_path: Path) -> None:
+    raw = dataclasses.asdict(provenance.RELEASE_IDENTITY)
+    path = tmp_path / "identity.json"
+    expected_digest = _write(path, raw)
+    identity, digest = provenance.load_release_identity(path)
+    assert dataclasses.asdict(identity) == raw
+    assert digest == expected_digest
+
+
+@pytest.mark.parametrize(("field", "message"), [
+    ("package_version", "identity.package_version must be non-empty"),
+    ("release_evidence_root", "identity.release_evidence_root must be non-empty"),
+    ("build_input_sha256", "identity.build_input_sha256 must be a SHA-256 digest"),
+])
+def test_invalid_release_fields_identify_the_bad_input(
+    tmp_path: Path, field: str, message: str,
+) -> None:
+    raw = dataclasses.asdict(provenance.RELEASE_IDENTITY)
+    raw[field] = ""
+    path = tmp_path / "identity.json"
+    _write(path, raw)
+    with pytest.raises(provenance.ReleaseProvenanceError) as error:
+        provenance.load_release_identity(path)
+    assert str(error.value) == message
 
 
 def test_published_release_resolves_only_installed_identity_paths(tmp_path: Path) -> None:
@@ -109,13 +145,13 @@ def test_published_release_resolves_only_installed_identity_paths(tmp_path: Path
         read_paths.append(path)
         return expected[path]
 
-    evidence = provenance.resolve_published_release(read_text)
+    evidence = provenance.resolve_published_release(read_text, deployment=_deployment())
     assert evidence.manifest_sha256 == manifest_sha
     assert evidence.receipt_sha256 == receipt_sha
     assert read_paths == list(expected)
     expected[provenance.postpublish_receipt_evidence_path()] = "{}"
     with pytest.raises(provenance.ReleaseProvenanceError):
-        provenance.resolve_published_release(read_text)
+        provenance.resolve_published_release(read_text, deployment=_deployment())
 
 
 def test_registration_metadata_derives_release_from_installed_sdk(monkeypatch) -> None:
@@ -124,16 +160,21 @@ def test_registration_metadata_derives_release_from_installed_sdk(monkeypatch) -
     read_text = lambda path: path
     observed = []
 
-    def published(reader):
-        observed.append(reader)
+    def published(reader, *, deployment):
+        observed.append((reader, deployment))
         return SimpleNamespace(manifest_sha256="b" * 64)
 
     monkeypatch.setattr(provenance, "resolve_published_release", published)
-    assert provenance.registration_release_digest(read_text) == "b" * 64
-    assert provenance.registration_release_digest(read_text, expected_digest="b" * 64) == "b" * 64
+    target = _deployment()
+    assert provenance.registration_release_digest(read_text, deployment=target) == "b" * 64
+    assert provenance.registration_release_digest(
+        read_text, deployment=target, expected_digest="b" * 64,
+    ) == "b" * 64
     with pytest.raises(provenance.ReleaseProvenanceError, match="installed SDK"):
-        provenance.registration_release_digest(read_text, expected_digest="a" * 64)
-    assert observed == [read_text] * 3
+        provenance.registration_release_digest(
+            read_text, deployment=target, expected_digest="a" * 64,
+        )
+    assert observed == [(read_text, target)] * 3
 
 
 def test_detached_manifest_and_receipt_bind_exact_independent_bytes(
@@ -149,6 +190,7 @@ def test_detached_manifest_and_receipt_bind_exact_independent_bytes(
         receipt_path,
         expected_manifest_sha256=manifest_sha256,
         expected_receipt_sha256=receipt_sha256,
+        deployment=_deployment(),
         observed_package_version=provenance.RELEASE_IDENTITY.package_version,
     )
 
@@ -177,6 +219,7 @@ def test_runtime_evidence_rejects_observed_package_version_mismatch(
             receipt_path,
             expected_manifest_sha256=manifest_sha256,
             expected_receipt_sha256=receipt_sha256,
+            deployment=_deployment(),
             observed_package_version="0.0.0",
         )
 
@@ -198,6 +241,7 @@ def test_runtime_evidence_uses_detached_manifest_version(
         receipt_path,
         expected_manifest_sha256=manifest_sha256,
         expected_receipt_sha256=receipt_sha256,
+        deployment=_deployment(),
         observed_package_version="9.8.7",
     )
 
@@ -208,7 +252,7 @@ def test_manifest_rejects_fixed_identity_or_expected_hash_mismatch(
     tmp_path: Path,
 ) -> None:
     value = _manifest()
-    value["environment_id"] = "different-environment"
+    value["release_identity_sha256"] = "0" * 64
     path = tmp_path / "manifest.json"
     digest = _write(path, value)
     with pytest.raises(
@@ -225,6 +269,112 @@ def test_manifest_rejects_fixed_identity_or_expected_hash_mismatch(
         provenance.load_detached_release_manifest(
             path, expected_sha256="e" * 64
         )
+
+
+def test_same_sdk_identity_accepts_two_independent_deployments(tmp_path: Path) -> None:
+    first = _deployment()
+    second = ManualFabricSjdConfig(
+        workspace_id=str(uuid.UUID(int=10)),
+        lakehouse_id=str(uuid.UUID(int=11)),
+        environment_id=str(uuid.UUID(int=12)),
+    )
+    for index, target in enumerate((first, second)):
+        manifest = _manifest()
+        manifest.update(
+            workspace_id=target.workspace_id,
+            lakehouse_id=target.lakehouse_id,
+            environment_id=target.environment_id,
+            deployment_intent=f"Deployment {index}",
+        )
+        manifest_path = tmp_path / f"manifest-{index}.json"
+        manifest_sha = _write(manifest_path, manifest)
+        receipt = _receipt(manifest_sha)
+        receipt["environment_id"] = target.environment_id
+        receipt_path = tmp_path / f"receipt-{index}.json"
+        receipt_sha = _write(receipt_path, receipt)
+        evidence = provenance.load_runtime_release_evidence(
+            manifest_path, receipt_path,
+            expected_manifest_sha256=manifest_sha,
+            expected_receipt_sha256=receipt_sha,
+            deployment=target,
+        )
+        assert evidence.identity_sha256 == provenance.RELEASE_IDENTITY_SHA256
+        assert evidence.manifest.environment_id == target.environment_id
+
+
+@pytest.mark.parametrize("field", ["workspace_id", "lakehouse_id", "environment_id"])
+def test_runtime_evidence_rejects_another_deployment(tmp_path: Path, field: str) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_sha = _write(manifest_path, _manifest())
+    receipt_path = tmp_path / "receipt.json"
+    receipt_sha = _write(receipt_path, _receipt(manifest_sha))
+    target = dataclasses.replace(_deployment(), **{field: str(uuid.UUID(int=99))})
+    with pytest.raises(provenance.ReleaseProvenanceError, match="configured deployment"):
+        provenance.load_runtime_release_evidence(
+            manifest_path, receipt_path,
+            expected_manifest_sha256=manifest_sha,
+            expected_receipt_sha256=receipt_sha,
+            deployment=target,
+        )
+
+
+def test_published_release_checks_configured_control_job(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    manifest_sha = _write(manifest_path, _manifest())
+    receipt_path = tmp_path / "receipt.json"
+    _write(receipt_path, _receipt(manifest_sha))
+    values = {
+        provenance.detached_manifest_evidence_path(): manifest_path.read_text(),
+        provenance.postpublish_receipt_evidence_path(): receipt_path.read_text(),
+    }
+    with pytest.raises(provenance.ReleaseProvenanceError, match="stable-control"):
+        provenance.resolve_published_release(
+            values.__getitem__, deployment=_deployment(),
+            expected_sjd_ids={"stable-control": str(uuid.UUID(int=99))},
+        )
+    evidence = provenance.resolve_published_release(
+        values.__getitem__, deployment=_deployment(),
+        expected_sjd_ids={"stable-control": "44444444-4444-4444-4444-444444444444"},
+    )
+    assert evidence.manifest_sha256 == manifest_sha
+
+
+@pytest.mark.parametrize("field", ["workspace_id", "lakehouse_id", "environment_id"])
+def test_empty_deployment_field_identifies_the_bad_input(
+    tmp_path: Path, field: str,
+) -> None:
+    path = tmp_path / "manifest.json"
+    digest = _write(path, _manifest())
+    manifest, _ = provenance.load_detached_release_manifest(path, expected_sha256=digest)
+    target = SimpleNamespace(**{
+        "workspace_id": _deployment().workspace_id,
+        "lakehouse_id": _deployment().lakehouse_id,
+        "environment_id": _deployment().environment_id,
+        field: "",
+    })
+    with pytest.raises(provenance.ReleaseProvenanceError) as error:
+        provenance.validate_release_deployment(manifest, target)
+    assert str(error.value) == f"deployment.{field} must be non-empty"
+
+
+def test_empty_deployment_role_identifies_the_bad_input(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    digest = _write(path, _manifest())
+    manifest, _ = provenance.load_detached_release_manifest(path, expected_sha256=digest)
+    with pytest.raises(provenance.ReleaseProvenanceError) as error:
+        provenance.validate_release_deployment(
+            manifest, _deployment(), expected_sjd_ids={"stable-control": ""},
+        )
+    assert str(error.value) == "deployment.sjd_ids.stable-control must be non-empty"
+
+
+def test_identity_rejects_embedded_deployment_fields(tmp_path: Path) -> None:
+    identity = dataclasses.asdict(provenance.RELEASE_IDENTITY)
+    identity["workspace_id"] = _deployment().workspace_id
+    path = tmp_path / "identity.json"
+    _write(path, identity)
+    with pytest.raises(provenance.ReleaseProvenanceError, match="deployment fields"):
+        provenance.load_release_identity(path)
 
 
 def test_receipt_rejects_different_manifest_binding(tmp_path: Path) -> None:
@@ -365,10 +515,10 @@ def test_trackers_identity_is_checked_against_detached_manifest() -> None:
         cpu_bundle_filename="bundle",
         cpu_bundle_sha256="3" * 64,
         build_input_sha256=provenance.RELEASE_IDENTITY.build_input_sha256,
-        workspace_id=provenance.RELEASE_IDENTITY.workspace_id,
-        lakehouse_id=provenance.RELEASE_IDENTITY.lakehouse_id,
-        environment_id=provenance.RELEASE_IDENTITY.environment_id,
-        sjd_ids=provenance.RELEASE_IDENTITY.sjd_ids,
+        workspace_id=_deployment().workspace_id,
+        lakehouse_id=_deployment().lakehouse_id,
+        environment_id=_deployment().environment_id,
+        sjd_ids={},
         public_dependencies={
             "trackers": provenance.DependencyIdentity(
                 version="2.6.0",
@@ -377,7 +527,7 @@ def test_trackers_identity_is_checked_against_detached_manifest() -> None:
         },
         reviewer="reviewer",
         reviewed_at="time",
-        deployment_intent=provenance.RELEASE_IDENTITY.deployment_intent,
+        deployment_intent="Reviewed deployment",
     )
     observed = provenance.TrackersDistributionIdentity(
         version="2.6.0",

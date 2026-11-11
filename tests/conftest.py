@@ -1,6 +1,18 @@
 import pytest
 
 
+@pytest.fixture
+def fabric_runtime_context(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from tests.fabric_fixtures import RUNTIME_CONTEXT
+
+    monkeypatch.setitem(
+        sys.modules, "notebookutils",
+        SimpleNamespace(runtime=SimpleNamespace(context=RUNTIME_CONTEXT)),
+    )
+
+
 def pytest_addoption(parser):
     parser.addoption("--portal-e2e", action="store_true", help="Run opt-in operator portal browser tests")
 

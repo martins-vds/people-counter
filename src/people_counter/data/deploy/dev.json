@@ -15,8 +15,7 @@
     "process": {"display_name": "pc-sjd-dev-process", "item_id": null, "schedule": null},
     "refresh": {"display_name": "pc-sjd-dev-refresh", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
     "reconciliation": {"display_name": "pc-sjd-dev-reconciliation", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
-    "gold": {"display_name": "pc-sjd-dev-gold", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}},
-    "cutover": {"display_name": "pc-sjd-dev-cutover", "item_id": null, "schedule": null}
+    "gold": {"display_name": "pc-sjd-dev-gold", "item_id": null, "schedule": {"interval_minutes": 15, "enabled": false}}
   },
   "analytics_reporting": {
     "semantic_model": {"source_item_id": null, "source_name": "pc_analytics_model", "target_name": "pc_sjd_dev_analytics_model"},
@@ -28,5 +27,5 @@
   },
   "real_time_intelligence": {"eventhouse_id": null, "kql_database_id": null, "queryset_id": null},
   "activator": {"reflex_id": null, "trigger_name": "alert_pc_event_intake_duration_20m"},
-  "release": {"require_identity": false, "identity_schema": "people-counter-sjd-release-identity-v1"}
+  "release": {"require_identity": false, "identity_schema": "people-counter-sjd-release-identity-v2"}
 }

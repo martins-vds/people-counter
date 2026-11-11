@@ -324,13 +324,13 @@ jobs:
               "/workspaces/${workspace_id}/environments/${environment_id}" || true
           fi
 
-          expected_roles='["control","cutover","dispatcher","gold","process","reconciliation","refresh"]'
+          expected_roles='["control","dispatcher","gold","process","reconciliation","refresh"]'
           actual_roles=$(jq -c 'keys | sort' <<<"${sjd_ids}" 2>/dev/null || echo '[]')
           if [ "${actual_roles}" != "${expected_roles}" ]; then
             record "sjd-role-set" "failed" \
-              "Expected seven canonical roles; received ${actual_roles}"
+              "Expected six canonical roles; received ${actual_roles}"
           else
-            record "sjd-role-set" "succeeded" "All seven canonical roles exist"
+            record "sjd-role-set" "succeeded" "All six canonical roles exist"
           fi
           while IFS=$'\t' read -r role item_id; do
             [ -n "${role}" ] || continue

@@ -71,6 +71,12 @@ def test_render_rejects_unresolved_tokens():
         render_definition(definition("{{ .Missing }}"), {})
 
 
+def test_render_binds_the_workspace_token_without_a_reference_workspace_literal():
+    source = definition("myorg/{{ .TargetWorkspaceName }};", path="definition.pbir")
+    rendered = render_definition(source, {}, workspace_name="selected-workspace")
+    assert base64.b64decode(rendered["parts"][0]["payload"]).decode() == "myorg/selected-workspace;"
+
+
 def test_render_does_not_rebind_other_parts_or_a_missing_workspace():
     connection = "powerbi://api.powerbi.com/v1.0/myorg/people-counter-dev;"
     unchanged = render_definition(definition(connection, path="definition.pbir"), {})
@@ -394,7 +400,8 @@ def test_prepare_assets_validates_sources_and_never_overwrites_different_inputs(
         root / "infra/modules/fabric-foundation/definitions/variable-library/variables.json.tmpl"
     ).read_text()
     assert payload["schema"] == "people-counter-manual-publication-inputs-v1"
-    assert "WORKSPACE_ID = TARGET_WORKSPACE_ID" in payload["clientSource"]
+    assert payload["clientSource"] == (root / "src/people_counter/fabric_rest.py").read_text()
+    assert "workspace_id: str," in payload["clientSource"]
     assert "from people_counter.fabric_sjd" not in payload["clientSource"]
     assert prepare_assets(root, output) == digest
     output.write_text("unrelated inputs")

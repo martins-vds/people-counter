@@ -145,7 +145,7 @@ class OneLakeEnvelopeWriter:
         verify_timeout_seconds: float = 15.0,
     ) -> None:
         self.root = root.rstrip("/")
-        expected = (config or FabricNamespaceConfig()).file_path("control").rstrip("/")
+        expected = (config or FabricNamespaceConfig.current()).file_path("control").rstrip("/")
         if self.root != expected:
             raise ValueError(
                 f"claim envelopes require the fixed Fabric SJD control root {expected!r}"
@@ -239,7 +239,7 @@ class FabricControlStoreImpl:
         if spark_session is None:
             raise ValueError("spark_session is required")
         self.spark = spark_session
-        self.config = config or FabricNamespaceConfig()
+        self.config = config or FabricNamespaceConfig.current()
         self.config.require_write_enabled()
         self._clock = clock
         self._id_factory = id_factory or (lambda: str(uuid4()))
@@ -658,7 +658,9 @@ class FabricControlStoreImpl:
             return expected
         from people_counter.fabric_release_provenance import resolve_published_release
 
-        published = resolve_published_release(self.envelopes.files.read_text).manifest_sha256
+        published = resolve_published_release(
+            self.envelopes.files.read_text, deployment=self.config,
+        ).manifest_sha256
         if expected is not None and expected != published:
             raise ImmutableConflictError(
                 f"dispatcher release binding {expected} differs from installed release {published}"

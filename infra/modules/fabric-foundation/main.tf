@@ -385,6 +385,7 @@ resource "fabric_spark_job_definition" "this" {
       tokens = {
         DefaultLakehouseArtifactId = fabric_lakehouse.this.id
         EnvironmentArtifactId      = fabric_environment.this.id
+        CommandLineArguments       = var.sjd_files_root == "Files/people-counter/sjd/v1/" ? "" : "--files-root ${var.sjd_files_root}"
       }
     }
   }
@@ -493,6 +494,7 @@ resource "fabric_report" "this" {
       tokens = {
         TargetSemanticModelId   = fabric_semantic_model.this[each.key].id
         TargetSemanticModelName = fabric_semantic_model.this[each.key].display_name
+        TargetWorkspaceName     = fabric_workspace.this.display_name
       }
     }
     if part.path != ".platform"

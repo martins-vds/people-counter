@@ -21,7 +21,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 PACKAGE_DISTRIBUTION = "people-counter"
 UNRESOLVED_PACKAGE_VERSION = "<people-counter-distribution-unresolved>"
@@ -110,17 +110,23 @@ class ReleaseIdentity:
     schema: str
     package_version: str
     build_input_sha256: str
-    workspace_id: str
-    lakehouse_id: str
-    environment_id: str
-    sjd_ids: Mapping[str, str]
     release_evidence_root: str
-    deployment_intent: str
 
     @property
     def allowed_package_version(self) -> str:
         """Compatibility spelling for older expected-version call sites."""
         return self.package_version
+
+
+class DeploymentTarget(Protocol):
+    @property
+    def workspace_id(self) -> str: ...
+
+    @property
+    def lakehouse_id(self) -> str: ...
+
+    @property
+    def environment_id(self) -> str: ...
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -171,6 +177,13 @@ class RuntimeReleaseEvidence:
 
 
 def _parse_identity(raw: Mapping[str, Any]) -> ReleaseIdentity:
+    extra = set(raw) - {
+        "schema", "package_version", "build_input_sha256", "release_evidence_root",
+    }
+    if extra:
+        raise ReleaseProvenanceError(
+            f"release identity must not contain deployment fields or other metadata: {sorted(extra)}"
+        )
     return ReleaseIdentity(
         schema=_text(raw.get("schema"), "identity.schema"),
         package_version=_text(
@@ -179,23 +192,9 @@ def _parse_identity(raw: Mapping[str, Any]) -> ReleaseIdentity:
         build_input_sha256=_digest(
             raw.get("build_input_sha256"), "identity.build_input_sha256"
         ),
-        workspace_id=_text(raw.get("workspace_id"), "identity.workspace_id"),
-        lakehouse_id=_text(raw.get("lakehouse_id"), "identity.lakehouse_id"),
-        environment_id=_text(
-            raw.get("environment_id"), "identity.environment_id"
-        ),
-        sjd_ids={
-            str(name): _text(value, f"identity.sjd_ids.{name}")
-            for name, value in _mapping(
-                raw.get("sjd_ids"), "identity.sjd_ids"
-            ).items()
-        },
         release_evidence_root=_text(
             raw.get("release_evidence_root"),
             "identity.release_evidence_root",
-        ),
-        deployment_intent=_text(
-            raw.get("deployment_intent"), "identity.deployment_intent"
         ),
     )
 
@@ -204,9 +203,9 @@ def load_release_identity(
     path: Path = _IDENTITY_PATH,
 ) -> tuple[ReleaseIdentity, str]:
     raw, content = _load_json_object(path, "release identity")
-    identity = _parse_identity(raw)
-    if identity.schema != "people-counter-sjd-release-identity-v1":
+    if raw.get("schema") != "people-counter-sjd-release-identity-v2":
         raise ReleaseProvenanceError("unsupported release identity schema")
+    identity = _parse_identity(raw)
     return identity, _sha256_bytes(content)
 
 
@@ -249,7 +248,6 @@ def load_detached_release_manifest(
     path: Path,
     *,
     expected_sha256: str,
-    identity: ReleaseIdentity = RELEASE_IDENTITY,
     identity_sha256: str = RELEASE_IDENTITY_SHA256,
 ) -> tuple[DetachedReleaseManifest, str]:
     raw, content = _load_json_object(path, "detached release manifest")
@@ -308,27 +306,31 @@ def load_detached_release_manifest(
     )
     if manifest.schema != "people-counter-sjd-detached-release-v1":
         raise ReleaseProvenanceError("unsupported detached manifest schema")
-    expected_identity = {
-        "release_identity_sha256": identity_sha256,
-        "workspace_id": identity.workspace_id,
-        "lakehouse_id": identity.lakehouse_id,
-        "environment_id": identity.environment_id,
-        "sjd_ids": dict(identity.sjd_ids),
-        "deployment_intent": identity.deployment_intent,
-    }
-    observed_identity = {
-        "release_identity_sha256": manifest.release_identity_sha256,
-        "workspace_id": manifest.workspace_id,
-        "lakehouse_id": manifest.lakehouse_id,
-        "environment_id": manifest.environment_id,
-        "sjd_ids": dict(manifest.sjd_ids),
-        "deployment_intent": manifest.deployment_intent,
-    }
-    if observed_identity != expected_identity:
+    if manifest.release_identity_sha256 != identity_sha256:
         raise ReleaseProvenanceError(
             "detached manifest does not bind the wheel's stable release identity"
         )
     return manifest, observed_sha256
+
+
+def validate_release_deployment(
+    manifest: DetachedReleaseManifest,
+    deployment: DeploymentTarget,
+    *,
+    expected_sjd_ids: Mapping[str, str] | None = None,
+) -> None:
+    """Bind deployment evidence to the selected runtime, not to the wheel."""
+    for name in ("workspace_id", "lakehouse_id", "environment_id"):
+        expected = _text(getattr(deployment, name), f"deployment.{name}")
+        if getattr(manifest, name) != expected:
+            raise ReleaseProvenanceError(
+                f"published release {name} differs from the configured deployment"
+            )
+    for role, expected in (expected_sjd_ids or {}).items():
+        if manifest.sjd_ids.get(role) != _text(expected, f"deployment.sjd_ids.{role}"):
+            raise ReleaseProvenanceError(
+                f"published release {role} differs from the configured deployment"
+            )
 
 
 def load_postpublish_receipt(
@@ -399,10 +401,15 @@ def load_runtime_release_evidence(
     *,
     expected_manifest_sha256: str,
     expected_receipt_sha256: str,
+    deployment: DeploymentTarget,
+    expected_sjd_ids: Mapping[str, str] | None = None,
     observed_package_version: str | None = None,
 ) -> RuntimeReleaseEvidence:
     manifest, manifest_sha256 = load_detached_release_manifest(
         manifest_path, expected_sha256=expected_manifest_sha256
+    )
+    validate_release_deployment(
+        manifest, deployment, expected_sjd_ids=expected_sjd_ids,
     )
     receipt, receipt_sha256 = load_postpublish_receipt(
         receipt_path,
@@ -424,7 +431,12 @@ def load_runtime_release_evidence(
     )
 
 
-def resolve_published_release(read_text: Callable[[str], str]) -> RuntimeReleaseEvidence:
+def resolve_published_release(
+    read_text: Callable[[str], str],
+    *,
+    deployment: DeploymentTarget,
+    expected_sjd_ids: Mapping[str, str] | None = None,
+) -> RuntimeReleaseEvidence:
     """Resolve the installed release through its immutable published evidence."""
     manifest_text = read_text(detached_manifest_evidence_path())
     receipt_text = read_text(postpublish_receipt_evidence_path())
@@ -437,13 +449,18 @@ def resolve_published_release(read_text: Callable[[str], str]) -> RuntimeRelease
             manifest_path, receipt_path,
             expected_manifest_sha256=_sha256_bytes(manifest_text.encode("utf-8")),
             expected_receipt_sha256=_sha256_bytes(receipt_text.encode("utf-8")),
+            deployment=deployment,
+            expected_sjd_ids=expected_sjd_ids,
         )
 
 
 def registration_release_digest(
-    read_text: Callable[[str], str], *, expected_digest: str = "",
+    read_text: Callable[[str], str], *, deployment: DeploymentTarget,
+    expected_digest: str = "",
 ) -> str:
-    published = resolve_published_release(read_text).manifest_sha256
+    published = resolve_published_release(
+        read_text, deployment=deployment,
+    ).manifest_sha256
     if expected_digest and expected_digest != published:
         raise ReleaseProvenanceError(
             f"registration metadata release {expected_digest} differs from "

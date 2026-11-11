@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
-
-from people_counter.fabric_sjd import ENVIRONMENT_ID, LAKEHOUSE_ID
+import pytest
+from people_counter.fabric_sjd import FabricSjdConfig
 from people_counter.fabric_sjd_definition import ENTRY_POINTS, build_sjd_definition
+
+from tests.fabric_fixtures import ENVIRONMENT_ID, LAKEHOUSE_ID, TEST_TARGET
 
 
 SJD_ROOT = (
@@ -13,7 +16,7 @@ SJD_ROOT = (
 
 
 def expected_parts(role: str) -> dict[str, bytes]:
-    parts = build_sjd_definition(role)["definition"]["parts"]
+    parts = build_sjd_definition(role, config=TEST_TARGET)["definition"]["parts"]
     return {
         part["path"]: base64.b64decode(part["payload"])
         for part in parts
@@ -27,7 +30,17 @@ def test_canonical_entry_points_match_generated_definitions() -> None:
         ).read_bytes() == expected_parts(role)["Main/main.py"]
 
 
-def test_metadata_template_matches_generated_definition() -> None:
+@pytest.mark.parametrize("files_root", [
+    "Files/people-counter/sjd/v1/", "Files/people-counter/dev/v1/",
+    "Files/people-counter/test/v1/",
+])
+def test_metadata_template_matches_generated_definition(files_root: str) -> None:
+    config = FabricSjdConfig(
+        workspace_id=TEST_TARGET.workspace_id, lakehouse_id=TEST_TARGET.lakehouse_id,
+        environment_id=TEST_TARGET.environment_id, files_root=files_root,
+    )
+    import shlex
+    arguments = shlex.join(config.namespace_arguments())
     template = (
         SJD_ROOT / "common" / "SparkJobDefinitionV1.json.tmpl"
     ).read_bytes().rstrip(b"\n")
@@ -37,7 +50,11 @@ def test_metadata_template_matches_generated_definition() -> None:
     ).replace(
         b"{{ .EnvironmentArtifactId }}",
         ENVIRONMENT_ID.encode(),
+    ).replace(
+        b"{{ .CommandLineArguments }}", arguments.encode(),
     )
 
     for role in ENTRY_POINTS:
-        assert rendered == expected_parts(role)["SparkJobDefinitionV1.json"]
+        parts = build_sjd_definition(role, config=config, command_line_arguments=arguments)["definition"]["parts"]
+        metadata = next(part for part in parts if part["path"] == "SparkJobDefinitionV1.json")
+        assert json.loads(rendered) == json.loads(base64.b64decode(metadata["payload"]))

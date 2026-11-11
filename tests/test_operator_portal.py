@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import threading
 import shutil
@@ -544,6 +545,61 @@ def test_invalid_video_capture_override_does_not_save_exception(service, monkeyp
     form = save_camera(service, monkeypatch)
     with pytest.raises(CatalogError):
         service.save_calibration({**form, "scope": "video", "captured_at_utc": "not-a-UTC-time"})
+    assert service.store.entries("exception") == []
+
+
+def test_capture_override_uses_optional_calendar_with_seconds(app, service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    response = app.test_client().get("/calibrate", query_string={"video": form["video"], "scope": "video"})
+    assert response.status_code == 200
+    control = re.search(rb'<input id="capture-override"[^>]+>', response.data).group()
+    assert b'type="datetime-local"' in control
+    assert b'step="any"' in control
+    assert b'name="captured_at_utc"' in control
+    assert b'aria-describedby="capture-override-help"' in control
+    assert b"required" not in control
+    assert b"Choose the recording date and time in UTC" in response.data
+
+
+@pytest.mark.parametrize(("selected", "stored"), [
+    ("2026-03-08T02:30", "2026-03-08T02:30Z"),
+    ("2026-11-01T01:30:45", "2026-11-01T01:30:45Z"),
+    ("2026-01-02T03:04:05.123", "2026-01-02T03:04:05.123Z"),
+    ("", ""),
+    ("2026-01-02T03:04:05Z", "2026-01-02T03:04:05Z"),
+    ("2026-01-02T03:04:05+02:00", "2026-01-02T03:04:05+02:00"),
+])
+def test_calendar_capture_submission_preserves_utc_contract(app, service, monkeypatch, selected, stored):
+    form = save_camera(service, monkeypatch)
+    camera = service.store.entries("camera")
+    client = app.test_client()
+    response = client.post("/calibrate", data={
+        **form, "csrf": csrf(client), "scope": "video", "captured_at_utc": selected,
+    })
+    assert response.status_code == 302
+    assert service.store.entries("exception")[0]["captured_at_utc"] == stored
+    assert service.store.entries("camera") == camera
+
+
+@pytest.mark.parametrize(("selected", "expected"), [
+    ("2026-03-08T02:30", "2026-03-08T02:30Z"),
+    ("2026-11-01T01:30:45.123", "2026-11-01T01:30:45.123Z"),
+    ("2026-01-02T03:04:05+02:00", "2026-01-02T03:04:05+02:00"),
+    ("", ""),
+    ("not-a-date", "not-a-date"),
+])
+def test_calendar_capture_time_conversion(selected, expected):
+    assert portal_web._calendar_capture_time(selected) == expected
+
+
+@pytest.mark.parametrize("selected", ["not-a-date", "2026-02-30T12:00", "2026-01-02T25:00"])
+def test_calendar_capture_submission_rejects_invalid_dates(app, service, monkeypatch, selected):
+    form = save_camera(service, monkeypatch)
+    client = app.test_client()
+    response = client.post("/calibrate", data={
+        **form, "csrf": csrf(client), "scope": "video", "captured_at_utc": selected,
+    })
+    assert response.status_code == 400
     assert service.store.entries("exception") == []
 
 

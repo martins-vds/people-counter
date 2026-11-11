@@ -55,7 +55,24 @@ def test_manual_config_is_explicit_immutable_and_keeps_stable_namespace() -> Non
     )
     config.require_write_enabled()
     with pytest.raises(FrozenInstanceError):
-        config.workspace_id = stable.WORKSPACE_ID
+        config.workspace_id = LAKEHOUSE
+
+
+def test_runtime_binding_can_be_derived_from_attached_deployment() -> None:
+    assert stable.ManualFabricSjdConfig.from_runtime_context(CONTEXT) == manual_config()
+
+
+@pytest.mark.parametrize("context", [None, [], "not a runtime context"])
+def test_derived_binding_rejects_nonmapping_context(context) -> None:
+    with pytest.raises(ValueError, match="runtime context"):
+        stable.ManualFabricSjdConfig.from_runtime_context(context)
+
+
+@pytest.mark.parametrize("key", list(CONTEXT))
+def test_derived_runtime_binding_requires_complete_matching_context(key: str) -> None:
+    context = {name: value for name, value in CONTEXT.items() if name != key}
+    with pytest.raises(ValueError, match="runtime context"):
+        stable.ManualFabricSjdConfig.from_runtime_context(context)
 
 
 @pytest.mark.parametrize("missing", ["workspace_id", "lakehouse_id", "environment_id"])
@@ -89,7 +106,6 @@ def test_manual_config_rejects_invalid_artifact_ids(field: str, invalid) -> None
     ("field", "value"),
     [
         ("table_prefix", "other_"),
-        ("files_root", "Files/other/"),
         ("runtime", "1.3"),
         ("stable_production", False),
         ("mode", "CANARY"),
@@ -106,10 +122,13 @@ def test_manual_context_must_be_a_mapping(context) -> None:
         manual_config().validate_runtime_context(context)
 
 
-@pytest.mark.parametrize("field", ["workspace_id", "lakehouse_id", "environment_id"])
-def test_fixed_config_still_rejects_new_artifact_ids(field: str) -> None:
-    with pytest.raises(ValueError, match="configuration is fixed"):
-        stable.FabricSjdConfig(**{field: WORKSPACE})
+def test_stable_config_accepts_the_same_explicit_target_as_the_manual_alias() -> None:
+    config = stable.FabricSjdConfig(
+        workspace_id=WORKSPACE, lakehouse_id=LAKEHOUSE, environment_id=ENVIRONMENT,
+    )
+    assert config.workspace_id == WORKSPACE
+    assert config.lakehouse_id == LAKEHOUSE
+    assert config.environment_id == ENVIRONMENT
 
 
 @pytest.mark.parametrize(
@@ -194,22 +213,31 @@ def test_manual_reconciliation_rejects_non_reconcile_commands(monkeypatch, argum
     run.assert_not_called()
 
 
-def test_explicit_empty_legacy_reconciliation_arguments_remain_invalid() -> None:
-    with patch.object(jobs, "control_main") as run:
-        with pytest.raises(ValueError, match="only the reconcile command"):
-            jobs.reconciliation_main([])
-    run.assert_not_called()
+def test_empty_reconciliation_arguments_use_the_checked_runtime_target(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules, "notebookutils", SimpleNamespace(runtime=SimpleNamespace(context=CONTEXT))
+    )
+    with patch.object(runtime, "control_main", return_value=0) as run:
+        assert jobs.reconciliation_main([]) == 0
+    assert run.call_args.args == (["reconcile"],)
+    assert run.call_args.kwargs["config"].workspace_id == WORKSPACE
 
 
 @pytest.mark.parametrize(
     "arguments",
     [["--help"], ["--manual-art", WORKSPACE, LAKEHOUSE, ENVIRONMENT, "bootstrap"]],
 )
-def test_common_binding_parser_does_not_consume_help_or_abbreviations(arguments) -> None:
+def test_common_binding_parser_does_not_consume_help_or_abbreviations(monkeypatch, arguments) -> None:
+    monkeypatch.setitem(
+        sys.modules, "notebookutils", SimpleNamespace(runtime=SimpleNamespace(context=CONTEXT))
+    )
     with patch.object(runtime, "control_main", return_value=7) as run:
         assert jobs.control_main(arguments) == 7
     assert run.call_args.args == (arguments,)
-    assert type(run.call_args.kwargs["config"]) is stable.FabricSjdConfig
+    if "--help" in arguments:
+        assert run.call_args.kwargs["config"] is None
+    else:
+        assert type(run.call_args.kwargs["config"]) is stable.FabricSjdConfig
 
 
 def test_manual_refresh_rejects_a_different_reporting_workspace(monkeypatch) -> None:
@@ -217,7 +245,7 @@ def test_manual_refresh_rejects_a_different_reporting_workspace(monkeypatch) -> 
     with patch.object(runtime, "_spark") as spark:
         with pytest.raises(ValueError, match="reporting workspace"):
             runtime.refresh_main(
-                ["--workspace-id", stable.WORKSPACE_ID, "--semantic-model-id", LAKEHOUSE],
+                ["--workspace-id", LAKEHOUSE, "--semantic-model-id", LAKEHOUSE],
                 config=manual_config(),
             )
     spark.assert_not_called()
@@ -292,16 +320,6 @@ def test_manual_refresh_targets_only_selected_workspace_and_acknowledges_after_r
     else:
         assert result["refreshes"] == expected
         assert "refresh" not in result
-
-
-def test_legacy_cutover_rejects_manual_binding_before_spark() -> None:
-    from people_counter import fabric_sjd_cutover_jobs as cutover
-
-    with patch.object(cutover, "_spark") as spark:
-        with pytest.raises(SystemExit) as error:
-            cutover.main([*MANUAL_ARGS, "bootstrap", "--evidence-id", "manual"])
-    assert error.value.code == 2
-    spark.assert_not_called()
 
 
 def test_manual_video_fallback_never_uses_legacy_artifact_ids(monkeypatch, tmp_path) -> None:

@@ -1,35 +1,31 @@
 from __future__ import annotations
 
-import argparse
 import copy
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from people_counter.fabric_rest import FabricRESTController, make_token_provider
-from people_counter.fabric_sjd import WORKSPACE_ID
+from people_counter.fabric_rest import FabricRESTController
+from people_counter.fabric_deployment_manifest import DeploymentManifest
 from scripts.deploy_sjd_analytics import (
     ReportingDeploymentError,
     _decoded_part,
-    _get_definition,
     _json_part,
     _parts,
     _replace_part,
     _set_platform_name,
-    _target_item,
     canonical_bytes,
-    definition_sha256,
+    publish_reporting_bundle,
+    reporting_arguments,
+    validate_report_binding,
 )
 
 
 SOURCE_MODEL = {
-    "id": "b108e56f-8559-4f84-8ae1-70ba58075353",
     "name": "pc_operations_model",
 }
 SOURCE_REPORT = {
-    "id": "8b81cc28-cf18-4707-a245-afb98a8acbcc",
     "name": "pc_operations_report",
 }
 TARGET_MODEL_NAME = "pc_sjd_operations_model"
@@ -283,14 +279,9 @@ def validate_report_definition(
         )
     report = json.loads(_decoded_part(reference))
     connection = report["datasetReference"]["byConnection"]["connectionString"]
-    if (
-        f"initial catalog={target_model_name}" not in connection
-        or f"semanticmodelid={target_model_id}" not in connection
-        or f"semanticmodelid={SOURCE_MODEL['id']}" in connection
-    ):
-        raise OperationalReportingDeploymentError(
-            "report target model binding is invalid"
-        )
+    validate_report_binding(
+        connection, target_model_id=target_model_id, target_model_name=target_model_name,
+    )
     _, layout = _json_part(parts, "report.json", "report layout")
     sections = layout.get("sections")
     pages = {
@@ -304,114 +295,18 @@ def validate_report_definition(
         )
 
 
-def _deploy_definition(
-    client: FabricRESTController,
-    *,
-    root: str,
-    item_type: str,
-    display_name: str,
-    definition: Mapping[str, Any],
+def deploy(
+    output: Path, *, manifest: DeploymentManifest,
+    client: FabricRESTController | None = None,
 ) -> dict[str, Any]:
-    item = _target_item(client, item_type, display_name)
-    if item is None:
-        client._lro_json(
-            "POST",
-            f"/workspaces/{WORKSPACE_ID}/{root}",
-            value={
-                **dict(definition),
-                "displayName": display_name,
-                "description": TARGET_DESCRIPTION,
-            },
-            accepted=(201, 202),
-        )
-        item = _target_item(client, item_type, display_name)
-        if item is None:
-            raise OperationalReportingDeploymentError(
-                f"created {item_type} {display_name} is not discoverable"
-            )
-    elif item.get("description") != TARGET_DESCRIPTION:
-        raise OperationalReportingDeploymentError(
-            f"refusing to overwrite unmanaged {item_type} {display_name}"
-        )
-    client._lro_json(
-        "POST",
-        f"/workspaces/{WORKSPACE_ID}/{root}/{item['id']}/updateDefinition",
-        value=dict(definition),
-        accepted=(200, 202),
+    return publish_reporting_bundle(
+        output, manifest=manifest, bundle="operational", client=client,
     )
-    return item
-
-
-def deploy(output: Path) -> dict[str, Any]:
-    client = FabricRESTController(make_token_provider("azure-cli"))
-    source_model = _get_definition(
-        client, "semanticModels", str(SOURCE_MODEL["id"])
-    )
-    source_report = _get_definition(
-        client, "reports", str(SOURCE_REPORT["id"])
-    )
-    source_model_sha256 = definition_sha256(source_model)
-    source_report_sha256 = definition_sha256(source_report)
-    model_definition = rewrite_model_definition(source_model)
-    model = _deploy_definition(
-        client,
-        root="semanticModels",
-        item_type="SemanticModel",
-        display_name=TARGET_MODEL_NAME,
-        definition=model_definition,
-    )
-    model_id = str(model["id"])
-    report_definition = rewrite_report_definition(
-        source_report,
-        source_model_id=str(SOURCE_MODEL["id"]),
-        target_model_id=model_id,
-    )
-    report = _deploy_definition(
-        client,
-        root="reports",
-        item_type="Report",
-        display_name=TARGET_REPORT_NAME,
-        definition=report_definition,
-    )
-    model_readback = _get_definition(client, "semanticModels", model_id)
-    report_readback = _get_definition(client, "reports", str(report["id"]))
-    validate_model_definition(model_readback)
-    validate_report_definition(
-        report_readback,
-        target_model_id=model_id,
-    )
-    evidence = {
-        "deployed_at": datetime.now(timezone.utc).isoformat(),
-        "model": {
-            "definition_sha256": definition_sha256(model_readback),
-            "id": model_id,
-            "name": TARGET_MODEL_NAME,
-        },
-        "removed_legacy_only_tables": sorted(REMOVED_TABLES),
-        "report": {
-            "definition_sha256": definition_sha256(report_readback),
-            "id": str(report["id"]),
-            "name": TARGET_REPORT_NAME,
-        },
-        "schema": "people-counter-sjd-operations-deployment-v1",
-        "source_model_definition_sha256": source_model_sha256,
-        "source_report_definition_sha256": source_report_sha256,
-        "table_bindings": TABLE_BINDINGS,
-        "workspace_id": WORKSPACE_ID,
-    }
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return evidence
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, required=True)
-    arguments = parser.parse_args(argv)
-    print(json.dumps(deploy(arguments.output), sort_keys=True))
+    output, manifest = reporting_arguments(argv)
+    print(json.dumps(deploy(output, manifest=manifest), sort_keys=True))
     return 0
 
 

@@ -14,6 +14,8 @@ from typing import Any, Mapping
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fabric_runtime_context")
+
 import people_counter.fabric_benchmark as benchmark_module
 import people_counter.fabric_benchmark_jobs as benchmark_jobs_module
 import people_counter.fabric_sjd_runtime as candidate_jobs
@@ -24,9 +26,7 @@ from people_counter.fabric_namespace import (
     FabricNamespaceConfig,
 )
 from people_counter.fabric_benchmark import (
-    ENVIRONMENT_ID,
     FILES_ROOT,
-    LAKEHOUSE_ID,
     MEASUREMENT_SECONDS,
     TABLE_PREFIX,
     THROUGHPUT_TARGET_X,
@@ -84,6 +84,14 @@ from people_counter.fabric_benchmark_jobs import (
     workload_main,
 )
 from people_counter.fabric_spark_event_ingest import SparkEventLogError
+
+from tests.fabric_fixtures import (
+    ENVIRONMENT_ID,
+    LAKEHOUSE_ID,
+    RUNTIME_CONTEXT,
+    TARGET_IDS,
+    TEST_TARGET,
+)
 
 
 class _FakeProperty:
@@ -262,7 +270,7 @@ def _passing_attempts(
 
 
 def test_fixed_namespace_and_safe_paths() -> None:
-    config = FabricBenchmarkConfig()
+    config = FabricBenchmarkConfig(**TARGET_IDS)
     assert config.table("attempts") == TABLE_PREFIX + "attempts"
     assert config.file_path("reports/final.json") == (
         FILES_ROOT + "reports/final.json"
@@ -271,7 +279,7 @@ def test_fixed_namespace_and_safe_paths() -> None:
         f"/{LAKEHOUSE_ID}/{FILES_ROOT}telemetry"
     )
     with pytest.raises(BenchmarkValidationError, match="fixed"):
-        FabricBenchmarkConfig(table_prefix="other_")
+        FabricBenchmarkConfig(**TARGET_IDS, table_prefix="other_")
     with pytest.raises(BenchmarkValidationError, match="unsafe"):
         config.file_path("../production")
     with pytest.raises(BenchmarkValidationError, match="fixed benchmark root"):
@@ -1359,7 +1367,7 @@ def test_report_throughput_gate_accepts_exact_target(
 
 
 def test_sjd_definitions_are_thin_fixed_and_never_deploy() -> None:
-    definitions = build_all_sjd_v2_definitions()
+    definitions = build_all_sjd_v2_definitions(config=TEST_TARGET)
     assert set(definitions) == {"control", "process", "gold"}
     for job, definition in definitions.items():
         assert definition["definition"]["format"] == "SparkJobDefinitionV2"
@@ -1376,7 +1384,7 @@ def test_sjd_definitions_are_thin_fixed_and_never_deploy() -> None:
         assert "requests" not in source and "deploy" not in source.lower()
         assert thin_main_source(job) == parts["Main/main.py"]
     with pytest.raises(BenchmarkValidationError, match="unsupported"):
-        build_sjd_v2_definition("deploy")
+        build_sjd_v2_definition("deploy", config=TEST_TARGET)
 
 
 def _fake_executors(
@@ -1944,7 +1952,7 @@ def test_prepare_pilot_main_defaults_to_five_work_items_for_backward_compatibili
     assert exit_code == 0
     assert len(calls.registered) == 5
     assert calls.constructed == [
-        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark()}
+        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark(target=TEST_TARGET)}
     ]
 
     cpu_profile = CPU_PROFILES["pytorch-r18-b1-1fps-1t"]
@@ -2353,7 +2361,7 @@ def test_control_main_dispatches_diagnose_to_the_extracted_helper(
     # ``sort_keys=True`` (not a falsy/omitted mutant) actually ran.
     assert out == json.dumps(expected, allow_nan=False, default=str, sort_keys=True) + "\n"
     assert calls.constructed == [
-        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark()}
+        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark(target=TEST_TARGET)}
     ]
 
 
@@ -2437,7 +2445,7 @@ def test_control_main_dispatches_recover_stale_to_the_extracted_helper(
     # alphabetical, so a byte-exact match also proves ``sort_keys=True`` ran.
     assert out == json.dumps(expected, allow_nan=False, default=str, sort_keys=True) + "\n"
     assert calls.constructed == [
-        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark()}
+        {"spark": sentinel_spark, "config": FabricNamespaceConfig.benchmark(target=TEST_TARGET)}
     ]
     assert calls.recovered == 1
     assert calls.reconciled == 1
@@ -2510,7 +2518,7 @@ def test_control_main_dispatches_tail_diagnostics_to_the_extracted_helper(
             assert path.endswith("process/stages/batch-009")
             return [_FakeEntry("00-bootstrap.json", path + "/00-bootstrap.json", 42, False)]
 
-    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs()))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT)))
 
     assert (
         benchmark_control_main(
@@ -2546,7 +2554,7 @@ def test_tail_diagnostics_main_reports_listing_failures_without_raising(
         def ls(path: str) -> list[object]:
             raise RuntimeError("path not found")
 
-    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FailingFs()))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FailingFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT)))
 
     assert (
         benchmark_jobs_module._tail_diagnostics_main(
@@ -2573,7 +2581,7 @@ def test_tail_diagnostics_main_error_payload_is_key_sorted(
         def ls(path: str) -> list[object]:
             raise RuntimeError("boom")
 
-    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FailingFs()))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FailingFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT)))
 
     assert (
         benchmark_jobs_module._tail_diagnostics_main(["--path", "process/x"]) == 0
@@ -2595,7 +2603,7 @@ def test_tail_diagnostics_main_success_payload_is_key_sorted(
         def ls(path: str) -> list[object]:
             return []
 
-    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs()))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT)))
 
     assert (
         benchmark_jobs_module._tail_diagnostics_main(["--path", "process/x"]) == 0
@@ -2624,7 +2632,7 @@ def test_tail_diagnostics_main_rejects_nan_entry_fields(
         def ls(path: str) -> list[object]:
             return [_NanEntry()]
 
-    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs()))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT)))
 
     with pytest.raises(ValueError, match="Out of range float values"):
         benchmark_jobs_module._tail_diagnostics_main(["--path", "process/x"])
@@ -2654,7 +2662,7 @@ def test_tail_diagnostics_main_coerces_non_json_native_entry_fields_via_str(
         def ls(path: str) -> list[object]:
             return [_OpaqueEntry()]
 
-    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs()))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT)))
 
     assert (
         benchmark_jobs_module._tail_diagnostics_main(["--path", "process/x"]) == 0
@@ -2689,7 +2697,7 @@ def test_tail_diagnostics_main_defaults_missing_entry_attributes_to_none(
         def ls(path: str) -> list[object]:
             return [_BareEntry()]
 
-    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs()))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT)))
 
     assert (
         benchmark_jobs_module._tail_diagnostics_main(["--path", "process/x"]) == 0
@@ -2729,7 +2737,7 @@ def test_process_main_persists_diagnostic_traceback_and_still_raises(
             written["overwrite"] = overwrite
             return True
 
-    fake_notebookutils = SimpleNamespace(fs=_FakeFs())
+    fake_notebookutils = SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT))
     monkeypatch.setitem(sys.modules, "notebookutils", fake_notebookutils)
 
     with pytest.raises(RuntimeError, match="boom from process dispatch"):
@@ -2769,9 +2777,9 @@ def test_write_process_stage_marker_writes_expected_path_and_payload(
             return True
 
     monkeypatch.setitem(
-        sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs())
+        sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT))
     )
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
 
     benchmark_jobs_module._write_process_stage_marker(
         config, "batch-007", 3, "envelope-loaded"
@@ -2798,9 +2806,9 @@ def test_write_process_stage_marker_swallows_write_failures(
             raise RuntimeError("OneLake unavailable")
 
     monkeypatch.setitem(
-        sys.modules, "notebookutils", SimpleNamespace(fs=_FailingFs())
+        sys.modules, "notebookutils", SimpleNamespace(fs=_FailingFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT))
     )
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
 
     benchmark_jobs_module._write_process_stage_marker(
         config, "batch-008", 0, "bootstrap"
@@ -3008,7 +3016,7 @@ def test_process_dispatch_executes_the_real_body_on_success(
     mutation-test coverage; this closes that gap."""
 
     calls = _patch_process_dispatch_collaborators(monkeypatch)
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3109,7 +3117,7 @@ def test_process_dispatch_accepts_a_claim_payload_relying_on_documented_defaults
     _patch_process_dispatch_collaborators(
         monkeypatch, observed_payload={"sample_fps": 1.0}
     )
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3137,7 +3145,7 @@ def test_process_dispatch_rejects_a_payload_missing_sample_fps(
             "batch_size": 1,
         },
     )
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3160,7 +3168,7 @@ def test_process_dispatch_rejects_a_device_variant_mismatch(
             "sample_fps": 1.0,
         },
     )
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3183,7 +3191,7 @@ def test_process_dispatch_rejects_a_device_mismatch(
             "sample_fps": 1.0,
         },
     )
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3206,7 +3214,7 @@ def test_process_dispatch_rejects_a_batch_size_mismatch(
             "sample_fps": 1.0,
         },
     )
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3233,7 +3241,7 @@ def test_process_dispatch_rejects_a_payload_that_differs_from_the_cpu_profile(
             "sample_fps": 1.0,
         },
     )
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
     arguments = argparse.Namespace(
         batch_id="batch-1", mode="sdk", profile_id="pytorch-r18-b1-1fps-1t"
     )
@@ -3291,7 +3299,7 @@ def test_process_main_writes_entry_marker_before_argument_parsing(
             written.append(path)
             return True
 
-    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs()))
+    monkeypatch.setitem(sys.modules, "notebookutils", SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT)))
 
     with pytest.raises(SystemExit):
         benchmark_jobs_module.process_main([])
@@ -3386,7 +3394,7 @@ def test_gold_main_persists_diagnostic_traceback_and_still_raises(
             written["overwrite"] = overwrite
             return True
 
-    fake_notebookutils = SimpleNamespace(fs=_FakeFs())
+    fake_notebookutils = SimpleNamespace(fs=_FakeFs(), runtime=SimpleNamespace(context=RUNTIME_CONTEXT))
     monkeypatch.setitem(sys.modules, "notebookutils", fake_notebookutils)
 
     with pytest.raises(RuntimeError, match="boom from gold reconcile"):
@@ -3946,8 +3954,8 @@ def test_definition_export_is_idempotent_and_refuses_differing_files() -> None:
     destination = Path.cwd() / ".benchmark-definition-export-test"
     shutil.rmtree(destination, ignore_errors=True)
     try:
-        first = export_sjd_definitions(destination)
-        second = export_sjd_definitions(destination)
+        first = export_sjd_definitions(destination, config=TEST_TARGET)
+        second = export_sjd_definitions(destination, config=TEST_TARGET)
         assert first == second
         for exported in first.values():
             assert (
@@ -3957,7 +3965,7 @@ def test_definition_export_is_idempotent_and_refuses_differing_files() -> None:
         control_path = Path(first["control"]["path"])
         control_path.write_text("{}\n", encoding="utf-8")
         with pytest.raises(FileExistsError, match="refusing"):
-            export_sjd_definitions(destination)
+            export_sjd_definitions(destination, config=TEST_TARGET)
     finally:
         shutil.rmtree(destination, ignore_errors=True)
 

@@ -267,8 +267,11 @@ are not exported as fabricated camera-catalog rows.
    create an unregistered camera or move one to another location; forged requests
    are rejected without changing metadata.
 4. **Video exceptions:** choose "This video only" to override that video's line
-   and frame dimensions. An optional authoritative UTC timestamp overrides
-   capture time; a blank timestamp retains normal embedded/filename resolution.
+   and frame dimensions. Use the calendar and time picker under **Authoritative
+   capture time override (UTC, optional)** to choose the recording date and time,
+   including seconds if needed. Enter UTC, not the browser or camera timezone;
+   the portal saves the selection as an authoritative UTC capture timestamp.
+   A blank selection retains normal embedded/filename resolution.
    Camera defaults are not changed. A camera configuration must still cover the video.
 5. **Packages:** choose **Generate manifest package** and review the folder in
    its dialog. **Prepare this folder** opens it with the selected folder retained.

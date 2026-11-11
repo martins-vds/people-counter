@@ -1,6 +1,6 @@
 # Fabric SJD operations
 
-The solution uses seven Spark Job Definitions (SJDs). GitHub Actions and
+The solution uses six Spark Job Definitions (SJDs). GitHub Actions and
 Terraform deploy each environment.
 
 Use the [GitHub deployment runbook](../../docs/github-deployment.md) for setup,
@@ -35,14 +35,15 @@ evidence or Terraform output. Do not copy an ID between environments.
 | `reconciliation` | Detects and records control/data inconsistencies |
 | `gold` | Builds analytics and operational Gold projections |
 | `refresh` | Refreshes both semantic models and acknowledges the durable outbox |
-| `cutover` | Applies approved schema changes and verifies release boundaries |
 
 All mutable production state is below:
 
 - tables: `people_counter_sjd_*`
 - files: `Files/people-counter/sjd/v1/`
 
-The runtime rejects other table names and file paths.
+The runtime rejects other table names and paths outside its configured Files
+root. `--files-root` carries a non-default state root through deployment,
+scheduled invocations, and backfill registration.
 
 ## Deployment
 

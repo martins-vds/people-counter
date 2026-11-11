@@ -13,6 +13,86 @@ from uuid import UUID
 
 PUBLICATION_DESCRIPTION = "People Counter manual guide publication v1"
 _TOKEN = re.compile(r"\{\{\s*\.\w+\s*\}\}")
+_SJD_ROLES = frozenset({"control", "dispatcher", "process", "refresh", "reconciliation", "gold"})
+
+
+def _artifact_id(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a canonical UUID")
+    identity = UUID(value)
+    if str(identity) != value or identity.int == 0:
+        raise ValueError(f"{label} must be a canonical UUID")
+    return value
+
+
+def resolve_sjd_ids(client: Any, names: Mapping[str, str]) -> dict[str, str]:
+    if not isinstance(names, Mapping) or not names or any(
+        not isinstance(name, str) or not name.strip() for name in names.values()
+    ):
+        raise ValueError("SJD role names must be non-empty")
+    if len({name.casefold() for name in names.values()}) != len(names):
+        raise ValueError("SJD role names must be unique")
+    items = client.list_items()
+    result = {}
+    for role, name in names.items():
+        matches = [
+            item for item in items
+            if item.get("displayName") == name and item.get("type") == "SparkJobDefinition"
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"Missing or ambiguous SJD: {role}")
+        item_id = _artifact_id(matches[0].get("id"), f"{role} SJD ID")
+        if item_id in result.values():
+            raise ValueError("The same SJD ID was returned for multiple roles")
+        result[role] = item_id
+    return result
+
+
+def save_deployment_state(files: Any, path: str, deployment: Mapping[str, Any]) -> None:
+    if deployment.get("schema") != "people-counter-deployment-manifest-v1":
+        raise ValueError("Unsupported deployment state schema")
+    _artifact_id(deployment.get("workspace_id"), "workspace_id")
+    _artifact_id(deployment.get("fabric_environment_id"), "fabric_environment_id")
+    lakehouse = deployment.get("lakehouse")
+    if not isinstance(lakehouse, Mapping):
+        raise ValueError("Deployment state Lakehouse must be an object")
+    _artifact_id(lakehouse.get("lakehouse_id"), "lakehouse_id")
+    roles = deployment.get("roles")
+    if not isinstance(roles, Mapping) or set(roles) != _SJD_ROLES:
+        raise ValueError("Deployment state must contain the six SJD roles")
+    for role, binding in roles.items():
+        if not isinstance(binding, Mapping):
+            raise ValueError(f"Invalid deployment state role {role}")
+        _artifact_id(binding.get("item_id"), f"{role} SJD ID")
+    if len({binding["item_id"] for binding in roles.values()}) != len(roles):
+        raise ValueError("Deployment state SJD IDs must be unique")
+    if files.exists(path):
+        previous = json.loads(files.head(path, 1024 * 1024))
+        target = (
+            deployment["workspace_id"], deployment["lakehouse"]["lakehouse_id"],
+            deployment["fabric_environment_id"],
+        )
+        observed = (
+            previous["workspace_id"], previous["lakehouse"]["lakehouse_id"],
+            previous["fabric_environment_id"],
+        )
+        if observed != target:
+            raise ValueError("Deployment state belongs to another target")
+        if (
+            previous["lakehouse"]["files_root"] != deployment["lakehouse"]["files_root"]
+            or previous["lakehouse"]["table_prefix"] != deployment["lakehouse"]["table_prefix"]
+        ):
+            raise ValueError("Deployment state namespace differs")
+        if set(previous["roles"]) != set(deployment["roles"]):
+            raise ValueError("Deployment state role set differs; review the migration")
+        for role, binding in previous["roles"].items():
+            if binding.get("item_id") is not None and binding["item_id"] != deployment["roles"][role]["item_id"]:
+                raise ValueError(f"Deployment state conflicts with the discovered {role} ID")
+    content = json.dumps(deployment, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n"
+    if files.put(path, content, True) is False:
+        raise OSError("Deployment state write failed")
+    if files.head(path, 1024 * 1024) != content:
+        raise OSError("Deployment state readback differs")
 
 
 def render_definition(
@@ -23,13 +103,18 @@ def render_definition(
 ) -> dict[str, Any]:
     result = copy.deepcopy(dict(definition))
     result["parts"] = [part for part in result["parts"] if part["path"] != ".platform"]
+    effective_tokens = dict(tokens)
+    if workspace_name is not None:
+        if "TargetWorkspaceName" in tokens and tokens["TargetWorkspaceName"] != workspace_name:
+            raise ValueError("Workspace name token differs from the selected workspace")
+        effective_tokens["TargetWorkspaceName"] = workspace_name
     for part in result["parts"]:
         content = base64.b64decode(part["payload"], validate=True)
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        for name, value in tokens.items():
+        for name, value in effective_tokens.items():
             text = text.replace("{{ ." + name + " }}", value)
         if workspace_name is not None and part["path"] == "definition.pbir":
             text = text.replace(

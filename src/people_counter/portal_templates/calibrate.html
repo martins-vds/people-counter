@@ -77,8 +77,8 @@
       <fieldset id="video-fields" {% if scope != 'video' %}disabled hidden{% endif %}>
         <legend>Video exception</legend>
         <label for="capture-override">Authoritative capture time override (UTC, optional)</label>
-        <input id="capture-override" name="captured_at_utc" placeholder="2026-01-01T12:00:00Z">
-        <p class="help">Leave blank to retain embedded/filename timestamp resolution. This line does not change the camera default.</p>
+        <input id="capture-override" name="captured_at_utc" type="datetime-local" step="any" aria-describedby="capture-override-help">
+        <p class="help" id="capture-override-help">Choose the recording date and time in UTC, not the browser or camera timezone. Leave blank to retain embedded/filename timestamp resolution. This line does not change the camera default.</p>
       </fieldset>
     </div>
     <div class="card-footer"><p class="text-xs text-slate-500">Saved locally. Generate a new package after changes.</p><button>{{ icon('check', 'size-4') }}Save calibration</button></div>

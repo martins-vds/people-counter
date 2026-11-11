@@ -3,7 +3,7 @@
   "version": "4.0",
   "datasetReference": {
     "byConnection": {
-      "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/people-counter-dev;initial catalog={{ .TargetSemanticModelName }};integrated security=ClaimsToken;semanticmodelid={{ .TargetSemanticModelId }}"
+      "connectionString": "Data Source=powerbi://api.powerbi.com/v1.0/myorg/{{ .TargetWorkspaceName }};initial catalog={{ .TargetSemanticModelName }};integrated security=ClaimsToken;semanticmodelid={{ .TargetSemanticModelId }}"
     }
   }
 }

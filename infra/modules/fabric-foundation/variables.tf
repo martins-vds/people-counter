@@ -112,7 +112,7 @@ variable "environment_description" {
 }
 
 variable "spark_job_definitions" {
-  description = "Names and descriptions for the seven canonical SJD roles."
+  description = "Names and descriptions for the six canonical SJD roles."
   type = map(object({
     display_name = string
     description  = optional(string, "")
@@ -126,11 +126,21 @@ variable "spark_job_definitions" {
       "refresh",
       "reconciliation",
       "gold",
-      "cutover",
     ])
-    error_message = "spark_job_definitions must contain the seven canonical roles."
+    error_message = "spark_job_definitions must contain the six canonical roles."
   }
 
+}
+
+variable "sjd_files_root" {
+  description = "Exact Lakehouse Files directory used for deployment runtime state."
+  type        = string
+  default     = "Files/people-counter/sjd/v1/"
+
+  validation {
+    condition     = can(regex("^Files/[A-Za-z0-9][A-Za-z0-9._=-]*(/[A-Za-z0-9][A-Za-z0-9._=-]*)*/$", var.sjd_files_root))
+    error_message = "sjd_files_root must be a safe directory below Files/ with a trailing slash."
+  }
 }
 
 variable "reporting_items" {

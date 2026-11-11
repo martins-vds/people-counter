@@ -13,8 +13,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from people_counter.fabric_benchmark import (
-    ENVIRONMENT_ID,
-    LAKEHOUSE_ID,
     BenchmarkValidationError,
     CpuInferenceProfile,
     MeasurementConfig,
@@ -22,6 +20,7 @@ from people_counter.fabric_benchmark import (
     canonical_json_bytes,
 )
 from people_counter.fabric_namespace import FabricNamespaceConfig
+from people_counter.fabric_target import FabricTarget
 
 if TYPE_CHECKING:
     from people_counter.fabric_executor_inventory import ExecutorRecord
@@ -172,6 +171,7 @@ def thin_main_source(job: str) -> bytes:
 def build_sjd_v2_definition(
     job: str,
     *,
+    config: FabricTarget,
     command_line_arguments: str = "",
 ) -> dict[str, object]:
     """Build one deterministic definition; this function never deploys it."""
@@ -183,8 +183,8 @@ def build_sjd_v2_definition(
         "additionalLakehouseIds": [],
         "additionalLibraryUris": [],
         "commandLineArguments": command_line_arguments,
-        "defaultLakehouseArtifactId": LAKEHOUSE_ID,
-        "environmentArtifactId": ENVIRONMENT_ID,
+        "defaultLakehouseArtifactId": config.lakehouse_id,
+        "environmentArtifactId": config.environment_id,
         "executableFile": "main.py",
         "language": "Python",
         "mainClass": "",
@@ -204,6 +204,8 @@ def build_sjd_v2_definition(
 
 def build_all_sjd_v2_definitions(
     command_line_arguments: Mapping[str, str] | None = None,
+    *,
+    config: FabricTarget,
 ) -> dict[str, dict[str, object]]:
     arguments = dict(command_line_arguments or {})
     unknown = set(arguments) - set(_JOB_MODULES)
@@ -211,7 +213,7 @@ def build_all_sjd_v2_definitions(
         raise BenchmarkValidationError(f"unknown benchmark jobs: {sorted(unknown)!r}")
     return {
         job: build_sjd_v2_definition(
-            job, command_line_arguments=arguments.get(job, "")
+            job, config=config, command_line_arguments=arguments.get(job, "")
         )
         for job in _JOB_MODULES
     }
@@ -220,6 +222,7 @@ def build_all_sjd_v2_definitions(
 def export_sjd_definitions(
     destination: str | Path,
     *,
+    config: FabricTarget,
     command_line_arguments: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, str]]:
     """Export deterministic JSON files locally, refusing destructive overwrite."""
@@ -232,7 +235,7 @@ def export_sjd_definitions(
     root.mkdir(parents=True, exist_ok=True)
     exported: dict[str, dict[str, str]] = {}
     for job, definition in build_all_sjd_v2_definitions(
-        command_line_arguments
+        command_line_arguments, config=config,
     ).items():
         content = canonical_json_bytes(definition) + b"\n"
         path = root / f"{job}.SparkJobDefinitionV2.json"
@@ -458,7 +461,9 @@ def _prepare_pilot_main(arguments: tuple[str, ...]) -> int:
         raise BenchmarkValidationError("release digest must be SHA-256")
     if parsed.work_count < 1:
         raise BenchmarkValidationError("pilot work count must be at least 1")
-    store = FabricControlStore(_spark(), config=FabricNamespaceConfig.benchmark())
+    store = FabricControlStore(
+        _spark(), config=FabricNamespaceConfig.benchmark(target=FabricTarget.current()),
+    )
     source = next(
         (
             row
@@ -533,7 +538,9 @@ def _diagnose_main() -> int:
     from people_counter.fabric_sjd_runtime import _spark
     from people_counter.sjd_control import FabricControlStore
 
-    store = FabricControlStore(_spark(), config=FabricNamespaceConfig.benchmark())
+    store = FabricControlStore(
+        _spark(), config=FabricNamespaceConfig.benchmark(target=FabricTarget.current()),
+    )
     rows = {
         suffix: store._rows(suffix)
         for suffix in (
@@ -560,7 +567,9 @@ def _recover_stale_main() -> int:
     from people_counter.fabric_sjd_runtime import _spark
     from people_counter.sjd_control import FabricControlStore
 
-    store = FabricControlStore(_spark(), config=FabricNamespaceConfig.benchmark())
+    store = FabricControlStore(
+        _spark(), config=FabricNamespaceConfig.benchmark(target=FabricTarget.current()),
+    )
     recovery = asdict(store.recover())
     findings = [asdict(item) for item in store.reconcile()]
     payload = {
@@ -593,7 +602,7 @@ def _tail_diagnostics_main(arguments: Sequence[str]) -> int:
     parsed = parser.parse_args(arguments)
     import notebookutils
 
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=FabricTarget.current())
     target = config.file_path(parsed.path)
     try:
         entries = notebookutils.fs.ls(target)
@@ -643,7 +652,9 @@ def control_main(argv: Sequence[str] | None = None) -> int:
         raise BenchmarkValidationError(
             "benchmark claims require one or more explicit --work-id values"
         )
-    return candidate_main(arguments, config=FabricNamespaceConfig.benchmark())
+    return candidate_main(
+        arguments, config=FabricNamespaceConfig.benchmark(target=FabricTarget.current()),
+    )
 
 
 def _benchmark_execution_profile(
@@ -757,7 +768,7 @@ def process_main(argv: Sequence[str] | None = None) -> int:
     """
     from people_counter.fabric_sjd_runtime import _write_control_diagnostic
 
-    entry_config = FabricNamespaceConfig.benchmark()
+    entry_config = FabricNamespaceConfig.benchmark(target=FabricTarget.current())
     _write_process_stage_marker(entry_config, "entry", 0, "main-entry")
 
     parser = argparse.ArgumentParser(prog="pc-benchmark-process-sjd")
@@ -773,7 +784,7 @@ def process_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--release-receipt-path", default="")
     parser.add_argument("--release-receipt-sha256", default="")
     arguments = parser.parse_args(argv)
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=FabricTarget.current())
     try:
         return _process_dispatch(arguments, config)
     except Exception as error:
@@ -862,6 +873,7 @@ def _process_dispatch(
             )
     release_evidence = _load_runtime_release_evidence(
         NotebookUtilsOneLakeFiles(),
+        config=config,
         manifest_path=getattr(arguments, "release_manifest_path", ""),
         manifest_sha256=getattr(arguments, "release_manifest_sha256", ""),
         receipt_path=getattr(arguments, "release_receipt_path", ""),
@@ -967,7 +979,7 @@ def gold_main(argv: Sequence[str] | None = None) -> int:
     from people_counter.fabric_sjd_runtime import _write_control_diagnostic
     from people_counter.fabric_sjd_runtime import gold_main as candidate_main
 
-    config = FabricNamespaceConfig.benchmark()
+    config = FabricNamespaceConfig.benchmark(target=FabricTarget.current())
     try:
         return candidate_main(argv, config=config)
     except Exception as error:

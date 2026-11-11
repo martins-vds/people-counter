@@ -201,6 +201,8 @@ jobs:
         id: reconcile
         env:
           PEOPLE_COUNTER_DEPLOY_STAGE: ${{ inputs.environment }}
+          PEOPLE_COUNTER_RELEASE_MANIFEST_SHA256: ${{ vars.FABRIC_RELEASE_MANIFEST_SHA256 }}
+          PEOPLE_COUNTER_RELEASE_RECEIPT_SHA256: ${{ vars.FABRIC_RELEASE_RECEIPT_SHA256 }}
           ACTIVATOR_ACTION_CHECKPOINT_JSON: ${{ secrets.FABRIC_ACTIVATOR_ACTION_CHECKPOINT_JSON }}
         run: |
           wheel=$(find "${RUNNER_TEMP}/dist" -maxdepth 1 -name 'people_counter-*.whl' -print -quit)

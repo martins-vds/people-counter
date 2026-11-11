@@ -7,16 +7,21 @@ from people_counter.fabric_namespace import (
     BENCHMARK_TABLE_PREFIX,
     CANARY_FILES_ROOT,
     CANARY_TABLE_PREFIX,
-    ENVIRONMENT_ID,
     LEGACY_TABLE_PREFIX,
-    LAKEHOUSE_ID,
     PRODUCTION_FILES_ROOT,
     PRODUCTION_SHADOW_FILES_ROOT,
     PRODUCTION_SHADOW_TABLE_PREFIX,
     PRODUCTION_TABLE_PREFIX,
-    WORKSPACE_ID,
     FabricNamespaceConfig,
     FabricNamespaceMode,
+)
+
+from tests.fabric_fixtures import (
+    ENVIRONMENT_ID,
+    LAKEHOUSE_ID,
+    TARGET_IDS,
+    TEST_TARGET,
+    WORKSPACE_ID,
 )
 
 
@@ -46,7 +51,7 @@ from people_counter.fabric_namespace import (
     ],
 )
 def test_mode_selects_one_immutable_exact_namespace(mode, prefix, root) -> None:
-    config = FabricNamespaceConfig.for_mode(mode)
+    config = FabricNamespaceConfig.for_mode(mode, target=TEST_TARGET)
 
     assert config.mode is mode
     assert config.table_prefix == prefix
@@ -74,7 +79,7 @@ def test_namespace_literals_are_the_reviewed_contract() -> None:
 
 
 def test_default_and_legacy_constructor_preserve_canary_semantics() -> None:
-    default = FabricNamespaceConfig()
+    default = FabricNamespaceConfig(**TARGET_IDS)
     legacy = FabricNamespaceConfig(
         WORKSPACE_ID,
         LAKEHOUSE_ID,
@@ -89,21 +94,21 @@ def test_default_and_legacy_constructor_preserve_canary_semantics() -> None:
 
 
 def test_named_constructors_select_their_mode() -> None:
-    assert FabricNamespaceConfig.canary().mode is FabricNamespaceMode.CANARY
+    assert FabricNamespaceConfig.canary(target=TEST_TARGET).mode is FabricNamespaceMode.CANARY
     assert (
-        FabricNamespaceConfig.benchmark().mode
+        FabricNamespaceConfig.benchmark(target=TEST_TARGET).mode
         is FabricNamespaceMode.BENCHMARK
     )
     assert (
-        FabricNamespaceConfig.production_shadow().mode
+        FabricNamespaceConfig.production_shadow(target=TEST_TARGET).mode
         is FabricNamespaceMode.PRODUCTION_SHADOW
     )
     assert (
-        FabricNamespaceConfig.production().mode
+        FabricNamespaceConfig.production(target=TEST_TARGET).mode
         is FabricNamespaceMode.PRODUCTION
     )
     with pytest.raises(ValueError, match="direct PRODUCTION writes"):
-        FabricNamespaceConfig.production().require_write_enabled()
+        FabricNamespaceConfig.production(target=TEST_TARGET).require_write_enabled()
 
 
 @pytest.mark.parametrize(
@@ -115,27 +120,29 @@ def test_named_constructors_select_their_mode() -> None:
     ],
 )
 def test_artifact_identity_mismatches_fail_closed(override) -> None:
-    with pytest.raises(ValueError, match="configuration is fixed"):
-        FabricNamespaceConfig(**override)
+    with pytest.raises(ValueError, match="canonical UUID"):
+        FabricNamespaceConfig(**{**TARGET_IDS, **override})
 
 
 def test_mode_namespace_mismatches_and_canary_reuse_fail_closed() -> None:
     with pytest.raises(ValueError, match="BENCHMARK configuration is fixed"):
         FabricNamespaceConfig(
+            **TARGET_IDS,
             mode=FabricNamespaceMode.BENCHMARK,
             table_prefix=CANARY_TABLE_PREFIX,
         )
     with pytest.raises(ValueError, match="PRODUCTION_SHADOW configuration is fixed"):
         FabricNamespaceConfig(
+            **TARGET_IDS,
             mode=FabricNamespaceMode.PRODUCTION_SHADOW,
             files_root=CANARY_FILES_ROOT,
         )
     with pytest.raises(ValueError, match="binding mismatch"):
-        FabricNamespaceConfig().require_mode(FabricNamespaceMode.BENCHMARK)
+        FabricNamespaceConfig(**TARGET_IDS).require_mode(FabricNamespaceMode.BENCHMARK)
 
 
 def test_runtime_binding_checks_mode_and_all_artifact_ids() -> None:
-    config = FabricNamespaceConfig.for_mode(FabricNamespaceMode.BENCHMARK)
+    config = FabricNamespaceConfig.for_mode(FabricNamespaceMode.BENCHMARK, target=TEST_TARGET)
     config.require_mode(FabricNamespaceMode.BENCHMARK)
     config.validate_binding(
         workspace_id=WORKSPACE_ID,
@@ -168,18 +175,28 @@ def test_runtime_binding_checks_mode_and_all_artifact_ids() -> None:
 def test_for_mode_does_not_discard_explicit_artifact_bindings(
     argument: str, value: str
 ) -> None:
-    with pytest.raises(ValueError, match="configuration is fixed"):
-        FabricNamespaceConfig.for_mode(
-            FabricNamespaceMode.BENCHMARK,
-            **{argument: value},
-        )
+    from dataclasses import replace
+
+    if argument == "runtime":
+        with pytest.raises(ValueError, match="configuration is fixed"):
+            FabricNamespaceConfig.for_mode(
+                FabricNamespaceMode.BENCHMARK,
+                target=TEST_TARGET,
+                runtime=value,
+            )
+    else:
+        with pytest.raises(ValueError, match="canonical UUID"):
+            FabricNamespaceConfig.for_mode(
+                FabricNamespaceMode.BENCHMARK,
+                target=replace(TEST_TARGET, **{argument: value}),
+            )
 
 
 def test_binding_rejects_invalid_mode_with_specific_evidence() -> None:
     with pytest.raises(
         ValueError, match="invalid Fabric SJD namespace mode 'OTHER'"
     ):
-        FabricNamespaceConfig().validate_binding(
+        FabricNamespaceConfig(**TARGET_IDS).validate_binding(
             workspace_id=WORKSPACE_ID,
             lakehouse_id=LAKEHOUSE_ID,
             environment_id=ENVIRONMENT_ID,
@@ -199,7 +216,7 @@ def test_binding_rejects_invalid_mode_with_specific_evidence() -> None:
 )
 def test_only_reviewed_table_suffixes_are_resolved(suffix) -> None:
     with pytest.raises(ValueError, match="invalid Fabric SJD table suffix"):
-        FabricNamespaceConfig().table(suffix)
+        FabricNamespaceConfig(**TARGET_IDS).table(suffix)
 
 
 @pytest.mark.parametrize(
@@ -219,7 +236,7 @@ def test_only_reviewed_table_suffixes_are_resolved(suffix) -> None:
 )
 def test_relative_paths_reject_traversal_and_non_path_syntax(relative) -> None:
     with pytest.raises(ValueError, match="unsafe Fabric SJD relative path"):
-        FabricNamespaceConfig().file_path(relative)
+        FabricNamespaceConfig(**TARGET_IDS).file_path(relative)
 
 
 @pytest.mark.parametrize(
@@ -230,7 +247,7 @@ def test_relative_paths_reject_traversal_and_non_path_syntax(relative) -> None:
     ],
 )
 def test_benchmark_and_shadow_cannot_mutate_legacy_namespace(mode) -> None:
-    config = FabricNamespaceConfig.for_mode(mode)
+    config = FabricNamespaceConfig.for_mode(mode, target=TEST_TARGET)
 
     with pytest.raises(ValueError, match="cannot mutate legacy production tables"):
         config.validate_table_name(LEGACY_TABLE_PREFIX + "work")
@@ -240,7 +257,8 @@ def test_benchmark_and_shadow_cannot_mutate_legacy_namespace(mode) -> None:
 
 def test_exact_namespace_validation_rejects_other_modes_and_prefix_collisions() -> None:
     benchmark = FabricNamespaceConfig.for_mode(
-        FabricNamespaceMode.BENCHMARK
+        FabricNamespaceMode.BENCHMARK,
+        target=TEST_TARGET,
     )
 
     assert benchmark.validate_table_name(

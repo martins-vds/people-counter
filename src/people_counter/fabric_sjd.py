@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import re
-import uuid
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
+from people_counter.fabric_target import FabricTarget
 
-WORKSPACE_ID = "c31ee864-230d-4005-8fd5-7c7130ebf774"
-LAKEHOUSE_ID = "883cff91-eaa8-40be-870f-6e9716303cb2"
-ENVIRONMENT_ID = "3e580f48-9ff7-4bc6-af2e-a59158029ada"
 FABRIC_RUNTIME = "2.0"
 TABLE_PREFIX = "people_counter_sjd_"
 FILES_ROOT = "Files/people-counter/sjd/v1/"
@@ -28,8 +24,6 @@ TABLE_SUFFIXES = frozenset(
         "reconciliation_findings",
         "gold_checkpoints",
         "semantic_refresh_outbox",
-        "migration_journal",
-        "retirement_journal",
         "gold_flow_minute",
         "gold_flow_hour",
         "gold_video",
@@ -44,13 +38,7 @@ TABLE_SUFFIXES = frozenset(
         "gold_dim_model_config",
     }
 )
-CUTOVER_TABLE_SUFFIXES = frozenset(
-    {
-        "migration_journal",
-        "retirement_journal",
-    }
-)
-BOOTSTRAP_TABLE_SUFFIXES = TABLE_SUFFIXES - CUTOVER_TABLE_SUFFIXES
+BOOTSTRAP_TABLE_SUFFIXES = TABLE_SUFFIXES
 _SAFE_PATH_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._=-]*\Z")
 
 
@@ -58,13 +46,25 @@ class StableNamespaceMode(str, Enum):
     PRODUCTION = "PRODUCTION"
 
 
-@dataclass(frozen=True, slots=True)
-class FabricSjdConfig:
-    """Fixed, write-enabled production binding with no legacy aliases."""
+def validate_files_root(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("Files/")
+        or not value.endswith("/")
+        or not value[6:-1]
+        or any(
+            _SAFE_PATH_SEGMENT.fullmatch(part) is None or part in {".", ".."}
+            for part in value[6:-1].split("/")
+        )
+    ):
+        raise ValueError("Fabric files root must be a safe directory below Files/")
+    return value
 
-    workspace_id: str = WORKSPACE_ID
-    lakehouse_id: str = LAKEHOUSE_ID
-    environment_id: str = ENVIRONMENT_ID
+
+@dataclass(frozen=True, slots=True)
+class FabricSjdConfig(FabricTarget):
+    """Explicit deployment binding with a guarded production namespace."""
+
     table_prefix: str = TABLE_PREFIX
     files_root: str = FILES_ROOT
     runtime: str = FABRIC_RUNTIME
@@ -72,15 +72,9 @@ class FabricSjdConfig:
     stable_production: bool = True
 
     def __post_init__(self) -> None:
-        self._validate_config((WORKSPACE_ID, LAKEHOUSE_ID, ENVIRONMENT_ID))
-
-    def _validate_config(self, artifact_ids: tuple[str, str, str]) -> None:
+        FabricTarget.__post_init__(self)
         expected = {
-            "workspace_id": artifact_ids[0],
-            "lakehouse_id": artifact_ids[1],
-            "environment_id": artifact_ids[2],
             "table_prefix": TABLE_PREFIX,
-            "files_root": FILES_ROOT,
             "runtime": FABRIC_RUNTIME,
             "mode": StableNamespaceMode.PRODUCTION,
             "stable_production": True,
@@ -94,13 +88,13 @@ class FabricSjdConfig:
             raise ValueError(
                 f"stable production configuration is fixed: {mismatches!r}"
             )
-        for value in (self.workspace_id, self.lakehouse_id, self.environment_id):
-            try:
-                identity = uuid.UUID(value)
-            except (AttributeError, TypeError, ValueError) as error:
-                raise ValueError("Fabric artifact IDs must be canonical UUIDs") from error
-            if str(identity) != value or identity.int == 0:
-                raise ValueError("Fabric artifact IDs must be canonical UUIDs")
+        validate_files_root(self.files_root)
+
+    def namespace_arguments(self) -> list[str]:
+        return [] if self.files_root == FILES_ROOT else ["--files-root", self.files_root]
+
+    def command_line_arguments(self) -> list[str]:
+        return [*FabricTarget.command_line_arguments(self), *self.namespace_arguments()]
 
     def require_write_enabled(self) -> None:
         if not self.stable_production:
@@ -148,29 +142,6 @@ class FabricSjdConfig:
         )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True)
 class ManualFabricSjdConfig(FabricSjdConfig):
-    """Explicit artifact binding; the stable namespace and write guards stay fixed."""
-
-    workspace_id: str
-    lakehouse_id: str
-    environment_id: str
-
-    def __post_init__(self) -> None:
-        self._validate_config((self.workspace_id, self.lakehouse_id, self.environment_id))
-
-    def validate_runtime_context(self, context: Mapping[str, object]) -> None:
-        if not isinstance(context, Mapping):
-            raise ValueError("Manual runtime context must be a mapping")
-        for key, expected in (
-            ("currentWorkspaceId", self.workspace_id),
-            ("defaultLakehouseId", self.lakehouse_id),
-            ("defaultLakehouseWorkspaceId", self.workspace_id),
-            ("environmentId", self.environment_id),
-            ("environmentWorkspaceId", self.workspace_id),
-        ):
-            if context.get(key) != expected:
-                raise ValueError(
-                    f"Manual runtime context {key} must match {expected}; "
-                    f"observed {context.get(key)!r}"
-                )
+    """Compatibility spelling for an explicitly bound production target."""

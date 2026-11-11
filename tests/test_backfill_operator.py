@@ -31,6 +31,10 @@ def forbid_live_cloud_clients(monkeypatch):
 
     monkeypatch.setattr(operator.OneLakeFiles, "__init__", forbidden)
     monkeypatch.setattr(operator.AzureDataLakeStorage, "__init__", forbidden)
+    monkeypatch.setattr(
+        operator.time, "sleep",
+        lambda seconds: pytest.fail("Tests must inject any expected polling delay"),
+    )
 
 
 @pytest.fixture
@@ -250,7 +254,7 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     call = fabric.request_response.call_args
     assert "sparkJobDefinitions/44444444-4444-4444-4444-444444444444" in call.args[1]
     command = call.kwargs["value"]["executionData"]["commandLineArguments"]
-    assert "--manual-artifacts" in command
+    assert "--artifacts" in command
     assert "bulk-register --partition-path Files/people-counter/sjd/v1/intake/backfill/" in command
     assert "--max-items 1" in command
     content = files.write_partition.call_args.args[1]
@@ -265,7 +269,10 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     assert json.loads((setup.root / "state/registration-summary.json").read_text()) == report
     config = operator.load_config(setup.config_path)
     onelake_client.assert_called_with(config)
-    resolver.assert_called_with(files.read_text)
+    resolver.assert_called_with(
+        files.read_text, deployment=config,
+        expected_sjd_ids={"stable-control": config.control_sjd_id},
+    )
     storage_client.assert_called_with("account", "footage", chunk_size=8 * 1024 * 1024)
     assert client.call_args.args[0] == operator.AzureCliResourceTokenProvider(
         "https://api.fabric.microsoft.com",
@@ -295,7 +302,9 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
         f"{config.shortcut_path}/{video.incoming_video_path}",
         video.inspection.size_bytes, video.inspection.sha256,
     )
-    assert files.write_partition.call_args.args[0].startswith(operator.INTAKE_ROOT + "/")
+    assert files.write_partition.call_args.args[0].startswith(
+        config.runtime_config().file_path("intake/backfill") + "/"
+    )
 
 
 @pytest.mark.parametrize("failure", ["publication", "shortcut", "release"])
@@ -766,10 +775,10 @@ def test_onelake_partition_never_overwrites_existing_content(existing):
     files._file = Mock(return_value=file)
     files.read_bytes = Mock(return_value=existing)
     if existing == b"partition":
-        files.write_partition(f"{operator.INTAKE_ROOT}/run/partition.json", b"partition")
+        files.write_partition("Files/people-counter/dev/v1/intake/backfill/run/partition.json", b"partition")
     else:
         with pytest.raises(ValueError, match="conflicts"):
-            files.write_partition(f"{operator.INTAKE_ROOT}/run/partition.json", b"partition")
+            files.write_partition("Files/people-counter/dev/v1/intake/backfill/run/partition.json", b"partition")
     file.upload_data.assert_called_once_with(b"partition", overwrite=False)
 
 
@@ -780,7 +789,7 @@ def test_partition_readback_failure_is_explicit():
     files._file = Mock()
     files.read_bytes = Mock(return_value=b"changed")
     with pytest.raises(ValueError, match="readback mismatch"):
-        files.write_partition(f"{operator.INTAKE_ROOT}/run/partition.json", b"partition")
+        files.write_partition("Files/people-counter/dev/v1/intake/backfill/run/partition.json", b"partition")
 
 
 def test_partition_bounds_are_exact(setup):
@@ -852,6 +861,53 @@ def test_state_directory_cannot_change_release_or_target(setup):
     ), patch.object(operator, "FabricAutomationClient", return_value=fabric):
         assert operator.main(setup.args + ["--submit"]) == 0
         release.manifest_sha256 = "e" * 64
+        with pytest.raises(ValueError, match="different package"):
+            operator.main(setup.args + ["--submit"])
+    assert fabric.request_response.call_count == 1
+
+
+def test_registration_in_progress_is_polled_once_then_persisted_as_completed(setup, tmp_path):
+    config = operator.load_config(setup.config_path)
+    state = tmp_path / "job.json"
+    client = Mock()
+    client.request_response.return_value = (202, {"Location": "/jobs/chosen-job"}, b"")
+    client.request_json.side_effect = [
+        {"status": "InProgress", "id": "chosen-job"},
+        {"status": "Completed", "id": "chosen-job"},
+    ]
+    with patch.object(operator.time, "sleep") as sleep:
+        result = operator._register_partition(
+            client, config, "Files/intake/partition.json", b"{}", 1, state,
+        )
+    sleep.assert_called_once_with(15)
+    assert client.request_json.call_count == 2
+    assert result["status"] == "Completed"
+    assert result["location"] == "/jobs/chosen-job"
+    assert json.loads(state.read_text()) == result
+
+
+def test_backfill_namespace_matches_the_deployed_control_job_and_retry_state(setup):
+    root = "Files/people-counter/dev/v1/"
+    setup.config_path.write_text(json.dumps({**setup.config, "files_root": root}))
+    storage, files, release = cloud_mocks(setup)
+    fabric = Mock()
+    fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
+    fabric.request_json.return_value = {"status": "Completed"}
+    with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
+        operator, "OneLakeFiles", return_value=files
+    ), patch.object(
+        operator, "resolve_published_release", return_value=release
+    ), patch.object(operator, "FabricAutomationClient", return_value=fabric):
+        assert operator.main(setup.args + ["--submit"]) == 0
+        path = files.write_partition.call_args.args[0]
+        assert path.startswith(root + "intake/backfill/")
+        command = fabric.request_response.call_args.kwargs["value"]["executionData"]["commandLineArguments"]
+        import shlex
+        arguments = shlex.split(command)
+        assert arguments[arguments.index("--files-root") + 1] == root
+        assert arguments[arguments.index("--partition-path") + 1] == path
+        assert json.loads((setup.root / "state/registration-plan.json").read_text())["target"]["files_root"] == root
+        setup.config_path.write_text(json.dumps({**setup.config, "files_root": "Files/another-deployment/"}))
         with pytest.raises(ValueError, match="different package"):
             operator.main(setup.args + ["--submit"])
     assert fabric.request_response.call_count == 1

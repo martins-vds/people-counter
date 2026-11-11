@@ -18,6 +18,8 @@ from scripts.deploy_sjd_operational_report import (
     validate_report_definition,
 )
 
+from tests.fabric_fixtures import SOURCE_MODEL_ID
+
 
 def _part(path: str, value: str | dict[str, object]) -> dict[str, str]:
     content = (
@@ -98,7 +100,7 @@ def _report() -> dict[str, object]:
     connection = (
         "Data Source=powerbi://example;"
         f"initial catalog={SOURCE_MODEL['name']};"
-        f"semanticmodelid={SOURCE_MODEL['id']}"
+        f"semanticmodelid={SOURCE_MODEL_ID}"
     )
     sections = [
         {"displayName": name, "visualContainers": []}
@@ -196,7 +198,7 @@ def test_rewrite_report_rebinds_model_and_preserves_operational_pages() -> None:
 
     result = rewrite_report_definition(
         source,
-        source_model_id=str(SOURCE_MODEL["id"]),
+        source_model_id=str(SOURCE_MODEL_ID),
         target_model_id=target_id,
     )
 
@@ -207,7 +209,7 @@ def test_rewrite_report_rebinds_model_and_preserves_operational_pages() -> None:
     ]
     assert f"initial catalog={TARGET_MODEL_NAME}" in connection
     assert f"semanticmodelid={target_id}" in connection
-    assert str(SOURCE_MODEL["id"]) not in connection
+    assert str(SOURCE_MODEL_ID) not in connection
     pages = json.loads(_decoded(result, "report.json"))["sections"]
     assert [page["displayName"] for page in pages] == [
         "Attempt History",
@@ -222,7 +224,7 @@ def test_rewrite_report_rebinds_model_and_preserves_operational_pages() -> None:
 def test_validate_report_rejects_missing_required_page() -> None:
     result = rewrite_report_definition(
         _report(),
-        source_model_id=str(SOURCE_MODEL["id"]),
+        source_model_id=str(SOURCE_MODEL_ID),
         target_model_id="target-id",
     )
     layout = json.loads(_decoded(result, "report.json"))

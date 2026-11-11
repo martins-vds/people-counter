@@ -242,6 +242,113 @@ for retries; a later source-shortcut read failure can occur after publication.
 See the [SJD deployment guide](../fabric/spark-job-definitions/README.md)
 and [manual deployment guide](manual-portal-deployment.md) for deployment details.
 
+### HTTP 404 for release evidence
+
+For example, a missing
+`Files/people-counter/sjd/v1/releases/0.9.64/detached-manifest.json`
+is a release-admission failure, not a missing model. The installed SDK selects
+the evidence root from its embedded `sjd_release_identity.json`; there is no
+notebook setting that selects an older release's evidence instead.
+
+1. Confirm the notebook's attached default workspace and Lakehouse are the
+   intended deployment. Fabric mode derives those IDs from the default
+   Lakehouse context, not from the notebook's workspace alone.
+2. In that Lakehouse's **Files** explorer, check the exact directory from the
+   error. Both `detached-manifest.json` and `postpublish-receipt.json` must
+   exist. Finding an older version's directory is not sufficient.
+3. Check the deployment manifest's workspace, Lakehouse, Environment, and
+   Control SJD IDs against `TARGET_BINDING` and the attached runtime. These
+   are deployment settings, **not SDK build inputs**. The SDK's v2 embedded
+   identity contains only release metadata; the same approved wheel can run
+   in different deployments. Admission compares deployment evidence with
+   the configured runtime target, not with IDs compiled into the SDK.
+4. If the correct evidence was previously published, restore those exact
+   immutable bytes. If it was never published, the release owner must complete
+   [Prepare and verify admission artifacts](manual-portal-deployment.md#prepare-and-verify-admission-artifacts).
+   The manifest binds the reviewed release artifacts and target; the receipt
+   must record actual successful Environment publication and readback.
+5. Re-read and validate both files with the matching SDK before retrying.
+   Keep the state directory and inspect any previously accepted job before
+   resuming; this error does not cancel earlier submissions.
+
+Do not create empty JSON files, rename an older release directory, copy old
+evidence into a new version's directory, edit installed identity files, or
+bypass admission checks. HTTP 401/403 instead requires checking the execution
+identity's access; a 404 alone does not establish that the target binding is
+correct.
+
+### SDK upgrades: version preparation is not deployment
+
+The [version bump script](../scripts/bump-sdk-version.sh) automates **source
+release preparation**: it updates the package version, lockfile, embedded
+identity's version/evidence-root suffix, and build-input digest. No deployment
+IDs belong in that identity. The script validates source consistency but does **not**
+publish a Fabric Environment, rebind SJDs, create a detached manifest or
+postpublish receipt, or upload either file to OneLake. A successful bump or
+[GitHub SDK release](../README.md#github-sdk-releases) is therefore not proof
+that a Fabric deployment can admit that version.
+
+Every SDK version selects its own evidence directory. Installing a newer wheel
+without completing its deployment can repeat this failure on every upgrade.
+Treat the following as one release handoff, rather than asking each backfill
+operator to repair the deployment:
+
+1. Build and approve the SDK release once, independently of any Fabric target.
+   Use the bump script after finalizing build inputs. Preserve the exact
+   wheel, locks, bundles, and hashes; reuse those same bytes across deployments.
+2. Configure each deployment's actual target IDs outside the wheel, in the
+   deployment configuration, notebook `TARGET_BINDING`, or SJD runtime
+   `--artifacts` binding (`--manual-artifacts` remains an alias). Prepare its reviewed detached manifest for
+   the shared release artifacts and that deployment's target.
+3. Publish the matching Environment, verify its published libraries and compute
+   settings, and verify all required SJD bindings. Build the receipt from the
+   observed publication results, not the requested settings.
+4. Publish both immutable evidence files at the wheel's exact evidence paths,
+   verify readback and admission with the matching SDK, then hand the release
+   to notebook operators. Keep recurring jobs unscheduled until acceptance.
+5. Coordinate existing work before switching releases: drain it or explicitly
+   quarantine/re-register incompatible work. Never rewrite an existing work
+   item's immutable release digest or delete retry state to force an upgrade.
+
+**Automation boundary:** keep the bump script credential-free. The missing
+end-to-end handoff belongs in target-aware deployment orchestration: consume
+the exact release artifacts and approved target configuration, publish and
+observe the Environment, create the receipt from readback, verify immutable
+OneLake evidence, and fail deployment before enabling schedules if any check
+fails. This is the required automation contract, not an existing one-command
+upgrade provided by the bump script. The manual deployment instructions still
+require reviewed evidence preparation and Lakehouse UI upload.
+
+**Migration from target-bound SDK identities:** older wheels with a v1
+`sjd_release_identity.json` still implement the old target restriction.
+The portable v2 identity is a code/schema change, not a setting that changes an
+already published wheel. Publish a new approved SDK release with v2 support,
+configure its runtime bindings, and prepare new deployment evidence against
+that release's identity digest. Do not edit the installed v1 wheel or relabel
+old evidence. Subsequent target changes do not require rebuilding the SDK.
+Release upgrades still require publication evidence for the new artifacts.
+
+### Use assigned IDs, not reference-deployment defaults
+
+SJD IDs do not exist until Fabric creates the items. Do not put guessed IDs
+in the SDK or rebuild a wheel after uploading a job. The administrative
+publication notebook resolves the six uploaded roles by their configured
+names and records their IDs in `Files/deployment/deployment.json`. It rejects
+missing/ambiguous matches and a state file owned by another target or changed
+job IDs. Reporting publication records its returned model/report IDs there too.
+
+Use the resulting Control ID and foundation bindings in `TARGET_BINDING`.
+For a non-default deployment state directory, also set `files_root` to the
+same reviewed `Files/.../` directory. Backfill uses it for intake partitions,
+passes it to Control, and rejects retry state from another namespace.
+`table_directory` independently selects `Tables`, `Tables/dbo`, or another
+Lakehouse schema; it does not select the deployment Files root.
+
+The API-assisted alternative is the operations script's `--provision-only`
+phase, followed by its resolved JSON as `--config` for later configuration.
+No preassigned SJD IDs or publication receipt are required to provision.
+Only the later configuration/enablement phase needs real release evidence.
+
 ## Every package: submission operator
 
 Keep the notebook's complete package directory and unchanged source videos.

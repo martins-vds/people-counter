@@ -53,7 +53,7 @@ class FabricCommittedSource:
     ) -> None:
         self.spark = spark_session
         self.attempts = attempt_adapter
-        self.config = config or FabricNamespaceConfig()
+        self.config = config or FabricNamespaceConfig.current()
 
     def checkpoint(self) -> SourceCheckpoint:
         rows = self._visible_rows()
@@ -262,7 +262,7 @@ class FabricGoldStoreImpl:
         config: FabricNamespaceConfig | None = None,
     ) -> None:
         self.spark = spark_session
-        self.config = config or FabricNamespaceConfig()
+        self.config = config or FabricNamespaceConfig.current()
         self.writer = ControlWriter(
             spark_session, self.config.table("locks")
         )
@@ -398,7 +398,7 @@ class FabricGoldState:
         auto_bootstrap: bool = True,
     ) -> None:
         self.spark = spark_session
-        self.config = config or FabricNamespaceConfig()
+        self.config = config or FabricNamespaceConfig.current()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.writer = ControlWriter(
             spark_session, self.config.table("locks")

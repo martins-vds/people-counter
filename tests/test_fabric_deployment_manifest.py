@@ -8,15 +8,19 @@ import pytest
 from people_counter import fabric_deployment_manifest as deploy
 from people_counter import fabric_release_provenance as provenance
 from people_counter.fabric_sjd import (
-    ENVIRONMENT_ID,
     FABRIC_RUNTIME,
     FILES_ROOT,
-    LAKEHOUSE_ID,
     TABLE_PREFIX,
-    WORKSPACE_ID,
     FabricSjdConfig,
 )
 from people_counter.fabric_sjd_definition import ENTRY_POINTS
+
+from tests.fabric_fixtures import (
+    ENVIRONMENT_ID,
+    LAKEHOUSE_ID,
+    TARGET_IDS,
+    WORKSPACE_ID,
+)
 
 
 def test_roles_cover_exactly_the_stable_entry_points() -> None:
@@ -25,26 +29,25 @@ def test_roles_cover_exactly_the_stable_entry_points() -> None:
     assert not deploy.SCHEDULED_ROLES & deploy.ON_DEMAND_ROLES
 
 
-def test_default_manifest_preserves_production_bindings() -> None:
+def test_default_manifest_has_no_preassigned_production_bindings() -> None:
     manifest = deploy.load_deployment_manifest(env={})
 
     assert manifest.stage is deploy.DeploymentEnvironment.PROD
-    assert manifest.workspace_id == WORKSPACE_ID
-    assert manifest.fabric_environment_id == ENVIRONMENT_ID
+    assert manifest.workspace_id is None
+    assert manifest.fabric_environment_id is None
     assert manifest.fabric_runtime == FABRIC_RUNTIME
-    assert manifest.lakehouse.lakehouse_id == LAKEHOUSE_ID
+    assert manifest.lakehouse.lakehouse_id is None
     assert manifest.lakehouse.table_prefix == TABLE_PREFIX
     assert manifest.lakehouse.files_root == FILES_ROOT
 
 
-def test_production_role_ids_come_from_release_identity() -> None:
+def test_production_role_ids_come_from_deployment_configuration() -> None:
     manifest = deploy.load_deployment_manifest("prod", env={})
+    document = deploy.load_manifest_document(deploy.DeploymentEnvironment.PROD, env={})
 
     for role in deploy.SJD_ROLES:
-        assert (
-            manifest.role(role).item_id
-            == provenance.RELEASE_IDENTITY.sjd_ids[f"stable-{role}"]
-        )
+        assert manifest.role(role).item_id == document["roles"][role]["item_id"]
+        assert manifest.role(role).item_id is None
 
 
 def test_production_release_provenance_is_verified() -> None:
@@ -76,8 +79,14 @@ def test_nonproduction_namespaces_are_isolated() -> None:
 
 
 def test_production_abfss_path_matches_existing_configuration() -> None:
-    manifest = deploy.load_deployment_manifest("prod", env={})
-    legacy = FabricSjdConfig()
+    manifest = deploy.load_deployment_manifest("prod", env={
+        "PEOPLE_COUNTER_DEPLOY_CONFIG_JSON": json.dumps({
+            "workspace_id": WORKSPACE_ID,
+            "fabric_environment_id": ENVIRONMENT_ID,
+            "lakehouse": {"lakehouse_id": LAKEHOUSE_ID},
+        }),
+    })
+    legacy = FabricSjdConfig(**TARGET_IDS)
     path = legacy.file_path("attempts/batch=a")
 
     assert manifest.abfss_path(path) == legacy.abfss_path(path)
@@ -243,8 +252,8 @@ def test_schedule_interval_boundaries(interval: int, valid: bool) -> None:
             "must end",
         ),
         (
-            lambda doc: doc["lakehouse"].__setitem__("files_root", FILES_ROOT),
-            "must not reuse",
+            lambda doc: doc["lakehouse"].__setitem__("files_root", "Files/"),
+            "files root",
         ),
     ],
 )
@@ -256,11 +265,11 @@ def test_manifest_shape_validation_branches(mutation, match: str) -> None:
         deploy.parse_deployment_manifest(document, deploy.DeploymentEnvironment.DEV)
 
 
-def test_manifest_requires_exactly_seven_roles() -> None:
+def test_manifest_requires_exactly_six_roles() -> None:
     document = deploy.load_manifest_document(deploy.DeploymentEnvironment.DEV, env={})
-    del document["roles"]["cutover"]
+    del document["roles"]["process"]
 
-    with pytest.raises(deploy.ManifestValidationError, match=r"missing=\['cutover'\]"):
+    with pytest.raises(deploy.ManifestValidationError, match=r"missing=\['process'\]"):
         deploy.parse_deployment_manifest(document, deploy.DeploymentEnvironment.DEV)
 
 
@@ -268,52 +277,80 @@ def test_reporting_artifacts_are_loaded_from_manifest() -> None:
     manifest = deploy.load_deployment_manifest("prod", env={})
 
     assert manifest.analytics_reporting.semantic_model == deploy.ArtifactRef(
-        source_item_id="5dbaf3d1-9f86-4bcd-a590-f32c7fbea08c",
+        source_item_id=None,
         source_name="pc_analytics_model",
         target_name="pc_sjd_analytics_model",
     )
     assert manifest.operational_reporting.report == deploy.ArtifactRef(
-        source_item_id="8b81cc28-cf18-4707-a245-afb98a8acbcc",
+        source_item_id=None,
         source_name="pc_operations_report",
         target_name="pc_sjd_operations_report",
     )
 
 
-def test_production_identity_drift_requires_explicit_double_override() -> None:
+def test_production_target_is_configured_without_disabling_release_checks() -> None:
     changed_workspace = "44444444-4444-4444-4444-444444444444"
-    with pytest.raises(deploy.ManifestValidationError, match="identity is fixed"):
-        deploy.load_deployment_manifest(
-            "prod",
-            env={
-                "PEOPLE_COUNTER_DEPLOY_CONFIG_JSON": json.dumps(
-                    {"workspace_id": changed_workspace}
-                )
-            },
-        )
-
-    with pytest.raises(deploy.ManifestValidationError, match="disagrees"):
-        deploy.load_deployment_manifest(
-            "prod",
-            env={
-                "PEOPLE_COUNTER_DEPLOY_CONFIG_JSON": json.dumps(
-                    {
-                        "workspace_id": changed_workspace,
-                        "allow_legacy_mismatch": True,
-                    }
-                )
-            },
-        )
-
+    changed_lakehouse = "55555555-5555-5555-5555-555555555555"
+    changed_environment = "66666666-6666-6666-6666-666666666666"
+    changed_control = "77777777-7777-7777-7777-777777777777"
     manifest = deploy.load_deployment_manifest(
         "prod",
         env={
             "PEOPLE_COUNTER_DEPLOY_CONFIG_JSON": json.dumps(
                 {
                     "workspace_id": changed_workspace,
-                    "allow_legacy_mismatch": True,
-                    "release": {"require_identity": False},
+                    "fabric_environment_id": changed_environment,
+                    "lakehouse": {"lakehouse_id": changed_lakehouse},
+                    "roles": {"control": {"item_id": changed_control}},
                 }
             )
         },
     )
     assert manifest.workspace_id == changed_workspace
+    assert manifest.lakehouse.lakehouse_id == changed_lakehouse
+    assert manifest.fabric_environment_id == changed_environment
+    assert manifest.role("control").item_id == changed_control
+    assert manifest.release.require_identity is True
+    assert deploy.verify_release_provenance(manifest) == provenance.RELEASE_IDENTITY_SHA256
+
+
+def test_identity_requirement_allows_unresolved_ids_before_provisioning() -> None:
+    document = deploy.load_manifest_document(deploy.DeploymentEnvironment.PROD, env={})
+    document["roles"]["control"]["item_id"] = None
+    manifest = deploy.parse_deployment_manifest(document, deploy.DeploymentEnvironment.PROD)
+    assert manifest.role("control").item_id is None
+    with pytest.raises(ValueError, match="workspace_id"):
+        manifest.target()
+
+
+@pytest.mark.parametrize("stage", list(deploy.DeploymentEnvironment))
+@pytest.mark.parametrize("field", ["runtime", "prefix"])
+def test_portability_does_not_disable_reviewed_runtime_or_table_guards(stage, field):
+    document = deploy.load_manifest_document(stage, env={})
+    if field == "runtime":
+        document["fabric_runtime"] = "1.3"
+    else:
+        document["lakehouse"]["table_prefix"] = "another_"
+    document["allow_legacy_mismatch"] = True
+    with pytest.raises(deploy.ManifestValidationError, match="reviewed"):
+        deploy.parse_deployment_manifest(document, stage)
+
+
+@pytest.mark.parametrize("release", [
+    {"manifest_sha256": "z" * 64, "receipt_sha256": "b" * 64},
+    {"manifest_sha256": "a" * 64, "receipt_sha256": "short"},
+    {"manifest_sha256": "a" * 64},
+    {"receipt_sha256": "b" * 64},
+])
+def test_release_hashes_must_be_valid_and_supplied_as_a_pair(release):
+    document = deploy.load_manifest_document(deploy.DeploymentEnvironment.PROD, env={})
+    document["release"].update(release)
+    with pytest.raises(deploy.ManifestValidationError, match="SHA-256|together"):
+        deploy.parse_deployment_manifest(document, deploy.DeploymentEnvironment.PROD)
+
+
+def test_release_schema_cannot_be_disabled_by_using_another_target():
+    document = deploy.load_manifest_document(deploy.DeploymentEnvironment.PROD, env={})
+    document["release"]["identity_schema"] = "unknown"
+    with pytest.raises(deploy.ManifestValidationError, match="schema"):
+        deploy.parse_deployment_manifest(document, deploy.DeploymentEnvironment.PROD)

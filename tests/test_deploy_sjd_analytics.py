@@ -25,6 +25,8 @@ from scripts.deploy_sjd_analytics import (
     validate_report_definition,
 )
 
+from tests.fabric_fixtures import SOURCE_MODEL_ID
+
 
 def _part(path: str, value: str | dict[str, object]) -> dict[str, str]:
     content = (
@@ -83,7 +85,7 @@ def _report() -> dict[str, object]:
         "Data Source=powerbi://example;"
         f"initial catalog={SOURCE_MODEL['name']};"
         "integrated security=ClaimsToken;"
-        f"semanticmodelid={SOURCE_MODEL['id']}"
+        f"semanticmodelid={SOURCE_MODEL_ID}"
     )
     return {
         "definition": {
@@ -229,7 +231,7 @@ def test_rewrite_report_binds_target_model_and_preserves_source() -> None:
 
     result = rewrite_report_definition(
         source,
-        source_model_id=str(SOURCE_MODEL["id"]),
+        source_model_id=str(SOURCE_MODEL_ID),
         target_model_id=target_id,
     )
 
@@ -238,7 +240,7 @@ def test_rewrite_report_binds_target_model_and_preserves_source() -> None:
     connection = report["datasetReference"]["byConnection"]["connectionString"]
     assert f"initial catalog={TARGET_MODEL_NAME}" in connection
     assert f"semanticmodelid={target_id}" in connection
-    assert str(SOURCE_MODEL["id"]) not in connection
+    assert str(SOURCE_MODEL_ID) not in connection
     platform = json.loads(_decoded(result, ".platform"))
     assert platform["metadata"]["displayName"] == TARGET_REPORT_NAME
     layout = json.loads(_decoded(result, "report.json"))
@@ -288,7 +290,7 @@ def test_rewrite_report_is_idempotent_for_generated_forecast_page() -> None:
     target_id = "11111111-2222-3333-4444-555555555555"
     result = rewrite_report_definition(
         _report(),
-        source_model_id=str(SOURCE_MODEL["id"]),
+        source_model_id=str(SOURCE_MODEL_ID),
         target_model_id=target_id,
     )
     pbir_part = next(
@@ -303,7 +305,7 @@ def test_rewrite_report_is_idempotent_for_generated_forecast_page() -> None:
         f"initial catalog={SOURCE_MODEL['name']}",
     ).replace(
         f"semanticmodelid={target_id}",
-        f"semanticmodelid={SOURCE_MODEL['id']}",
+        f"semanticmodelid={SOURCE_MODEL_ID}",
     )
     pbir["datasetReference"]["byConnection"]["connectionString"] = connection
     pbir_part["payload"] = base64.b64encode(
@@ -312,7 +314,7 @@ def test_rewrite_report_is_idempotent_for_generated_forecast_page() -> None:
 
     repeated = rewrite_report_definition(
         result,
-        source_model_id=str(SOURCE_MODEL["id"]),
+        source_model_id=str(SOURCE_MODEL_ID),
         target_model_id=target_id,
     )
 
@@ -326,7 +328,7 @@ def test_rewrite_report_supports_custom_target_names() -> None:
 
     result = rewrite_report_definition(
         _report(),
-        source_model_id=str(SOURCE_MODEL["id"]),
+        source_model_id=str(SOURCE_MODEL_ID),
         target_model_id=target_id,
         target_model_name="custom_sjd_model",
         target_report_name="custom_sjd_report",
@@ -348,7 +350,7 @@ def test_validate_report_rejects_missing_forecast_page() -> None:
     target_id = "11111111-2222-3333-4444-555555555555"
     result = rewrite_report_definition(
         _report(),
-        source_model_id=str(SOURCE_MODEL["id"]),
+        source_model_id=str(SOURCE_MODEL_ID),
         target_model_id=target_id,
     )
     layout_part = next(
@@ -377,7 +379,7 @@ def test_validate_report_accepts_fabric_forecast_normalization() -> None:
     target_id = "11111111-2222-3333-4444-555555555555"
     result = rewrite_report_definition(
         _report(),
-        source_model_id=str(SOURCE_MODEL["id"]),
+        source_model_id=str(SOURCE_MODEL_ID),
         target_model_id=target_id,
     )
     layout_part = next(
@@ -426,7 +428,7 @@ def test_rewrite_report_requires_complete_report_definition(
     with pytest.raises(ReportingDeploymentError, match=message):
         rewrite_report_definition(
             source,
-            source_model_id=str(SOURCE_MODEL["id"]),
+            source_model_id=str(SOURCE_MODEL_ID),
             target_model_id="11111111-2222-3333-4444-555555555555",
         )
 
@@ -467,7 +469,7 @@ def test_rewrite_report_refuses_conflicting_forecast_page(
     with pytest.raises(ReportingDeploymentError, match="Forecast"):
         rewrite_report_definition(
             source,
-            source_model_id=str(SOURCE_MODEL["id"]),
+            source_model_id=str(SOURCE_MODEL_ID),
             target_model_id="11111111-2222-3333-4444-555555555555",
         )
 
@@ -491,7 +493,7 @@ def test_rewrite_report_refuses_unexpected_source_model() -> None:
             "Data Source=powerbi://example;"
             f"initial catalog={TARGET_MODEL_NAME};"
             "integrated security=ClaimsToken;"
-            f"semanticmodelid={SOURCE_MODEL['id']}"
+            f"semanticmodelid={SOURCE_MODEL_ID}"
         ),
         (
             "Data Source=powerbi://example;"

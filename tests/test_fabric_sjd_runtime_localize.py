@@ -31,6 +31,8 @@ from people_counter.fabric_sjd_runtime import (
 from people_counter.fabric_input_resolver import InputBackend, stream_sha256
 from people_counter.fabric_source_cache import LocalizedSourceCache
 
+from tests.fabric_fixtures import LAKEHOUSE_ID, TARGET_IDS, WORKSPACE_ID
+
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
@@ -143,6 +145,8 @@ def test_resolve_localized_video_rejects_non_default_lakehouse_source() -> None:
             staged_sources={},
             broadcast_digests=set(),
             validation_error=_Boom,
+            workspace_id=WORKSPACE_ID,
+            lakehouse_id=LAKEHOUSE_ID,
         )
     assert str(exc_info.value) == (
         "Fabric SJD source_video must use the default Lakehouse"
@@ -171,6 +175,8 @@ def test_resolve_localized_video_direct_backend_hashes_resolved_mount_path(
         staged_sources={},
         broadcast_digests=set(),
         validation_error=_Boom,
+        workspace_id=WORKSPACE_ID,
+        lakehouse_id=LAKEHOUSE_ID,
     )
     assert relative_out == relative
     assert source_sha == _sha256_bytes(b"video-bytes")
@@ -199,6 +205,8 @@ def test_resolve_localized_video_direct_backend_rejects_digest_mismatch(
             staged_sources={},
             broadcast_digests=set(),
             validation_error=_Boom,
+            workspace_id=WORKSPACE_ID,
+            lakehouse_id=LAKEHOUSE_ID,
         )
     assert str(exc_info.value) == (
         "localized video digest differs from registered input"
@@ -234,6 +242,8 @@ def test_resolve_localized_video_fallback_backend_uses_exact_abfss_uri_and_basen
         staged_sources={},
         broadcast_digests=set(),
         validation_error=_Boom,
+        workspace_id=WORKSPACE_ID,
+        lakehouse_id=LAKEHOUSE_ID,
     )
     assert relative_out == relative
     assert source_sha == _sha256_bytes(b"video-bytes")
@@ -351,6 +361,8 @@ def test_resolve_localized_models_rejects_non_mapping_expected_artifacts() -> No
             staged_sources={},
             broadcast_digests=set(),
             validation_error=_Boom,
+            workspace_id=WORKSPACE_ID,
+            lakehouse_id=LAKEHOUSE_ID,
         )
     assert str(exc_info.value) == "model_artifact_sha256 must be an object"
 
@@ -383,6 +395,8 @@ def test_resolve_localized_models_direct_backend_hashes_every_path(
         staged_sources={},
         broadcast_digests=set(),
         validation_error=_Boom,
+        workspace_id=WORKSPACE_ID,
+        lakehouse_id=LAKEHOUSE_ID,
     )
     assert len(localized) == 2
     for relative, content in contents.items():
@@ -410,6 +424,8 @@ def test_resolve_localized_models_rejects_digest_mismatch_against_cpu_profile(
             staged_sources={},
             broadcast_digests=set(),
             validation_error=_Boom,
+            workspace_id=WORKSPACE_ID,
+            lakehouse_id=LAKEHOUSE_ID,
         )
     assert str(exc_info.value) == "localized model digest differs from CPU profile"
 
@@ -436,6 +452,8 @@ def test_resolve_localized_models_accepts_matching_expected_digest(
         staged_sources={},
         broadcast_digests=set(),
         validation_error=_Boom,
+        workspace_id=WORKSPACE_ID,
+        lakehouse_id=LAKEHOUSE_ID,
     )
     assert localized[_MODEL_PATHS[0]]["sha256"] == _sha256_bytes(b"config-bytes")
 
@@ -469,6 +487,8 @@ def test_resolve_localized_models_fallback_backend_populates_localized_name(
         staged_sources={},
         broadcast_digests=set(),
         validation_error=_Boom,
+        workspace_id=WORKSPACE_ID,
+        lakehouse_id=LAKEHOUSE_ID,
     )
     assert localized[_MODEL_PATHS[0]] == {
         "localized_name": _sha256_bytes(b"config-bytes"),
@@ -804,10 +824,13 @@ def test_real_local_spark_fallback_is_collision_safe_before_staging(
 
 
 def test_release_evidence_rejects_nonfixed_paths_before_reading() -> None:
+    from people_counter.fabric_sjd import FabricSjdConfig
+
     files = MagicMock()
     with pytest.raises(ValueError, match="fixed release identity"):
         _load_runtime_release_evidence(
             files,
+            config=FabricSjdConfig(**TARGET_IDS),
             manifest_path="Files/arbitrary/manifest.json",
             manifest_sha256="a" * 64,
             receipt_path="Files/arbitrary/receipt.json",

@@ -21,11 +21,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
 
-from people_counter.fabric_namespace import (
-    LAKEHOUSE_ID,
-    WORKSPACE_ID,
-    FabricNamespaceConfig,
-)
+from people_counter.fabric_namespace import FabricNamespaceConfig
 from people_counter.fabric_input_resolver import (
     InputBackend,
     content_addressed_name,
@@ -36,7 +32,7 @@ from people_counter.fabric_input_resolver import (
     verify_sha256,
 )
 from people_counter.fabric_source_cache import LocalizedSourceCache
-from people_counter.fabric_sjd import FabricSjdConfig, ManualFabricSjdConfig
+from people_counter.fabric_sjd import FabricSjdConfig
 
 
 FabricRuntimeConfig = FabricNamespaceConfig | FabricSjdConfig
@@ -733,8 +729,8 @@ def _resolve_localized_video(
     staged_sources: dict[str, Any],
     broadcast_digests: set[str],
     distributed_alias_root_uri: str | None = None,
-    workspace_id: str = WORKSPACE_ID,
-    lakehouse_id: str = LAKEHOUSE_ID,
+    workspace_id: str,
+    lakehouse_id: str,
     validation_error: type[Exception],
 ) -> tuple[str, str, str | None]:
     """Resolve and hash-verify one item's video; never a whole-file read.
@@ -824,8 +820,8 @@ def _resolve_localized_models(
     staged_sources: dict[str, Any],
     broadcast_digests: set[str],
     distributed_alias_root_uri: str | None = None,
-    workspace_id: str = WORKSPACE_ID,
-    lakehouse_id: str = LAKEHOUSE_ID,
+    workspace_id: str,
+    lakehouse_id: str,
     validation_error: type[Exception],
 ) -> dict[str, dict[str, str]]:
     """Resolve and hash-verify every fixed model artifact for one item."""
@@ -998,7 +994,7 @@ def _localize_process_inputs(
         store_config,
         (FabricNamespaceConfig, FabricSjdConfig),
     ):
-        store_config = FabricNamespaceConfig()
+        store_config = FabricNamespaceConfig.current()
     distributed_alias_root_uri = (
         f"abfss://{store_config.workspace_id}@onelake.dfs.fabric.microsoft.com/"
         f"{store_config.lakehouse_id}/{store_config.file_path('distributed-cache')}"
@@ -1125,7 +1121,7 @@ def _clear_stale_lock(
     from delta.tables import DeltaTable
     from pyspark.sql import functions
 
-    selected = config or FabricNamespaceConfig()
+    selected = config or FabricNamespaceConfig.current()
     selected.require_write_enabled()
     table = selected.table("locks")
     rows = spark.table(table).select(
@@ -1225,7 +1221,7 @@ def control_main(
     arguments = _control_parser().parse_args(argv)
     from people_counter.sjd_control import FabricControlStore
 
-    selected = config or FabricNamespaceConfig()
+    selected = config or FabricNamespaceConfig.current()
     selected.require_write_enabled()
     store = FabricControlStore(_spark(), config=selected)
     try:
@@ -1427,7 +1423,7 @@ def dispatcher_main(
     arguments = _dispatcher_parser().parse_args(argv)
     from people_counter.sjd_control import FabricControlStore
 
-    selected = config or FabricNamespaceConfig()
+    selected = config or FabricNamespaceConfig.current()
     selected.require_write_enabled()
     owner = arguments.owner or f"pc-production-dispatcher-{uuid.uuid4().hex}"
     store = FabricControlStore(_spark(), config=selected)
@@ -1437,6 +1433,7 @@ def dispatcher_main(
 
             _load_runtime_release_evidence(
                 NotebookUtilsOneLakeFiles(),
+                config=selected,
                 manifest_path=arguments.release_manifest_path,
                 manifest_sha256=arguments.release_manifest_sha256,
                 receipt_path=arguments.release_receipt_path,
@@ -1643,9 +1640,9 @@ def refresh_main(
     from people_counter.fabric_gold import FabricGoldState
     import notebookutils
 
-    selected = config or FabricNamespaceConfig()
+    selected = config or FabricNamespaceConfig.current()
     selected.require_write_enabled()
-    if isinstance(selected, ManualFabricSjdConfig) and arguments.workspace_id != selected.workspace_id:
+    if isinstance(selected, FabricSjdConfig) and arguments.workspace_id != selected.workspace_id:
         raise ValueError("Manual reporting workspace must match the runtime binding")
     state = FabricGoldState(_spark(), config=selected)
     pending = state.pending_refreshes()
@@ -1725,6 +1722,7 @@ def _configure_after_stage_failure(harness: Any, enabled: bool) -> None:
 def _load_runtime_release_evidence(
     files: Any,
     *,
+    config: FabricRuntimeConfig,
     manifest_path: str,
     manifest_sha256: str,
     receipt_path: str,
@@ -1761,6 +1759,7 @@ def _load_runtime_release_evidence(
             local_receipt,
             expected_manifest_sha256=manifest_sha256,
             expected_receipt_sha256=receipt_sha256,
+            deployment=config,
         )
 
 
@@ -1811,11 +1810,12 @@ def process_main(
     )
 
     spark = _spark()
-    config = config or FabricNamespaceConfig()
+    config = config or FabricNamespaceConfig.current()
     config.require_write_enabled()
     store = FabricControlStore(spark, config=config)
     release_evidence = _load_runtime_release_evidence(
         NotebookUtilsOneLakeFiles(),
+        config=config,
         manifest_path=arguments.release_manifest_path,
         manifest_sha256=arguments.release_manifest_sha256,
         receipt_path=arguments.release_receipt_path,
@@ -1956,7 +1956,7 @@ def gold_main(
     from people_counter.sjd_process import OneLakeDeltaAttemptAdapter
 
     spark = _spark()
-    config = config or FabricNamespaceConfig()
+    config = config or FabricNamespaceConfig.current()
     config.require_write_enabled()
     source = FabricCommittedSource(
         spark,

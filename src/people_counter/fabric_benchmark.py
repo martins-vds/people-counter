@@ -9,7 +9,6 @@ import random
 import re
 import statistics
 import subprocess
-import uuid
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -20,11 +19,9 @@ from people_counter.fabric_spark_event_ingest import (
     parse_spark_event_log_lines,
     require_complete_event_evidence,
 )
+from people_counter.fabric_target import FabricTarget
 
 
-WORKSPACE_ID = "c31ee864-230d-4005-8fd5-7c7130ebf774"
-LAKEHOUSE_ID = "883cff91-eaa8-40be-870f-6e9716303cb2"
-ENVIRONMENT_ID = "3e580f48-9ff7-4bc6-af2e-a59158029ada"
 TABLE_PREFIX = "pc_ca_benchmark_v1_"
 FILES_ROOT = "Files/_benchmark/people-counter/sjd/v1/"
 FABRIC_RUNTIME = "2.0"
@@ -267,21 +264,16 @@ def required_f64_equivalent_capacities(
 
 
 @dataclass(frozen=True)
-class FabricBenchmarkConfig:
-    """Fixed, isolated Fabric namespace for the approval benchmark."""
+class FabricBenchmarkConfig(FabricTarget):
+    """Isolated benchmark namespace in an explicitly selected Fabric target."""
 
-    workspace_id: str = WORKSPACE_ID
-    lakehouse_id: str = LAKEHOUSE_ID
-    environment_id: str = ENVIRONMENT_ID
     table_prefix: str = TABLE_PREFIX
     files_root: str = FILES_ROOT
     runtime: str = FABRIC_RUNTIME
 
     def __post_init__(self) -> None:
+        FabricTarget.__post_init__(self)
         expected = (
-            ("workspace_id", WORKSPACE_ID),
-            ("lakehouse_id", LAKEHOUSE_ID),
-            ("environment_id", ENVIRONMENT_ID),
             ("table_prefix", TABLE_PREFIX),
             ("files_root", FILES_ROOT),
             ("runtime", FABRIC_RUNTIME),
@@ -295,8 +287,6 @@ class FabricBenchmarkConfig:
             raise BenchmarkValidationError(
                 f"benchmark configuration is fixed; mismatches={mismatches!r}"
             )
-        for value in (self.workspace_id, self.lakehouse_id, self.environment_id):
-            uuid.UUID(value)
 
     def table(self, suffix: str) -> str:
         if re.fullmatch(r"[a-z0-9_]+", suffix) is None:

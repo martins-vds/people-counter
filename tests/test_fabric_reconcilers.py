@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -16,6 +17,115 @@ from people_counter.fabric_deployment_manifest import DeploymentEnvironment, par
 
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _BASE = "/workspaces/ws/items/item-1/jobs/sparkjob/schedules"
+
+
+def test_schedule_reconciliation_cannot_enable_jobs_without_admission_inputs() -> None:
+    manifest = _resolved_manifest()
+    client = _FakeClient()
+    with pytest.raises(ValueError, match="release"):
+        reconcilers._reconcile_all_schedules(client, manifest, enabled=True, now=_NOW)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("role", ["control", "gold", "reconciliation", "dispatcher", "refresh"])
+def test_disabled_postconfiguration_schedules_keep_the_resolved_runtime_binding(role) -> None:
+    import shlex
+
+    manifest = _resolved_manifest()
+    client = _FakeClient()
+    reconcilers._reconcile_all_schedules(client, manifest, enabled=False, now=_NOW)
+    call = next(call for call in client.calls if call[-1] == f"schedule:{role}")
+    arguments = shlex.split(call[2]["executionData"]["commandLineArguments"])
+    prefix = manifest.runtime_config().command_line_arguments()
+    assert arguments[:len(prefix)] == prefix
+    assert call[2]["enabled"] is False
+
+
+@pytest.mark.parametrize("key", ["workspace_id", "environment_id", "lakehouse_id"])
+def test_conflicting_foundation_outputs_fail_instead_of_mixing_deployments(key) -> None:
+    document = _resolved_manifest().to_document()
+    with pytest.raises(reconcilers.ReconcileError, match="conflict"):
+        reconcilers.merge_terraform_output(document, {key: {"value": _uid("another-target")}})
+
+
+def test_conflicting_job_output_is_not_silently_ignored() -> None:
+    document = _resolved_manifest().to_document()
+    with pytest.raises(reconcilers.ReconcileError, match="conflict"):
+        reconcilers.merge_terraform_output(document, {
+            "spark_job_definition_ids": {"value": {"control": _uid("another-control")}},
+        })
+
+
+def test_postconfiguration_cli_accepts_deployment_release_hashes_without_baking_them_into_sdk(
+    monkeypatch, tmp_path,
+) -> None:
+    document = _resolved_manifest().to_document()
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(document))
+    parsed = reconcilers._argument_parser().parse_args([
+        "--manifest-path", str(path), "--stage", "dev",
+        "--whl-path", str(tmp_path / "people_counter-1.0.0-py3-none-any.whl"),
+        "--release-manifest-sha256", "a" * 64, "--release-receipt-sha256", "b" * 64,
+    ])
+    observed = {}
+
+    def reconcile(client, manifest, **kwargs):
+        observed["manifest"] = manifest
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(reconcilers, "reconcile_runtime", reconcile)
+    _, result = reconcilers._execute(parsed)
+    assert result["status"] == "succeeded"
+    assert observed["manifest"].release.manifest_sha256 == "a" * 64
+    assert observed["manifest"].release.receipt_sha256 == "b" * 64
+    assert observed["manifest"].target() == _resolved_manifest().target()
+
+
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_postconfiguration_activation_failure_attempts_to_disable_all_roles(rollback_fails) -> None:
+    document = _resolved_manifest().to_document()
+    document["release"].update(manifest_sha256="a" * 64, receipt_sha256="b" * 64)
+    manifest = parse_deployment_manifest(document, DeploymentEnvironment.DEV)
+    client = _FakeClient()
+    failed = False
+    run_operation = client.run_operation
+
+    def operation(method, path, *, action, value, accepted):
+        nonlocal failed
+        if action == "schedule:dispatcher" and value["enabled"]:
+            client.calls.append((method, path, value, action))
+            failed = True
+            return DeploymentEvidence(action=action, status="failed", error="injected activation failure")
+        if failed and rollback_fails and action == "schedule:control":
+            client.calls.append((method, path, value, action))
+            return DeploymentEvidence(action=action, status="failed", error="injected rollback failure")
+        return run_operation(method, path, action=action, value=value, accepted=accepted)
+
+    client.run_operation = operation
+    with pytest.raises(reconcilers.ReconcileError) as error:
+        reconcilers._reconcile_all_schedules(client, manifest, enabled=True, now=_NOW)
+    final = [call for call in client.calls if call[0] == "POST"][-5:]
+    assert len(final) == 5
+    assert all(call[2]["enabled"] is False for call in final)
+    assert {call[-1] for call in final} == {
+        f"schedule:{role}" for role in reconcilers.SCHEDULED_ROLES
+    }
+    assert error.value.__cause__ is not None
+    assert ("could not confirm" if rollback_fails else "disabled again") in str(error.value)
+
+
+def test_postconfiguration_does_not_confuse_a_write_ack_with_persisted_schedule_state():
+    client = _FakeClient()
+    client.request_json = lambda *args, **kwargs: {
+        "id": "sched-1",
+        "enabled": True,
+        "configuration": {"type": "Cron", "interval": 5},
+    }
+    with pytest.raises(reconcilers.ReconcileError, match="readback"):
+        reconcilers.reconcile_role_schedule(
+            client, ws="ws", role="control", item_id="item",
+            enabled=False, interval_minutes=5, now=_NOW,
+        )
 
 
 def _uid(seed: str) -> str:
@@ -45,6 +155,12 @@ class _FakeClient:
 
     def run_operation(self, method, path, *, action, value=None, accepted=(200, 201, 202), content_type="json"):
         self.calls.append((method, path, value, action))
+        if "/schedules" in path and method in {"POST", "PATCH"}:
+            schedule_id = path.rsplit("/", 1)[-1] if method == "PATCH" else "sched-1"
+            target = path if method == "PATCH" else path + "/" + schedule_id
+            self.get_results.setdefault(target, []).append({
+                "id": schedule_id, **copy.deepcopy(value),
+            })
         return DeploymentEvidence(action=action, status="succeeded", resource={"id": "sched-1"})
 
     def request_response(
@@ -312,6 +428,7 @@ def test_merge_terraform_output_and_full_runtime_reconciliation(tmp_path: Path) 
         "kql_dashboard_id": {"value": _uid("dashboard")},
         "activator_ids": {"value": {"operations": _uid("activator")}},
     }
+    tf_output["spark_job_definition_ids"]["value"]["control"] = _uid("pinned-control")
     merged = reconcilers.merge_terraform_output(document, tf_output)
     assert merged["workspace_id"] == _uid("ws")
     assert merged["roles"]["control"]["item_id"] == _uid("pinned-control")
@@ -368,6 +485,7 @@ def test_activator_enablement_fails_closed_without_a_definition_bundle(
     document = json.loads(path.read_text())
     document["workspace_id"] = _uid("ws")
     document["fabric_environment_id"] = _uid("env")
+    document["lakehouse"]["lakehouse_id"] = _uid("lakehouse")
     document["activator"] = {
         "reflex_id": _uid("activator"),
         "trigger_name": "Crowding detected",
@@ -593,7 +711,10 @@ def test_table_readback_uses_schema_aware_control_job() -> None:
         for suffix in reconcilers.BOOTSTRAP_TABLE_SUFFIXES
     )
     submission = next(call for call in client.calls if call[0] == "POST")
-    assert submission[2] == {"executionData": {"commandLineArguments": "bootstrap"}}
+    import shlex
+    assert shlex.split(submission[2]["executionData"]["commandLineArguments"]) == [
+        *manifest.runtime_config().command_line_arguments(), "bootstrap",
+    ]
 
     failing = _FakeClient(
         get_results={

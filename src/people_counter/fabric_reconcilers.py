@@ -7,10 +7,12 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -29,6 +31,8 @@ from people_counter.fabric_deployment_manifest import (
     DeploymentEnvironment, DeploymentManifest, SCHEDULED_ROLES, SJD_ROLES, parse_deployment_manifest,
 )
 from people_counter.fabric_sjd import BOOTSTRAP_TABLE_SUFFIXES
+from people_counter.fabric_sjd_definition import validate_schedule_readback
+from people_counter.fabric_target import validate_artifact_id
 
 JOB_TYPE = "sparkjob"
 _BETA_OFF = "beta=false"
@@ -292,7 +296,9 @@ def verify_lakehouse_tables(
         client,
         ws=manifest.workspace_id,
         item_id=control_id,
-        command_line_arguments="bootstrap",
+        command_line_arguments=shlex.join([
+            *manifest.runtime_config().command_line_arguments(), "bootstrap",
+        ]),
         sleep=sleep,
         monotonic=monotonic,
     )
@@ -921,8 +927,8 @@ def reconcile_role_schedule(
     existing = schedules[0] if schedules else None
 
     def _id() -> str:
-        schedule_id = str(existing.get("id", "")) if existing else ""
-        if not schedule_id:
+        schedule_id = existing.get("id") if existing else None
+        if not isinstance(schedule_id, str) or not schedule_id:
             raise ReconcileError(f"{role} schedule readback omitted its ID")
         return schedule_id
 
@@ -937,10 +943,36 @@ def reconcile_role_schedule(
 
     payload = _schedule_payload(interval=interval_minutes, enabled=enabled, args=command_line_arguments, now=now)
     if existing is None:
-        return client.run_operation("POST", base, action=f"schedule:{role}", value=payload, accepted=(200, 201, 202))
-    return client.run_operation(
-        "PATCH", f"{base}/{_id()}", action=f"schedule:{role}", value=payload, accepted=(200, 202)
-    )
+        evidence = client.run_operation(
+            "POST", base, action=f"schedule:{role}", value=payload, accepted=(200, 201, 202),
+        )
+        resource = evidence.resource or {}
+        schedule_id = resource.get("id")
+        if evidence.status != "succeeded":
+            return evidence
+        if not isinstance(schedule_id, str) or not schedule_id:
+            discovered = client.list_pages(base)
+            if len(discovered) != 1 or not isinstance(discovered[0], Mapping):
+                raise ReconcileError(f"{role} created schedule could not be uniquely read back")
+            schedule_id = discovered[0].get("id")
+    else:
+        schedule_id = _id()
+        evidence = client.run_operation(
+            "PATCH", f"{base}/{schedule_id}", action=f"schedule:{role}",
+            value=payload, accepted=(200, 202, 204),
+        )
+        if evidence.status != "succeeded":
+            return evidence
+    if not isinstance(schedule_id, str) or not schedule_id:
+        raise ReconcileError(f"{role} schedule readback omitted its ID")
+    observed = client.request_json("GET", f"{base}/{schedule_id}", expected=(200,))
+    if observed.get("id") != schedule_id:
+        raise ReconcileError(f"{role} schedule readback ID differs")
+    try:
+        validate_schedule_readback(observed, payload)
+    except ValueError as error:
+        raise ReconcileError(f"{role} schedule readback differs: {error}") from error
+    return replace(evidence, resource={**(evidence.resource or {}), "id": schedule_id, "readback": observed})
 
 
 def run_item_job(
@@ -1106,18 +1138,32 @@ def _terraform_value(terraform_output: Mapping[str, Any], key: str) -> Any:
     return entry.get("value") if isinstance(entry, Mapping) else None
 
 
+def _merge_resolved_id(target: dict[str, Any], key: str, value: object, label: str) -> None:
+    if value is None:
+        return
+    try:
+        resolved = validate_artifact_id(value, label)
+    except ValueError as error:
+        raise ReconcileError(str(error)) from error
+    configured = target.get(key)
+    if configured is not None and configured != resolved:
+        raise ReconcileError(f"{label} conflicts with the configured deployment")
+    target[key] = resolved
+
+
 def _merge_foundation_ids(
     merged: dict[str, Any],
     terraform_output: Mapping[str, Any],
 ) -> None:
     lakehouse = merged.setdefault("lakehouse", {})
+    if not isinstance(lakehouse, dict):
+        raise ReconcileError("deployment lakehouse must be an object")
     for target, source, key in (
         (merged, "workspace_id", "workspace_id"),
         (merged, "fabric_environment_id", "environment_id"),
         (lakehouse, "lakehouse_id", "lakehouse_id"),
     ):
-        if target.get(source) is None:
-            target[source] = _terraform_value(terraform_output, key)
+        _merge_resolved_id(target, source, _terraform_value(terraform_output, key), key)
 
 
 def _merge_role_ids(
@@ -1128,8 +1174,8 @@ def _merge_role_ids(
     if not isinstance(role_ids, Mapping):
         raise ReconcileError("terraform output spark_job_definition_ids must be an object")
     for role, binding in (merged.get("roles") or {}).items():
-        if isinstance(binding, Mapping) and binding.get("item_id") is None and role in role_ids:
-            binding["item_id"] = role_ids[role]
+        if isinstance(binding, dict) and role in role_ids:
+            _merge_resolved_id(binding, "item_id", role_ids[role], f"roles.{role}.item_id")
 
 
 def _merge_reporting_ids(
@@ -1155,11 +1201,12 @@ def _merge_reporting_ids(
         ):
             artifact = bundle.get(artifact_key)
             if (
-                isinstance(artifact, Mapping)
-                and artifact.get("target_item_id") is None
-                and bundle_name in outputs
+                isinstance(artifact, dict) and bundle_name in outputs
             ):
-                artifact["target_item_id"] = outputs[bundle_name]
+                _merge_resolved_id(
+                    artifact, "target_item_id", outputs[bundle_name],
+                    f"{document_key}.{artifact_key}.target_item_id",
+                )
 
 
 def _merge_rti_ids(
@@ -1355,30 +1402,61 @@ def _reconcile_all_schedules(
     enabled: bool,
     now: datetime | None,
 ) -> dict[str, DeploymentEvidence]:
-    if manifest.workspace_id is None:
+    workspace_id = manifest.workspace_id
+    if workspace_id is None:
         raise ReconcileError("schedule reconciliation requires a workspace ID")
-    schedules: dict[str, DeploymentEvidence] = {}
+    plans: dict[str, tuple[str, int | None, str]] = {}
     for role in sorted(SJD_ROLES):
         binding = manifest.role(role)
         if binding.item_id is None:
             raise ReconcileError(f"roles.{role}.item_id is unresolved")
+        arguments = (
+            manifest.schedule_arguments(role, enabled=enabled)
+            if binding.schedule is not None else ""
+        )
+        plans[role] = (
+            binding.item_id, binding.schedule.interval_minutes if binding.schedule else None,
+            arguments,
+        )
+
+    def apply(role: str, desired: bool) -> DeploymentEvidence:
+        item_id, interval, arguments = plans[role]
         evidence = reconcile_role_schedule(
             client,
-            ws=manifest.workspace_id,
+            ws=workspace_id,
             role=role,
-            item_id=binding.item_id,
-            enabled=enabled,
-            interval_minutes=(
-                binding.schedule.interval_minutes if binding.schedule else None
-            ),
+            item_id=item_id,
+            enabled=desired,
+            interval_minutes=interval,
+            command_line_arguments=arguments,
             now=now,
         )
         if evidence.status != "succeeded":
             raise ReconcileError(
                 f"{role} schedule reconciliation failed: {evidence.error}"
             )
-        schedules[role] = evidence
-    return schedules
+        return evidence
+
+    try:
+        return {role: apply(role, enabled) for role in plans}
+    except (ReconcileError, FabricApiError, ValueError, OSError) as error:
+        if not enabled:
+            raise
+        failed = []
+        for role in plans:
+            try:
+                apply(role, False)
+            except (ReconcileError, FabricApiError, ValueError, OSError):
+                failed.append(role)
+        if failed:
+            raise ReconcileError(
+                "Schedule activation failed; could not confirm disabled schedules for "
+                + ", ".join(failed) + ". Inspect the workspace before retrying."
+            ) from error
+        raise ReconcileError(
+            "Schedule activation failed; recurring schedules were disabled again. "
+            "Previously accepted jobs are not cancelled."
+        ) from error
 
 
 def _publish_release_manifest(
@@ -1434,7 +1512,9 @@ def _run_lakehouse_bootstrap(
         client,
         ws=manifest.workspace_id,
         item_id=control_id,
-        command_line_arguments="bootstrap",
+        command_line_arguments=shlex.join([
+            *manifest.runtime_config().command_line_arguments(), "bootstrap",
+        ]),
         sleep=sleep,
         monotonic=monotonic,
     )
@@ -1701,6 +1781,14 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage", required=True, choices=[s.value for s in DeploymentEnvironment])
     parser.add_argument("--terraform-output-path", type=Path, default=None)
     parser.add_argument("--whl-path", required=True, type=Path)
+    parser.add_argument(
+        "--release-manifest-sha256",
+        default=os.environ.get("PEOPLE_COUNTER_RELEASE_MANIFEST_SHA256") or None,
+    )
+    parser.add_argument(
+        "--release-receipt-sha256",
+        default=os.environ.get("PEOPLE_COUNTER_RELEASE_RECEIPT_SHA256") or None,
+    )
     parser.add_argument("--enable-schedules", action="store_true")
     parser.add_argument("--bootstrap-lakehouse", action="store_true")
     parser.add_argument("--refresh-reporting", action="store_true")
@@ -1736,6 +1824,16 @@ def _execute(arguments: argparse.Namespace) -> tuple[DeploymentEnvironment, dict
 
     stage = DeploymentEnvironment(arguments.stage)
     document = _load_json(arguments.manifest_path, "deployment manifest")
+    if (arguments.release_manifest_sha256 is None) != (arguments.release_receipt_sha256 is None):
+        raise ReconcileError("both release manifest and receipt hashes must be supplied")
+    if arguments.release_manifest_sha256 is not None:
+        release = document.setdefault("release", {})
+        if not isinstance(release, dict):
+            raise ReconcileError("deployment release must be an object")
+        release.update(
+            manifest_sha256=arguments.release_manifest_sha256,
+            receipt_sha256=arguments.release_receipt_sha256,
+        )
     terraform_output: dict[str, Any] = {}
     if arguments.terraform_output_path is not None:
         terraform_output = _load_json(

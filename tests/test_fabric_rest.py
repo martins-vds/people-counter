@@ -19,6 +19,8 @@ from people_counter.fabric_rest import (
     make_token_provider,
 )
 
+from tests.fabric_fixtures import WORKSPACE_ID
+
 
 @dataclass
 class _TokenProvider:
@@ -221,6 +223,7 @@ def test_request_authenticates_and_serializes_canonical_json() -> None:
         _TokenProvider(),
         transport=transport,
         api_root="https://fabric.example/v1",
+        workspace_id=WORKSPACE_ID,
     )
 
     result = client._json("POST", "/items", value={"z": 1, "a": 2})
@@ -245,7 +248,7 @@ def test_request_redacts_token_from_http_errors() -> None:
     transport = _Transport(
         [HTTPResponse(403, {}, b"denied secret-token")]
     )
-    client = FabricRESTController(_TokenProvider(), transport=transport)
+    client = FabricRESTController(_TokenProvider(), transport=transport, workspace_id=WORKSPACE_ID)
 
     with pytest.raises(FabricRestError, match="Fabric HTTP 403") as captured:
         client._json("GET", "/items")
@@ -256,7 +259,7 @@ def test_request_redacts_token_from_http_errors() -> None:
 
 def test_request_rejects_non_finite_json_before_transport() -> None:
     transport = _Transport([])
-    client = FabricRESTController(_TokenProvider(), transport=transport)
+    client = FabricRESTController(_TokenProvider(), transport=transport, workspace_id=WORKSPACE_ID)
 
     with pytest.raises(ValueError, match="Out of range float values"):
         client._json("POST", "/items", value={"invalid": float("nan")})
@@ -268,7 +271,7 @@ def test_invalid_utf8_error_body_is_safely_reported() -> None:
     transport = _Transport(
         [HTTPResponse(500, {}, b"\xff secret-token")]
     )
-    client = FabricRESTController(_TokenProvider(), transport=transport)
+    client = FabricRESTController(_TokenProvider(), transport=transport, workspace_id=WORKSPACE_ID)
 
     with pytest.raises(FabricRestError) as captured:
         client._json("GET", "/items")
@@ -290,7 +293,7 @@ def test_list_items_follows_continuation_uri() -> None:
     )
     client = FabricRESTController(
         _TokenProvider(),
-        workspace_id="workspace",
+        workspace_id=WORKSPACE_ID,
         transport=transport,
     )
 
@@ -315,6 +318,7 @@ def test_lro_polls_and_reads_resource_location() -> None:
         transport=transport,
         sleep=lambda _: None,
         monotonic=lambda: 0.0,
+        workspace_id=WORKSPACE_ID,
     )
 
     assert client._lro_json("POST", "/items", value={}) == {
@@ -344,6 +348,7 @@ def test_lro_reads_result_location() -> None:
         transport=transport,
         sleep=lambda _: None,
         monotonic=lambda: 0.0,
+        workspace_id=WORKSPACE_ID,
     )
 
     assert client._lro_json("POST", "/items", value={}) == {
@@ -363,6 +368,7 @@ def test_lro_surfaces_terminal_failure() -> None:
         transport=transport,
         sleep=lambda _: None,
         monotonic=lambda: 0.0,
+        workspace_id=WORKSPACE_ID,
     )
 
     with pytest.raises(FabricRestError, match="operation failed"):
@@ -374,4 +380,22 @@ def test_non_https_api_root_is_rejected() -> None:
         FabricRESTController(
             _TokenProvider(),
             api_root="http://fabric.example/v1",
+            workspace_id=WORKSPACE_ID,
         )
+
+
+@pytest.mark.parametrize(
+    "workspace_id",
+    [
+        None, "", "workspace", "../another-workspace",
+        "00000000-0000-0000-0000-000000000000",
+        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+    ],
+)
+def test_rest_client_rejects_invalid_or_nil_workspace_bindings(workspace_id):
+    transport = _Transport([])
+    with pytest.raises(ValueError, match="workspace_id"):
+        FabricRESTController(
+            _TokenProvider(), workspace_id=workspace_id, transport=transport,
+        )
+    assert transport.requests == []

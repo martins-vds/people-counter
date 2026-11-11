@@ -5,7 +5,7 @@ Definition (SJD) pipeline for reliable, observable video processing.
 
 ## Stable Fabric SJD pipeline
 
-The Fabric solution starts with seven Spark Job Definitions:
+The Fabric solution starts with six Spark Job Definitions:
 
 - Control registers work and coordinates recovery.
 - Dispatcher claims bounded batches and starts Process jobs.
@@ -13,10 +13,16 @@ The Fabric solution starts with seven Spark Job Definitions:
 - Reconciliation records differences between control state and data state.
 - Gold builds the analytics and operations tables.
 - Refresh updates both semantic models.
-- Cutover applies approved schema changes and verifies release boundaries.
 
 All roles use the `people_counter_sjd_*` tables. They also use the
 `Files/people-counter/sjd/v1/` file boundary.
+
+The SDK contains no deployment-specific workspace, Lakehouse, Environment,
+SJD, or reporting item IDs. Runtime bindings come from the attached Fabric
+context or explicit validated configuration. Fabric-assigned item IDs are
+captured after provisioning, not built into a wheel. Cutover tooling has been
+removed; Control `bootstrap` initializes a new deployment without migrating
+or deleting existing data.
 
 - [Fabric SJD operations](notebooks/fabric/README.md)
 - [GitHub/Terraform deployment](docs/github-deployment.md)
@@ -455,7 +461,10 @@ bash scripts/bump-sdk-version.sh 1.0.0
 The script updates `pyproject.toml`, resolves `uv.lock`, and synchronizes
 `src/people_counter/data/sjd_release_identity.json`: `package_version`,
 the version suffix in `release_evidence_root`, and `build_input_sha256`.
-It preserves Fabric target IDs and other identity fields, then runs the same
+The v2 identity contains no Fabric target IDs or deployment intent; one SDK
+wheel can be used in multiple deployments. Target IDs belong in deployment
+configuration and runtime bindings, and detached deployment evidence is checked
+against that selected target. The script then runs the same
 release validator as the PR check. On failure it restores the original three
 files. No SDK dependencies are installed. Run it again with the same version
 after finalizing source, package data, build configuration, or this README,

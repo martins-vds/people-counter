@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
-from people_counter.fabric_sjd import ENVIRONMENT_ID, LAKEHOUSE_ID
+from people_counter.fabric_target import FabricTarget
 
 
 ENTRY_POINTS: Mapping[str, str] = {
@@ -17,7 +18,6 @@ ENTRY_POINTS: Mapping[str, str] = {
     "refresh": "people_counter.fabric_sjd_jobs:refresh_main",
     "reconciliation": "people_counter.fabric_sjd_jobs:reconciliation_main",
     "gold": "people_counter.fabric_sjd_jobs:gold_main",
-    "cutover": "people_counter.fabric_sjd_cutover_jobs:main",
 }
 
 
@@ -46,6 +46,41 @@ def validate_reviewed_compute_settings(settings: Mapping[str, Any]) -> None:
             raise RuntimeError(f"Environment {key} differs from reviewed fixed allocation")
 
 
+def _schedule_configuration(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("schedule configuration must be an object")
+    result = dict(value)
+    if "interval" in result and type(result["interval"]) is not int:
+        raise ValueError("schedule interval must be an integer")
+    for key in ("startDateTime", "endDateTime"):
+        text = result.get(key)
+        if not isinstance(text, str):
+            raise ValueError(f"schedule {key} must be an ISO datetime")
+        try:
+            instant = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"schedule {key} must be an ISO datetime") from error
+        if result.get("localTimeZoneId") == "UTC":
+            if instant.tzinfo is None:
+                instant = instant.replace(tzinfo=timezone.utc)
+            instant = instant.astimezone(timezone.utc)
+        result[key] = instant.isoformat()
+    return result
+
+
+def validate_schedule_readback(observed: object, expected: Mapping[str, Any]) -> None:
+    if (
+        not isinstance(observed, Mapping)
+        or type(observed.get("enabled")) is not bool
+        or observed.get("enabled") is not expected["enabled"]
+    ):
+        raise ValueError("schedule enabled readback differs")
+    if _schedule_configuration(observed.get("configuration")) != _schedule_configuration(expected.get("configuration")):
+        raise ValueError("schedule configuration readback differs")
+    if observed.get("executionData") != expected.get("executionData"):
+        raise ValueError("schedule execution data readback differs")
+
+
 def definition_part(path: str, content: bytes) -> dict[str, str]:
     return {
         "path": path,
@@ -64,15 +99,19 @@ def _main_source(entry_point: str) -> bytes:
     ).encode("utf-8")
 
 
-def build_sjd_definition(kind: str) -> dict[str, object]:
+def build_sjd_definition(
+    kind: str, *, config: FabricTarget, command_line_arguments: str = "",
+) -> dict[str, object]:
     if kind not in ENTRY_POINTS:
         raise ValueError(f"unsupported stable SJD kind {kind!r}")
+    if "\x00" in command_line_arguments:
+        raise ValueError("command_line_arguments contains NUL")
     metadata = {
         "additionalLakehouseIds": [],
         "additionalLibraryUris": [],
-        "commandLineArguments": "",
-        "defaultLakehouseArtifactId": LAKEHOUSE_ID,
-        "environmentArtifactId": ENVIRONMENT_ID,
+        "commandLineArguments": command_line_arguments,
+        "defaultLakehouseArtifactId": config.lakehouse_id,
+        "environmentArtifactId": config.environment_id,
         "executableFile": "main.py",
         "language": "Python",
         "mainClass": "",

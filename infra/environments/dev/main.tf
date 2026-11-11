@@ -6,7 +6,6 @@ locals {
     refresh        = { display_name = "pc-sjd-dev-refresh" }
     reconciliation = { display_name = "pc-sjd-dev-reconciliation" }
     gold           = { display_name = "pc-sjd-dev-gold" }
-    cutover        = { display_name = "pc-sjd-dev-cutover" }
   }
   reporting_items = {
     analytics = {
@@ -36,6 +35,7 @@ module "fabric_foundation" {
   environment_description  = "People Counter development Spark Environment"
 
   spark_job_definitions            = local.spark_job_definitions
+  sjd_files_root                   = "Files/people-counter/dev/v1/"
   reporting_items                  = local.reporting_items
   deployment_pipeline              = var.deployment_pipeline
   enable_activator                 = var.enable_activator

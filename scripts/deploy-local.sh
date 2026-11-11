@@ -795,13 +795,13 @@ probe lakehouse "/workspaces/${workspace_id}/lakehouses/${lakehouse_id}" || true
 probe environment \
   "/workspaces/${workspace_id}/environments/${environment_id}" || true
 
-expected_roles='["control","cutover","dispatcher","gold","process","reconciliation","refresh"]'
+expected_roles='["control","dispatcher","gold","process","reconciliation","refresh"]'
 actual_roles=$(jq -c 'keys | sort' <<<"${sjd_ids}")
 if [[ "${actual_roles}" == "${expected_roles}" ]]; then
-  record_probe sjd-role-set succeeded "All seven canonical roles exist"
+  record_probe sjd-role-set succeeded "All six canonical roles exist"
 else
   record_probe sjd-role-set failed \
-    "Expected seven canonical roles; received ${actual_roles}"
+    "Expected six canonical roles; received ${actual_roles}"
 fi
 while IFS=$'\t' read -r role item_id; do
   probe "sjd-${role}" \

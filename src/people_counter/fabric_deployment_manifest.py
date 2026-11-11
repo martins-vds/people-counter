@@ -6,22 +6,21 @@ import dataclasses
 import json
 import os
 import re
-import uuid
-from collections.abc import Mapping
+import shlex
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from people_counter.fabric_sjd import (
-    ENVIRONMENT_ID,
     FABRIC_RUNTIME,
-    FILES_ROOT,
-    LAKEHOUSE_ID,
     TABLE_PREFIX,
     TABLE_SUFFIXES,
-    WORKSPACE_ID,
+    FabricSjdConfig,
+    validate_files_root,
 )
 from people_counter.fabric_sjd_definition import ENTRY_POINTS
+from people_counter.fabric_target import FabricTarget, validate_artifact_id
 
 
 MANIFEST_SCHEMA = "people-counter-deployment-manifest-v1"
@@ -43,7 +42,7 @@ SJD_ROLES = frozenset(ENTRY_POINTS)
 SCHEDULED_ROLES = frozenset(
     {"control", "dispatcher", "reconciliation", "gold", "refresh"}
 )
-ON_DEMAND_ROLES = frozenset({"process", "cutover"})
+ON_DEMAND_ROLES = frozenset({"process"})
 
 if SCHEDULED_ROLES | ON_DEMAND_ROLES != SJD_ROLES:
     raise RuntimeError("SJD role partition does not match ENTRY_POINTS")
@@ -155,6 +154,8 @@ class ActivatorBinding:
 class ReleaseProvenanceRef:
     require_identity: bool
     identity_schema: str
+    manifest_sha256: str | None = None
+    receipt_sha256: str | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -170,6 +171,74 @@ class DeploymentManifest:
     real_time_intelligence: RealTimeIntelligenceBinding
     activator: ActivatorBinding
     release: ReleaseProvenanceRef
+
+    def target(self) -> FabricTarget:
+        return FabricTarget(
+            workspace_id=_uuid(self.workspace_id, "workspace_id"),
+            lakehouse_id=_uuid(self.lakehouse.lakehouse_id, "lakehouse.lakehouse_id"),
+            environment_id=_uuid(self.fabric_environment_id, "fabric_environment_id"),
+        )
+
+    def runtime_config(self) -> FabricSjdConfig:
+        target = self.target()
+        return FabricSjdConfig(
+            workspace_id=target.workspace_id,
+            lakehouse_id=target.lakehouse_id,
+            environment_id=target.environment_id,
+            table_prefix=self.lakehouse.table_prefix,
+            files_root=self.lakehouse.files_root,
+            runtime=self.fabric_runtime,
+        )
+
+    def to_document(self) -> dict[str, Any]:
+        return {
+            "schema": MANIFEST_SCHEMA, **dataclasses.asdict(self), "stage": self.stage.value,
+        }
+
+    def schedule_arguments(
+        self, role: str, *, enabled: bool,
+        semantic_model_ids: Sequence[str] | None = None,
+    ) -> str:
+        self.role(role)
+        arguments = self.runtime_config().command_line_arguments()
+        simple = {
+            "control": ["recover"],
+            "reconciliation": ["reconcile"],
+            "gold": ["run", "--lookback-hours", "48"],
+        }
+        if role in simple:
+            return shlex.join([*arguments, *simple[role]])
+        if role == "dispatcher":
+            if self.release.manifest_sha256 is None or self.release.receipt_sha256 is None:
+                if enabled:
+                    raise ManifestValidationError("Dispatcher activation requires both release hashes")
+                return shlex.join(arguments)
+            from people_counter.fabric_release_provenance import (
+                detached_manifest_evidence_path, postpublish_receipt_evidence_path,
+            )
+            arguments.extend([
+                "--max-items", "64", "--maximum-active-batches", "1",
+                "--lease-seconds", "14400", "--minimum-speed-x", "1",
+                "--safety-factor", "1.25", "--margin-seconds", "60",
+                "--release-manifest-path", detached_manifest_evidence_path(),
+                "--release-manifest-sha256", self.release.manifest_sha256,
+                "--release-receipt-path", postpublish_receipt_evidence_path(),
+                "--release-receipt-sha256", self.release.receipt_sha256,
+            ])
+        elif role == "refresh":
+            model_ids = list(semantic_model_ids) if semantic_model_ids is not None else [
+                artifact.semantic_model.target_item_id
+                for artifact in (self.analytics_reporting, self.operational_reporting)
+                if artifact.semantic_model.target_item_id is not None
+            ]
+            if not model_ids and enabled:
+                raise ManifestValidationError("Refresh activation requires a resolved semantic model ID")
+            arguments.extend(["--workspace-id", self.runtime_config().workspace_id])
+            for model_id in model_ids:
+                arguments.extend(["--semantic-model-id", _uuid(model_id, "semantic model ID")])
+        else:
+            raise ManifestValidationError(f"{role} is not a scheduled role")
+        return shlex.join(arguments)
 
     def role(self, name: str) -> RoleBinding:
         try:
@@ -224,12 +293,9 @@ def _integer(value: object, label: str) -> int:
 def _uuid(value: object, label: str) -> str:
     text = _text(value, label)
     try:
-        canonical = str(uuid.UUID(text))
-    except (AttributeError, TypeError, ValueError) as error:
-        raise ManifestValidationError(f"{label} must be a canonical UUID") from error
-    if canonical != text:
-        raise ManifestValidationError(f"{label} must be a canonical UUID")
-    return text
+        return validate_artifact_id(text, label)
+    except ValueError as error:
+        raise ManifestValidationError(str(error)) from error
 
 
 def _optional_uuid(value: object, label: str) -> str | None:
@@ -271,6 +337,18 @@ def _load_json_file(path: Path, label: str) -> Mapping[str, Any]:
         raise ManifestLoadError(f"{label} at {path} is not valid JSON: {error}") from error
     if not isinstance(document, Mapping):
         raise ManifestLoadError(f"{label} at {path} must be a JSON object")
+    if document.get("schema") == "people-counter-sjd-reporting-deployment-v2":
+        deployment = document.get("deployment")
+        if not isinstance(deployment, Mapping):
+            raise ManifestLoadError(f"{label} reporting evidence omitted its deployment manifest")
+        lakehouse = deployment.get("lakehouse")
+        if (
+            document.get("workspace_id") != deployment.get("workspace_id")
+            or not isinstance(lakehouse, Mapping)
+            or document.get("lakehouse_id") != lakehouse.get("lakehouse_id")
+        ):
+            raise ManifestLoadError(f"{label} reporting evidence contradicts its deployment target")
+        return deployment
     return document
 
 
@@ -383,9 +461,6 @@ def _parse_reporting(value: object, label: str) -> ReportingBundle:
 
 def _verify_release_identity(
     stage: DeploymentEnvironment,
-    workspace_id: str | None,
-    lakehouse_id: str | None,
-    environment_id: str | None,
     release: ReleaseProvenanceRef,
 ) -> None:
     from people_counter import fabric_release_provenance as provenance
@@ -395,30 +470,13 @@ def _verify_release_identity(
         raise ManifestValidationError(
             f"{stage.value} release identity schema does not match the manifest"
         )
-    mismatches = {
-        name: (actual, expected)
-        for name, actual, expected in (
-            ("workspace_id", workspace_id, identity.workspace_id),
-            ("lakehouse_id", lakehouse_id, identity.lakehouse_id),
-            ("fabric_environment_id", environment_id, identity.environment_id),
-        )
-        if actual != expected
-    }
-    if mismatches:
-        raise ManifestValidationError(
-            f"{stage.value} release identity disagrees with manifest: {mismatches!r}"
-        )
 
 
 def verify_release_provenance(manifest: DeploymentManifest) -> str | None:
     if not manifest.release.require_identity:
         return None
     _verify_release_identity(
-        manifest.stage,
-        manifest.workspace_id,
-        manifest.lakehouse.lakehouse_id,
-        manifest.fabric_environment_id,
-        manifest.release,
+        manifest.stage, manifest.release,
     )
     from people_counter import fabric_release_provenance as provenance
 
@@ -451,36 +509,14 @@ def parse_deployment_manifest(
         raise ManifestValidationError("lakehouse.table_prefix has an unsafe value")
     if not files_root.endswith("/"):
         raise ManifestValidationError("lakehouse.files_root must end with '/'")
+    try:
+        validate_files_root(files_root)
+    except ValueError as error:
+        raise ManifestValidationError(str(error)) from error
 
-    if stage is DeploymentEnvironment.PROD:
-        expected = {
-            "workspace_id": WORKSPACE_ID,
-            "fabric_environment_id": ENVIRONMENT_ID,
-            "fabric_runtime": FABRIC_RUNTIME,
-            "lakehouse_id": LAKEHOUSE_ID,
-            "table_prefix": TABLE_PREFIX,
-            "files_root": FILES_ROOT,
-        }
-        actual = {
-            "workspace_id": workspace_id,
-            "fabric_environment_id": environment_id,
-            "fabric_runtime": runtime,
-            "lakehouse_id": lakehouse_id,
-            "table_prefix": table_prefix,
-            "files_root": files_root,
-        }
-        mismatches = {
-            key: (actual[key], value)
-            for key, value in expected.items()
-            if actual[key] != value
-        }
-        if mismatches and not document.get("allow_legacy_mismatch", False):
-            raise ManifestValidationError(
-                f"production deployment identity is fixed: {mismatches!r}"
-            )
-    elif files_root == FILES_ROOT:
+    if runtime != FABRIC_RUNTIME or table_prefix != TABLE_PREFIX:
         raise ManifestValidationError(
-            f"{stage.value} must not reuse the production OneLake files namespace"
+            "deployment must retain the reviewed Fabric runtime and table prefix"
         )
 
     roles_document = _mapping(document.get("roles"), "roles")
@@ -488,10 +524,14 @@ def parse_deployment_manifest(
         missing = sorted(SJD_ROLES - set(roles_document))
         extra = sorted(set(roles_document) - SJD_ROLES)
         raise ManifestValidationError(
-            f"roles must declare exactly the seven SJD roles; "
+            f"roles must declare exactly the six SJD roles; "
             f"missing={missing} extra={extra}"
         )
     roles = {role: _parse_role(role, value) for role, value in roles_document.items()}
+    names = [binding.display_name.casefold() for binding in roles.values()]
+    item_ids = [binding.item_id for binding in roles.values() if binding.item_id is not None]
+    if len(set(names)) != len(names) or len(set(item_ids)) != len(item_ids):
+        raise ManifestValidationError("deployment roles contain duplicate names or item IDs")
 
     release_document = _mapping(document.get("release"), "release")
     release = ReleaseProvenanceRef(
@@ -501,27 +541,25 @@ def parse_deployment_manifest(
         ),
         identity_schema=_text(
             release_document.get(
-                "identity_schema", "people-counter-sjd-release-identity-v1"
+                "identity_schema", "people-counter-sjd-release-identity-v2"
             ),
             "release.identity_schema",
         ),
+        manifest_sha256=_optional_text(release_document.get("manifest_sha256"), "release.manifest_sha256"),
+        receipt_sha256=_optional_text(release_document.get("receipt_sha256"), "release.receipt_sha256"),
     )
+    for label, digest in (
+        ("manifest_sha256", release.manifest_sha256),
+        ("receipt_sha256", release.receipt_sha256),
+    ):
+        if digest is not None and re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ManifestValidationError(f"release.{label} must be a SHA-256 digest")
+    if (release.manifest_sha256 is None) != (release.receipt_sha256 is None):
+        raise ManifestValidationError("release manifest and receipt hashes must be supplied together")
     if release.require_identity:
         _verify_release_identity(
-            stage, workspace_id, lakehouse_id, environment_id, release
+            stage, release,
         )
-        from people_counter import fabric_release_provenance as provenance
-
-        roles = {
-            role: dataclasses.replace(
-                binding,
-                item_id=binding.item_id
-                or provenance.RELEASE_IDENTITY.sjd_ids.get(f"stable-{role}"),
-            )
-            for role, binding in roles.items()
-        }
-        if any(binding.item_id is None for binding in roles.values()):
-            raise ManifestValidationError("release identity omitted an SJD role")
 
     rti_document = _mapping(
         document.get("real_time_intelligence"), "real_time_intelligence"

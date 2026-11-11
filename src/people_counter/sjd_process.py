@@ -1878,7 +1878,7 @@ class OneLakeDeltaAttemptAdapter:
         from people_counter.fabric_namespace import FabricNamespaceConfig
 
         self.root = root.rstrip("/")
-        self.config = config or FabricNamespaceConfig()
+        self.config = config or FabricNamespaceConfig.current()
         try:
             namespace_mode = ProcessRouteMode(self.config.mode.value)
             selected_mode = (

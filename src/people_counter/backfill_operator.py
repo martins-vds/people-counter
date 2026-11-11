@@ -18,7 +18,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 if TYPE_CHECKING:
     from azure.core.credentials import AccessToken, TokenCredential
@@ -30,6 +29,8 @@ from people_counter.fabric_automation import (
     FabricAutomationClient,
 )
 from people_counter.fabric_release_provenance import resolve_published_release
+from people_counter.fabric_sjd import FILES_ROOT, FabricSjdConfig
+from people_counter.fabric_target import validate_artifact_id
 from people_counter.fabric_rest import UrllibTransport
 from people_counter.manifest import manifest_bytes, normalize_relative_path
 from people_counter.manifest_publisher import (
@@ -50,7 +51,6 @@ from people_counter.inference_profiles import (
 )
 
 PARTITION_SIZE = 1000
-INTAKE_ROOT = "Files/people-counter/sjd/v1/intake/backfill"
 CATALOG_SCHEMA = "people-counter-backfill-catalog-v1"
 DEFAULT_CATALOG = Path("config/backfill-catalog.json")
 
@@ -94,6 +94,13 @@ class BackfillConfig:
     shortcut_path: str
     profile: dict[str, Any]
     table_directory: str = "Tables/dbo"
+    files_root: str = FILES_ROOT
+
+    def runtime_config(self) -> FabricSjdConfig:
+        return FabricSjdConfig(
+            workspace_id=self.workspace_id, lakehouse_id=self.lakehouse_id,
+            environment_id=self.environment_id, files_root=self.files_root,
+        )
 
 
 class NotebookStorageCredential:
@@ -150,12 +157,13 @@ def _parse_config(raw: object) -> BackfillConfig:
     values = dict(raw)
     del values["intake_mode"]
     values.setdefault("table_directory", "Tables/dbo")
+    values.setdefault("files_root", FILES_ROOT)
     expected = set(BackfillConfig.__dataclass_fields__)
     if set(values) != expected:
         raise ValueError(
             "Use a generated target/profile catalog; handwritten config_sha256 "
             "and runtime identities are no longer accepted. Required target fields: "
-            f"{sorted(expected - {'table_directory'})}, intake_mode."
+            f"{sorted(expected - {'table_directory', 'files_root'})}, intake_mode."
         )
     directory = values["table_directory"]
     if not isinstance(directory, str) or re.fullmatch(
@@ -163,9 +171,7 @@ def _parse_config(raw: object) -> BackfillConfig:
     ) is None:
         raise ValueError("table_directory must be Tables or Tables/<schema>")
     for name in ("workspace_id", "lakehouse_id", "environment_id", "control_sjd_id"):
-        if not isinstance(values[name], str):
-            raise ValueError(f"{name} must be a UUID")
-        values[name] = str(UUID(values[name]))
+        values[name] = validate_artifact_id(values[name], name)
     for name, pattern in (
         ("storage_account", STORAGE_ACCOUNT_NAME),
         ("filesystem", FILESYSTEM_NAME),
@@ -184,7 +190,9 @@ def _parse_config(raw: object) -> BackfillConfig:
     if resolved is None or profile != resolved:
         raise ValueError("profile must contain only the generated inference profile fields")
     values["profile"] = resolved
-    return BackfillConfig(**values)
+    config = BackfillConfig(**values)
+    config.runtime_config()
+    return config
 
 
 def _read_catalog(path: Path) -> dict[str, Any]:
@@ -579,8 +587,7 @@ def _register_partition(
     if location is None:
         _progress(f"Submitting registration {Path(partition_path).name}: {count} items")
         arguments = shlex.join([
-            "--manual-artifacts", config.workspace_id, config.lakehouse_id,
-            config.environment_id,
+            *config.runtime_config().command_line_arguments(),
             "bulk-register", "--partition-path", partition_path,
             "--partition-sha256", _digest(content), "--max-items", str(count),
         ])
@@ -640,7 +647,10 @@ def submit(
         credentials["credential"] = NotebookStorageCredential()
     _progress("Verifying published release evidence...")
     files = OneLakeFiles(config, **credentials)
-    release = resolve_published_release(files.read_text)
+    release = resolve_published_release(
+        files.read_text, deployment=config,
+        expected_sjd_ids={"stable-control": config.control_sjd_id},
+    )
     if release.manifest.environment_id != config.environment_id:
         raise ValueError("published release Environment does not match the configured Environment")
     _progress("Verifying deployed model artifacts...")
@@ -660,6 +670,8 @@ def submit(
         "package_sha256": _digest(package.index_bytes),
         "items": records,
     }
+    if config.files_root != FILES_ROOT:
+        plan["target"]["files_root"] = config.files_root
     plan_bytes = _json_bytes(plan)
     state_dir.mkdir(parents=True, exist_ok=True)
     plan_path = state_dir / "registration-plan.json"
@@ -714,7 +726,7 @@ def submit(
         transport=UrllibTransport(),
     )
     jobs = []
-    root = f"{INTAKE_ROOT}/{_digest(plan_bytes)}"
+    root = f"{config.runtime_config().file_path('intake/backfill')}/{_digest(plan_bytes)}"
     for offset in range(0, len(records), PARTITION_SIZE):
         partition = records[offset:offset + PARTITION_SIZE]
         name = f"partition-{offset // PARTITION_SIZE + 1:05d}"

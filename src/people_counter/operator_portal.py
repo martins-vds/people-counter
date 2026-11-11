@@ -39,6 +39,12 @@ def _codespaces_origin() -> str | None:
     return f"https://{name}-{port}.{domain}"
 
 
+def _calendar_capture_time(value: str) -> str:
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?", value):
+        return value + "Z"
+    return value
+
+
 def create_app(service: PortalService) -> Flask:
     public_origin = _codespaces_origin()
     public_address = urlsplit(public_origin) if public_origin else None
@@ -217,7 +223,9 @@ def create_app(service: PortalService) -> Flask:
 
     @app.post("/calibrate")
     def save_calibration():
-        flash(service.save_calibration(request.form))
+        form = request.form.to_dict()
+        form["captured_at_utc"] = _calendar_capture_time(form.get("captured_at_utc", ""))
+        flash(service.save_calibration(form))
         return redirect(url_for("cameras"))
 
     @app.route("/cameras", methods=["GET", "POST"])

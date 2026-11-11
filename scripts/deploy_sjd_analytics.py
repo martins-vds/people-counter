@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import dataclasses
 import hashlib
 import json
+import os
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -12,18 +14,17 @@ from pathlib import Path
 from typing import Any
 
 from people_counter.fabric_rest import FabricRESTController, make_token_provider
-from people_counter.fabric_sjd import WORKSPACE_ID
+from people_counter.fabric_definition_bundle import read_definition_bundle
+from people_counter.fabric_deployment_manifest import DeploymentManifest, load_deployment_manifest
+from people_counter.manual_fabric_publication import ensure_item, render_definition
+from people_counter.fabric_target import validate_artifact_id
 
 
 SOURCE_MODEL = {
-    "id": "5dbaf3d1-9f86-4bcd-a590-f32c7fbea08c",
     "name": "pc_analytics_model",
-    "sha256": "cf413a08ef8a8e23e084f37c031e3f6cdc53f8c919c6d6791492065ca5585120",
 }
 SOURCE_REPORT = {
-    "id": "133a8648-ca75-409e-9154-1b89d67f3917",
     "name": "pc_analytics_report",
-    "sha256": "ad2bd08b5aff60ed282bab085224e85d54a0ff63a8a40be5bbf8e31a8ec617d1",
 }
 TARGET_MODEL_NAME = "pc_sjd_analytics_model"
 TARGET_REPORT_NAME = "pc_sjd_analytics_report"
@@ -1116,12 +1117,9 @@ def validate_report_definition(
         raise ReportingDeploymentError("report definition.pbir is absent")
     report = json.loads(_decoded_part(part))
     connection = report["datasetReference"]["byConnection"]["connectionString"]
-    if (
-        f"initial catalog={target_model_name}" not in connection
-        or f"semanticmodelid={target_model_id}" not in connection
-        or f"semanticmodelid={SOURCE_MODEL['id']}" in connection
-    ):
-        raise ReportingDeploymentError("report target model binding is invalid")
+    validate_report_binding(
+        connection, target_model_id=target_model_id, target_model_name=target_model_name,
+    )
     _, layout = _json_part(
         _parts(value),
         "report.json",
@@ -1130,135 +1128,102 @@ def validate_report_definition(
     _validate_forecast_page(layout)
 
 
-def _get_definition(
-    client: FabricRESTController,
-    root: str,
-    item_id: str,
+def validate_report_binding(
+    connection: object, *, target_model_id: str, target_model_name: str,
+) -> None:
+    if not isinstance(connection, str):
+        raise ReportingDeploymentError("report target model binding is invalid")
+    values = {}
+    for parameter in connection.split(";"):
+        if not parameter.strip():
+            continue
+        key, separator, value = parameter.partition("=")
+        name = key.strip().lower()
+        if not separator or name in values:
+            raise ReportingDeploymentError("report target model binding is invalid")
+        values[name] = value.strip()
+    if (
+        values.get("initial catalog") != target_model_name
+        or values.get("semanticmodelid") != target_model_id
+    ):
+        raise ReportingDeploymentError("report target model binding is invalid")
+
+
+def publish_reporting_bundle(
+    output: Path, *, manifest: DeploymentManifest, bundle: str,
+    client: FabricRESTController | None = None,
 ) -> dict[str, Any]:
-    return dict(
-        client._lro_json(
-            "POST",
-            f"/workspaces/{WORKSPACE_ID}/{root}/{item_id}/getDefinition",
-            accepted=(200, 202),
+    target = manifest.target()
+    if client is None:
+        client = FabricRESTController(
+            make_token_provider("azure-cli"), workspace_id=target.workspace_id,
         )
+    if client.workspace_id != target.workspace_id:
+        raise ReportingDeploymentError("Reporting client workspace differs from deployment")
+    selected = {
+        "analytics": manifest.analytics_reporting,
+        "operational": manifest.operational_reporting,
+    }[bundle]
+    root = Path(__file__).resolve().parents[1] / "fabric"
+    model_template = read_definition_bundle(root / "semantic-models" / bundle)["definition"]
+    report_template = read_definition_bundle(root / "reports" / bundle)["definition"]
+    workspace = client._json("GET", f"/workspaces/{target.workspace_id}")
+    lakehouse = client._json(
+        "GET", f"/workspaces/{target.workspace_id}/lakehouses/{target.lakehouse_id}",
     )
-
-
-def _target_item(
-    client: FabricRESTController,
-    item_type: str,
-    display_name: str,
-) -> dict[str, Any] | None:
-    matches = [
-        dict(item)
-        for item in client.list_items()
-        if item.get("type") == item_type
-        and item.get("displayName") == display_name
-    ]
-    if len(matches) > 1:
-        raise ReportingDeploymentError(
-            f"multiple {item_type} items named {display_name}"
-        )
-    return matches[0] if matches else None
-
-
-def _deploy_definition(
-    client: FabricRESTController,
-    *,
-    root: str,
-    item_type: str,
-    display_name: str,
-    definition: Mapping[str, Any],
-) -> dict[str, Any]:
-    item = _target_item(client, item_type, display_name)
-    if item is None:
-        client._lro_json(
-            "POST",
-            f"/workspaces/{WORKSPACE_ID}/{root}",
-            value={
-                **dict(definition),
-                "displayName": display_name,
-                "description": TARGET_DESCRIPTION,
-            },
-            accepted=(201, 202),
-        )
-        item = _target_item(client, item_type, display_name)
-        if item is None:
-            raise ReportingDeploymentError(
-                f"created {item_type} {display_name} is not discoverable"
+    for label, item in (("workspace", workspace), ("Lakehouse", lakehouse)):
+        if not isinstance(item.get("displayName"), str) or not item["displayName"].strip():
+            raise ReportingDeploymentError(f"Published {label} name is missing")
+    model_definition = render_definition(model_template, {
+        "TargetWorkspaceId": target.workspace_id,
+        "TargetLakehouseId": target.lakehouse_id,
+        "TargetLakehouseName": lakehouse["displayName"],
+    })
+    model_id = ensure_item(
+        client, selected.semantic_model.target_name, "SemanticModel", model_definition,
+        approved_existing_id=selected.semantic_model.target_item_id,
+    )
+    validate_artifact_id(model_id, "published semantic model ID")
+    report_definition = render_definition(
+        report_template,
+        {
+            "TargetSemanticModelId": model_id,
+            "TargetSemanticModelName": selected.semantic_model.target_name,
+        },
+        workspace_name=workspace["displayName"],
+    )
+    report_id = ensure_item(
+        client, selected.report.target_name, "Report", report_definition,
+        approved_existing_id=selected.report.target_item_id,
+    )
+    validate_artifact_id(report_id, "published report ID")
+    resolved = dataclasses.replace(
+        manifest,
+        **{
+            f"{bundle}_reporting": dataclasses.replace(
+                selected,
+                semantic_model=dataclasses.replace(selected.semantic_model, target_item_id=model_id),
+                report=dataclasses.replace(selected.report, target_item_id=report_id),
             )
-    elif item.get("description") != TARGET_DESCRIPTION:
-        raise ReportingDeploymentError(
-            f"refusing to overwrite unmanaged {item_type} {display_name}"
-        )
-    client._lro_json(
-        "POST",
-        f"/workspaces/{WORKSPACE_ID}/{root}/{item['id']}/updateDefinition",
-        value=dict(definition),
-        accepted=(200, 202),
-    )
-    return item
-
-
-def deploy(output: Path) -> dict[str, Any]:
-    client = FabricRESTController(make_token_provider("azure-cli"))
-    source_model = _get_definition(
-        client, "semanticModels", str(SOURCE_MODEL["id"])
-    )
-    source_report = _get_definition(
-        client, "reports", str(SOURCE_REPORT["id"])
-    )
-    if definition_sha256(source_model) != SOURCE_MODEL["sha256"]:
-        raise ReportingDeploymentError("source semantic model definition changed")
-    if definition_sha256(source_report) != SOURCE_REPORT["sha256"]:
-        raise ReportingDeploymentError("source report definition changed")
-
-    model_definition = rewrite_model_definition(source_model)
-    model = _deploy_definition(
-        client,
-        root="semanticModels",
-        item_type="SemanticModel",
-        display_name=TARGET_MODEL_NAME,
-        definition=model_definition,
-    )
-    model_id = str(model["id"])
-    report_definition = rewrite_report_definition(
-        source_report,
-        source_model_id=str(SOURCE_MODEL["id"]),
-        target_model_id=model_id,
-    )
-    report = _deploy_definition(
-        client,
-        root="reports",
-        item_type="Report",
-        display_name=TARGET_REPORT_NAME,
-        definition=report_definition,
-    )
-
-    model_readback = _get_definition(client, "semanticModels", model_id)
-    report_readback = _get_definition(client, "reports", str(report["id"]))
-    validate_model_definition(model_readback)
-    validate_report_definition(
-        report_readback,
-        target_model_id=model_id,
+        },
     )
     evidence = {
         "deployed_at": datetime.now(timezone.utc).isoformat(),
+        "bundle": bundle,
         "model": {
-            "definition_sha256": definition_sha256(model_readback),
+            "definition_sha256": definition_sha256({"definition": model_definition}),
             "id": model_id,
-            "name": TARGET_MODEL_NAME,
+            "name": selected.semantic_model.target_name,
         },
         "report": {
-            "definition_sha256": definition_sha256(report_readback),
-            "id": str(report["id"]),
-            "name": TARGET_REPORT_NAME,
+            "definition_sha256": definition_sha256({"definition": report_definition}),
+            "id": report_id,
+            "name": selected.report.target_name,
         },
-        "schema": "people-counter-sjd-analytics-deployment-v1",
-        "source_model_definition_sha256": SOURCE_MODEL["sha256"],
-        "source_report_definition_sha256": SOURCE_REPORT["sha256"],
-        "table_bindings": TABLE_BINDINGS,
-        "workspace_id": WORKSPACE_ID,
+        "schema": "people-counter-sjd-reporting-deployment-v2",
+        "workspace_id": target.workspace_id,
+        "lakehouse_id": target.lakehouse_id,
+        "deployment": resolved.to_document(),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -1268,11 +1233,31 @@ def deploy(output: Path) -> dict[str, Any]:
     return evidence
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def deploy(
+    output: Path, *, manifest: DeploymentManifest,
+    client: FabricRESTController | None = None,
+) -> dict[str, Any]:
+    return publish_reporting_bundle(output, manifest=manifest, bundle="analytics", client=client)
+
+
+def reporting_arguments(
+    argv: Sequence[str] | None,
+) -> tuple[Path, DeploymentManifest]:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--stage", choices=("dev", "test", "prod"))
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args(argv)
-    print(json.dumps(deploy(arguments.output), sort_keys=True))
+    env = dict(os.environ)
+    if arguments.config is not None:
+        env["PEOPLE_COUNTER_DEPLOY_CONFIG_PATH"] = str(arguments.config)
+        env.pop("PEOPLE_COUNTER_DEPLOY_CONFIG_JSON", None)
+    return arguments.output, load_deployment_manifest(arguments.stage, env=env)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    output, manifest = reporting_arguments(argv)
+    print(json.dumps(deploy(output, manifest=manifest), sort_keys=True))
     return 0
 
 

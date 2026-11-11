@@ -8,12 +8,10 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
-
-from people_counter.fabric_sjd import WORKSPACE_ID
-
 
 FABRIC_API_ROOT = "https://api.fabric.microsoft.com/v1"
 FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
@@ -155,7 +153,7 @@ class FabricRESTController:
         self,
         token_provider: TokenProvider,
         *,
-        workspace_id: str = WORKSPACE_ID,
+        workspace_id: str,
         transport: HTTPTransport | None = None,
         api_root: str = FABRIC_API_ROOT,
         timeout: float = 30.0,
@@ -165,6 +163,14 @@ class FabricRESTController:
     ) -> None:
         if not api_root.startswith("https://"):
             raise ValueError("Fabric API root must use HTTPS")
+        if not isinstance(workspace_id, str):
+            raise ValueError("Fabric workspace_id must be a canonical UUID")
+        try:
+            identity = uuid.UUID(workspace_id)
+        except ValueError as error:
+            raise ValueError("Fabric workspace_id must be a canonical UUID") from error
+        if str(identity) != workspace_id or identity.int == 0:
+            raise ValueError("Fabric workspace_id must be a canonical UUID")
         self.token_provider = token_provider
         self.workspace_id = workspace_id
         self.transport = transport or UrllibTransport()

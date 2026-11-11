@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from datetime import datetime, timezone
+from uuid import UUID
 
 import pytest
+from tests.test_fabric_operations_portable import manifest as portable_manifest
 
 from scripts.deploy_sjd_operations import (
     FabricApi,
@@ -15,6 +18,14 @@ from scripts.deploy_sjd_operations import (
     validate_definition_readback,
     bind_intake_release,
     bind_registration_notebook,
+)
+
+from tests.fabric_fixtures import (
+    ENVIRONMENT_ID,
+    LAKEHOUSE_ID,
+    ROLE_IDS,
+    TEST_TARGET,
+    WORKSPACE_ID,
 )
 
 
@@ -46,7 +57,7 @@ def test_fabric_api_uses_the_supplied_bearer_token(
         "scripts.deploy_sjd_operations.urllib.request.urlopen",
         open_request,
     )
-    api = FabricApi("workspace-1", token="token-1")
+    api = FabricApi(TEST_TARGET, token="token-1")
 
     status, _, body = api.request("GET", "/workspaces/workspace-1/items")
 
@@ -59,7 +70,9 @@ def test_fabric_api_uses_the_supplied_bearer_token(
 
 
 class FakeApi:
-    workspace_id = "workspace-1"
+    workspace_id = WORKSPACE_ID
+    target = TEST_TARGET
+    config = portable_manifest().runtime_config()
 
     def __init__(self) -> None:
         self.upserts: list[tuple[str, str]] = []
@@ -79,15 +92,16 @@ class FakeApi:
         assert not self.schedules
         self.notebook_bindings.append(item_id)
 
-    def upsert_sjd(self, kind: str, display_name: str) -> str:
+    def upsert_sjd(self, kind: str, display_name: str, *, expected_item_id=None) -> str:
         self.upserts.append((kind, display_name))
-        return f"{kind}-id"
+        return ROLE_IDS[kind]
 
     @staticmethod
     def get_definition(item_id: str) -> dict[str, object]:
         from people_counter.fabric_sjd_definition import build_sjd_definition
 
-        definition = build_sjd_definition(item_id.removesuffix("-id"))
+        role = next(role for role, value in ROLE_IDS.items() if value == item_id)
+        definition = build_sjd_definition(role, config=TEST_TARGET)
         definition["definition"]["parts"].append(
             {
                 "path": ".platform",
@@ -104,11 +118,7 @@ class FakeApi:
         payload: dict[str, object],
     ) -> dict[str, object]:
         self.schedules.append((item_id, payload))
-        return {
-            "configuration": payload["configuration"],
-            "enabled": payload["enabled"],
-            "id": f"{item_id}-schedule",
-        }
+        return {**payload, "id": f"{item_id}-schedule"}
 
 
 def test_schedule_payload_is_bounded_deterministic_and_disabled_by_default() -> None:
@@ -142,24 +152,25 @@ def test_deploy_operations_reconciles_all_stable_jobs_and_schedules() -> None:
     api = FakeApi()
     result = deploy_operations(
         api,
+        manifest=portable_manifest(),
         release_manifest_sha256="a" * 64,
         release_receipt_sha256="b" * 64,
-        semantic_model_id="model-1",
-        additional_semantic_model_ids=("model-2",),
+        semantic_model_id=str(UUID(int=80)),
+        additional_semantic_model_ids=(str(UUID(int=81)),),
         enable_schedules=False,
-        intake_pipeline_id="intake-id",
-        registration_notebook_id="metadata-notebook",
+        intake_pipeline_id=str(UUID(int=82)),
+        registration_notebook_id=str(UUID(int=83)),
         now=datetime(2026, 10, 9, 20, 0, tzinfo=timezone.utc),
     )
 
     assert api.upserts == list(ITEM_NAMES.items())
     scheduled_ids = [item_id for item_id, _ in api.schedules]
     assert scheduled_ids == [
-        "dispatcher-id",
-        "6df10e00-517c-409a-8dd6-40ae9bc62003",
-        "c94fc6fb-7397-4d11-9bd8-c4d3e778b501",
-        "621391c9-ba0c-4965-8f1e-52fbb46b59eb",
-        "refresh-id",
+        ROLE_IDS["dispatcher"],
+        ROLE_IDS["control"],
+        ROLE_IDS["reconciliation"],
+        ROLE_IDS["gold"],
+        ROLE_IDS["refresh"],
     ]
     assert all(
         payload["enabled"] is False for _, payload in api.schedules
@@ -173,13 +184,14 @@ def test_deploy_operations_reconciles_all_stable_jobs_and_schedules() -> None:
         "commandLineArguments"
     ]
     assert refresh == (
-        "--workspace-id workspace-1 --semantic-model-id model-1 "
-        "--semantic-model-id model-2"
+        f"--artifacts {WORKSPACE_ID} {LAKEHOUSE_ID} {ENVIRONMENT_ID} "
+        f"--workspace-id {WORKSPACE_ID} --semantic-model-id {UUID(int=80)} "
+        f"--semantic-model-id {UUID(int=81)}"
     )
     assert result["enabled"] is False
     assert api.compute_verified is True
-    assert api.intake_bindings == [("intake-id", "a" * 64)]
-    assert api.notebook_bindings == ["metadata-notebook"]
+    assert api.intake_bindings == [(str(UUID(int=82)), "a" * 64)]
+    assert api.notebook_bindings == [str(UUID(int=83))]
 
 
 def test_deploy_operations_fails_closed_on_definition_drift() -> None:
@@ -192,12 +204,13 @@ def test_deploy_operations_fails_closed_on_definition_drift() -> None:
     ):
         deploy_operations(
             api,
+            manifest=portable_manifest(),
             release_manifest_sha256="a" * 64,
             release_receipt_sha256="b" * 64,
-            semantic_model_id="model-1",
+            semantic_model_id=str(UUID(int=80)),
             enable_schedules=False,
-            intake_pipeline_id="intake-id",
-            registration_notebook_id="metadata-notebook",
+            intake_pipeline_id=str(UUID(int=82)),
+            registration_notebook_id=str(UUID(int=83)),
         )
 
 
@@ -238,6 +251,9 @@ def test_intake_binding_uses_same_release_and_preserves_other_configuration() ->
 
 def test_registration_notebook_uses_sdk_release_without_literal_versions(monkeypatch) -> None:
     from unittest.mock import Mock
+    from types import SimpleNamespace
+    from people_counter.fabric_sjd import ManualFabricSjdConfig
+    from tests.test_fabric_manual_deployment import CONTEXT
 
     source = (
         "# PARAMETERS\nRELEASE_MANIFEST_SHA256 = ''\n"
@@ -259,9 +275,17 @@ def test_registration_notebook_uses_sdk_release_without_literal_versions(monkeyp
     resolver = Mock(return_value="b" * 64)
     monkeypatch.setattr("people_counter.fabric_control_store.NotebookUtilsOneLakeFiles", lambda: files)
     monkeypatch.setattr("people_counter.fabric_release_provenance.registration_release_digest", resolver)
+    monkeypatch.setitem(
+        sys.modules, "notebookutils",
+        SimpleNamespace(runtime=SimpleNamespace(context=CONTEXT)),
+    )
     namespace = {}
     exec(compile(observed, "<registration-metadata>", "exec"), namespace)
-    resolver.assert_called_once_with(files.read_text, expected_digest="")
+    resolver.assert_called_once_with(
+        files.read_text,
+        deployment=ManualFabricSjdConfig.from_runtime_context(CONTEXT),
+        expected_digest="",
+    )
     assert namespace["result"] == {"release_digest": "b" * 64}
 
 
@@ -314,10 +338,8 @@ def test_reviewed_compute_validation_rejects_each_contract_drift(field, value):
 def test_workspace_pool_limits_are_required_before_enabling_compute(monkeypatch):
     from unittest.mock import Mock
     from people_counter.fabric_sjd_definition import reviewed_compute_settings
-    from people_counter.fabric_release_provenance import RELEASE_IDENTITY
-
-    api = FabricApi("workspace", token="token")
-    base = "/workspaces/workspace/environments/" + RELEASE_IDENTITY.environment_id + "/sparkcompute?beta=false"
+    api = FabricApi(TEST_TARGET, token="token")
+    base = f"/workspaces/{WORKSPACE_ID}/environments/{ENVIRONMENT_ID}/sparkcompute?beta=false"
     policy = {"pool": {"customizeComputeEnabled": True, "starterPool": {"maxNodeCount": 10, "maxExecutors": 9}}}
     request = Mock(side_effect=[
         (200, {}, reviewed_compute_settings({})),
@@ -331,7 +353,7 @@ def test_workspace_pool_limits_are_required_before_enabling_compute(monkeypatch)
     api.verify_compute()
     calls = request.call_args_list
     assert calls[0].args == ("GET", base)
-    assert calls[1].args == ("GET", "/workspaces/workspace/spark/settings")
+    assert calls[1].args == ("GET", f"/workspaces/{WORKSPACE_ID}/spark/settings")
 
 
 def test_live_allocation_verifier_checks_runtime_not_just_published_properties():
@@ -442,7 +464,7 @@ def test_release_producer_reconcilers_update_and_verify_live_readback(monkeypatc
         "payload": base64.b64encode(payload).decode(),
     }]}}
     expected = bind_intake_release(original, "b" * 64) if kind == "intake" else bind_registration_notebook(original)
-    api = FabricApi("workspace", token="token")
+    api = FabricApi(TEST_TARGET, token="token")
     readback = Mock(side_effect=[original, expected])
     request = Mock(return_value=(status, {"Location": "operation"}, {}))
     wait = Mock()
@@ -453,7 +475,7 @@ def test_release_producer_reconcilers_update_and_verify_live_readback(monkeypatc
         api.reconcile_intake_release("item", "b" * 64)
     else:
         api.reconcile_registration_notebook("item")
-    assert request.call_args.args[:2] == ("POST", "/workspaces/workspace/items/item/updateDefinition")
+    assert request.call_args.args[:2] == ("POST", f"/workspaces/{WORKSPACE_ID}/items/item/updateDefinition")
     assert readback.call_count == 2
     assert wait.call_count == (1 if status == 202 else 0)
     readback.side_effect = [original, original]
@@ -466,7 +488,7 @@ def test_release_producer_reconcilers_update_and_verify_live_readback(monkeypatc
 def test_definition_readback_accepts_fabric_json_formatting_only() -> None:
     from people_counter.fabric_sjd_definition import build_sjd_definition
 
-    observed = build_sjd_definition("dispatcher")
+    observed = build_sjd_definition("dispatcher", config=TEST_TARGET)
     parts = observed["definition"]["parts"]
     metadata = next(
         part for part in parts if part["path"] == "SparkJobDefinitionV1.json"
@@ -490,4 +512,4 @@ def test_definition_readback_accepts_fabric_json_formatting_only() -> None:
         }
     )
 
-    validate_definition_readback("dispatcher", observed)
+    validate_definition_readback("dispatcher", observed, config=TEST_TARGET)
