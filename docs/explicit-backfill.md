@@ -14,7 +14,7 @@ default Lakehouse and a compatible published SDK Environment, and ensure
 
 | Setting | Default mounted path | Purpose |
 |---|---|---|
-| `VIDEO_ROOT` | `/lakehouse/default/Files/backfill/source-videos` | Source-tree root containing the `samples/` shortcut |
+| `VIDEO_ROOT` | `/lakehouse/default/Files/backfill/source-videos` | Source-tree root containing the selected shortcut or folder |
 | `PACKAGE_DIR` | `/lakehouse/default/Files/backfill/manifest-package-tutorial` | Generated package consumed by the second notebook |
 | `CATALOG_PATH` | `/lakehouse/default/Files/backfill/config/camera_catalog.csv` | Automatically generated tutorial camera metadata |
 | `EXCEPTION_INVENTORY_PATH` | `/lakehouse/default/Files/backfill/config/video-inventory-exceptions.csv` | Automatically generated tutorial timestamp override |
@@ -22,12 +22,16 @@ default Lakehouse and a compatible published SDK Environment, and ensure
 The notebook identity needs read access to the shortcut and write access to
 the package/configuration folders. These folders must be outside the source
 shortcut. No repository checkout, uv, or Azure CLI login is required.
-The only data input is the same three tutorial clips. Create a shortcut named
-`samples` inside the source-tree root, targeting the folder containing those
-clips, or set `VIDEO_ROOT` to a mounted tree already containing `samples/`.
-Both modes generate identical camera metadata and the
-`samples/three_people_walking.mp4` timestamp override. No catalog upload is
-required. Generated metadata paths are relative to `VIDEO_ROOT`; preserve that
+The only data input is the same three tutorial clips. Set `PARTITION_PREFIX`
+in the Fabric or local branch to their relative folder beneath `VIDEO_ROOT`.
+It defaults to `samples/`, but a different shortcut name or nested folder such
+as `tutorial-videos/` or `footage/demo` also works. A trailing slash is optional;
+empty, absolute, URL, and parent-traversal paths are rejected. The generated
+camera catalog uses the normalized prefix, and the timestamp override points to
+`<prefix>/three_people_walking.mp4`. Other tutorial camera metadata and the
+override timestamp are unchanged. No catalog upload is required.
+After changing the prefix, rerun setup and subsequent cells to regenerate the
+package. Paths and asset identities are relative to `VIDEO_ROOT`; preserve that
 layout for the second notebook. Use dedicated tutorial configuration/output
 folders because the metadata cells rewrite their example CSVs. The sample
 calibration is not intended for arbitrary production footage.

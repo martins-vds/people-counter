@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import people_counter.manifest_publisher as publisher
+from people_counter.manifest import CatalogError
 from tests.test_manifest_publisher import inspection
 
 
@@ -24,7 +25,7 @@ def cells():
     }
 
 
-def run_setup(source, fabric, lakehouse):
+def run_setup(source, fabric, lakehouse, partition_prefix=None):
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
@@ -36,17 +37,25 @@ def run_setup(source, fabric, lakehouse):
                     func=ast.Name(id="Path", ctx=ast.Load()),
                     args=[ast.Constant(str(lakehouse))], keywords=[],
                 )
+            if (
+                "PARTITION_PREFIX" in names
+                and isinstance(node.value, ast.Constant)
+                and partition_prefix is not None
+            ):
+                node.value = ast.Constant(partition_prefix)
     namespace = {}
     exec(compile(ast.fix_missing_locations(tree), "<notebook-setup>", "exec"), namespace)
     return namespace
 
 
 @pytest.fixture
-def fabric_setup(cells, tmp_path, monkeypatch):
+def fabric_setup(cells, tmp_path, monkeypatch, request):
     lakehouse = tmp_path / "lakehouse"
     (lakehouse / "Files/backfill/source-videos").mkdir(parents=True)
     monkeypatch.chdir(tmp_path)
-    namespace = run_setup(cells["workspace-setup"], True, lakehouse)
+    namespace = run_setup(
+        cells["workspace-setup"], True, lakehouse, getattr(request, "param", None),
+    )
     yield namespace
     namespace["PREPARATION_STATE"].cleanup()
 
@@ -128,6 +137,43 @@ def test_fabric_generates_identical_tutorial_metadata(
     assert {row["source_path_prefix"] for row in rows} == {"samples/"}
 
 
+@pytest.mark.parametrize("fabric", [False, True])
+@pytest.mark.parametrize("prefix", ["camera-shortcut/", "footage/custom"])
+def test_custom_prefix_updates_generated_metadata(cells, tmp_path, monkeypatch, fabric, prefix):
+    (tmp_path / "samples").mkdir()
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n")
+    (tmp_path / "lakehouse/Files/backfill/source-videos").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    namespace = run_setup(cells["workspace-setup"], fabric, tmp_path / "lakehouse", prefix)
+    try:
+        expected = prefix.rstrip("/") + "/"
+        assert namespace["PARTITION_PREFIX"] == expected
+        exec(cells["write-catalog"], namespace)
+        exec(cells["write-exception-inventory"], namespace)
+        with namespace["CATALOG_PATH"].open(newline="") as handle:
+            rows = list(namespace["csv"].DictReader(handle))
+        assert {row["source_path_prefix"] for row in rows} == {expected}
+        assert [row["frame_width"] for row in rows] == ["3626", "3840", "1920"]
+        with namespace["EXCEPTION_INVENTORY_PATH"].open(newline="") as handle:
+            overrides = list(namespace["csv"].DictReader(handle))
+        assert overrides == [{
+            "video_relative_path": f"{expected}three_people_walking.mp4",
+            "captured_at_utc": "2023-10-01T01:00:00Z",
+        }]
+    finally:
+        if fabric:
+            namespace["PREPARATION_STATE"].cleanup()
+
+
+@pytest.mark.parametrize("prefix", ["", "../videos", "/videos", "abfss://container/videos"])
+def test_invalid_prefix_fails_before_writing_metadata(cells, tmp_path, monkeypatch, prefix):
+    (tmp_path / "Files/backfill/source-videos").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(CatalogError, match="Invalid relative path"):
+        run_setup(cells["workspace-setup"], True, tmp_path, prefix)
+    assert not (tmp_path / "Files/backfill/config").exists()
+
+
 def test_fabric_preview_discovers_nested_shortcut_videos(cells, fabric_setup):
     root = fabric_setup["VIDEO_ROOT"]
     video = root / "samples/three_people_walking.mp4"
@@ -145,8 +191,12 @@ def test_fabric_preview_discovers_nested_shortcut_videos(cells, fabric_setup):
     assert runner.call_args.kwargs["check"] is True
 
 
+@pytest.mark.parametrize(
+    "fabric_setup", ["samples/", "camera-shortcut/", "footage/custom"], indirect=True,
+)
 def test_fabric_prepares_and_validates_handoff_from_videos_only(cells, fabric_setup):
-    video = fabric_setup["VIDEO_ROOT"] / "samples/three_people_walking.mp4"
+    prefix = fabric_setup["PARTITION_PREFIX"]
+    video = fabric_setup["VIDEO_ROOT"] / prefix / "three_people_walking.mp4"
     video.parent.mkdir(parents=True)
     video.write_bytes(b"video")
     unrelated = fabric_setup["VIDEO_ROOT"] / "outside-tutorial.mp4"
@@ -183,7 +233,7 @@ def test_fabric_prepares_and_validates_handoff_from_videos_only(cells, fabric_se
     storage.assert_not_called()
     assert runner.call_count == 2
     first, complete = (call.args[0] for call in runner.call_args_list)
-    assert first[first.index("--partition-prefix") + 1] == "samples/"
+    assert first[first.index("--partition-prefix") + 1] == prefix
     assert "--inventory" not in first
     assert complete[complete.index("--inventory") + 1] == str(
         fabric_setup["EXCEPTION_INVENTORY_PATH"]
