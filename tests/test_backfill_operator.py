@@ -367,6 +367,8 @@ def test_notebook_preparation_uses_kernel_interpreter():
         "VIDEO_ROOT": Path("videos"),
         "PARTITION_PREFIX": "samples/",
         "PACKAGE_DIR": Path("package"),
+        "CHECKPOINT_PATH": Path("checkpoint.sqlite3"),
+        "MAX_FILES": 10,
     }
     exec(compile(assignment, str(path), "exec"), namespace)
     command = namespace["prepare_base"]
@@ -377,6 +379,7 @@ def test_notebook_preparation_uses_kernel_interpreter():
         "--video-root", "videos",
         "--partition-prefix", "samples/",
         "--output-dir", "package",
+        "--checkpoint", "checkpoint.sqlite3",
         "--max-files", "10",
     ]
     result = subprocess.run(

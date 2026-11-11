@@ -5,7 +5,34 @@ profile setup, and controlled publication/submission, use the
 [local operator portal](operator-portal.md). The CLI workflow below remains available.
 
 The [manifest package notebook](../notebooks/manifest_package_operator_tutorial.ipynb)
-only prepares local packages. It never uploads videos or submits work.
+prepares packages locally or directly in a Fabric Lakehouse. It never publishes
+videos or submits work.
+
+For **Fabric preparation**, import the first notebook as PySpark, attach the
+default Lakehouse and a compatible published SDK Environment, and ensure
+`ffprobe` is available. Set `FABRIC_MODE = True` and configure:
+
+| Setting | Default mounted path | Purpose |
+|---|---|---|
+| `VIDEO_ROOT` | `/lakehouse/default/Files/backfill/source-videos` | Source-tree root containing the `samples/` shortcut |
+| `PACKAGE_DIR` | `/lakehouse/default/Files/backfill/manifest-package-tutorial` | Generated package consumed by the second notebook |
+| `CATALOG_PATH` | `/lakehouse/default/Files/backfill/config/camera_catalog.csv` | Automatically generated tutorial camera metadata |
+| `EXCEPTION_INVENTORY_PATH` | `/lakehouse/default/Files/backfill/config/video-inventory-exceptions.csv` | Automatically generated tutorial timestamp override |
+
+The notebook identity needs read access to the shortcut and write access to
+the package/configuration folders. These folders must be outside the source
+shortcut. No repository checkout, uv, or Azure CLI login is required.
+The only data input is the same three tutorial clips. Create a shortcut named
+`samples` inside the source-tree root, targeting the folder containing those
+clips, or set `VIDEO_ROOT` to a mounted tree already containing `samples/`.
+Both modes generate identical camera metadata and the
+`samples/three_people_walking.mp4` timestamp override. No catalog upload is
+required. Generated metadata paths are relative to `VIDEO_ROOT`; preserve that
+layout for the second notebook. Use dedicated tutorial configuration/output
+folders because the metadata cells rewrite their example CSVs. The sample
+calibration is not intended for arbitrary production footage.
+SQLite preparation state stays driver-local and temporary; the completed
+package is retained in the Lakehouse.
 
 After its step 9, continue with the
 [explicit backfill operator notebook](../notebooks/explicit_backfill_operator_tutorial.ipynb)
@@ -15,6 +42,12 @@ Lakehouse and matching published SDK Environment. Set its `PACKAGE_DIR`,
 for example `/lakehouse/default/Files/...`, preserving relative video paths.
 Set the real Environment/Control SJD IDs and source ADLS account/filesystem.
 Workspace and Lakehouse IDs come from the default Lakehouse runtime context.
+Set `FABRIC_MODE = True` in this second notebook too. Its default package and
+video paths match Fabric preparation above, so it consumes the first notebook's
+output without copying. If either path was customized, use the same path in
+both notebooks and preserve the video-relative layout. The preparation shortcut
+is a source reader; the deployment's `shortcut_path` such as `Files/videos`
+still exposes the ADLS filesystem used for published `incoming/...` objects.
 
 The notebook generates its catalog from the actual files under `MODELS_DIR`,
 prints every required artifact's SHA-256, previews the package, and triggers
