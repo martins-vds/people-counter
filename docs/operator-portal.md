@@ -150,6 +150,25 @@ The existing Playwright tests remain responsible for real-browser integration.
 
 ## VS Code and Codespaces
 
+The dev container uses Docker outside Docker: the Docker CLI connects to the
+host daemon through its mounted socket instead of running a nested daemon.
+Images, build cache, and named volumes now belong to the host daemon. This avoids
+a separate nested Docker store, but does not increase the Codespace's total disk
+capacity or automatically remove the previous daemon's data.
+
+After changing this configuration, run **Codespaces: Rebuild Container** (or
+**Dev Containers: Rebuild Container** locally), then check `docker info`,
+`docker system df`, and `df -h` before retrying `./scripts/start-portal.sh`.
+Do not prune volumes to recover space unless their data can be deleted.
+Existing portal state and Azure credentials in the old daemon's named volumes
+do not migrate automatically; back up any needed state before rebuilding.
+
+Bind-mount sources must exist on the Docker host at the paths Compose resolves.
+Use the shared `/workspaces` checkout in Codespaces and keep footage/model folders
+there. On local dev containers, the checkout must be mounted at the same absolute
+path on the host and in the dev container for relative Compose mounts to work.
+Access to the host Docker socket grants host-level control; use only trusted code.
+
 The dev container forwards port **8088**, labels it **People Counter operator
 portal**, and notifies you when it becomes available. Rebuild the dev container
 to apply changed forwarding settings, start Compose, then open the port from the
