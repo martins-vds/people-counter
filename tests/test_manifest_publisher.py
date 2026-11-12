@@ -916,6 +916,16 @@ class ManifestPublisherTests(unittest.TestCase):
 
         self.assertFalse(config.checkpoint_path.exists())
 
+    def test_discovery_missing_partition_identifies_video_root(self):
+        with self.assertRaises(ManifestPublisherError) as raised:
+            discover_videos(self.root, "south/camera-18/", 1)
+
+        self.assertEqual(
+            str(raised.exception),
+            "Partition prefix 'south/camera-18/' does not exist in video root: "
+            f"{self.root}",
+        )
+
     def test_discovery_rejects_unbounded_partition(self):
         second = self.video.with_name("20260203T050506Z.mp4")
         second.write_bytes(b"video")

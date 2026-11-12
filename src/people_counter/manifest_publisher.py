@@ -394,7 +394,8 @@ def discover_videos(
         search_root = video_root.joinpath(*_path_parts(normalized))
         if not search_root.is_dir():
             raise ManifestPublisherError(
-                f"Partition prefix does not exist: {partition_prefix}"
+                f"Partition prefix '{partition_prefix}' does not exist "
+                f"in video root: {video_root}"
             )
     paths = sorted(
         path
