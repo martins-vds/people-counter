@@ -33,15 +33,39 @@ cp pyproject.toml uv.lock original-release/
 release_files=(pyproject.toml uv.lock)
 sha256sum "${release_files[@]}" > "${temp}/original-release.sha256"
 expect_failure "Usage:" bash scripts/bump-sdk-version.sh
-for version in v1.2.4 1.2 01.2.4 1.2.4-rc1 '1.2.4 '; do
+for version in '' v1.2.4 1.2 01.2.4 1.2.4-rc1 '1.2.4 '; do
   expect_failure "MAJOR.MINOR.PATCH" bash scripts/bump-sdk-version.sh "${version}"
+  expect_failure "MAJOR.MINOR.PATCH" bash scripts/bump-sdk-version.sh --patch "${version}"
 done
 expect_failure "Usage:" bash scripts/bump-sdk-version.sh 1.2.4 extra
+for arguments in '--major --minor' '--minor --patch' '--major --patch' '--patch --patch' '--unknown'; do
+  read -r -a args <<< "${arguments}"
+  expect_failure "Usage:" bash scripts/bump-sdk-version.sh "${args[@]}"
+done
 sha256sum --check "${temp}/original-release.sha256"
 git tag v1.2.4
 expect_failure "already exists" bash scripts/bump-sdk-version.sh 1.2.4
+expect_failure "already exists" bash scripts/bump-sdk-version.sh --patch
 sha256sum --check "${temp}/original-release.sha256"
 git tag -d v1.2.4
+
+for bump in major minor patch; do
+  case "${bump}" in
+    major) expected=2.0.0 ;;
+    minor) expected=1.3.0 ;;
+    patch) expected=1.2.4 ;;
+  esac
+  cp original-release/pyproject.toml original-release/uv.lock .
+  (cd /; bash "${temp}/scripts/bump-sdk-version.sh" "--${bump}")
+  [[ "$(uv version --short)" == "${expected}" ]]
+  bash "${scripts}/validate-release.sh" pr "releases/v${expected}"
+  for args in "--${bump} 3.4.5" "3.4.5 --${bump}"; do
+    read -r -a arguments <<< "${args}"
+    bash scripts/bump-sdk-version.sh "${arguments[@]}"
+    [[ "$(uv version --short)" == 3.4.5 ]]
+    bash "${scripts}/validate-release.sh" pr releases/v3.4.5
+  done
+done
 
 # Exercise the command from outside the repository, without SDK dependencies.
 (cd /; bash "${temp}/scripts/bump-sdk-version.sh" 1.2.4)
@@ -70,6 +94,9 @@ sha256sum "${release_files[@]}" > "${temp}/before-failure.sha256"
 expect_failure "Lock resolution failed" \
   env REAL_UV="${real_uv}" PATH="${temp}/failing-uv:${PATH}" \
   bash scripts/bump-sdk-version.sh 1.2.5
+expect_failure "Lock resolution failed" \
+  env REAL_UV="${real_uv}" PATH="${temp}/failing-uv:${PATH}" \
+  bash scripts/bump-sdk-version.sh --patch
 sha256sum --check "${temp}/before-failure.sha256"
 
 cat > .github/scripts/validate-release.sh <<'MOCK'

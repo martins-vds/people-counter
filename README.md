@@ -458,6 +458,12 @@ git switch -c releases/v1.0.0
 bash scripts/bump-sdk-version.sh 1.0.0
 ```
 
+Instead of supplying a version, pass exactly one of `--major`, `--minor`, or
+`--patch` to increment the current project version. Major increments reset minor
+and patch to zero; minor increments reset patch to zero. An explicit
+`MAJOR.MINOR.PATCH` version takes precedence over a bump flag, in either order.
+For example, `bash scripts/bump-sdk-version.sh --patch 1.0.0` sets `1.0.0`.
+
 The script updates `pyproject.toml`, resolves `uv.lock`, and runs the same
 release validator as the PR check. On failure it restores those two files.
 No SDK dependencies are installed. The wheel uses standard Python package
