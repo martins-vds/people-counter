@@ -71,6 +71,7 @@ services:
       - "127.0.0.1:${PC_PORTAL_PORT:-8088}:8088"
     environment:
       PC_PORTAL_ALLOW_CLOUD: ${PC_PORTAL_ALLOW_CLOUD:-0}
+      PC_PORTAL_OUTPUT_ROOT: ${PC_PORTAL_OUTPUT_ROOT:-/var/lib/people-counter/portal/packages}
       PC_PORTAL_PORT: ${PC_PORTAL_PORT:-8088}
       PC_PORTAL_TEMPLATE_DIR: /opt/portal-ui/templates
       PC_PORTAL_STATIC_DIR: /opt/portal-ui/static

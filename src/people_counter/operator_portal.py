@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import available_timezones
@@ -20,7 +21,7 @@ from people_counter import backfill_operator as backfill
 from people_counter.inference_profiles import PRESETS
 from people_counter.manifest import ManifestPublisherError
 from people_counter.portal_service import (
-    LINE_FIELDS, METADATA_FIELDS, PORTAL_CATALOG_FIELDS, REPORTS, PortalService, csv_text,
+    LINE_FIELDS, METADATA_FIELDS, PORTAL_CATALOG_FIELDS, REPORT_TYPES, PortalService, csv_text, report_type,
 )
 
 
@@ -43,6 +44,14 @@ def _calendar_capture_time(value: str) -> str:
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?", value):
         return value + "Z"
     return value
+
+
+def _inference_overrides(form: Mapping[str, str]) -> dict[str, int | float]:
+    return {
+        key: convert(form[key]) for key, convert in (
+            ("batch_size", int), ("sample_fps", float), ("detection_threshold", float),
+        ) if form.get(key)
+    }
 
 
 def create_app(service: PortalService) -> Flask:
@@ -132,7 +141,7 @@ def create_app(service: PortalService) -> Flask:
         canonical = service.source.resolve(folder).relative_to(service.source.root).as_posix()
         folder = "" if canonical == "." else canonical
         query = request.args.get("q", "")
-        kind = request.args.get("kind", "all")
+        kind = request.args.get("kind", "videos")
         if kind not in {"all", "videos", "folders"}:
             raise ValueError("Select All types, Videos, or Folders")
         entries = service.source.entries(folder)
@@ -177,6 +186,7 @@ def create_app(service: PortalService) -> Flask:
         )
         return app.response_class(content, mimetype="image/jpeg")
 
+    @app.get("/review", endpoint="review")
     @app.get("/calibrate")
     def calibrate():
         video = request.args.get("video", "")
@@ -186,6 +196,7 @@ def create_app(service: PortalService) -> Flask:
         config_id = request.args.get("config_id", "")
         camera_id = request.args.get("camera_id", "") or service.footage_assignments().get(video, "")
         values = {}
+        config_choices = []
         folder = request.args.get("folder", Path(video).parent.as_posix())
         new_configuration = request.args.get("new") == "1"
         if not config_id and camera_id and not new_configuration:
@@ -196,8 +207,10 @@ def create_app(service: PortalService) -> Flask:
             if len(candidates) == 1:
                 config_id = candidates[0]["id"]
             elif candidates:
-                flash("Choose the saved effective-dated counting-line configuration to review.")
-                return redirect(url_for("camera_footage", camera_id=camera_id))
+                if request.endpoint != "review":
+                    flash("Choose the saved effective-dated counting-line configuration to review.")
+                    return redirect(url_for("camera_footage", camera_id=camera_id))
+                config_choices = candidates
         if config_id:
             found = next((item for item in service.store.entries("camera") if item["id"] == config_id), None)
             if found is None:
@@ -211,12 +224,19 @@ def create_app(service: PortalService) -> Flask:
             if registered is None:
                 abort(404)
             values = {"camera_id": camera_id, "location_id": registered["location_id"]}
+        exception = service.video_exception(video)
+        scope = request.args.get("scope", "video" if exception.get("frame_width") else "camera")
+        geometry = {**values, **{key: exception[key] for key in LINE_FIELDS if key in exception}} if scope == "video" else values
         return render_template(
-            "calibrate.html", video=video, width=width, height=height,
+            "review.html" if request.endpoint == "review" else "calibrate.html",
+            video=video, width=width, height=height,
             folder=folder,
-            config_id=config_id, values=values,
+            config_id=config_id, values=geometry, camera_values=values, exception=exception,
+            config_choices=config_choices,
+            return_folder=request.args.get("folder", folder), query=request.args.get("q", ""),
+            kind=request.args.get("kind", "videos"),
             new_configuration=new_configuration,
-            scope=request.args.get("scope", "camera"), seconds=request.args.get("seconds", "0"),
+            scope=scope, seconds=request.args.get("seconds", "0"),
             locations=service.store.locations(), camera_registry=service.store.entries("camera_identity"),
             timezones=sorted(available_timezones()),
         )
@@ -227,6 +247,27 @@ def create_app(service: PortalService) -> Flask:
         form["captured_at_utc"] = _calendar_capture_time(form.get("captured_at_utc", ""))
         flash(service.save_calibration(form))
         return redirect(url_for("cameras"))
+
+    def back_to_review():
+        return redirect(url_for(
+            "review", video=request.form.get("video", ""),
+            folder=request.form.get("return_folder", request.form.get("folder", "")),
+            q=request.form.get("q", ""), kind=request.form.get("kind", "videos"),
+        ))
+
+    @app.post("/footage/recording")
+    def save_recording():
+        service.update_video_exception(request.form.get("video", ""), {
+            "captured_at_utc": _calendar_capture_time(request.form.get("captured_at_utc", "")),
+        })
+        flash("Recording details saved. Counting line unchanged. Prepare a new package to use these changes.")
+        return back_to_review()
+
+    @app.post("/footage/line")
+    def save_line():
+        service.save_line(request.form)
+        flash("Counting line saved. Recording details unchanged. Prepare a new package to use these changes.")
+        return back_to_review()
 
     @app.route("/cameras", methods=["GET", "POST"])
     def cameras():
@@ -308,12 +349,24 @@ def create_app(service: PortalService) -> Flask:
     @app.route("/packages", methods=["GET", "POST"])
     def packages():
         if request.method == "POST":
-            identity = service.enqueue_preparation(request.form.get("folder", ""))
+            identity = service.enqueue_preparation(
+                request.form.get("folder", ""), name=request.form.get("package_name", ""),
+                destination=request.form.get("destination", ""),
+            )
             return redirect(url_for("job", identity=identity))
         return render_template(
             "packages.html", folder=request.args.get("folder", ""),
-            cameras=service.store.entries("camera"),
+            cameras=service.store.entries("camera"), packages=service.packages(),
+            output_root=service.output_root,
         )
+
+    @app.post("/packages/<identity>/delete")
+    def delete_package(identity):
+        if request.form.get("confirm") != "yes":
+            abort(400, "Confirm deletion of the selected package artifacts")
+        service.delete_package(identity)
+        flash("Selected package artifacts deleted. Source footage, reports, history, and recovery evidence retained.")
+        return redirect(url_for("packages"))
 
     @app.route("/profiles", methods=["GET", "POST"])
     def profiles():
@@ -327,11 +380,7 @@ def create_app(service: PortalService) -> Flask:
             )
             binding = {name: request.form.get(name, "") for name in fields}
             binding["intake_mode"] = "explicit"
-            overrides = {}
-            if request.form.get("batch_size"):
-                overrides["batch_size"] = int(request.form["batch_size"])
-            if request.form.get("sample_fps"):
-                overrides["sample_fps"] = float(request.form["sample_fps"])
+            overrides = _inference_overrides(request.form)
             identity = service.enqueue("profiles", {
                 "target": request.form.get("target", ""), "binding": binding,
                 "profiles": selected, "overrides": overrides,
@@ -357,8 +406,25 @@ def create_app(service: PortalService) -> Flask:
             wait = request.form.get("wait") == "yes"
             if wait and action != "submit":
                 raise ValueError("Waiting for processing requires explicit submission")
+            overrides = _inference_overrides(request.form)
+            if request.form.get("preview") == "yes":
+                package = service.store.job(request.form.get("package_id", ""))
+                if package is None or package["kind"] != "prepare" or package["status"] != "SUCCEEDED":
+                    raise ValueError("Select a successfully prepared package")
+                service.package_dir(package["id"])
+                if action not in {"publish", "submit"}:
+                    raise ValueError("Select publication or explicit submission")
+                if action == "publish" and overrides:
+                    raise ValueError("Inference overrides apply only to processing submissions")
+                config = backfill.load_target(service.catalog, target, profile, overrides=overrides)
+                defaults = backfill.load_target(service.catalog, target, profile)
+                return render_template(
+                    "cloud_review.html", config=config, defaults=defaults, form=request.form,
+                    overrides=overrides,
+                )
             identity = service.enqueue_cloud(
                 request.form.get("package_id", ""), target, profile, action, wait,
+                overrides=overrides, capacity=request.form.get("capacity", ""),
             )
             return redirect(url_for("job", identity=identity))
         choices = []
@@ -368,11 +434,12 @@ def create_app(service: PortalService) -> Flask:
                 for name in entry["profiles"]:
                     config = backfill.load_target(service.catalog, target, name)
                     choices.append({"value": f"{target}::{name}", "target": target, "profile": config.profile})
-        prepared = [
-            item for item in service.store.jobs()
-            if item["kind"] == "prepare" and item["status"] == "SUCCEEDED"
-        ]
-        return render_template("cloud.html", choices=choices, packages=prepared)
+        prepared = [item for item in service.packages() if item["status"] == "SUCCEEDED" and not item["deleted"]]
+        return render_template(
+            "cloud.html", choices=choices, packages=prepared,
+            selected_package=request.args.get("package_id", ""),
+            capacities=[f"F{2 ** exponent}" for exponent in range(1, 12)],
+        )
 
     @app.get("/jobs")
     def jobs():
@@ -384,13 +451,24 @@ def create_app(service: PortalService) -> Flask:
         if found is None:
             abort(404)
         available = []
-        for name in REPORTS:
+        for key, (name, label, format) in REPORT_TYPES.items():
             try:
                 service.report(identity, name)
-                available.append(name)
+                available.append({"id": key, "name": name, "label": label, "format": format})
             except ValueError:
                 continue
-        return render_template("job.html", job=found, events=service.store.events(identity), reports=available)
+        summary = None
+        summary_error = None
+        if any(item["id"] == "summary" for item in available):
+            try:
+                summary = service.report_preview(identity, "summary", 1)
+            except ValueError as error:
+                summary_error = str(error)
+        package = next((item for item in service.packages() if item["id"] == identity), None)
+        return render_template(
+            "job.html", job=found, events=service.store.events(identity), reports=available,
+            summary=summary, summary_error=summary_error, package=package,
+        )
 
     @app.post("/jobs/<identity>/resume")
     def resume(identity):
@@ -404,7 +482,7 @@ def create_app(service: PortalService) -> Flask:
 
     @app.get("/jobs/<identity>/files/<name>")
     def report(identity, name):
-        if service.store.job(identity) is None or name not in REPORTS:
+        if service.store.job(identity) is None:
             abort(404)
         try:
             path = service.report(identity, name)
@@ -414,10 +492,11 @@ def create_app(service: PortalService) -> Flask:
 
     @app.get("/jobs/<identity>/reports/<name>")
     def report_view(identity, name):
-        if service.store.job(identity) is None or name not in REPORTS:
+        if service.store.job(identity) is None:
             abort(404)
         try:
             service.report(identity, name)
+            _, label, format = report_type(name)
         except ValueError:
             abort(404)
         try:
@@ -429,10 +508,11 @@ def create_app(service: PortalService) -> Flask:
         except ValueError as error:
             return render_template(
                 "report.html", identity=identity, name=name, page=page,
-                preview=None, preview_error=str(error),
+                preview=None, preview_error=str(error), label=label, format=format,
             ), 400
         return render_template(
             "report.html", identity=identity, name=name, page=page, preview=preview,
+            label=label, format=format,
         )
 
     @app.get("/jobs/<identity>/package.zip")
@@ -452,12 +532,16 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, default=Path(os.environ.get("PC_PORTAL_SOURCE_ROOT", "samples")))
     parser.add_argument("--models-root", type=Path, default=Path(os.environ.get("PC_PORTAL_MODELS_ROOT", "offline-models")))
     parser.add_argument("--state-dir", type=Path, default=Path(os.environ.get("PC_PORTAL_STATE_DIR", ".people-counter-portal")))
+    parser.add_argument("--output-root", type=Path, default=Path(os.environ["PC_PORTAL_OUTPUT_ROOT"]) if os.environ.get("PC_PORTAL_OUTPUT_ROOT") else None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8088)
     parser.add_argument("--allow-cloud", action="store_true", default=os.environ.get("PC_PORTAL_ALLOW_CLOUD") == "1")
     args = parser.parse_args()
     os.umask(0o077)
-    service = PortalService(args.source_root, args.models_root, args.state_dir, allow_cloud=args.allow_cloud)
+    service = PortalService(
+        args.source_root, args.models_root, args.state_dir,
+        allow_cloud=args.allow_cloud, output_root=args.output_root,
+    )
     with FileLock(service.state / "server.lock", timeout=0):
         stop = threading.Event()
         worker = threading.Thread(target=service.work, args=(stop,), daemon=True)

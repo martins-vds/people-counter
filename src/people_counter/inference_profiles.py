@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from people_counter.config import DETECTOR_FLOOR
 from people_counter.model_artifacts import (
     OSNET_FILENAME,
     OSNET_MODEL_DIR,
@@ -71,8 +72,13 @@ def _overrides(values: Mapping[str, Any] | None) -> dict[str, Any]:
     if values is not None and not isinstance(values, Mapping):
         raise ValueError("profile overrides must be an object")
     overrides = dict(values or {})
-    if overrides.keys() - {"batch_size", "sample_fps"}:
-        raise ValueError("profile overrides support only batch_size and sample_fps")
+    if overrides.keys() - {"batch_size", "sample_fps", "detection_threshold"}:
+        raise ValueError("profile overrides support only batch_size, sample_fps, and detection_threshold")
+    if "detection_threshold" in overrides:
+        threshold = overrides["detection_threshold"]
+        if type(threshold) not in (int, float) or not math.isfinite(threshold) or not DETECTOR_FLOOR <= threshold <= 1:
+            raise ValueError(f"profile detection_threshold must be finite and between {DETECTOR_FLOOR} and 1")
+        overrides["detection_threshold"] = float(threshold)
     if "batch_size" in overrides:
         batch = overrides["batch_size"]
         if type(batch) is not int or batch not in {1, 2, 4}:

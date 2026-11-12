@@ -232,6 +232,16 @@ def test_explorer_rejects_unknown_file_filters(app):
     assert app.test_client().get("/?kind=unknown").status_code == 400
 
 
+def test_footage_defaults_to_videos_without_hiding_folder_navigation(app, service):
+    (service.source.root / "lobby/clip.mp4").write_bytes(b"video")
+    (service.source.root / "lobby/manifest-package.json").write_text("{}")
+    page = app.test_client().get("/?folder=lobby").data
+    assert b'data-entry-path="lobby/clip.mp4"' in page
+    assert b'data-entry-path="lobby/manifest-package.json"' not in page
+    assert b'aria-label="Folders"' in page
+    assert b'data-entry-path="lobby/manifest-package.json"' in app.test_client().get("/?folder=lobby&kind=all").data
+
+
 def test_explorer_distinguishes_empty_folders_from_no_filter_matches(app):
     response = app.test_client().get("/?folder=lobby&q=anything")
     assert response.status_code == 200

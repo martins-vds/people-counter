@@ -10,7 +10,9 @@ from people_counter import backfill_operator as operator
 from people_counter import fabric_sjd_runtime as runtime
 from people_counter.fabric_sjd import FabricSjdConfig
 from tests.fabric_fixtures import TARGET_IDS
-from tests.test_backfill_operator import cloud_mocks, forbid_live_cloud_clients, setup
+from tests.test_backfill_operator import (
+    cloud_mocks, forbid_live_cloud_clients, publication_shortcut, setup,
+)
 
 
 def test_installed_release_uses_only_standard_package_metadata(monkeypatch):
@@ -99,6 +101,7 @@ def test_backfill_submits_without_any_release_evidence(setup, workspace_id):
     client = Mock()
     client.request_response.return_value = (202, {"Location": "/jobs/accepted"}, b"")
     client.request_json.return_value = {"status": "Completed"}
+    client.list_pages.return_value = [publication_shortcut(setup)]
     with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
         operator, "AzureDataLakeStorage", return_value=storage,
     ), patch.object(operator, "FabricAutomationClient", return_value=client):

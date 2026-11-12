@@ -6,7 +6,9 @@ from unittest.mock import Mock, call, patch
 import pytest
 
 from people_counter import backfill_operator as operator
-from tests.test_backfill_operator import cloud_mocks, forbid_live_cloud_clients, setup
+from tests.test_backfill_operator import (
+    cloud_mocks, forbid_live_cloud_clients, publication_shortcut, setup,
+)
 from tests.test_manifest_publisher import inspection
 
 
@@ -192,6 +194,7 @@ def test_submission_summary_and_progress_do_not_claim_processing_or_gold_complet
     client = Mock()
     client.request_response.return_value = (202, {"Location": "/jobs/accepted"}, b"")
     client.request_json.return_value = {"id": "accepted", "status": "Completed"}
+    client.list_pages.return_value = [publication_shortcut(setup)]
     progress = []
     with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
         operator, "AzureDataLakeStorage", return_value=storage,
@@ -215,7 +218,8 @@ def test_submission_summary_and_progress_do_not_claim_processing_or_gold_complet
         f"Verifying model: Files/models/{name}" for name in config.profile["model_artifact_sha256"]
     ]
     assert progress[2:2 + len(expected_models)] == expected_models
-    assert progress[2 + len(expected_models)] == "Publishing 1 videos and manifests (or verifying existing publications)..."
+    assert progress[2 + len(expected_models)] == "Verifying publication shortcut target: Files/videos"
+    assert progress[3 + len(expected_models)] == "Publishing 1 videos and manifests (or verifying existing publications)..."
 
 
 def test_submission_keeps_source_order_and_reuses_the_validated_multi_video_package(setup):
@@ -258,6 +262,7 @@ def test_submission_keeps_source_order_and_reuses_the_validated_multi_video_pack
     client = Mock()
     client.request_response.return_value = (202, {"Location": "/jobs/accepted"}, b"")
     client.request_json.return_value = {"id": "accepted", "status": "Completed"}
+    client.list_pages.return_value = [publication_shortcut(setup)]
     progress = []
     with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
         operator, "AzureDataLakeStorage", return_value=storage,
@@ -305,7 +310,10 @@ def test_submission_failures_keep_the_correct_operator_recovery_instruction(setu
         operator, "AzureDataLakeStorage", return_value=storage,
     ), patch.object(
         operator, "installed_release", return_value=release,
-    ), patch.object(operator, "publish_manifest_package", publisher):
+    ), patch.object(operator, "publish_manifest_package", publisher), patch.object(
+        operator, "FabricAutomationClient",
+    ) as client:
+        client.return_value.list_pages.return_value = [publication_shortcut(setup)]
         with pytest.raises((ValueError, RuntimeError)) as error:
             operator.submit(package, publication, config, state)
     assert str(error.value) == message

@@ -633,6 +633,44 @@ def _register_partition(
     raise TimeoutError(f"Control registration timed out; rerun to resume polling {location}")
 
 
+def verify_publication_shortcut(
+    client: FabricAutomationClient, config: BackfillConfig,
+) -> None:
+    shortcuts = client.list_pages(
+        f"/workspaces/{config.workspace_id}/items/{config.lakehouse_id}/shortcuts"
+    )
+    parent, name = config.shortcut_path.rsplit("/", 1)
+    matches = [
+        shortcut for shortcut in shortcuts
+        if shortcut.get("path") in (parent, f"/{parent}")
+        and shortcut.get("name") == name
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one shortcut at {config.shortcut_path!r} in "
+            f"Lakehouse {config.lakehouse_id}; found {len(matches)}. "
+            "Check the shortcut and target Lakehouse before publishing."
+        )
+    target = matches[0].get("target")
+    adls = target.get("adlsGen2") if isinstance(target, Mapping) else None
+    location = adls.get("location") if isinstance(adls, Mapping) else None
+    subpath = adls.get("subpath") if isinstance(adls, Mapping) else None
+    expected_location = f"https://{config.storage_account}.dfs.core.windows.net"
+    if (
+        not isinstance(location, str)
+        or location.rstrip("/").lower() != expected_location
+        or not isinstance(subpath, str)
+        or subpath.strip("/") != config.filesystem
+    ):
+        raise ValueError(
+            f"Publication shortcut {config.shortcut_path!r} must target "
+            f"{expected_location}/{config.filesystem} (ADLS Gen2 container root). "
+            "Its target type, storage account, or container/subfolder differs. "
+            "Have an administrator align the shortcut with the publication "
+            "destination; do not move files or delete retry state."
+        )
+
+
 def submit(
     package: ValidatedManifestPackage,
     publication: ManifestPackagePublishConfig,
@@ -652,6 +690,13 @@ def submit(
     for name, digest in config.profile["model_artifact_sha256"].items():
         _progress(f"Verifying model: Files/models/{name}")
         files.verify_video(f"Files/models/{name}", None, digest)
+    client = FabricAutomationClient(
+        NotebookFabricTokenProvider() if fabric
+        else AzureCliResourceTokenProvider("https://api.fabric.microsoft.com"),
+        transport=UrllibTransport(),
+    )
+    _progress(f"Verifying publication shortcut target: {config.shortcut_path}")
+    verify_publication_shortcut(client, config)
     records = registration_records(package, config, release.digest)
     plan = {
         "target": {
@@ -715,11 +760,6 @@ def submit(
         })
         _progress(f"Verified Lakehouse source {len(evidence)}/{len(package.plans)}: {source.relative_path}")
     _save(state_dir / "publication-evidence.json", evidence)
-    client = FabricAutomationClient(
-        NotebookFabricTokenProvider() if fabric
-        else AzureCliResourceTokenProvider("https://api.fabric.microsoft.com"),
-        transport=UrllibTransport(),
-    )
     jobs = []
     root = f"{config.runtime_config().file_path('intake/backfill')}/{_digest(plan_bytes)}"
     for offset in range(0, len(records), PARTITION_SIZE):

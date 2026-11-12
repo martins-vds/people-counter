@@ -53,10 +53,19 @@ def portal(tmp_path, monkeypatch, request):
         storage = FakeStorage()
         partitions = {}
         registered = {}
+        shortcut = {}
 
         class Files:
             def __init__(self, config):
                 assert config.workspace_id == "11111111-1111-1111-1111-111111111111"
+                parent, name = config.shortcut_path.rsplit("/", 1)
+                shortcut.update({
+                    "path": parent, "name": name,
+                    "target": {"adlsGen2": {
+                        "location": f"https://{config.storage_account}.dfs.core.windows.net",
+                        "subpath": f"/{config.filesystem}",
+                    }},
+                })
 
             def read_text(self, path):
                 raise AssertionError("Release evidence is provided by the test adapter")
@@ -76,6 +85,10 @@ def portal(tmp_path, monkeypatch, request):
                 partitions[path] = content
 
         class Fabric:
+            def list_pages(self, path):
+                assert path.endswith("/shortcuts")
+                return [shortcut]
+
             def request_response(self, method, path, *, value, expected):
                 assert method == "POST" and expected == (202,)
                 arguments = shlex.split(value["executionData"]["commandLineArguments"])

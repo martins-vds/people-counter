@@ -236,6 +236,135 @@ def cloud_mocks(setup):
     return storage, files, release
 
 
+def publication_shortcut(setup):
+    parent, name = setup.config["shortcut_path"].rsplit("/", 1)
+    return {
+        "path": f"/{parent}", "name": name,
+        "target": {"adlsGen2": {
+            "location": f"https://{setup.config['storage_account']}.dfs.core.windows.net",
+            "subpath": f"/{setup.config['filesystem']}",
+        }},
+    }
+
+
+@pytest.mark.parametrize("target", [
+    {"adlsGen2": {"location": "https://other.dfs.core.windows.net", "subpath": "/footage"}},
+    {"adlsGen2": {"location": "https://account.dfs.core.windows.net", "subpath": "/other"}},
+    {"adlsGen2": {"location": "https://account.dfs.core.windows.net", "subpath": "/footage/incoming"}},
+    {"oneLake": {"path": "Files/videos"}},
+    {"adlsGen2": None},
+    {"adlsGen2": {"location": None, "subpath": "/footage"}},
+    {"adlsGen2": {"location": "https://account.dfs.core.windows.net", "subpath": None}},
+    None,
+])
+def test_shortcut_target_mismatch_stops_before_publication(setup, target):
+    storage, files, _ = cloud_mocks(setup)
+    client = Mock()
+    shortcut = publication_shortcut(setup)
+    shortcut["target"] = target
+    client.list_pages.return_value = [shortcut]
+    with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
+        operator, "FabricAutomationClient", return_value=client,
+    ), patch.object(operator, "AzureDataLakeStorage") as adls, patch.object(
+        operator, "publish_manifest_package",
+    ) as publish, pytest.raises(ValueError, match="shortcut.*container root") as raised:
+        operator.main(setup.args + ["--submit"])
+    assert "Files/videos" in str(raised.value)
+    assert "https://account.dfs.core.windows.net/footage" in str(raised.value)
+    adls.assert_not_called()
+    publish.assert_not_called()
+    files.write_partition.assert_not_called()
+    client.request_response.assert_not_called()
+    assert not (setup.root / "state").exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "duplicate", "wrong-path", "wrong-name"])
+def test_shortcut_must_resolve_unambiguously_in_the_target_lakehouse(setup, case):
+    shortcut = publication_shortcut(setup)
+    matches = [shortcut]
+    if case == "missing":
+        matches = []
+    elif case == "duplicate":
+        matches = [shortcut, shortcut]
+    elif case == "wrong-path":
+        shortcut["path"] = "/Files/other"
+    else:
+        shortcut["name"] = "other"
+    client = Mock()
+    client.list_pages.return_value = matches
+    config = operator.load_config(setup.config_path)
+    with pytest.raises(ValueError, match="exactly one.*Files/videos"):
+        operator.verify_publication_shortcut(client, config)
+    client.list_pages.assert_called_once_with(
+        f"/workspaces/{config.workspace_id}/items/{config.lakehouse_id}/shortcuts"
+    )
+    client.request_response.assert_not_called()
+
+
+@pytest.mark.parametrize("parent,location,subpath", [
+    ("/Files", "https://account.dfs.core.windows.net", "/footage"),
+    ("Files", "https://account.dfs.core.windows.net/", "footage/"),
+])
+def test_shortcut_root_validation_accepts_api_path_slash_variants(
+    setup, parent, location, subpath,
+):
+    shortcut = publication_shortcut(setup)
+    shortcut["path"] = parent
+    shortcut["target"]["adlsGen2"].update(location=location, subpath=subpath)
+    client = Mock()
+    client.list_pages.return_value = [shortcut]
+    operator.verify_publication_shortcut(client, operator.load_config(setup.config_path))
+
+
+def test_shortcut_lookup_failure_preserves_cause_and_never_publishes(setup):
+    from people_counter.fabric_automation import FabricApiError
+
+    _, files, _ = cloud_mocks(setup)
+    client = Mock()
+    error = FabricApiError("Fabric GET shortcuts returned HTTP 403")
+    client.list_pages.side_effect = error
+    with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
+        operator, "FabricAutomationClient", return_value=client,
+    ), patch.object(operator, "AzureDataLakeStorage") as adls, pytest.raises(
+        FabricApiError, match="403",
+    ) as raised:
+        operator.main(setup.args + ["--submit"])
+    assert raised.value is error
+    adls.assert_not_called()
+    files.write_partition.assert_not_called()
+    client.request_response.assert_not_called()
+    assert not (setup.root / "state").exists()
+
+
+def test_shortcut_lookup_follows_pages_and_uses_the_exact_nested_path(setup):
+    from people_counter.fabric_automation import HTTPResponse
+    from tests.test_fabric_automation import _TokenProvider, _Transport
+
+    setup.config["shortcut_path"] = "Files/source videos/selected"
+    setup.config_path.write_text(json.dumps(setup.config))
+    config = operator.load_config(setup.config_path)
+    shortcut = publication_shortcut(setup)
+    unrelated = {**shortcut, "path": "/Files/other"}
+    continuation = (
+        f"https://api.fabric.microsoft.com/v1/workspaces/{config.workspace_id}"
+        f"/items/{config.lakehouse_id}/shortcuts?continuationToken=next"
+    )
+    transport = _Transport([
+        HTTPResponse(200, {}, json.dumps({
+            "value": [unrelated], "continuationUri": continuation,
+        }).encode()),
+        HTTPResponse(200, {}, json.dumps({"value": [shortcut]}).encode()),
+    ])
+    client = operator.FabricAutomationClient(_TokenProvider(), transport=transport)
+    operator.verify_publication_shortcut(client, config)
+    assert [request["method"] for request in transport.requests] == ["GET", "GET"]
+    assert transport.requests[0]["url"] == (
+        f"https://api.fabric.microsoft.com/v1/workspaces/{config.workspace_id}"
+        f"/items/{config.lakehouse_id}/shortcuts"
+    )
+    assert transport.requests[1]["url"] == continuation
+
+
 def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     storage, files, release = cloud_mocks(setup)
     fabric = Mock()
@@ -243,6 +372,7 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
         202, {"Location": "https://api.fabric.microsoft.com/v1/jobs/job-1"}, b""
     )
     fabric.request_json.return_value = {"id": "job-1", "status": "Completed"}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage) as storage_client, patch.object(
         operator, "OneLakeFiles", return_value=files
     ) as onelake_client, patch.object(
@@ -272,6 +402,10 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     resolver.assert_called_with()
     files.read_text.assert_not_called()
     storage_client.assert_called_with("account", "footage", chunk_size=8 * 1024 * 1024)
+    assert fabric.list_pages.call_count == 2
+    fabric.list_pages.assert_called_with(
+        f"/workspaces/{config.workspace_id}/items/{config.lakehouse_id}/shortcuts"
+    )
     assert client.call_args.args[0] == operator.AzureCliResourceTokenProvider(
         "https://api.fabric.microsoft.com",
     )
@@ -325,6 +459,7 @@ def test_preflight_failure_never_submits_control(setup, failure):
     ), patch.object(operator, "FabricAutomationClient") as fabric, publication, pytest.raises(
         (ValueError, RuntimeError), match="publication|manifest|model"
     ):
+        fabric.return_value.list_pages.return_value = [publication_shortcut(setup)]
         operator.main(setup.args + ["--submit"])
     assert not fabric.return_value.request_response.called
 
@@ -335,6 +470,7 @@ def test_failed_job_is_not_success_and_retry_does_not_resubmit(setup, status):
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job-1"}, b"")
     fabric.request_json.return_value = {"status": status}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
@@ -794,6 +930,7 @@ def test_partition_bounds_are_exact(setup):
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
     fabric.request_json.return_value = {"status": "Completed"}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     records = [{"work_id": f"work-{index}"} for index in range(1001)]
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
@@ -851,6 +988,7 @@ def test_state_directory_cannot_change_release_or_target(setup):
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
     fabric.request_json.return_value = {"status": "Completed"}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
@@ -890,6 +1028,7 @@ def test_backfill_namespace_matches_the_deployed_control_job_and_retry_state(set
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
     fabric.request_json.return_value = {"status": "Completed"}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
@@ -1143,6 +1282,7 @@ def test_fabric_submit_uses_notebook_credentials_and_local_sqlite(setup, noteboo
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
     fabric.request_json.return_value = {"status": "Completed"}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     checkpoints = []
     spark = Mock()
 
@@ -1192,6 +1332,9 @@ def test_fabric_submit_uses_notebook_credentials_and_local_sqlite(setup, noteboo
     assert onelake.call_args.args == (operator.load_config(setup.config_path),)
     assert onelake.call_args.kwargs["credential"] is adls.call_args.kwargs["credential"]
     assert isinstance(client.call_args.args[0], operator.NotebookFabricTokenProvider)
+    fabric.list_pages.assert_called_with(
+        f"/workspaces/{setup.config['workspace_id']}/items/{setup.config['lakehouse_id']}/shortcuts"
+    )
     assert (setup.root / "state/registration-summary.json").is_file()
     assert len(set(checkpoints)) == 2
     assert not any(path.exists() for path in checkpoints)
@@ -1336,6 +1479,7 @@ def test_publication_and_registration_print_progress_to_stderr(setup, capsys):
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
     fabric.request_json.return_value = {"status": "Completed"}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
@@ -1474,6 +1618,7 @@ def test_submit_wait_integrates_publication_registration_processing_and_resume(s
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
     fabric.request_json.return_value = {"id": "job", "status": "Completed"}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     connection = Mock()
     state = setup.root / "state"
 
@@ -1599,6 +1744,7 @@ def test_named_target_submit_uses_derived_config_and_runtime_identities(setup, c
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
     fabric.request_json.return_value = {"id": "job", "status": "Completed"}
+    fabric.list_pages.return_value = [publication_shortcut(setup)]
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(

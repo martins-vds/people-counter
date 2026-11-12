@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import threading
@@ -32,16 +33,31 @@ from people_counter.manifest import (
     CATALOG_COLUMNS, CONTENT_TYPES, inspect_video, load_camera_catalog, load_video_inventory,
 )
 from people_counter.manifest_publisher import (
-    PublisherConfig, publish_manifest_package, run_publisher, validate_manifest_package,
+    MANIFEST_PACKAGE_VERSION, PublisherConfig, publish_manifest_package, run_publisher, validate_manifest_package,
 )
 
 LINE_FIELDS = ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")
 EXCEPTION_FIELDS = ("video_relative_path", "captured_at_utc", "frame_width", "frame_height", *LINE_FIELDS)
-REPORTS = (
-    "summary.json", "rejection-report.csv", "generated-video-inventory.csv",
-    "manifest-package.json", "publication-summary.json", "publication-rejections.csv",
-    "registration-summary.json", "processing-summary.json",
-)
+REPORT_TYPES = {
+    "summary": ("summary.json", "Summary", "JSON"),
+    "rejections": ("rejection-report.csv", "Rejections", "CSV"),
+    "inventory": ("generated-video-inventory.csv", "Footage inventory", "CSV"),
+    "manifest": ("manifest-package.json", "Manifest package", "JSON"),
+    "publication": ("publication-summary.json", "Publication summary", "JSON"),
+    "publication-rejections": ("publication-rejections.csv", "Publication rejections", "CSV"),
+    "registration": ("registration-summary.json", "Registration summary", "JSON"),
+    "processing": ("processing-summary.json", "Processing summary", "JSON"),
+}
+REPORTS = tuple(spec[0] for spec in REPORT_TYPES.values())
+
+
+def report_type(name: str) -> tuple[str, str, str]:
+    if name in REPORT_TYPES:
+        return REPORT_TYPES[name]
+    for spec in REPORT_TYPES.values():
+        if spec[0] == name:
+            return spec
+    raise ValueError("Unknown report")
 PORTAL_CATALOG_FIELDS = (*sorted(CATALOG_COLUMNS), "video_relative_path")
 METADATA_FIELDS = (
     "camera_timezone", "capture_time_source", "capture_time_regex", "capture_time_format",
@@ -211,6 +227,10 @@ class PortalStore:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
                 CREATE TABLE IF NOT EXISTS events (
                     sequence INTEGER PRIMARY KEY, job_id TEXT NOT NULL, message TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS package_revisions (
+                    package_key TEXT NOT NULL, name TEXT NOT NULL, revision INTEGER NOT NULL,
+                    job_id TEXT NOT NULL UNIQUE, deleted INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(package_key,revision));
             """)
         self._migrate_locations()
 
@@ -441,11 +461,18 @@ class PortalStore:
 
 
 class PortalService:
-    def __init__(self, source_root: Path, models_root: Path, state: Path, *, allow_cloud: bool = False):
+    def __init__(
+        self, source_root: Path, models_root: Path, state: Path, *,
+        allow_cloud: bool = False, output_root: Path | None = None,
+    ):
         self.source = LocalFootageSource(source_root)
         self.models_root = models_root.resolve()
         self.state = state.resolve()
         self.state.mkdir(parents=True, exist_ok=True)
+        self.output_root = (output_root or self.state / "packages").resolve()
+        if self.output_root.is_relative_to(self.source.root) or self.source.root.is_relative_to(self.output_root):
+            raise ValueError("The package output root must be separate from the source root")
+        self.output_root.mkdir(parents=True, exist_ok=True)
         self.store = PortalStore(self.state / "portal.sqlite3")
         known = {item["id"] for item in self.store.entries("footage")}
         for item in self.store.entries("camera"):
@@ -585,6 +612,57 @@ class PortalService:
             self.store.assign_footage(camera_id, [video])
         return "Saved camera configuration. Generate a new package to use this calibration."
 
+    def video_exception(self, video: str) -> dict[str, Any]:
+        path = self.source.resolve(video)
+        if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES:
+            raise ValueError("Select a supported video file")
+        relative = path.relative_to(self.source.video_root).as_posix()
+        return next(
+            (row for row in self.store.entries("exception") if row["id"] == relative),
+            {"video_relative_path": relative},
+        )
+
+    def update_video_exception(
+        self, video: str, changes: Mapping[str, str], remove: tuple[str, ...] = (),
+    ) -> None:
+        relative = self.video_exception(video)["video_relative_path"]
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            saved = db.execute(
+                "SELECT data FROM entries WHERE kind='exception' AND id=?", (relative,),
+            ).fetchone()
+            row = {**(json.loads(saved["data"]) if saved else {}),
+                   "video_relative_path": relative, **changes}
+            for name in remove:
+                row.pop(name, None)
+            if row.get("captured_at_utc") or row.get("frame_width"):
+                self.validate_csv(EXCEPTION_FIELDS, [row], inventory=True)
+                db.execute(
+                    "INSERT OR REPLACE INTO entries VALUES ('exception',?,?)",
+                    (relative, json.dumps(row, allow_nan=False)),
+                )
+            else:
+                db.execute("DELETE FROM entries WHERE kind='exception' AND id=?", (relative,))
+
+    def save_line(self, form: Mapping[str, str]) -> None:
+        video = form.get("video", "")
+        if form.get("use_camera") == "yes":
+            self.update_video_exception(video, {}, ("frame_width", "frame_height", *LINE_FIELDS))
+        elif form.get("scope") == "video":
+            _, width, height = self.source.frame(video)
+            self.update_video_exception(video, {
+                "frame_width": str(width), "frame_height": str(height),
+                **{name: str(int(form.get(name, ""))) for name in LINE_FIELDS},
+            })
+        else:
+            config = next((
+                item["catalog"] for item in self.store.entries("camera")
+                if item["id"] == form.get("config_id")
+            ), {})
+            self.save_calibration({
+                **form, **{name: config[name] for name in METADATA_FIELDS if name in config},
+            })
+
     def enqueue(self, kind: str, payload: Mapping[str, Any]) -> str:
         if kind not in {"prepare", "profiles", "publish", "submit"}:
             raise ValueError("Unsupported operator job")
@@ -592,12 +670,12 @@ class PortalService:
             raise ValueError("Cloud actions are disabled")
         return self.store.enqueue(kind, payload)
 
-    def enqueue_preparation(self, folder: str) -> str:
+    def enqueue_preparation(self, folder: str, *, name: str = "", destination: str = "") -> str:
         self.source.prefix(folder)
         relative = self.source.resolve(folder).relative_to(self.source.root).as_posix()
         folder = "" if relative == "." else relative
         calibrated = {item["catalog"]["camera_id"] for item in self.store.entries("camera")}
-        return self.enqueue("prepare", {
+        payload = {
             "folder": folder,
             "cameras": self.camera_catalog(),
             "exceptions": self.store.entries("exception"),
@@ -606,16 +684,145 @@ class PortalService:
                 if (video == folder or video.startswith(folder.rstrip("/") + "/") or not folder)
                 and camera_id not in calibrated
             }),
-        })
+        }
+        if not name and not destination:
+            return self.enqueue("prepare", payload)
+        name = _identifier(name, "Package name")
+        key = _name_slug(name)
+        relative = Path(destination)
+        parent = (self.output_root / relative).resolve()
+        if relative.is_absolute() or ".." in relative.parts or not parent.is_relative_to(self.output_root):
+            raise ValueError("Package destination must remain within the configured output root")
+        identity = uuid.uuid4().hex
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute(
+                "SELECT name,MAX(revision) AS revision FROM package_revisions WHERE package_key=?",
+                (key,),
+            ).fetchone()
+            if previous["name"] and previous["name"].casefold() != name.casefold():
+                raise ValueError("A different package name already uses this generated identifier")
+            revision = (previous["revision"] or 0) + 1
+            package = parent / key / f"v{revision}"
+            if not package.resolve().is_relative_to(self.output_root):
+                raise ValueError("Package destination must remain within the configured output root")
+            try:
+                package.mkdir(parents=True, exist_ok=False)
+            except OSError as error:
+                raise ValueError(f"Cannot reserve package destination: {error}") from error
+            payload.update(
+                output_dir=str(package), output_root=str(self.output_root),
+                manifest_package_version=MANIFEST_PACKAGE_VERSION,
+            )
+            db.execute(
+                "INSERT INTO jobs(id,kind,payload,status) VALUES (?,'prepare',?,'QUEUED')",
+                (identity, json.dumps(payload, allow_nan=False)),
+            )
+            db.execute(
+                "INSERT INTO package_revisions(package_key,name,revision,job_id) VALUES (?,?,?,?)",
+                (key, name, revision, identity),
+            )
+        return identity
 
-    def enqueue_cloud(self, package_id: str, target: str, profile: str, action: str, wait: bool) -> str:
+    def packages(self) -> list[dict[str, Any]]:
+        with self.store.connection() as db:
+            rows = db.execute(
+                "SELECT j.id,j.status,j.created_at,r.name,r.revision,r.deleted,j.payload "
+                "FROM jobs j LEFT JOIN package_revisions r ON r.job_id=j.id "
+                "WHERE j.kind='prepare' ORDER BY j.rowid DESC"
+            ).fetchall()
+        return [{
+            **dict(row), "name": row["name"] or "Historical package",
+            "destination": json.loads(row["payload"]).get(
+                "output_dir", str(self.job_dir(row["id"]) / "package"),
+            ),
+            "schema_version": json.loads(row["payload"]).get("manifest_package_version"),
+        } for row in rows]
+
+    def package_dir(self, identity: str) -> Path:
+        job = self.store.job(identity)
+        if job is None or job["kind"] != "prepare":
+            raise ValueError("Select an existing manifest package")
+        with self.store.connection() as db:
+            row = db.execute(
+                "SELECT deleted FROM package_revisions WHERE job_id=?", (identity,),
+            ).fetchone()
+        if row and row["deleted"]:
+            raise ValueError("Package artifacts were explicitly deleted")
+        payload = job["payload"]
+        allowed = Path(payload.get("output_root", self.job_dir(identity))).resolve()
+        saved_path = Path(payload.get("output_dir", self.job_dir(identity) / "package"))
+        path = saved_path.resolve()
+        if path != saved_path:
+            raise ValueError("Package destination changed since preparation was queued")
+        if path == allowed or not path.is_relative_to(allowed) or path.is_relative_to(self.source.root):
+            raise ValueError("Package destination is outside its saved output root")
+        return path
+
+    def _retain_reports(self, identity: str, package: Path) -> None:
+        root = self.job_dir(identity)
+        root.mkdir(parents=True, exist_ok=True)
+        for name in REPORTS:
+            path = package / name
+            if path.is_file():
+                shutil.copy2(path, root / name)
+
+    def delete_package(self, identity: str) -> None:
+        package = self.package_dir(identity)
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            active = db.execute(
+                "SELECT 1 FROM jobs WHERE status IN ('QUEUED','RUNNING','INTERRUPTED') "
+                "AND (id=? OR json_extract(payload,'$.package_id')=?)", (identity, identity),
+            ).fetchone()
+            if active:
+                raise ValueError("Package is referenced by active or interrupted work")
+            self._retain_reports(identity, package)
+            # Keep a tombstone even for legacy, ungrouped packages.
+            db.execute(
+                "INSERT INTO package_revisions(package_key,name,revision,job_id,deleted) "
+                "VALUES (?, 'Historical package',1,?,1) ON CONFLICT(job_id) DO UPDATE SET deleted=1",
+                ("legacy-" + identity, identity),
+            )
+        try:
+            archive = self.job_dir(identity) / "manifest-package.zip"
+            if archive.exists():
+                archive.unlink()
+            if package.exists():
+                shutil.rmtree(package)
+        except OSError as error:
+            logging.getLogger(__name__).exception("Deleted package artifact cleanup failed for %s", identity)
+            raise ValueError("Package is marked deleted, but artifact cleanup failed; an administrator must remove the retained files") from error
+
+    def enqueue_cloud(
+        self, package_id: str, target: str, profile: str, action: str, wait: bool, *,
+        overrides: Mapping[str, Any] | None = None, capacity: str = "",
+    ) -> str:
+        if not self.allow_cloud:
+            raise ValueError("Cloud actions are disabled")
         package = self.store.job(package_id)
         if package is None or package["kind"] != "prepare" or package["status"] != "SUCCEEDED":
             raise ValueError("Select a successfully prepared package")
+        self.package_dir(package_id)
         if action not in {"publish", "submit"}:
             raise ValueError("Select publication or explicit submission")
-        config = backfill.load_target(self.catalog, target, profile)
-        return self.enqueue(action, {"package_id": package_id, "config": asdict(config), "wait": wait})
+        if action == "publish" and overrides:
+            raise ValueError("Inference overrides apply only to processing submissions")
+        if capacity and capacity not in {f"F{2 ** exponent}" for exponent in range(1, 12)}:
+            raise ValueError("Select an available capacity SKU or Unknown")
+        config = backfill.load_target(self.catalog, target, profile, overrides=overrides)
+        payload = {"package_id": package_id, "config": asdict(config), "wait": wait}
+        if capacity:
+            payload["capacity"] = {"sku": capacity, "source": "operator-declared"}
+        # Serialize eligibility with deletion so a selected revision cannot disappear while queued.
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.package_dir(package_id)
+            identity = uuid.uuid4().hex
+            db.execute("INSERT INTO jobs(id,kind,payload,status) VALUES (?,?,?,'QUEUED')", (
+                identity, action, json.dumps(payload, allow_nan=False),
+            ))
+        return identity
 
     def _prepare(self, identity: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         if payload.get("uncalibrated"):
@@ -630,7 +837,7 @@ class PortalService:
         inventory = folder / "exceptions.csv"
         catalog.write_text(csv_text(PORTAL_CATALOG_FIELDS, payload["cameras"]), encoding="utf-8")
         inventory.write_text(csv_text(EXCEPTION_FIELDS, payload["exceptions"]), encoding="utf-8")
-        package = folder / "package"
+        package = self.package_dir(identity)
         config = PublisherConfig(
             catalog, inventory, self.source.video_root, self.source.prefix(payload["folder"]),
             "offline", "offline", "staging", "incoming", folder / "prepare.sqlite3",
@@ -642,7 +849,10 @@ class PortalService:
             self.store.event(identity, f"Inspecting and hashing {path.relative_to(self.source.root)}")
             return inspect_video(path)
 
-        summary = run_publisher(config, storage=None, inspector=inspect)
+        try:
+            summary = run_publisher(config, storage=None, inspector=inspect)
+        finally:
+            self._retain_reports(identity, package)
         if summary.rejected:
             raise ValueError(f"{summary.rejected} videos rejected. Review the rejection report, correct metadata, and prepare a new package.")
         if not summary.planned:
@@ -653,7 +863,7 @@ class PortalService:
         if not self.allow_cloud:
             raise ValueError("Cloud actions are disabled")
         config = backfill._parse_config({"intake_mode": "explicit", **payload["config"]})
-        package_dir = self.job_dir(payload["package_id"]) / "package"
+        package_dir = self.package_dir(payload["package_id"])
         publication = backfill.publication_config(
             package_dir, self.source.video_root, self.job_dir(identity), config,
         )
@@ -711,10 +921,16 @@ class PortalService:
             logging.getLogger(__name__).error("%s", self.worker_error)
 
     def report(self, identity: str, name: str) -> Path:
-        if self.store.job(identity) is None or name not in REPORTS:
+        name = report_type(name)[0]
+        job = self.store.job(identity)
+        if job is None or name not in REPORTS:
             raise ValueError("Unknown report")
         root = self.job_dir(identity)
-        for path in (root / "package" / name, root / name):
+        if (root / name).is_file():
+            return root / name
+        for path in (
+            (self.package_dir(identity) if job["kind"] == "prepare" else root / "package") / name,
+        ):
             if path.is_file():
                 return path
         raise ValueError("Report is not available")
@@ -727,7 +943,7 @@ class PortalService:
         path = self.report(identity, name)
         if path.stat().st_size > 5 * 1024 * 1024:
             raise ValueError("This report exceeds the 5 MiB inline limit. Use Download to inspect it.")
-        if name.endswith(".json"):
+        if path.suffix == ".json":
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (UnicodeError, json.JSONDecodeError) as error:
@@ -765,6 +981,7 @@ class PortalService:
         job = self.store.job(identity)
         if job is None or job["kind"] != "prepare" or job["status"] != "SUCCEEDED":
             raise ValueError("Only completed manifest packages can be downloaded")
+        package = self.package_dir(identity)
         root = self.job_dir(identity)
         archive = root / "manifest-package.zip"
         if archive.exists():
@@ -772,8 +989,8 @@ class PortalService:
         with TemporaryDirectory(dir=root) as directory:
             pending = Path(directory) / "package.zip"
             with zipfile.ZipFile(pending, "w", compression=zipfile.ZIP_DEFLATED) as output:
-                for path in sorted((root / "package").rglob("*")):
+                for path in sorted(package.rglob("*")):
                     if path.is_file():
-                        output.write(path, path.relative_to(root / "package"))
+                        output.write(path, path.relative_to(package))
             pending.replace(archive)
         return archive

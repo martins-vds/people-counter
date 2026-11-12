@@ -216,8 +216,9 @@ original execution behavior.
 
 Storage operations use `DefaultAzureCredential`; Fabric job operations use the
 attended Azure CLI identity. Both identities must belong to the intended tenant.
-The operator needs ADLS publication access, OneLake model/release/shortcut read
-access, OneLake backfill-intake write access, and permission to invoke/read the
+The operator needs ADLS publication access, OneLake model/shortcut read
+access, Fabric API access to list the target Lakehouse's shortcuts,
+OneLake backfill-intake write access, and permission to invoke/read the
 Control SJD. Use narrowly scoped permissions. Never put secrets in configuration.
 With `--wait`, the Azure CLI identity also needs read access to the production
 `people_counter_sjd_work` Delta table in OneLake.
@@ -227,7 +228,21 @@ Submission and Control derive work compatibility from the installed SDK's
 standard package version. Target IDs come from configuration and runtime
 context; no deployment identity is embedded in the wheel.
 
-If submission fails while verifying release evidence or models, the OneLake
+Before any ADLS publication or registration-plan write, submission reads the
+target Lakehouse's shortcut definitions through the Fabric REST API. The exact
+`shortcut_path` must resolve to one ADLS Gen2 shortcut whose account matches
+`storage_account` and whose subpath is the configured `filesystem` container
+root, not an `incoming/` subfolder. Missing, ambiguous, wrong-account/container,
+non-ADLS targets, or API failures stop the run before publication. This check
+runs on retries too; offline preview still makes no network requests.
+
+On a mismatch, have an administrator align the shortcut with the reviewed
+publication destination. The SDK does not repoint shortcuts or move existing
+files to conceal a mismatch. Preserve retry state. Post-publication manifest
+and video checks through OneLake remain required: matching shortcut metadata
+does not prove that its connection credentials can read the files.
+
+If submission fails while verifying models or published shortcut files, the OneLake
 error identifies the operation, full `abfss://` resource URI, Azure exception
 type, HTTP status, and request ID when available. The original Azure exception
 is retained as the cause. Model checks precede publication.

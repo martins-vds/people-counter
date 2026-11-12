@@ -46,6 +46,20 @@ at `/data/videos` and `/data/models`. The browser's optional folder field is rel
 to the allowed footage root; it cannot browse the rest of the host filesystem.
 Portal packages use the logical source prefix `videos/`.
 
+Package outputs are separate from source footage. By default they live in
+`portal-state` at `/var/lib/people-counter/portal/packages`. Administrators can set
+`PC_PORTAL_OUTPUT_ROOT` (or standalone `pc-admin --output-root`) to another writable,
+persistent directory. For Compose, an alternative directory must be mounted writable
+with a Compose override; changing the environment variable alone does not create a
+host mount or make the read-only container filesystem writable. Never use a directory
+inside the footage root or a parent containing that root.
+
+The package dialog accepts a destination **relative to the output root**. Named
+revisions use `<destination>/<generated-package-name>/vN/`. Traversal, symlink
+escape, and existing revision destinations are rejected. Each queued preparation
+retains its original destination even if the configured default changes.
+Existing job-local packages stay where they are and remain accessible.
+
 The local source boundary is isolated in `LocalFootageSource`. Cloud **source**
 adapters are not implemented yet; the disabled source selector says so.
 Cloud publication of local footage is a separate, supported operation below.
@@ -197,9 +211,11 @@ Loaded branches are retained for the current page. Loading failures remain
 visible with a Retry action instead of appearing as an empty folder.
 
 Name filtering is a case-insensitive substring match in the **current folder**,
-not a recursive search or a glob expression. The type filter supports all items,
-videos, and folders. Filters persist through folder navigation; **Clear filters**
-retains the folder. Empty folders and filters with no matches have distinct states.
+not a recursive search or a glob expression. The default type filter is **Videos**;
+**All types** and **Folders** remain available. Folder navigation is independent of
+the table filter. Filters persist through folder navigation; **Clear filters**
+retains the folder and restores Videos. Empty folders and filters with no matches
+have distinct states.
 
 Folders sort first, followed by files and blocked links. Size is real filesystem
 metadata, and modification times are explicitly UTC. Modification time is not
@@ -207,8 +223,9 @@ the recording/capture time used in manifests. Unavailable metadata is reported
 on its row. Links outside the mounted source are blocked without exposing their
 metadata. Browsing does not modify source files.
 
-Each video has one **Calibrate** action, opening the existing counting-line
-editor. **Generate manifest package** opens the existing package dialog with the
+Each video has a **Review footage** action, opening separate Counting line and
+Recording details sections side by side on wide screens and stacked on phones.
+**Generate manifest package** opens the package dialog with the
 current folder retained. Source/mount information and manual path entry remain
 under **Source configuration**. There are no upload, rename, or delete actions.
 
@@ -238,8 +255,8 @@ are not exported as fabricated camera-catalog rows.
    recordings from different days/folders. Repeating assignment updates ownership
    without changing the saved counting line. The camera's footage page lists all
    associated files and identifies the calibration example separately.
-   The footage library shows camera ownership only, without calibration badges or
-   counting-line actions. Follow the camera link to manage its geometry. Assignment
+   The footage library shows camera ownership and a **Review footage** action.
+   Review footage opens geometry and recording details directly. Assignment
    controls align beside each other on larger screens and stack at full width on
    phones. Narrow layouts keep selection, filename, and camera visible; type, size,
    and modification time remain available under **File details**.
@@ -251,11 +268,11 @@ are not exported as fabricated camera-catalog rows.
    their coordinates under **Manual line coordinates**. Drawing uses the original frame's pixel coordinates,
    including when the canvas is scaled on a small screen. The arrow shows
    endpoint order, not walking direction; reversing endpoints swaps in/out.
-3. **Camera metadata:** when first calibrating, select a location, then one of that location's
-   registered cameras. Changing location clears the previous camera selection.
-   Choose the camera timezone from the IANA timezone list and set timestamp rules
-   and effective dates under **Recording time and effective dates**. Editing a
-   calibration restores its saved selections and expands nondefault recording rules.
+3. **Camera metadata:** when first saving a camera line, select a registered
+   camera if the footage is not assigned yet. Recording rules are edited separately:
+   use **Edit camera recording rules** in Review footage, or **Edit metadata**
+   on the camera page. Choose a timezone, timestamp rules, and effective dates
+   without changing the saved geometry or decoding footage.
    The example video is not the complete assignment list. Existing counting lines
    are restored when reviewing another recording from the same camera. Multiple
    effective-dated configurations remain separate. Use **Edit metadata** on the
@@ -266,22 +283,41 @@ are not exported as fabricated camera-catalog rows.
    Review the Cameras page or download its catalog CSV. Calibration cannot
    create an unregistered camera or move one to another location; forged requests
    are rejected without changing metadata.
-4. **Video exceptions:** choose "This video only" to override that video's line
-   and frame dimensions. Use the calendar and time picker under **Authoritative
-   capture time override (UTC, optional)** to choose the recording date and time,
+4. **Video exceptions:** choose "This video only" under **Line applies to** to
+   override that video's line and frame dimensions. Recording details always
+   exposes **Capture time override (UTC, optional)**, regardless of line scope.
+   Use its calendar and time picker to choose the recording date and time,
    including seconds if needed. Enter UTC, not the browser or camera timezone;
    the portal saves the selection as an authoritative UTC capture timestamp.
-   A blank selection retains normal embedded/filename resolution.
+   Save each section independently. Saving a line retains the capture-time
+   exception; saving recording details retains geometry. Clear the capture time
+   and save to restore normal resolution. **Use camera line** removes only
+   video geometry, preserving any timestamp exception. Timestamp-only saves do
+   not decode frames. Legacy calibration URLs remain supported.
    Camera defaults are not changed. A camera configuration must still cover the video.
-5. **Packages:** choose **Generate manifest package** and review the folder in
-   its dialog. **Prepare this folder** opens it with the selected folder retained.
+5. **Packages:** choose **Generate manifest package**, enter a package name,
+   and review its source folder and optional relative output destination.
+   Reuse a name to allocate the next integer revision. Failed attempts retain
+   their numbers; existing revisions and their saved inputs are not overwritten.
    Preparation snapshots metadata and footage ownership before queuing the job,
    probes/hashes videos, and displays progress and rejection reports.
    This is an **offline preparation job only**: it does not upload footage,
    publish to cloud storage, submit Fabric work, or run inference. Cloud actions
    remain separate and require approval.
-   Use **View** beside each JSON/CSV report on the job page to inspect it in the
-   UI; original downloads remain available. CSV rows and JSON record collections
+   Package history shows revision, status, destination, schema version, and
+   links to reports and cloud selection. Historical packages remain ungrouped.
+   Rerunning a retained revision creates a new cloud job and validates unchanged
+   source bytes, rather than modifying the package or resuming an old run.
+   **Delete artifacts** requires explicit confirmation. Active/interrupted work
+   blocks deletion. Source footage, reports, job history, and recovery evidence
+   remain; deleted revisions cannot be downloaded or used for new work.
+   There is no automatic deletion.
+   Job **Reports** opens with a readable Summary when available. Choose
+   **Rejections**, **Footage inventory**, or **Manifest package** to inspect
+   details; downloads identify purpose and format rather than internal filenames.
+   The inventory is a CSV of footage, not a rendered video. The portal does not
+   generate annotated videos or fetch new cloud video artifacts.
+   Original downloads remain available. CSV rows and JSON record collections
    have 50-item pagination, with section links for multiple JSON collections.
    JSON uses labeled fields and expandable records rather than raw JSON.
    Inline reports are limited to 5 MiB, 50 nested records/fields per collection,
@@ -302,12 +338,26 @@ are not exported as fabricated camera-catalog rows.
    the artifacts deployed in Fabric.
    This job does not deploy resources, upload footage, submit backfill, or run
    inference; those actions are not implied by adding a target.
-   Optional advanced controls select batch size and sampling FPS; the shared
-   resolver validates them and recalculates identities automatically.
+   Optional advanced controls select detection threshold, batch size, and
+   sampling FPS; the shared resolver validates them and recalculates identities
+   automatically. Threshold is finite and between 0.1 and 1, inclusive,
+   matching the detector's existing candidate floor.
+   Supported detector batch sizes remain 1, 2, and 4; FPS must be positive
+   and finite.
 7. **Cloud work:** choose **Start cloud action** to review a completed package,
    target/profile, and explicit action in its dialog.
    Publication-only and publish-plus-registration are separate choices.
    "Wait for processing" applies only to explicit submission.
+   Optional job inference overrides apply only to processing submissions.
+   **Review cloud action** shows profile defaults, overrides, and final effective
+   settings before a fresh approval starts work. Profile defaults are unchanged,
+   and resume retains the queued job's exact configuration.
+   The capacity picker records operator-declared target context, not a verified
+   resource lookup or a deployment change. Unknown capacity is explicit.
+   Guidance is advisory: Fabric F64 does not establish a safe batch maximum.
+   Detector batching differs from concurrent jobs and Spark sizing. Model/runtime
+   memory and concurrent work also affect feasibility. Sampling FPS controls
+   the number of frames processed per second of footage.
 
 Package ZIP downloads contain metadata, not source videos. Retain the unchanged
 footage. Changing camera metadata requires a new package. Changing a profile or
@@ -324,8 +374,9 @@ and explicit approvals remain visible within the active dialog. Draft values
 survive closing/reopening on the same page, but cloud approval checkboxes are
 cleared so each submission/resume needs fresh consent.
 
-Folder browsing and frame-preview controls stay inline, as does the counting-line
-editor with its location/camera/timezone selections. Job status, downloads,
+Folder browsing and frame-preview controls stay inline. Review footage keeps its
+geometry and recording-details saves independent; camera recording rules have a
+separate page. Job status, downloads,
 errors, safety warnings, and recovery guidance remain visible outside dialogs.
 Source configuration, manual coordinates, recording rules, camera geometry/date
 details, package explanations, inference overrides, completed-job logs, and raw

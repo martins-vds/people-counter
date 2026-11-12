@@ -134,6 +134,301 @@ def test_metadata_edit_does_not_change_geometry_or_require_frame_decode(service,
     assert changed["video"] == config["video"]
 
 
+def test_footage_review_has_independent_geometry_and_recording_forms(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    client = create_app(service).test_client()
+    library = client.get("/?folder=lobby").get_data(as_text=True)
+    assert library.index(">Locations</a>") < library.index(">Cameras</a>") < library.index(">Footage</a>")
+    assert "Review footage" in library
+    response = client.get("/review", query_string={"video": form["video"], "folder": "lobby"})
+    assert response.status_code == 200
+    assert b"Save counting line" in response.data
+    assert b"Save recording details" in response.data
+    assert b'action="/footage/recording"' in response.data
+    assert b"Effective dates select" in response.data
+
+
+def test_recording_exception_saves_without_decoding_or_changing_geometry(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    service.save_calibration({**form, "scope": "video", "counting_line_x1": "42"})
+    client = create_app(service).test_client()
+    token = csrf(client)
+    with patch.object(service.source, "frame", side_effect=AssertionError("Must not decode")):
+        response = client.post("/footage/recording", data={
+            "csrf": token, "video": form["video"], "folder": "lobby",
+            "captured_at_utc": "2026-01-01T12:34:56",
+        })
+    assert response.status_code == 302
+    saved = service.store.entries("exception")[0]
+    assert saved["captured_at_utc"] == "2026-01-01T12:34:56Z"
+    assert saved["counting_line_x1"] == "42"
+    camera = service.store.entries("camera")[0]
+    with patch.object(service.source, "frame", wraps=service.source.frame) as decoded:
+        response = client.post("/footage/line", data={
+            **form, "csrf": token, "scope": "video", "counting_line_x1": "70",
+        })
+    decoded.assert_called_once_with(form["video"])
+    assert response.status_code == 302
+    saved = service.store.entries("exception")[0]
+    assert saved["captured_at_utc"] == "2026-01-01T12:34:56Z"
+    assert saved["counting_line_x1"] == "70"
+    assert service.store.entries("camera")[0] == camera
+    response = client.get("/review", query_string={"video": form["video"], "scope": "video"})
+    assert b'value="2026-01-01T12:34:56"' in response.data
+    assert b'value="70"' in response.data
+
+
+def test_timestamp_only_exception_and_independent_override_removal(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    client = create_app(service).test_client()
+    token = csrf(client)
+    assert client.post("/footage/recording", data={
+        "csrf": token, "video": form["video"], "captured_at_utc": "2026-01-01T12:00",
+    }).status_code == 302
+    assert "frame_width" not in service.store.entries("exception")[0]
+    assert client.post("/footage/line", data={
+        **form, "csrf": token, "scope": "video",
+    }).status_code == 302
+    assert client.post("/footage/line", data={
+        "csrf": token, "video": form["video"], "use_camera": "yes",
+    }).status_code == 302
+    saved = service.store.entries("exception")[0]
+    assert saved["captured_at_utc"] == "2026-01-01T12:00Z"
+    assert "frame_width" not in saved
+    assert client.post("/footage/recording", data={
+        "csrf": token, "video": form["video"], "captured_at_utc": "",
+    }).status_code == 302
+    assert service.store.entries("exception") == []
+
+
+def test_camera_line_save_retains_recording_rules(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    config = service.store.entries("camera")[0]
+    service.update_camera_metadata(form["camera_id"], config["id"], {
+        **config["catalog"], "camera_timezone": "America/Chicago", "capture_time_source": "embedded",
+        "capture_time_regex": "", "capture_time_format": "",
+    })
+    client = create_app(service).test_client()
+    assert client.post("/footage/line", data={
+        **form, "csrf": csrf(client), "config_id": config["id"], "counting_line_x1": "77",
+    }).status_code == 302
+    updated = service.store.entries("camera")[0]["catalog"]
+    assert updated["camera_timezone"] == "America/Chicago"
+    assert updated["capture_time_source"] == "embedded"
+    assert updated["counting_line_x1"] == "77"
+
+
+@pytest.mark.parametrize("folder", ["lobby", ""])
+def test_named_package_revisions_use_confined_snapshotted_destinations(service, monkeypatch, tmp_path, folder):
+    save_camera(service, monkeypatch)
+    monkeypatch.setattr("people_counter.portal_service.inspect_video", inspection)
+    first = service.enqueue_preparation(folder, name="Morning", destination="north")
+    assert service.run_next_job()
+    original = service.package_dir(first)
+    assert original.is_relative_to(service.output_root)
+    before = (original / "manifest-package.json").read_bytes()
+    second = service.enqueue_preparation(folder, name="Morning", destination="north")
+    assert service.run_next_job()
+    packages = service.packages()
+    assert [(p["name"], p["revision"]) for p in packages] == [("Morning", 2), ("Morning", 1)]
+    assert (original / "manifest-package.json").read_bytes() == before
+    restored = PortalService(service.source.root, service.models_root, service.state, output_root=tmp_path / "new-output")
+    assert restored.package_dir(first) == original
+    assert restored.package_dir(second) != original
+    assert restored.archive(first).is_file()
+    for destination in ("../outside", "/tmp/outside"):
+        with pytest.raises(ValueError, match="output root"):
+            service.enqueue_preparation("lobby", name="Unsafe", destination=destination)
+    (service.output_root / "escape").symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ValueError, match="output root"):
+        service.enqueue_preparation("lobby", name="Unsafe", destination="escape")
+
+
+def test_package_deletion_preserves_reports_history_and_active_references(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    monkeypatch.setattr("people_counter.portal_service.inspect_video", inspection)
+    identity = service.enqueue_preparation("lobby", name="Morning")
+    assert service.run_next_job()
+    service.archive(identity)
+    dependent = service.store.enqueue("submit", {"package_id": identity})
+    with pytest.raises(ValueError, match="referenced"):
+        service.delete_package(identity)
+    service.store.finish(dependent, error="Test job stopped")
+    service.delete_package(identity)
+    assert service.store.job(identity)["status"] == "SUCCEEDED"
+    assert service.report(identity, "summary.json").is_file()
+    assert (service.source.root / form["video"]).read_bytes() == b"video"
+    assert service.packages()[0]["deleted"]
+    assert not (service.job_dir(identity) / "manifest-package.zip").exists()
+    with pytest.raises(ValueError, match="deleted"):
+        service.archive(identity)
+    with pytest.raises(ValueError, match="deleted"):
+        service.package_dir(identity)
+    client = create_app(service).test_client()
+    assert b"Artifacts deleted" in client.get("/packages").data
+
+
+def test_failed_revisions_keep_numbers_and_legacy_packages_remain_readable(service):
+    first = service.enqueue_preparation("lobby", name="Morning")
+    assert service.run_next_job()
+    assert service.store.job(first)["status"] == "FAILED"
+    service.enqueue_preparation("lobby", name="Morning")
+    assert [p["revision"] for p in service.packages()] == [2, 1]
+    legacy = service.enqueue("prepare", {})
+    folder = service.job_dir(legacy) / "package"
+    folder.mkdir(parents=True)
+    (folder / "summary.json").write_text('{"planned":1}')
+    assert service.package_dir(legacy) == folder
+    assert service.report(legacy, "summary.json").read_text() == '{"planned":1}'
+    assert service.packages()[0]["revision"] is None
+
+
+def test_output_root_overlap_and_existing_revision_are_rejected(service):
+    with pytest.raises(ValueError, match="separate"):
+        PortalService(
+            service.source.root, service.models_root, service.state,
+            output_root=service.source.root / "output",
+        )
+    existing = service.output_root / "morning/v1"
+    existing.mkdir(parents=True)
+    (existing / "keep.txt").write_text("unchanged")
+    with pytest.raises(ValueError, match="destination"):
+        service.enqueue_preparation("lobby", name="Morning")
+    assert (existing / "keep.txt").read_text() == "unchanged"
+    assert service.store.jobs() == []
+
+
+def test_recording_exception_rejects_bad_timestamp_without_losing_geometry(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    service.save_calibration({**form, "scope": "video"})
+    before = service.store.entries("exception")
+    client = create_app(service).test_client()
+    assert client.post("/footage/recording", data={
+        "csrf": csrf(client), "video": form["video"], "captured_at_utc": "not-a-time",
+    }).status_code == 400
+    assert service.store.entries("exception") == before
+    assert client.post("/footage/line", data={
+        **form, "csrf": csrf(client), "scope": "video", "counting_line_x1": "-1",
+    }).status_code == 400
+    assert service.store.entries("exception") == before
+
+
+def test_review_keeps_recording_details_available_with_multiple_camera_configurations(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    (service.source.root / "side").mkdir()
+    (service.source.root / "side/clip.mp4").write_bytes(b"video")
+    service.save_calibration({**form, "folder": "side", "video": "side/clip.mp4"})
+    client = create_app(service).test_client()
+    response = client.get("/review", query_string={"video": form["video"], "folder": "lobby"})
+    assert response.status_code == 200
+    assert b"Save recording details" in response.data
+    assert b"Choose a camera configuration" in response.data
+    assert b"Save counting line" not in response.data
+
+
+def test_package_path_rejects_replaced_revision_symlink(service):
+    first = service.enqueue_preparation("lobby", name="Morning")
+    second = service.enqueue_preparation("lobby", name="Morning")
+    original = service.package_dir(first)
+    original.rmdir()
+    original.symlink_to(service.package_dir(second), target_is_directory=True)
+    with pytest.raises(ValueError, match="destination"):
+        service.package_dir(first)
+
+
+def test_failed_artifact_cleanup_remains_deleted_and_reports_are_retained(service, monkeypatch):
+    identity = service.enqueue_preparation("lobby", name="Morning")
+    service.store.finish(identity, result={"planned": 1})
+    (service.package_dir(identity) / "summary.json").write_text('{"planned":1}')
+    with patch("people_counter.portal_service.shutil.rmtree", side_effect=PermissionError("read-only")):
+        with pytest.raises(ValueError, match="cleanup"):
+            service.delete_package(identity)
+    assert service.packages()[0]["deleted"]
+    assert service.report(identity, "summary").read_text() == '{"planned":1}'
+    with pytest.raises(ValueError, match="deleted"):
+        service.archive(identity)
+
+
+def test_job_reports_use_stable_semantic_ids_and_readable_summary(service):
+    identity = service.enqueue("prepare", {})
+    root = service.job_dir(identity) / "package"
+    root.mkdir(parents=True)
+    (root / "summary.json").write_text('{"planned":12,"rejected":1}')
+    (root / "rejection-report.csv").write_text("reason,message\nTIME,Missing timestamp\n")
+    client = create_app(service).test_client()
+    page = client.get(f"/jobs/{identity}").data
+    assert b"Download summary JSON" in page
+    assert b"View summary.json" not in page
+    assert b"planned" in page and b"12" in page
+    response = client.get(f"/jobs/{identity}/reports/summary")
+    assert response.status_code == 200 and b"<h1>Summary</h1>" in response.data
+    assert b"Download summary JSON" in response.data
+    assert client.get(f"/jobs/{identity}/files/summary").status_code == 200
+    assert client.get(f"/jobs/{identity}/files/../../secret").status_code == 404
+
+
+def test_processing_overrides_are_snapshotted_without_changing_approved_defaults(service, monkeypatch):
+    from people_counter import backfill_operator as backfill
+    from people_counter.inference_profiles import artifact_paths, resolve_profile
+
+    identity = service.enqueue("prepare", {})
+    service.store.finish(identity, result={"planned": 1})
+    preset = "rtdetr-r18-onnx-cpu"
+    profile = resolve_profile(preset, {path: "a" * 64 for path in artifact_paths(preset)})
+    binding = {
+        "workspace_id": "11111111-1111-1111-1111-111111111111",
+        "lakehouse_id": "22222222-2222-2222-2222-222222222222",
+        "environment_id": "33333333-3333-3333-3333-333333333333",
+        "control_sjd_id": "44444444-4444-4444-4444-444444444444",
+        "storage_account": "testaccount", "filesystem": "footage",
+        "shortcut_path": "Files/videos", "table_directory": "Tables/dbo", "intake_mode": "explicit",
+    }
+    service.catalog.write_text(json.dumps({
+        "schema": backfill.CATALOG_SCHEMA,
+        "targets": {"prod": {"binding": binding, "profiles": {preset: profile}}},
+    }))
+    before = service.catalog.read_bytes()
+    service.allow_cloud = True
+    client = create_app(service).test_client()
+    response = client.post("/cloud", data={
+        "csrf": csrf(client), "confirm": "yes", "package_id": identity,
+        "selection": "prod::" + preset, "action": "submit", "batch_size": "4",
+        "detection_threshold": "0.35", "sample_fps": "2", "capacity": "F64",
+    })
+    assert response.status_code == 302
+    job = service.store.job(response.headers["Location"].rsplit("/", 1)[1])
+    assert job["kind"] == "submit" and job["status"] == "QUEUED"
+    assert job["payload"]["package_id"] == identity
+    assert job["payload"]["wait"] is False
+    assert job["payload"]["config"]["profile"]["detection_threshold"] == 0.35
+    assert job["payload"]["config"]["profile"]["batch_size"] == 4
+    assert job["payload"]["config"]["profile"]["sample_fps"] == 2.0
+    assert job["payload"]["capacity"] == {"sku": "F64", "source": "operator-declared"}
+    assert job["payload"]["config"]["profile"]["runtime_key"] != profile["runtime_key"]
+    assert service.catalog.read_bytes() == before
+    assert b"Effective inference settings" in client.get(response.headers["Location"]).data
+    default_job = service.store.job(service.enqueue_cloud(identity, "prod", preset, "submit", True))
+    assert default_job["payload"]["wait"] is True
+    assert "capacity" not in default_job["payload"]
+    assert default_job["payload"]["config"]["profile"] == profile
+    for capacity in ("F1", "F4096"):
+        with pytest.raises(ValueError, match="capacity"):
+            service.enqueue_cloud(identity, "prod", preset, "submit", False, capacity=capacity)
+    invalid = client.post("/cloud", data={
+        "csrf": csrf(client), "confirm": "yes", "package_id": identity,
+        "selection": "prod::" + preset, "action": "publish", "detection_threshold": "0.35",
+    })
+    assert invalid.status_code == 400
+
+
+def test_direct_cloud_queueing_still_obeys_disabled_cloud_gate(service):
+    identity = service.enqueue("prepare", {})
+    service.store.finish(identity, result={"planned": 1})
+    with patch("people_counter.portal_service.backfill.load_target", side_effect=AssertionError("Must not resolve")):
+        with pytest.raises(ValueError, match="disabled"):
+            service.enqueue_cloud(identity, "prod", "profile", "submit", False)
+
+
 @pytest.mark.parametrize("name", ["summary.json", "rejection-report.csv"])
 def test_reports_view_inline_with_escaping_and_download_retained(service, name):
     identity = service.enqueue("prepare", {"folder": "lobby", "cameras": [], "exceptions": []})
@@ -152,7 +447,8 @@ def test_reports_view_inline_with_escaping_and_download_retained(service, name):
     assert b"&lt;script&gt;" in response.data
     assert b"Download" in response.data
     page = client.get(f"/jobs/{identity}").data
-    assert f"/jobs/{identity}/reports/{name}".encode() in page
+    semantic = "summary" if name.endswith(".json") else "rejections"
+    assert f"/jobs/{identity}/reports/{semantic}".encode() in page
     assert b"does not upload" in page
     assert "attachment" in client.get(f"/jobs/{identity}/files/{name}").headers["Content-Disposition"]
     assert client.get(f"/jobs/{identity}/reports/not-allowed.json").status_code == 404
@@ -174,6 +470,9 @@ def test_csv_report_pagination_and_empty_state(service):
     assert client.get(f"/jobs/{identity}/reports/rejection-report.csv?page=0").status_code == 400
     path.write_text("reason_code,message\n")
     assert b"No rows" in client.get(f"/jobs/{identity}/reports/rejection-report.csv").data
+    path.write_text("")
+    empty = client.get(f"/jobs/{identity}/reports/rejection-report.csv")
+    assert empty.status_code == 200 and b"No rows" in empty.data
 
 
 def test_exact_catalog_assignment_precedes_folder_without_matching_other_video(service, monkeypatch):

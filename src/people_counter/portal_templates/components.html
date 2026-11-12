@@ -39,6 +39,18 @@
 {% endfor %}
 {%- endmacro %}
 
+{% macro report_value(value, depth=0) %}
+{% if value is mapping and depth < 6 %}
+<dl class="space-y-2">{% for key, item in value.items() %}{% if loop.index <= 50 %}<div><dt class="font-medium">{{ key|replace('_',' ') }}</dt><dd class="break-all">{{ report_value(item, depth + 1) }}</dd></div>{% endif %}{% endfor %}</dl>
+{% if value|length > 50 %}<p>Showing 50 fields. Download the report for all fields.</p>{% endif %}
+{% elif value is sequence and value is not string and depth < 6 %}
+{% for item in value[:50] %}<details class="technical-details"><summary>Record {{ loop.index }}</summary><div class="card-body">{{ report_value(item, depth + 1) }}</div></details>{% else %}<p>No records.</p>{% endfor %}
+{% if value|length > 50 %}<p>Showing 50 of {{ value|length }} records. Download the report for all records.</p>{% endif %}
+{% elif value is mapping or (value is sequence and value is not string) %}<p>Nested details exceed the inline depth limit. Download the report to inspect them.</p>
+{% elif value is none %}<span>Not provided</span>
+{% else %}{{ value }}{% endif %}
+{% endmacro %}
+
 {% macro dialog_button(identity, label, glyph='settings', enabled=true) -%}
 <button type="button" id="open-{{ identity }}" {% if enabled %}data-dialog-open="{{ identity }}"{% endif %} aria-haspopup="dialog" aria-controls="{{ identity }}" disabled>{{ icon(glyph, 'size-4') }}{{ label }}</button>
 {%- endmacro %}

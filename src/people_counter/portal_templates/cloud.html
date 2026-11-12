@@ -7,20 +7,30 @@
 {% endcall %}
 {% if not cloud_enabled %}<div class="alert alert-warning" role="status">{{ icon('lock', 'size-5 shrink-0') }}<div><p class="font-semibold">Cloud actions are disabled.</p><p class="mt-1">Set <code>PC_PORTAL_ALLOW_CLOUD=1</code> and authenticate inside the portal container before enabling them.</p></div></div>{% endif %}
 <div class="alert alert-info">{{ icon('info', 'size-5 shrink-0') }}<p>Publishing can trigger arrival automation. Coordinate competing intake before explicitly registering the same footage.</p></div>
-{% call form_dialog('cloud-dialog', 'Start a cloud job', 'Review the package, target and action. Nothing runs until you approve and submit.', wide=true) %}
+{% call form_dialog('cloud-dialog', 'Start a cloud job', 'Review the package, target and action. Nothing runs until you approve and submit.', wide=true, auto_open=selected_package != '') %}
   <form method="post">
     <div class="card-body">
       <input type="hidden" name="csrf" value="{{ session.csrf }}">
       <div class="alert alert-info"><p>Publishing can trigger arrival automation. Coordinate competing intake before explicitly registering the same footage.</p></div>
       <fieldset class="space-y-5" {% if not cloud_enabled %}disabled{% endif %}><legend>Explicit cloud action</legend>
-        <div class="field"><label for="package-id">Prepared package</label><select id="package-id" name="package_id" required autofocus><option value="">Select a completed package</option>{% for item in packages %}<option value="{{ item.id }}">{{ item.created_at }} - {{ item.id }}</option>{% endfor %}</select><p class="help">Only successfully prepared packages are eligible.</p></div>
+        <div class="field"><label for="package-id">Prepared package</label><select id="package-id" name="package_id" required autofocus><option value="">Select a completed package</option>{% for item in packages %}<option value="{{ item.id }}" {% if item.id == selected_package %}selected{% endif %}>{{ item.name }} / {{ 'v' ~ item.revision if item.revision is not none else item.id }} ({{ item.created_at }})</option>{% endfor %}</select><p class="help">Only successfully prepared, retained package revisions are eligible.</p></div>
         <div class="field"><label for="target-profile">Target and profile</label><select id="target-profile" name="selection" required><option value="">Select an approved target/profile</option>{% for item in choices %}<option value="{{ item.value }}">{{ item.target }} / {{ item.profile.profile_id }} - batch {{ item.profile.batch_size }}, {{ item.profile.sample_fps }} FPS</option>{% endfor %}</select></div>
         <div class="field"><label for="cloud-action">Action</label><select name="action" id="cloud-action" required><option value="">Choose an action</option><option value="publish">Upload/publish only (does not explicitly register work)</option><option value="submit">Publish and register explicit backfill work</option></select></div>
+        <details class="technical-details"><summary>Job inference overrides and capacity context</summary><div class="card-body">
+          <p>Overrides apply only to processing submissions. Leave blank for approved profile defaults. Publication-only actions reject inference overrides.</p>
+          <div class="form-grid">
+            <div class="field"><label for="job-threshold">Detection threshold override</label><input id="job-threshold" name="detection_threshold" type="number" min="0.1" max="1" step="any"><p class="help">Range 0.1 to 1, matching the detector's candidate floor.</p></div>
+            <div class="field"><label for="job-batch">Batch size override</label><select id="job-batch" name="batch_size"><option value="">Use profile default</option>{% for size in [1,2,4] %}<option>{{ size }}</option>{% endfor %}</select></div>
+            <div class="field"><label for="job-fps">Sampling FPS override</label><input id="job-fps" name="sample_fps" type="number" min="0" step="any"></div>
+            <div class="field"><label for="capacity-sku">Target capacity context</label><select id="capacity-sku" name="capacity"><option value="">Unknown</option>{% for sku in capacities %}<option>{{ sku }}</option>{% endfor %}</select><p class="help">Operator-declared, not verified against the selected target. This does not change deployed capacity.</p></div>
+          </div>
+          <p class="help">Batch size controls detector inference batching, not concurrent jobs or Spark sizing. Options 1, 2, and 4 are runtime restrictions, not SKU limits. Capacity does not guarantee that a model/batch fits execution memory. Sampling FPS controls how many video frames are processed per second of footage.</p>
+        </div></details>
         <div id="wait-options" hidden><label class="check"><input type="checkbox" name="wait" value="yes" id="wait-processing">Wait for processing after submission</label><p class="help">Wait mode checks each exact work ID for successful processing and a committed attempt. Gold, reconciliation, and report refresh remain separate checks.</p></div>
         <div class="rounded-xl border border-amber-200 bg-amber-50 p-4"><label class="check"><input type="checkbox" name="confirm" value="yes" required>I reviewed the target and intake policy and approve this cloud action.</label></div>
       </fieldset>
     </div>
-    <div class="card-footer"><button type="button" class="btn-secondary" data-dialog-close>Cancel</button><button {% if not cloud_enabled %}disabled{% endif %}>{{ icon('cloud', 'size-4') }}Start cloud action</button></div>
+    <div class="card-footer"><button type="button" class="btn-secondary" data-dialog-close>Cancel</button><button name="preview" value="yes" {% if not cloud_enabled %}disabled{% endif %}>Review cloud action</button></div>
   </form>
 {% endcall %}
     <section class="card"><div class="card-header"><h2>Before you continue</h2></div><div class="card-body space-y-4">

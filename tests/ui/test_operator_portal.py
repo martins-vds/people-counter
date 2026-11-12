@@ -61,6 +61,9 @@ def test_folder_explorer_lazy_navigation_filters_metadata_and_context(page, port
     page.get_by_role("button", name="Apply filters", exact=True).click()
     expect(page.get_by_text("No matching items", exact=True)).to_be_visible()
     page.get_by_role("link", name="Clear filters", exact=True).click()
+    expect(table.locator("tbody tr[data-entry-path]")).to_have_count(1)
+    page.get_by_label("File type", exact=True).select_option("all")
+    page.get_by_role("button", name="Apply filters", exact=True).click()
     expect(table.locator("tbody tr[data-entry-path]")).to_have_count(3)
     page.get_by_role("link", name="Open folder nested", exact=True).click()
     expect(page.get_by_text("This folder is empty.", exact=True)).to_be_visible()
@@ -199,9 +202,35 @@ def prepare_package(page, portal):
     page.goto(portal.url + "/packages?folder=lobby")
     expect(page.get_by_role("dialog", name="Generate a package", exact=True)).to_be_visible()
     expect(page.get_by_label("Folder within source root", exact=True)).to_have_value("lobby")
+    page.get_by_label("Package name", exact=True).fill("Morning footage")
     page.get_by_role("dialog", name="Generate a package", exact=True).get_by_role("button", name="Generate manifest package", exact=True).click()
     expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
     return page.url.rsplit("/", 1)[-1]
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 1024, "height": 900}, {"width": 375, "height": 844}])
+def test_review_footage_layout_a_saves_details_independently(page, portal, viewport):
+    calibrate_camera(page, portal)
+    camera_before = portal.service.store.entries("camera")
+    page.set_viewport_size(viewport)
+    page.goto(portal.url + "/?folder=lobby")
+    page.get_by_role("link", name="Review footage", exact=True).click()
+    expect(page.get_by_role("heading", name="Review footage", exact=True)).to_be_visible()
+    counting = page.get_by_role("heading", name="Counting line", exact=True)
+    recording = page.get_by_role("heading", name="Recording details", exact=True)
+    if viewport["width"] >= 1024:
+        assert abs(counting.bounding_box()["y"] - recording.bounding_box()["y"]) < 2
+    page.get_by_label("Capture time override (UTC, optional)", exact=True).fill("2026-01-02T13:14:15")
+    page.get_by_role("button", name="Save recording details", exact=True).click()
+    expect(page.get_by_label("Capture time override (UTC, optional)", exact=True)).to_have_value("2026-01-02T13:14:15")
+    assert portal.service.store.entries("camera") == camera_before
+    page.get_by_label("Line applies to", exact=True).select_option("video")
+    page.get_by_role("button", name="Save counting line", exact=True).click()
+    expect(page.get_by_label("Capture time override (UTC, optional)", exact=True)).to_have_value("2026-01-02T13:14:15")
+    page.get_by_role("button", name="Use camera line", exact=True).click()
+    assert "frame_width" not in portal.service.store.entries("exception")[0]
+    assert portal.service.store.entries("exception")[0]["captured_at_utc"] == "2026-01-02T13:14:15Z"
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
@@ -225,11 +254,11 @@ def test_camera_owns_multiple_recordings_and_reports_open_inline(page, portal, v
     expect(table).to_contain_text("Calibration example")
     identity = prepare_package(page, portal)
     expect(page.get_by_text("Offline preparation only.", exact=True)).to_be_visible()
-    page.get_by_role("link", name="View summary.json", exact=True).click()
-    expect(page.get_by_role("heading", name="summary.json", exact=True)).to_be_visible()
-    expect(page.get_by_role("link", name="Download original report", exact=True)).to_be_visible()
+    page.get_by_role("link", name="Summary", exact=True).click()
+    expect(page.get_by_role("heading", name="Summary", exact=True)).to_be_visible()
+    expect(page.get_by_role("link", name="Download summary JSON", exact=True)).to_be_visible()
     page.get_by_role("link", name="Back to job", exact=False).click()
-    page.get_by_role("link", name="View generated-video-inventory.csv", exact=True).click()
+    page.get_by_role("link", name="Footage inventory", exact=True).click()
     report = page.get_by_role("table", name="Report rows", exact=True)
     expect(report.locator("tbody tr")).to_have_count(2)
     expect(report).to_contain_text(camera)
@@ -279,10 +308,10 @@ def test_per_video_exception_preserves_camera_defaults_and_original_timestamp(pa
     page.get_by_role("button", name="Save calibration").click()
     expect(page.get_by_text("videos/lobby/wide.mp4:", exact=False)).to_be_visible()
     identity = prepare_package(page, portal)
-    index = json.loads((portal.service.job_dir(identity) / "package/manifest-package.json").read_text())
+    index = json.loads((portal.service.package_dir(identity) / "manifest-package.json").read_text())
     entry = next(item for item in index["entries"] if item["video_relative_path"].endswith("wide.mp4"))
     manifest = json.loads((
-        portal.service.job_dir(identity) / "package" / entry["prepared_manifest_path"]
+        portal.service.package_dir(identity) / entry["prepared_manifest_path"]
     ).read_text())
     assert manifest["counting_line"] == [12, 30, 620, 30]
     assert manifest["frame_width"] == 640 and manifest["frame_height"] == 360
@@ -310,7 +339,7 @@ def test_calendar_capture_override_reaches_manifest_in_utc(browser, portal, view
         expect(page.get_by_text("Saved per-video exception. Camera defaults are unchanged.", exact=True)).to_be_visible()
         assert portal.service.store.entries("exception")[0]["captured_at_utc"] == "2026-03-08T02:30:45Z"
         identity = prepare_package(page, portal)
-        package = portal.service.job_dir(identity) / "package"
+        package = portal.service.package_dir(identity)
         index = json.loads((package / "manifest-package.json").read_text())
         manifest = json.loads((package / index["entries"][0]["prepared_manifest_path"]).read_text())
         assert manifest["captured_at_utc"] == "2026-03-08T02:30:45Z"
@@ -324,6 +353,7 @@ def test_background_job_continues_after_browser_leaves_and_errors_are_visible(pa
     calibrate_camera(page, portal)
     (portal.source / "lobby/broken.mp4").write_bytes(b"not a video")
     page.goto(portal.url + "/packages?folder=lobby")
+    page.get_by_label("Package name", exact=True).fill("Rejected footage")
     page.get_by_role("dialog", name="Generate a package", exact=True).get_by_role("button", name="Generate manifest package", exact=True).click()
     identity = page.url.rsplit("/", 1)[-1]
     page.goto(portal.url + "/")
@@ -331,7 +361,7 @@ def test_background_job_continues_after_browser_leaves_and_errors_are_visible(pa
     expect(page.locator("[data-job-status]")).to_have_text("FAILED", timeout=15000)
     expect(page.get_by_role("alert")).to_contain_text("rejected")
     expect(page.locator("#job-log")).to_be_visible()
-    expect(page.get_by_role("link", name="View rejection-report.csv", exact=True)).to_be_visible()
+    expect(page.get_by_role("link", name="Rejections", exact=True)).to_be_visible()
     assert portal.service.store.job(identity)["status"] == "FAILED"
     original = portal.service.store.job(identity)["payload"]
     page.get_by_role("button", name="Resume with retained state", exact=True).click()
@@ -750,7 +780,10 @@ def test_profile_generation_publication_and_submit_wait_use_shared_backends(page
         if wait:
             page.get_by_label("Wait for processing after submission").check()
         page.get_by_label("I reviewed the target and intake policy and approve this cloud action.").check()
-        page.get_by_role("dialog", name="Start a cloud job", exact=True).get_by_role("button", name="Start cloud action", exact=True).click()
+        page.get_by_role("dialog", name="Start a cloud job", exact=True).get_by_role("button", name="Review cloud action", exact=True).click()
+        expect(page.get_by_role("heading", name="Effective inference settings", exact=True)).to_be_visible()
+        page.get_by_label("I approve this exact package, target, action, and effective settings.").check()
+        page.get_by_role("button", name="Start cloud action", exact=True).click()
         expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
     expect(page.get_by_role("heading", name="Result", exact=True)).to_be_visible()
     page.get_by_text("Completed job log", exact=False).click()

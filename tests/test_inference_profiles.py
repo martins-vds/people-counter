@@ -101,6 +101,22 @@ def test_only_explicit_supported_overrides_are_allowed(model_tree, overrides):
         resolved(model_tree, **overrides)
 
 
+@pytest.mark.parametrize("threshold", [0.1, 0.35, 1])
+def test_threshold_override_recalculates_managed_identities(model_tree, threshold):
+    original = resolved(model_tree)
+    changed = resolved(model_tree, detection_threshold=threshold)
+    assert changed["detection_threshold"] == threshold
+    assert changed["runtime_key"] != original["runtime_key"]
+    assert changed["profile_sha256"] != original["profile_sha256"]
+    assert profiles.validate_profile(changed) == changed
+
+
+@pytest.mark.parametrize("threshold", [0, 0.099, -0.01, 1.01, float("nan"), float("inf"), True, "0.5"])
+def test_threshold_override_rejects_invalid_values(model_tree, threshold):
+    with pytest.raises(ValueError, match="detection_threshold"):
+        resolved(model_tree, detection_threshold=threshold)
+
+
 @pytest.mark.parametrize("name", ["supervision", "rfdetr-botsort", "rtdetr-r99-onnx-cpu"])
 def test_unsupported_fabric_profiles_fail_before_model_access(tmp_path, name):
     with pytest.raises(ValueError, match="Unsupported"):

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components.html" import icon, heading, badge, dialog_button, form_dialog %}
+{% from "components.html" import icon, heading, badge, dialog_button, form_dialog, report_value %}
 {% block head %}{% if job.status in ['QUEUED','RUNNING'] %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
 {% block title %}{{ job.kind|capitalize }} job{% endblock %}
 {% block content %}
@@ -16,6 +16,7 @@
   </div>
 </section>
 {% if job.error %}<div class="alert alert-danger" role="alert">{{ icon('info', 'size-5 shrink-0') }}<p class="break-words">{{ job.error }}</p></div>{% endif %}
+{% if job.payload.config %}<section class="card"><div class="card-header"><h2>Effective inference settings</h2></div><div class="card-body"><p>Threshold {{ job.payload.config.profile.detection_threshold }}, batch {{ job.payload.config.profile.batch_size }}, sampling {{ job.payload.config.profile.sample_fps }} FPS.</p><p>Capacity: {{ job.payload.capacity.sku if job.payload.capacity else 'Unknown' }} ({{ job.payload.capacity.source if job.payload.capacity else 'not verified' }}). Advisory only.</p></div></section>{% endif %}
 {% if job.result %}<section class="card">
   <div class="card-header"><div><h2>Result</h2><p class="card-description">The completed job's recorded outcome.</p></div>{{ badge('Saved', 'success') }}</div>
   <div class="card-body">
@@ -37,10 +38,12 @@
 <section class="card">
   <div class="card-header"><div><h2>Reports</h2><p class="card-description">Review validation results and retain package evidence.</p></div></div>
   <div class="card-body">
+    {% if summary %}<h3>Summary</h3>{{ report_value(summary.data) }}{% elif summary_error %}<p role="alert">{{ summary_error }}</p>{% endif %}
     {% if reports or (job.kind == 'prepare' and job.status == 'SUCCEEDED') %}<ul class="report-list">
-    {% for name in reports %}<li><a class="report-link" href="{{ url_for('report_view', identity=job.id, name=name) }}">{{ icon('jobs', 'size-5 shrink-0') }}<span class="break-all font-mono text-xs">View {{ name }}</span></a><a class="text-xs" href="{{ url_for('report', identity=job.id, name=name) }}">Download {{ name }}</a></li>{% endfor %}
-    {% if job.kind == 'prepare' and job.status == 'SUCCEEDED' %}<li class="sm:col-span-2"><a class="btn w-full" href="{{ url_for('package_zip', identity=job.id) }}">{{ icon('package', 'size-4') }}Download manifest package ZIP</a></li>{% endif %}
+    {% for report in reports %}<li><a class="report-link" href="{{ url_for('report_view', identity=job.id, name=report.id) }}">{{ icon('jobs', 'size-5 shrink-0') }}<span>{{ report.label }}</span></a><a class="text-xs" href="{{ url_for('report', identity=job.id, name=report.id) }}">Download {{ report.label|lower }} {{ report.format }}</a></li>{% endfor %}
+    {% if job.kind == 'prepare' and job.status == 'SUCCEEDED' and not package.deleted %}<li class="sm:col-span-2"><a class="btn w-full" href="{{ url_for('package_zip', identity=job.id) }}">{{ icon('package', 'size-4') }}Download manifest package ZIP</a></li>{% endif %}
     </ul>{% else %}<p class="text-sm text-slate-500">No reports available yet.</p>{% endif %}
+    {% if package.deleted %}<p>Package artifacts were explicitly deleted. Reports and history remain; this revision cannot be rerun or downloaded.</p>{% endif %}
   </div>
 </section>
 {% if job.status in ['FAILED','INTERRUPTED'] %}

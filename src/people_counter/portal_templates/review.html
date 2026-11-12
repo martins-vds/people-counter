@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% from "components.html" import icon, heading, badge %}
+{% macro context() %}
+<input type="hidden" name="csrf" value="{{ session.csrf }}">
+<input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="folder" value="{{ folder }}">
+<input type="hidden" name="return_folder" value="{{ return_folder }}"><input type="hidden" name="q" value="{{ query }}"><input type="hidden" name="kind" value="{{ kind }}">
+{% endmacro %}
+{% block title %}Review footage{% endblock %}
+{% block content %}
+{% call heading('Review footage', video, 'Footage') %}
+<a class="btn btn-secondary" href="{{ url_for('footage', folder=return_folder, q=query, kind=kind) }}">&larr; Back to footage</a>
+{% endcall %}
+<div class="workflow-note"><p>Camera defaults apply unless this video has an exception. Each section saves independently. Prepare a new package after changes.</p></div>
+<div class="grid min-w-0 items-start gap-6 lg:grid-cols-2">
+  <section class="card">
+    <div class="card-header"><h2>Counting line</h2>{{ badge('Video exception' if exception.get('frame_width') else 'Camera default') }}</div>
+    <div class="card-body">
+      {% if config_choices %}
+      <h3>Choose a camera configuration</h3>
+      <p>Multiple configurations exist. Select one explicitly before editing its geometry. Recording details remain editable independently.</p>
+      {% for config in config_choices %}<p><a href="{{ url_for('review', video=video, folder=return_folder, config_id=config.id, q=query, kind=kind) }}">{{ config.catalog.effective_from_utc }} to {{ config.catalog.effective_to_utc or 'no end date' }} ({{ config.folder or 'source root' }})</a></p>{% endfor %}
+      {% else %}
+      <form method="get" id="preview-form" class="flex flex-wrap items-end gap-3">
+        <div class="field"><label for="preview-seconds">Preview time in seconds</label><input id="preview-seconds" name="seconds" type="number" min="0" step="0.1" value="{{ seconds }}"></div><button class="btn-secondary">Show frame</button>
+      </form>
+      <div class="preview-stage"><img id="preview-image" hidden src="{{ url_for('frame', video=video, seconds=seconds) }}" alt="Source video frame"><canvas id="line-canvas" class="preview-canvas" width="{{ width }}" height="{{ height }}" tabindex="0" aria-label="Counting line editor"></canvas></div>
+      <p id="line-instructions" role="status">Click the first endpoint, then the second. You can also edit coordinates.</p>
+      <button class="btn-secondary btn-sm" type="button" id="redraw-line">Redraw line</button>
+      <p class="help">The arrow shows endpoint order, not walking direction. Reversing endpoints swaps in/out.</p>
+      <form method="post" action="{{ url_for('save_line') }}" id="calibration-form">
+        {{ context() }}<input type="hidden" name="config_id" value="{{ config_id }}">
+        <div class="field"><label for="calibration-scope">Line applies to</label><select name="scope" id="calibration-scope"><option value="camera" {% if scope == 'camera' %}selected{% endif %}>Camera default for associated footage</option><option value="video" {% if scope == 'video' %}selected{% endif %}>This video only</option></select></div>
+        <details class="technical-details"><summary>Manual line coordinates</summary><div class="p-4"><fieldset class="coordinates"><legend>Original frame pixels ({{ width }} x {{ height }})</legend>
+          {% set defaults = [width // 5, height // 2, width * 4 // 5, height // 2] %}
+          {% for name in line_fields %}<div class="field"><label for="{{ name }}">{{ ['X1','Y1','X2','Y2'][loop.index0] }}</label><input id="{{ name }}" name="{{ name }}" type="number" required min="0" max="{{ width - 1 if loop.index0 in [0,2] else height - 1 }}" value="{{ values.get(name, defaults[loop.index0]) }}"></div>{% endfor %}
+        </fieldset></div></details>
+        <fieldset id="camera-fields" {% if scope == 'video' %}disabled hidden{% endif %}><legend>Camera</legend>
+          {% if camera_values.get('camera_id') %}
+          <p>{{ camera_values.camera_id }}</p><input type="hidden" name="camera_id" value="{{ camera_values.camera_id }}"><input type="hidden" name="location_id" value="{{ camera_values.location_id }}">
+          {% else %}
+          <div class="field"><label for="camera-location">Location</label><select id="camera-location" name="location_id" required><option value="">Select a location</option>{% for location in locations %}<option value="{{ location.id }}">{{ location.display_name }}</option>{% endfor %}</select></div>
+          <div class="field"><label for="camera-id">Camera</label><select id="camera-id" name="camera_id" required data-selected="" disabled><option value="">Select a location first</option></select><template id="camera-options">{% for camera in camera_registry %}<option value="{{ camera.id }}" data-location="{{ camera.location_id }}">{{ camera.display_name }}</option>{% endfor %}</template></div>
+          <p class="help"><a href="{{ url_for('cameras', create='1') }}">Register a camera</a> before saving its line.</p>
+          {% endif %}
+        </fieldset>
+        <fieldset id="video-fields" {% if scope != 'video' %}disabled hidden{% endif %}><legend>Video geometry exception</legend><p class="help">The camera default stays unchanged.</p></fieldset>
+        <button>Save counting line</button>
+      </form>
+      {% if exception.get('frame_width') %}<form method="post" action="{{ url_for('save_line') }}">{{ context() }}<input type="hidden" name="use_camera" value="yes"><button class="btn-secondary">Use camera line</button></form>{% endif %}
+      {% endif %}
+    </div>
+  </section>
+  <section class="card">
+    <div class="card-header"><h2>Recording details</h2>{{ badge('Video exception' if exception.get('captured_at_utc') else 'Normal time resolution') }}</div>
+    <div class="card-body">
+      <p>Camera timezone: <strong>{{ camera_values.get('camera_timezone', 'Not configured') }}</strong></p>
+      <p class="help">Without an authoritative exception, package preparation resolves capture time from the configured embedded/filename rules. Filesystem modification time is not capture time.</p>
+      <form method="post" action="{{ url_for('save_recording') }}">
+        {{ context() }}
+        <div class="field"><label for="capture-override">Capture time override (UTC, optional)</label><input id="capture-override" name="captured_at_utc" type="datetime-local" step="any" value="{{ exception.get('captured_at_utc', '').removesuffix('Z') }}"><p class="help">Enter UTC, not browser or camera local time. No counting-line override is required. Clear this value to use normal timestamp resolution.</p></div>
+        <button>Save recording details</button>
+      </form>
+      <p class="help">This save never changes the counting line.</p>
+      <h3>Inherited camera rules</h3>
+      <p>Capture time source: {{ camera_values.get('capture_time_source', 'Not configured') }}.</p>
+      <p>Effective dates select the camera configuration. They are never substituted for recording time.</p>
+      {% if config_id %}<p>{{ camera_values.effective_from_utc }} to {{ camera_values.effective_to_utc or 'no end date' }}</p><a class="btn btn-secondary" href="{{ url_for('camera_metadata', camera_id=camera_values.camera_id, config_id=config_id) }}">Edit camera recording rules</a>{% else %}<p>Save a camera counting line to establish a configuration, then edit its recording rules separately.</p>{% endif %}
+    </div>
+  </section>
+</div>
+{% endblock %}

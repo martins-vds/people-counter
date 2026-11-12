@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% from "components.html" import heading %}
+{% block title %}Review cloud action{% endblock %}
+{% block content %}
+{% call heading('Review cloud action', 'Nothing has been queued. Confirm the effective configuration before starting.', 'Cloud work') %}
+<a class="btn btn-secondary" href="{{ url_for('cloud', package_id=form.package_id) }}">Change selections</a>
+{% endcall %}
+<section class="card"><div class="card-header"><h2>Effective inference settings</h2></div><div class="card-body">
+<p>Package job: <code>{{ form.package_id }}</code></p><p>Target: {{ form.selection }}. Action: {{ form.action }}.</p>
+<div class="table-wrap"><table><thead><tr><th>Setting</th><th>Profile default</th><th>Job override</th><th>Effective value</th></tr></thead><tbody>
+{% for key, label in [('detection_threshold','Detection threshold'),('batch_size','Batch size'),('sample_fps','Sampling FPS')] %}<tr><th>{{ label }}</th><td>{{ defaults.profile[key] }}</td><td>{{ overrides.get(key, 'None') }}</td><td>{{ config.profile[key] }}</td></tr>{% endfor %}
+</tbody></table></div>
+<p>Capacity: {{ form.get('capacity') or 'Unknown' }} (operator-declared, not verified). No SKU-based batch limit is assumed.</p>
+<p class="help">Publication alone does not run inference. Changed processing settings create a new runtime identity; resume keeps the saved configuration.</p>
+<form method="post" action="{{ url_for('cloud') }}">
+<input type="hidden" name="csrf" value="{{ session.csrf }}">
+{% for key in ['package_id','selection','action','wait','batch_size','sample_fps','detection_threshold','capacity'] %}<input type="hidden" name="{{ key }}" value="{{ form.get(key, '') }}">{% endfor %}
+<label class="check"><input type="checkbox" name="confirm" value="yes" required>I approve this exact package, target, action, and effective settings.</label><button>Start cloud action</button>
+</form></div></section>
+{% endblock %}

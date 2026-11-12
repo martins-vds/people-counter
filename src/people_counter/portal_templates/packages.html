@@ -15,12 +15,30 @@
   <form method="post">
     <div class="card-body">
       <input type="hidden" name="csrf" value="{{ session.csrf }}">
+      <div class="field"><label for="package-name">Package name</label><input id="package-name" name="package_name" required placeholder="For example: North Store morning"><p class="help">Reuse the name to create the next immutable revision. Failed revisions keep their numbers.</p></div>
       <div class="field"><label for="package-folder">Folder within source root</label><input id="package-folder" name="folder" value="{{ folder }}" placeholder="Leave blank for the whole source root" autofocus><p class="help">Select a camera folder, or leave blank to inspect the entire mounted source.</p></div>
+      <div class="field"><label for="package-destination">Destination within output root (optional)</label><input id="package-destination" name="destination" placeholder="For example: north-store"><p class="help">Output root: <code>{{ output_root }}</code>. Each revision gets its own name/vN directory. Source files are never outputs.</p></div>
       <div class="workflow-note">{{ icon('lock', 'size-5 shrink-0') }}<p>The package contains metadata only. Source videos remain unchanged and are not copied.</p></div>
     </div>
     <div class="card-footer"><p class="text-xs text-slate-500">Safety bound: 10,000 videos per package.</p><div class="flex flex-wrap gap-2"><button type="button" class="btn-secondary" data-dialog-close>Cancel</button><button {% if not cameras %}disabled{% endif %}>{{ icon('package', 'size-4') }}Generate manifest package</button></div></div>
   </form>
 {% endcall %}
+<section class="card">
+  <div class="card-header"><h2>Package revisions</h2></div>
+  <div class="table-wrap"><table><thead><tr><th>Package</th><th>Revision / status</th><th>Destination</th><th>Actions</th></tr></thead><tbody>
+  {% for item in packages %}<tr>
+    <td>{{ item.name }}</td><td>{{ 'v' ~ item.revision if item.revision is not none else 'Ungrouped' }} / {{ 'Artifacts deleted' if item.deleted else item.status }}<br><small>Schema version: {{ item.schema_version if item.schema_version is not none else 'see original manifest' }}</small></td><td><code>{{ item.destination }}</code></td>
+    <td><div class="cell-actions"><a href="{{ url_for('job', identity=item.id) }}">Reports and details</a>
+    {% if item.status == 'SUCCEEDED' and not item.deleted %}<a href="{{ url_for('package_zip', identity=item.id) }}">Download package ZIP</a><a href="{{ url_for('cloud', package_id=item.id) }}">Select for cloud work</a>{% endif %}
+    {% if not item.deleted and item.status in ['SUCCEEDED','FAILED'] %}{{ dialog_button('delete-' ~ item.id, 'Delete artifacts') }}{% endif %}
+    </div></td>
+  </tr>{% else %}<tr><td colspan="4">No packages yet. Prepare a named package to start its revision history.</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% for item in packages %}{% if not item.deleted and item.status in ['SUCCEEDED','FAILED'] %}
+{% call form_dialog('delete-' ~ item.id, 'Delete selected package artifacts', item.name ~ ' / ' ~ (item.revision or 'Ungrouped')) %}
+<form method="post" action="{{ url_for('delete_package', identity=item.id) }}"><div class="card-body"><input type="hidden" name="csrf" value="{{ session.csrf }}"><p>Source footage, reports, history, and recovery evidence remain. Active or interrupted jobs block deletion. This revision cannot be rerun or downloaded afterward.</p><label class="check"><input type="checkbox" name="confirm" value="yes" required>I approve deleting only this package's artifacts.</label></div><div class="card-footer"><button type="button" class="btn-secondary" data-dialog-close>Cancel</button><button>Delete selected artifacts</button></div></form>
+{% endcall %}{% endif %}{% endfor %}
   <details class="card">
     <summary class="px-5 py-4 sm:px-6">How package preparation works</summary>
     <ol class="card-body space-y-5">

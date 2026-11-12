@@ -25,9 +25,10 @@
     </fieldset>
     <details class="technical-details"><summary>Advanced inference overrides (optional)</summary>
       <div class="form-grid border-t border-slate-100 p-5">
+        <div class="field"><label for="profile-threshold">Detection threshold override</label><input id="profile-threshold" name="detection_threshold" type="number" min="0.1" max="1" step="any" placeholder="Use preset default (0.6)"><p class="help">Confidence cutoff from 0.1 to 1. The detector discards candidates below its 0.1 floor. Lower values retain more candidate detections.</p></div>
         <div class="field"><label for="profile-batch-size">Batch size override</label><select name="batch_size" id="profile-batch-size"><option value="">Use preset default (1)</option><option value="1">1</option><option value="2">2</option><option value="4">4</option></select></div>
         <div class="field"><label for="profile-sampling">Sampling FPS override</label><input id="profile-sampling" name="sample_fps" type="number" min="0" step="any" placeholder="Use preset default (1.0)"></div>
-        <p class="help md:col-span-2">FPS must be positive and finite. Overrides apply to all selected presets and automatically recalculate identities.</p>
+        <p class="help md:col-span-2">FPS must be positive and finite. Batch size controls detector inference batching, not concurrent jobs or Fabric capacity. Supported runtime sizes are 1, 2, and 4. Overrides apply to all selected presets and automatically recalculate identities.</p>
       </div>
     </details>
   </div>
@@ -37,9 +38,9 @@
 <section class="card">
   <div class="card-header"><div><h2>Approved target catalog</h2><p class="card-description">These resolved profiles are available for explicit cloud actions.</p></div>{{ badge(catalog.targets|length ~ ' targets') }}</div>
   {% if catalog.targets %}<div class="table-wrap"><table>
-    <thead><tr><th>Target</th><th>Profile</th><th>Model / format</th><th>Device</th><th>Batch</th><th>Sampling</th></tr></thead><tbody>
+    <thead><tr><th>Target</th><th>Profile</th><th>Model / format</th><th>Device</th><th>Threshold</th><th>Batch</th><th>Sampling</th></tr></thead><tbody>
     {% for target, entry in catalog.targets.items() %}{% for name, profile in entry.profiles.items() %}<tr>
-      <td class="cell-title">{{ target }}</td><td><code>{{ name }}</code></td><td>{{ profile.detector_model }} / {{ profile.model_format }}</td><td>{{ badge(profile.device_variant|upper) }}</td><td>{{ profile.batch_size }}</td><td class="whitespace-nowrap">{{ profile.sample_fps }} FPS</td>
+      <td class="cell-title">{{ target }}</td><td><code>{{ name }}</code></td><td>{{ profile.detector_model }} / {{ profile.model_format }}</td><td>{{ badge(profile.device_variant|upper) }}</td><td>{{ profile.detection_threshold }}</td><td>{{ profile.batch_size }}</td><td class="whitespace-nowrap">{{ profile.sample_fps }} FPS</td>
     </tr>{% endfor %}{% endfor %}
     </tbody></table></div>
   {% else %}<div class="empty-state"><span class="empty-icon">{{ icon('settings', 'size-6') }}</span><p class="empty-title">No target profiles yet</p><p class="empty-copy">Choose Add target and profiles to generate a catalog from reviewed local model files.</p></div>{% endif %}
