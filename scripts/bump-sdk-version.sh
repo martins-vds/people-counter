@@ -1,18 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# != 1)); then
-  echo "Usage: bash scripts/bump-sdk-version.sh MAJOR.MINOR.PATCH" >&2
+usage() {
+  echo "Usage: bash scripts/bump-sdk-version.sh [--major | --minor | --patch] [MAJOR.MINOR.PATCH]" >&2
   exit 1
+}
+
+version=""
+bump=""
+for argument in "$@"; do
+  case "${argument}" in
+    --major|--minor|--patch)
+      [[ -z "${bump}" ]] || usage
+      bump="${argument#--}"
+      ;;
+    -*)
+      usage
+      ;;
+    *)
+      [[ -z "${version}" && -n "${argument}" ]] || usage
+      version="${argument}"
+      ;;
+  esac
+done
+if [[ -z "${version}" && -z "${bump}" ]]; then
+  usage
 fi
-version="$1"
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${root}"
+if [[ -z "${version}" ]]; then
+  version="$(uv version --bump "${bump}" --dry-run --short --frozen)"
+fi
 if [[ ! "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   echo "Version must be MAJOR.MINOR.PATCH without a v prefix or prerelease suffix." >&2
   exit 1
 fi
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${root}"
 if git show-ref --verify --quiet "refs/tags/v${version}"; then
   echo "Tag v${version} already exists. Choose a new release version." >&2
   exit 1
