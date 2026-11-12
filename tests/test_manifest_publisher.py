@@ -14,6 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from people_counter.adls import (
     AzureDataLakeStorage,
     PublicationConflictError,
@@ -190,6 +192,54 @@ def inspection(path):
         height=1080,
         duration_seconds=30.0,
     )
+
+
+def test_media_probe_does_not_hash_or_read_all_video_bytes(tmp_path):
+    from people_counter.manifest import probe_video
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    response = SimpleNamespace(stdout=json.dumps({
+        "streams": [{"width": 320, "height": 180, "duration": "2",
+                     "tags": {"creation_time": "2026-01-01T12:00:00Z"}}],
+    }))
+    with patch("people_counter.manifest._run_ffprobe", return_value=response), patch.object(
+        Path, "open", side_effect=AssertionError("Probing must not hash/read file bytes"),
+    ):
+        metadata = probe_video(video)
+    assert (metadata.width, metadata.height, metadata.duration_seconds) == (320, 180, 2.0)
+    assert metadata.embedded_capture_times == ("2026-01-01T12:00:00Z",)
+
+
+def test_media_probe_rejects_empty_file_before_starting_probe(tmp_path):
+    from people_counter.manifest import VideoValidationError, probe_video
+
+    video = tmp_path / "empty.mp4"
+    video.touch()
+    with patch("people_counter.manifest._run_ffprobe") as probe:
+        with pytest.raises(VideoValidationError) as caught:
+            probe_video(video)
+    assert caught.value.reason_code == "VIDEO_EMPTY"
+    assert caught.value.field == "expected_size_bytes"
+    probe.assert_not_called()
+
+
+@pytest.mark.parametrize("streams,code", [
+    ([], "VIDEO_METADATA_MISSING"),
+    ([{"width": 0, "height": 180, "duration": "1"}], "VIDEO_VALIDATION_FAILED"),
+    ([{"width": 320, "height": -1, "duration": "1"}], "VIDEO_VALIDATION_FAILED"),
+    ([{"width": 320, "height": 180, "duration": "0"}], "VIDEO_DURATION_INVALID"),
+    ([{"width": 320, "height": 180, "duration": "NaN"}], "VIDEO_DURATION_INVALID"),
+])
+def test_media_probe_rejects_unusable_streams(tmp_path, streams, code):
+    from people_counter.manifest import VideoValidationError, probe_video
+
+    video = tmp_path / "bad.mp4"
+    video.write_bytes(b"video")
+    with patch("people_counter.manifest._run_ffprobe", return_value=SimpleNamespace(stdout=json.dumps({"streams": streams}))):
+        with pytest.raises(VideoValidationError) as caught:
+            probe_video(video)
+    assert caught.value.reason_code == code
 
 
 class ManifestCatalogTests(unittest.TestCase):

@@ -119,6 +119,14 @@ class InventoryEntry:
 
 
 @dataclass(frozen=True)
+class VideoMetadata:
+    width: int
+    height: int
+    duration_seconds: float
+    embedded_capture_times: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class VideoInspection:
     size_bytes: int
     sha256: str
@@ -641,6 +649,22 @@ def inspect_video(path: Path, chunk_size: int = 8 * 1024 * 1024) -> VideoInspect
             ),
         )
 
+    metadata = probe_video(path)
+    return VideoInspection(
+        size_bytes=size_bytes, sha256=digest.hexdigest(),
+        width=metadata.width, height=metadata.height,
+        duration_seconds=metadata.duration_seconds,
+        embedded_capture_times=metadata.embedded_capture_times,
+    )
+
+
+def probe_video(path: Path) -> VideoMetadata:
+    if path.stat().st_size <= 0:
+        raise VideoValidationError(
+            f"Video is empty: {path}", reason_code="VIDEO_EMPTY",
+            field="expected_size_bytes", observed_value="0",
+            suggested_action="Replace the empty source file.",
+        )
     completed = _run_ffprobe(path)
     try:
         probe = json.loads(completed.stdout)
@@ -665,9 +689,7 @@ def inspect_video(path: Path, chunk_size: int = 8 * 1024 * 1024) -> VideoInspect
             f"ffprobe returned invalid metadata for video: {path}"
         )
 
-    return VideoInspection(
-        size_bytes=size_bytes,
-        sha256=digest.hexdigest(),
+    return VideoMetadata(
         width=width,
         height=height,
         duration_seconds=duration_seconds,
@@ -839,6 +861,46 @@ def build_manifest_plan(
         local_path.relative_to(video_root).as_posix()
     )
     inspection = inspector(local_path)
+    entry, captured_at, capture_time_source = resolve_video_metadata(
+        relative_path, catalog, inventory, inspection,
+    )
+
+    asset_id = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
+    asset_version = inspection.sha256
+    date_path = captured_at.strftime("%Y/%m/%d")
+    filename = PurePosixPath(relative_path).name
+    manifest_name = f"{PurePosixPath(filename).stem}.json"
+    staging_root = normalize_relative_path(staging_prefix, directory=True)
+    incoming_root = normalize_relative_path(incoming_prefix, directory=True)
+    staging_base = f"{staging_root}{asset_id}/{asset_version}"
+    incoming_base = (
+        f"{incoming_root}{date_path}/{asset_id}/{asset_version}"
+    )
+    suffix = local_path.suffix.lower()
+    if suffix not in CONTENT_TYPES:
+        raise VideoValidationError(f"Unsupported video extension: {relative_path}")
+
+    return ManifestPlan(
+        local_path=local_path,
+        relative_path=relative_path,
+        catalog=entry,
+        captured_at_utc=captured_at,
+        capture_time_source=capture_time_source,
+        inspection=inspection,
+        asset_id=asset_id,
+        asset_version=asset_version,
+        staging_video_path=f"{staging_base}/{filename}",
+        incoming_video_path=f"{incoming_base}/{filename}",
+        staging_manifest_path=f"{staging_base}/{manifest_name}",
+        incoming_manifest_path=f"{incoming_base}/{manifest_name}",
+        content_type=CONTENT_TYPES[suffix],
+    )
+
+
+def resolve_video_metadata(
+    relative_path: str, catalog: list[CameraCatalogEntry],
+    inventory: dict[str, InventoryEntry], inspection: VideoMetadata | VideoInspection,
+) -> tuple[CameraCatalogEntry, datetime, str]:
     entry, captured_at, capture_time_source = match_catalog_entry(
         relative_path,
         catalog,
@@ -872,36 +934,7 @@ def build_manifest_plan(
             source_path_prefix=entry.source_path_prefix,
         )
 
-    asset_id = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()
-    asset_version = inspection.sha256
-    date_path = captured_at.strftime("%Y/%m/%d")
-    filename = PurePosixPath(relative_path).name
-    manifest_name = f"{PurePosixPath(filename).stem}.json"
-    staging_root = normalize_relative_path(staging_prefix, directory=True)
-    incoming_root = normalize_relative_path(incoming_prefix, directory=True)
-    staging_base = f"{staging_root}{asset_id}/{asset_version}"
-    incoming_base = (
-        f"{incoming_root}{date_path}/{asset_id}/{asset_version}"
-    )
-    suffix = local_path.suffix.lower()
-    if suffix not in CONTENT_TYPES:
-        raise VideoValidationError(f"Unsupported video extension: {relative_path}")
-
-    return ManifestPlan(
-        local_path=local_path,
-        relative_path=relative_path,
-        catalog=entry,
-        captured_at_utc=captured_at,
-        capture_time_source=capture_time_source,
-        inspection=inspection,
-        asset_id=asset_id,
-        asset_version=asset_version,
-        staging_video_path=f"{staging_base}/{filename}",
-        incoming_video_path=f"{incoming_base}/{filename}",
-        staging_manifest_path=f"{staging_base}/{manifest_name}",
-        incoming_manifest_path=f"{incoming_base}/{manifest_name}",
-        content_type=CONTENT_TYPES[suffix],
-    )
+    return entry, captured_at, capture_time_source
 
 
 def manifest_bytes(

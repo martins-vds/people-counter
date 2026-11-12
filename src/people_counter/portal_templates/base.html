@@ -25,7 +25,7 @@
   <div class="nav-scroller">
     <nav class="main-nav" aria-label="Main navigation">
       {% set navigation = [('locations','Locations','location'),('cameras','Cameras','camera'),('footage','Footage','folder'),('packages','Packages','package'),('profiles','Profiles','settings'),('cloud','Cloud work','cloud'),('jobs','Jobs','jobs')] %}
-      {% set active = 'footage' if request.endpoint == 'review' else 'cameras' if request.endpoint in ['calibrate','camera_footage','camera_metadata'] else 'jobs' if request.endpoint in ['job','report_view'] else request.endpoint %}
+      {% set active = 'footage' if request.endpoint == 'review' else 'cameras' if request.endpoint in ['calibrate','camera_calibration','camera_footage','camera_metadata'] else 'jobs' if request.endpoint in ['job','report_view'] else request.endpoint %}
       {% for endpoint, label, glyph in navigation %}
       <a class="nav-link" href="{{ url_for(endpoint) }}" {% if active == endpoint %}aria-current="page"{% endif %}>{{ icon(glyph, 'size-4') }}{{ label }}</a>
       {% endfor %}

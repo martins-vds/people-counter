@@ -364,7 +364,7 @@ class OneLakeFiles:
         return self._filesystem.get_file_client(f"{self._lakehouse}/{path}")
 
     @contextmanager
-    def _read_context(self, path: str, operation: str) -> Iterator[None]:
+    def _operation_context(self, path: str, operation: str) -> Iterator[None]:
         from azure.core.exceptions import AzureError, ResourceNotFoundError
 
         try:
@@ -373,28 +373,37 @@ class OneLakeFiles:
             status = getattr(error, "status_code", None)
             response = getattr(error, "response", None)
             request_id = response.headers.get("x-ms-request-id") if response is not None else None
+            error_code = getattr(error, "error_code", None)
             uri = (
                 f"abfss://{self._workspace}@onelake.dfs.fabric.microsoft.com/"
                 f"{self._lakehouse}/{path}"
             )
             if isinstance(error, ResourceNotFoundError):
-                guidance = (
-                    "Check the target workspace/Lakehouse and restore the required artifact. "
-                    "Models must exist under Files/models; "
-                    "source files must be exposed by the shortcut."
-                )
+                if operation in {"create directory", "upload registration partition"} or "/intake/" in path:
+                    guidance = (
+                        "Check the target workspace/Lakehouse and registration parent "
+                        "directory under Files. The Files root is managed by Fabric; "
+                        "only its user-created subdirectories can be created through this API."
+                    )
+                else:
+                    guidance = (
+                        "Check the target workspace/Lakehouse and restore the required artifact. "
+                        "Models must exist under Files/models; "
+                        "source files must be exposed by the shortcut."
+                    )
             elif status in (401, 403):
                 guidance = "Check the notebook/operator identity's OneLake permissions and token access."
             else:
                 guidance = "Check OneLake connectivity, service availability, and identity access."
             raise RuntimeError(
                 f"OneLake {operation} failed: {uri} "
-                f"({type(error).__name__}; HTTP status={status}; request_id={request_id}). "
+                f"({type(error).__name__}; HTTP status={status}; "
+                f"error_code={error_code}; request_id={request_id}). "
                 f"{guidance} Retain the state directory; accepted Fabric jobs are not cancelled."
             ) from error
 
     def read_bytes(self, path: str) -> bytes:
-        with self._read_context(path, "read"):
+        with self._operation_context(path, "read"):
             return self._file(path).download_file().readall()
 
     def read_text(self, path: str) -> str:
@@ -403,7 +412,7 @@ class OneLakeFiles:
     def verify_video(self, path: str, expected_size: int | None, expected_sha256: str) -> None:
         digest = hashlib.sha256()
         size = 0
-        with self._read_context(path, "verify size/SHA-256"):
+        with self._operation_context(path, "verify size/SHA-256"):
             for chunk in self._file(path).download_file().chunks():
                 size += len(chunk)
                 digest.update(chunk)
@@ -412,17 +421,19 @@ class OneLakeFiles:
 
     def write_partition(self, path: str, content: bytes) -> None:
         for directory in reversed(PurePosixPath(path).parents):
-            if str(directory) == ".":
+            if str(directory) in {".", "Files"}:
                 continue
+            with self._operation_context(str(directory), "create directory"):
+                try:
+                    self._filesystem.create_directory(f"{self._lakehouse}/{directory}")
+                except self._exists_error:
+                    pass
+        with self._operation_context(path, "upload registration partition"):
             try:
-                self._filesystem.create_directory(f"{self._lakehouse}/{directory}")
+                self._file(path).upload_data(content, overwrite=False)
             except self._exists_error:
-                pass
-        try:
-            self._file(path).upload_data(content, overwrite=False)
-        except self._exists_error:
-            if self.read_bytes(path) != content:
-                raise ValueError(f"immutable registration partition conflicts: {path}")
+                if self.read_bytes(path) != content:
+                    raise ValueError(f"immutable registration partition conflicts: {path}")
         if self.read_bytes(path) != content:
             raise ValueError(f"registration partition readback mismatch: {path}")
 
@@ -767,7 +778,9 @@ def submit(
         name = f"partition-{offset // PARTITION_SIZE + 1:05d}"
         content = _json_bytes({"items": partition})
         path = f"{root}/{name}.json"
+        _progress(f"Writing registration partition {name}.json: {len(partition)} items to {path}")
         files.write_partition(path, content)
+        _progress(f"Verified registration partition: {path}")
         (state_dir / f"{name}.json").write_bytes(content)
         jobs.append(_register_partition(
             client, config, path, content, len(partition), state_dir / f"{name}-job.json"

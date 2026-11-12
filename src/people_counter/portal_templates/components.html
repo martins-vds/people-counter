@@ -51,6 +51,23 @@
 {% else %}{{ value }}{% endif %}
 {% endmacro %}
 
+{% macro frame_editor(video, width, height, values, seconds, config_id='') %}
+<div class="space-y-4">
+  <form method="get" id="preview-form" class="flex flex-wrap items-end gap-3">
+    <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="config_id" value="{{ config_id }}">
+    <div class="field"><label for="preview-seconds">Preview time in seconds</label><input id="preview-seconds" name="seconds" type="number" min="0" step="0.1" value="{{ seconds }}"></div><button class="btn-secondary">Show frame</button>
+  </form>
+  <div class="preview-stage"><img id="preview-image" hidden src="{{ url_for('frame', video=video, seconds=seconds) }}" alt="Source video frame"><canvas id="line-canvas" class="preview-canvas" width="{{ width }}" height="{{ height }}" tabindex="0" aria-label="Counting line editor"></canvas></div>
+  <p id="line-instructions" role="status">Click the first endpoint, then the second. You can also edit coordinates.</p>
+  <button class="btn-secondary btn-sm" type="button" id="redraw-line">Redraw line</button>
+  <p class="help">The arrow shows endpoint order, not walking direction. Reversing endpoints swaps in/out.</p>
+  <details class="technical-details"><summary>Manual line coordinates</summary><div class="p-4"><fieldset class="coordinates"><legend>Original frame pixels ({{ width }} x {{ height }})</legend>
+    {% set defaults = [width // 5, height // 2, width * 4 // 5, height // 2] %}
+    {% for name in ['counting_line_x1','counting_line_y1','counting_line_x2','counting_line_y2'] %}<div class="field"><label for="{{ name }}">{{ ['X1','Y1','X2','Y2'][loop.index0] }}</label><input id="{{ name }}" name="{{ name }}" form="calibration-form" type="number" required min="0" max="{{ width - 1 if loop.index0 in [0,2] else height - 1 }}" value="{{ values.get(name, defaults[loop.index0]) }}"></div>{% endfor %}
+  </fieldset></div></details>
+</div>
+{% endmacro %}
+
 {% macro dialog_button(identity, label, glyph='settings', enabled=true) -%}
 <button type="button" id="open-{{ identity }}" {% if enabled %}data-dialog-open="{{ identity }}"{% endif %} aria-haspopup="dialog" aria-controls="{{ identity }}" disabled>{{ icon(glyph, 'size-4') }}{{ label }}</button>
 {%- endmacro %}

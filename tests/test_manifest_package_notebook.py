@@ -2,6 +2,7 @@ import ast
 import io
 import json
 import subprocess
+import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -266,3 +267,51 @@ def test_fabric_prepares_and_validates_handoff_from_videos_only(cells, fabric_se
     assert not list(package.rglob("*.sqlite3"))
     assert video.read_bytes() == b"video"
     assert unrelated.read_bytes() == b"outside"
+
+
+@pytest.mark.parametrize("returncode,stderr,stdout,detail", [
+    (1, "Video inventory references a file outside the discovered partition: staging/three_people_walking.mp4", "", "staging/three_people_walking.mp4"),
+    (2, "", '{"complete": false}', '"complete": false'),
+    (1, "", "", "No subprocess output."),
+])
+def test_complete_preparation_surfaces_subprocess_failure(
+    cells, tmp_path, returncode, stderr, stdout, detail,
+):
+    command = ["python", "-c", "prepare"]
+
+    def run(actual, **options):
+        if options["check"]:
+            raise subprocess.CalledProcessError(
+                returncode, actual, output=stdout, stderr=stderr,
+            )
+        return subprocess.CompletedProcess(actual, returncode, stdout, stderr)
+
+    runner = Mock(side_effect=run)
+    namespace = {
+        "subprocess": SimpleNamespace(run=runner), "sys": sys,
+        "prepare_base": command, "EXCEPTION_INVENTORY_PATH": tmp_path / "inventory.csv",
+        "VIDEO_ROOT": tmp_path,
+    }
+    with pytest.raises(RuntimeError, match="Package preparation failed") as raised:
+        exec(cells["prepare-complete-package"], namespace)
+    assert f"exit code {returncode}" in str(raised.value)
+    assert detail in str(raised.value)
+    assert runner.call_args.args[0] == [
+        *command, "--inventory", str(tmp_path / "inventory.csv"),
+    ]
+    assert runner.call_args.kwargs["cwd"] == tmp_path
+
+
+def test_complete_preparation_displays_success_output_and_warnings(cells, tmp_path, capsys):
+    runner = Mock(return_value=subprocess.CompletedProcess(
+        ["prepare"], 0, '{"complete": true}\n', "Preparation warning\n",
+    ))
+    namespace = {
+        "subprocess": SimpleNamespace(run=runner), "sys": sys,
+        "prepare_base": ["prepare"], "EXCEPTION_INVENTORY_PATH": tmp_path / "inventory.csv",
+        "VIDEO_ROOT": tmp_path,
+    }
+    exec(cells["prepare-complete-package"], namespace)
+    output = capsys.readouterr()
+    assert output.out == '{"complete": true}\n'
+    assert output.err == "Preparation warning\n"

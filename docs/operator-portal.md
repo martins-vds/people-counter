@@ -225,6 +225,7 @@ metadata. Browsing does not modify source files.
 
 Each video has a **Review footage** action, opening separate Counting line and
 Recording details sections side by side on wide screens and stacked on phones.
+Readiness and Camera association are separate sections above them.
 **Generate manifest package** opens the package dialog with the
 current folder retained. Source/mount information and manual path entry remain
 under **Source configuration**. There are no upload, rename, or delete actions.
@@ -264,12 +265,26 @@ are not exported as fabricated camera-catalog rows.
    a counting line is saved. Package preparation rejects selected footage assigned
    to an uncalibrated camera; association alone never creates a synthetic line.
    Existing calibration example files are retained as assignments on upgrade.
-2. **Counting line:** select the preview time, then click two endpoints or enter
+   Intrinsic media checks run before assignment. Unreadable/unsupported footage
+   blocks the entire selected batch without partial ownership changes. Assignment
+   to an uncalibrated camera is allowed so its first reference can be registered.
+   When changing cameras, explicitly keep or clear any video line exception;
+   authoritative capture time is retained either way.
+2. **Camera calibration:** use **Calibrate camera** or **Recalibrate camera**
+   on the camera's footage page. The camera and location are fixed. Choose a
+   **Reference footage** recording already associated with that camera, then
+   select the preview time and click two endpoints or enter
    their coordinates under **Manual line coordinates**. Drawing uses the original frame's pixel coordinates,
    including when the canvas is scaled on a small screen. The arrow shows
    endpoint order, not walking direction; reversing endpoints swaps in/out.
-3. **Camera metadata:** when first saving a camera line, select a registered
-   camera if the footage is not assigned yet. Recording rules are edited separately:
+   Choosing a reference never changes its ownership, capture time, or video
+   geometry exception. Saving replaces the selected camera line for future
+   package preparation, without creating another dated calibration. Existing
+   recording rules, dates, and prepared package snapshots are retained.
+   The Camera calibration summary replaces the technical configuration list.
+   If older data has several recording periods, select the period explicitly
+   before recalibrating; the others remain unchanged.
+3. **Camera metadata:** recording rules are edited separately:
    use **Edit camera recording rules** in Review footage, or **Edit metadata**
    on the camera page. Choose a timezone, timestamp rules, and effective dates
    without changing the saved geometry or decoding footage.
@@ -277,23 +292,26 @@ are not exported as fabricated camera-catalog rows.
    are restored when reviewing another recording from the same camera. Multiple
    effective-dated configurations remain separate. Use **Edit metadata** on the
    camera page to change recording-time rules/effective dates without opening
-   geometry or decoding footage; use **Edit counting line** for geometry.
+   geometry or decoding footage; use **Recalibrate camera** for geometry.
    Legacy folder defaults continue to apply where a folder has one camera.
    When different cameras share a folder, assign each video explicitly.
    Review the Cameras page or download its catalog CSV. Calibration cannot
    create an unregistered camera or move one to another location; forged requests
    are rejected without changing metadata.
-4. **Video exceptions:** choose "This video only" under **Line applies to** to
-   override that video's line and frame dimensions. Recording details always
-   exposes **Capture time override (UTC, optional)**, regardless of line scope.
+4. **Video exceptions:** the Counting line section in **Review footage** edits
+   only that video's line and frame dimensions. **Save video line exception**
+   cannot change camera defaults; **Calibrate camera separately** opens the
+   fixed-camera workflow. Recording details always exposes
+   **Capture time override (UTC, optional)** independently of geometry.
    Use its calendar and time picker to choose the recording date and time,
    including seconds if needed. Enter UTC, not the browser or camera timezone;
    the portal saves the selection as an authoritative UTC capture timestamp.
    Save each section independently. Saving a line retains the capture-time
    exception; saving recording details retains geometry. Clear the capture time
    and save to restore normal resolution. **Use camera line** removes only
-   video geometry, preserving any timestamp exception. Timestamp-only saves do
-   not decode frames. Legacy calibration URLs remain supported.
+   video geometry, preserving any timestamp exception. Timestamp-only storage
+   does not decode frames; automatic review checks probe media again afterward.
+   Legacy calibration links redirect to the appropriate separated screen.
    Camera defaults are not changed. A camera configuration must still cover the video.
 5. **Packages:** choose **Generate manifest package**, enter a package name,
    and review its source folder and optional relative output destination.
@@ -363,6 +381,34 @@ Package ZIP downloads contain metadata, not source videos. Retain the unchanged
 footage. Changing camera metadata requires a new package. Changing a profile or
 release is a new processing run, not recovery of an existing run.
 
+### Local readiness
+
+Review footage automatically checks local media and metadata and exposes issues
+with corrective actions and reason codes. **Recheck** reruns the checks without
+starting a package job. Intrinsic media failures block assignment; missing camera
+calibration or recording metadata blocks local package readiness, but corrective
+assignment remains available. Camera association is an independent save, not a
+counting-line option.
+
+Checks reuse the manifest resolver for timestamps, effective-date coverage,
+dimensions, and video overrides. Media probing and a preview-frame check do not
+hash the complete video. Invalid media still has a review page with diagnostics,
+but no unusable canvas or enabled assignment button. If a probe cannot run,
+the check fails explicitly rather than reporting success.
+
+**Local checks passed** is not a cloud-publication guarantee. Full content
+hashing and final preparation/publication validation remain necessary. The
+page does not contact cloud targets or test remote permissions/availability.
+
+A dimension mismatch refers to the frame size saved with the counting line,
+not necessarily a visibly misplaced line. Review footage shows the current video
+resolution and whether the saved reference belongs to the camera or a video-only
+exception. **Review and confirm this video's line** opens the line editor.
+If its camera association and line placement are correct, keep the coordinates and choose **Save video line
+exception**; otherwise adjust them first. This saves the current video's frame
+dimensions without changing camera defaults. No automatic scaling is performed.
+Use camera recalibration only for an intentional camera-wide correction.
+
 ### Progressive disclosure
 
 Directory tables and catalogs stay visible. Location/camera creation, package
@@ -383,7 +429,9 @@ details, package explanations, inference overrides, completed-job logs, and raw
 result JSON are available through labeled native disclosures. They work with a
 keyboard without changing pages or losing entered values.
 
-The calibration scope shows only the applicable camera or video-exception fields.
+Camera calibration has no editable camera/location identity or video-exception
+fields. Footage line edits are always video-only, with recording details and
+association kept independent.
 Wait controls and their explanation appear only for submission; switching to
 publication clears the wait selection. Active/failed job progress, safety warnings,
 and resume confirmations are never collapsed automatically. If native form

@@ -242,14 +242,30 @@ files to conceal a mismatch. Preserve retry state. Post-publication manifest
 and video checks through OneLake remain required: matching shortcut metadata
 does not prove that its connection credentials can read the files.
 
-If submission fails while verifying models or published shortcut files, the OneLake
-error identifies the operation, full `abfss://` resource URI, Azure exception
-type, HTTP status, and request ID when available. The original Azure exception
+If submission fails while reading/verifying OneLake files, creating intake
+directories, or uploading registration partitions, the error identifies the
+operation, full `abfss://` resource URI, Azure exception type, HTTP status,
+Azure error code, and request ID when available. The original Azure exception
 is retained as the cause. Model checks precede publication.
 Inspect the reported URI and restore the approved model at the reported
 `Files/models` path, or fix the source shortcut. Do not bypass hash validation. For HTTP 401/403,
 check the notebook/operator identity's OneLake access. Retain the state directory
 for retries; a later source-shortcut read failure can occur after publication.
+
+After `Verified Lakehouse source ...`, progress names each registration partition
+and its intake path before writing it. A failure at this stage is an intake
+directory/upload/readback failure, not a missing model or failed ADLS publication.
+The SDK creates only user directories below `Files/`; it must not attempt to
+create the Fabric-managed Lakehouse or `Files` root through the storage API.
+See [OneLake managed folders](https://learn.microsoft.com/en-us/fabric/onelake/onelake-api-parity#managed-onelake-folders).
+For a 404, inspect the reported Lakehouse and exact parent/partition path.
+For 401/403, check the execution identity's OneLake write permissions.
+Keep `registration-plan.json`, publication evidence, and any job-state files.
+Repair the cause and retry with unchanged inputs and the same state directory.
+Do not delete successful ADLS publications or manually create dummy partitions.
+If the repair requires a newer SDK version, follow the SDK-upgrade guidance
+below: retain the old run's state and coordinate a deliberate new run rather
+than bypassing the release-compatibility check by deleting its registration plan.
 
 See the [SJD deployment guide](../fabric/spark-job-definitions/README.md)
 and [manual deployment guide](manual-portal-deployment.md) for deployment details.

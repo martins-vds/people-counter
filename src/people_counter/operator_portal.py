@@ -19,7 +19,7 @@ from flask import (
 
 from people_counter import backfill_operator as backfill
 from people_counter.inference_profiles import PRESETS
-from people_counter.manifest import ManifestPublisherError
+from people_counter.manifest import CONTENT_TYPES, ManifestPublisherError
 from people_counter.portal_service import (
     LINE_FIELDS, METADATA_FIELDS, PORTAL_CATALOG_FIELDS, REPORT_TYPES, PortalService, csv_text, report_type,
 )
@@ -171,8 +171,13 @@ def create_app(service: PortalService) -> Flask:
 
     @app.post("/footage/assign")
     def assign_footage():
-        service.assign_footage(request.form.get("camera_id", ""), request.form.getlist("videos"))
+        service.assign_footage(
+            request.form.get("camera_id", ""), request.form.getlist("videos"),
+            geometry_action=request.form.get("geometry_action", ""),
+        )
         flash("Selected footage assigned to the camera. Its saved counting line is unchanged.")
+        if request.form.get("return_to_review") == "yes":
+            return back_to_review()
         return redirect(url_for("footage", folder=request.form.get("folder", "")))
 
     @app.get("/folders")
@@ -186,66 +191,74 @@ def create_app(service: PortalService) -> Flask:
         )
         return app.response_class(content, mimetype="image/jpeg")
 
-    @app.get("/review", endpoint="review")
+    @app.get("/review")
+    def review():
+        video = request.args.get("video", "")
+        readiness = service.footage_readiness(video)
+        metadata = readiness["metadata"]
+        path = service.source.resolve(video)
+        exception = service.video_exception(video) if path.is_file() and path.suffix.lower() in CONTENT_TYPES else {}
+        values = {**readiness["camera_values"], **{key: exception[key] for key in LINE_FIELDS if key in exception}}
+        return render_template(
+            "review.html", video=video, readiness=readiness, exception=exception, values=values,
+            camera_values=readiness["camera_values"], config_id=readiness["config_id"],
+            width=metadata.width if metadata else 0, height=metadata.height if metadata else 0,
+            seconds=request.args.get("seconds", "0"),
+            folder=request.args.get("folder", path.parent.relative_to(service.source.root).as_posix()),
+            return_folder=request.args.get("folder", ""), query=request.args.get("q", ""),
+            kind=request.args.get("kind", "videos"), camera_registry=service.store.entries("camera_identity"),
+        )
+
     @app.get("/calibrate")
     def calibrate():
         video = request.args.get("video", "")
-        _, width, height = service.source.frame(
-            video, float(request.args.get("seconds", "0")),
-        )
+        service.source.resolve(video)
+        owner = service.footage_assignments().get(video)
+        if request.args.get("scope") == "video" or not owner:
+            return redirect(url_for("review", video=video, folder=request.args.get("folder", "")))
+        if request.args.get("camera_id", owner) != owner:
+            raise ValueError("Reference footage must already belong to this camera")
+        return redirect(url_for(
+            "camera_calibration", camera_id=owner, video=video,
+            config_id=request.args.get("config_id", ""),
+        ))
+
+    @app.route("/cameras/<camera_id>/calibrate", methods=["GET", "POST"])
+    def camera_calibration(camera_id):
+        camera = service.registered_camera(camera_id)
+        if request.method == "POST":
+            service.save_camera_line(camera_id, request.form)
+            flash("Camera calibration saved. Footage ownership and video exceptions are unchanged.")
+            return redirect(url_for("camera_footage", camera_id=camera_id))
+        videos = sorted(video for video, owner in service.footage_assignments().items() if owner == camera_id)
         config_id = request.args.get("config_id", "")
-        camera_id = request.args.get("camera_id", "") or service.footage_assignments().get(video, "")
-        values = {}
-        config_choices = []
-        folder = request.args.get("folder", Path(video).parent.as_posix())
-        new_configuration = request.args.get("new") == "1"
-        if not config_id and camera_id and not new_configuration:
-            candidates = [
-                item for item in service.store.entries("camera")
-                if item["catalog"]["camera_id"] == camera_id
-            ]
-            if len(candidates) == 1:
-                config_id = candidates[0]["id"]
-            elif candidates:
-                if request.endpoint != "review":
-                    flash("Choose the saved effective-dated counting-line configuration to review.")
-                    return redirect(url_for("camera_footage", camera_id=camera_id))
-                config_choices = candidates
-        if config_id:
-            found = next((item for item in service.store.entries("camera") if item["id"] == config_id), None)
-            if found is None:
-                abort(404)
-            values = found["catalog"]
-            folder = found["folder"]
-        elif camera_id:
-            registered = next((
-                item for item in service.store.entries("camera_identity") if item["id"] == camera_id
-            ), None)
-            if registered is None:
-                abort(404)
-            values = {"camera_id": camera_id, "location_id": registered["location_id"]}
-        exception = service.video_exception(video)
-        scope = request.args.get("scope", "video" if exception.get("frame_width") else "camera")
-        geometry = {**values, **{key: exception[key] for key in LINE_FIELDS if key in exception}} if scope == "video" else values
+        configs = [item for item in service.store.entries("camera") if item["catalog"]["camera_id"] == camera_id]
+        if not config_id and len(configs) == 1:
+            config_id = configs[0]["id"]
+        config = next((item for item in configs if item["id"] == config_id), None)
+        if config_id and config is None:
+            abort(404)
+        video = request.args.get("video", videos[0] if videos else "")
+        if video and video not in videos:
+            raise ValueError("Choose reference footage already associated with this camera")
+        readiness = service.footage_readiness(video) if video else None
+        metadata = readiness["metadata"] if readiness else None
         return render_template(
-            "review.html" if request.endpoint == "review" else "calibrate.html",
-            video=video, width=width, height=height,
-            folder=folder,
-            config_id=config_id, values=geometry, camera_values=values, exception=exception,
-            config_choices=config_choices,
-            return_folder=request.args.get("folder", folder), query=request.args.get("q", ""),
-            kind=request.args.get("kind", "videos"),
-            new_configuration=new_configuration,
-            scope=scope, seconds=request.args.get("seconds", "0"),
-            locations=service.store.locations(), camera_registry=service.store.entries("camera_identity"),
-            timezones=sorted(available_timezones()),
+            "camera_calibration.html", camera=camera, videos=videos, video=video,
+            configs=configs, config=config, config_id=config_id, readiness=readiness,
+            values=config["catalog"] if config else {}, seconds=request.args.get("seconds", "0"),
+            width=metadata.width if metadata else 0, height=metadata.height if metadata else 0,
         )
 
     @app.post("/calibrate")
     def save_calibration():
         form = request.form.to_dict()
-        form["captured_at_utc"] = _calendar_capture_time(form.get("captured_at_utc", ""))
-        flash(service.save_calibration(form))
+        if form.get("scope") == "camera":
+            service.save_camera_line(form.get("camera_id", ""), form)
+            flash("Camera calibration saved. Footage ownership and video exceptions are unchanged.")
+        else:
+            form["captured_at_utc"] = _calendar_capture_time(form.get("captured_at_utc", ""))
+            flash(service.save_calibration(form))
         return redirect(url_for("cameras"))
 
     def back_to_review():
@@ -266,7 +279,7 @@ def create_app(service: PortalService) -> Flask:
     @app.post("/footage/line")
     def save_line():
         service.save_line(request.form)
-        flash("Counting line saved. Recording details unchanged. Prepare a new package to use these changes.")
+        flash("Video counting line saved. Camera calibration and recording details unchanged.")
         return back_to_review()
 
     @app.route("/cameras", methods=["GET", "POST"])
@@ -275,7 +288,7 @@ def create_app(service: PortalService) -> Flask:
             service.store.add_camera(
                 request.form.get("display_name", ""), request.form.get("location_id", ""),
             )
-            flash("Camera added. Assign footage now, then save its counting line when ready.")
+            flash("Camera added. Assign footage now, then calibrate the camera when ready.")
             return redirect(url_for("cameras"))
         directory = service.store.entries("camera_identity")
         locations = service.store.locations()
@@ -322,7 +335,6 @@ def create_app(service: PortalService) -> Flask:
             "camera_metadata.html", config=found, fields=METADATA_FIELDS,
             timezones=sorted(available_timezones()),
         )
-
     @app.route("/locations", methods=["GET", "POST"])
     def locations():
         if request.method == "POST":

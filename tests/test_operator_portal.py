@@ -16,7 +16,7 @@ pytest.importorskip("flask")
 
 from people_counter.operator_portal import create_app
 from people_counter.portal_service import PortalService, PortalStore
-from people_counter.manifest import CatalogError, build_manifest_plan, load_camera_catalog, load_video_inventory
+from people_counter.manifest import CatalogError, VideoMetadata, build_manifest_plan, load_camera_catalog, load_video_inventory
 from tests.test_manifest_publisher import inspection, write_catalog
 from people_counter import portal_service as portal_module
 from people_counter import operator_portal as portal_web
@@ -33,12 +33,13 @@ def forbid_live_cloud(monkeypatch):
 
 
 @pytest.fixture
-def service(tmp_path):
+def service(tmp_path, monkeypatch):
     source = tmp_path / "videos"
     source.mkdir()
     (source / "lobby").mkdir()
     models = tmp_path / "models"
     models.mkdir()
+    monkeypatch.setattr(portal_module, "probe_video", lambda path: VideoMetadata(1920, 1080, 30))
     return PortalService(source, models, tmp_path / "state")
 
 
@@ -560,7 +561,7 @@ def test_invalid_video_capture_override_does_not_save_exception(service, monkeyp
 
 def test_capture_override_uses_optional_calendar_with_seconds(app, service, monkeypatch):
     form = save_camera(service, monkeypatch)
-    response = app.test_client().get("/calibrate", query_string={"video": form["video"], "scope": "video"})
+    response = app.test_client().get("/calibrate", query_string={"video": form["video"], "scope": "video"}, follow_redirects=True)
     assert response.status_code == 200
     control = re.search(rb'<input id="capture-override"[^>]+>', response.data).group()
     assert b'type="datetime-local"' in control

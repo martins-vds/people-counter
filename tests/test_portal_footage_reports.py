@@ -7,16 +7,208 @@ import pytest
 
 from people_counter.operator_portal import create_app
 from people_counter.portal_service import PortalService
-from people_counter.manifest import CatalogError, VideoValidationError, load_camera_catalog, match_catalog_entry
+from people_counter.manifest import CatalogError, VideoMetadata, VideoValidationError, load_camera_catalog, match_catalog_entry
 from tests.test_manifest_publisher import inspection
 from tests.test_operator_portal import csrf, save_camera
 
 
 @pytest.fixture
-def service(tmp_path):
+def service(tmp_path, monkeypatch):
     source = tmp_path / "videos"
     (source / "lobby").mkdir(parents=True)
-    return PortalService(source, tmp_path / "models", tmp_path / "state")
+    service = PortalService(source, tmp_path / "models", tmp_path / "state")
+    monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(1920, 1080, 30))
+    monkeypatch.setattr(service.source, "frame", lambda *args: (b"jpeg", 1920, 1080))
+    return service
+
+
+def test_camera_calibration_is_scoped_and_replaces_only_camera_geometry(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    service.save_calibration({**form, "scope": "video", "captured_at_utc": "2026-01-01T12:00:00Z"})
+    before_assignments = service.footage_assignments()
+    before_exception = service.store.entries("exception")
+    config = service.store.entries("camera")[0]
+    client = create_app(service).test_client()
+    url = f"/cameras/{form['camera_id']}/calibrate"
+    page = client.get(url).data
+    assert b"Reference footage" in page and b"Save camera calibration" in page
+    assert b'name="camera_id"' not in page and b'name="scope"' not in page
+    response = client.post(url, data={
+        "csrf": csrf(client), "video": form["video"], "config_id": config["id"],
+        **{name: form[name] for name in ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")},
+        "counting_line_x1": "42",
+    })
+    assert response.status_code == 302
+    assert service.footage_assignments() == before_assignments
+    assert service.store.entries("exception") == before_exception
+    updated = service.store.entries("camera")
+    assert len(updated) == 1 and updated[0]["id"] == config["id"]
+    assert updated[0]["catalog"] == {**config["catalog"], "counting_line_x1": "42"}
+    camera_page = client.get(f"/cameras/{form['camera_id']}/footage").data
+    assert b"Saved counting-line configurations" not in camera_page
+    assert b"Recalibrate camera" in camera_page
+    assert b"/review?video=" in camera_page
+
+
+@pytest.mark.parametrize("change", [
+    {"video": "other.mp4"}, {"camera_id": "forged"}, {"location_id": "forged"}, {"config_id": "forged"},
+])
+def test_camera_calibration_rejects_unassociated_reference_without_mutation(service, monkeypatch, change):
+    form = save_camera(service, monkeypatch)
+    (service.source.root / "other.mp4").write_bytes(b"video")
+    before = service.store.entries("camera")
+    client = create_app(service).test_client()
+    response = client.post(f"/cameras/{form['camera_id']}/calibrate", data={
+        **form, "csrf": csrf(client), "config_id": before[0]["id"], **change,
+    })
+    assert response.status_code == 400
+    assert service.store.entries("camera") == before
+    assert "other.mp4" not in service.footage_assignments()
+
+
+def test_first_camera_calibration_creates_valid_defaults_and_recalibration_replaces_them(service, monkeypatch):
+    location = service.store.add_location("Entrance")
+    camera = service.store.add_camera("Main", location)
+    video = "lobby/first.mp4"
+    (service.source.root / video).write_bytes(b"video")
+    monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(
+        1920, 1080, 30, ("2026-01-01T12:00:00Z",),
+    ))
+    unassigned = service.footage_readiness(video)
+    assert unassigned["issues"][0]["code"] == "CAMERA_UNASSIGNED"
+    assert "Camera association" in unassigned["issues"][0]["action"]
+    service.assign_footage(camera, [video])
+    line = dict(zip(("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2"),
+                    ("10", "20", "1900", "900")))
+    service.save_camera_line(camera, {"video": video, **line})
+    first = service.store.entries("camera")[0]
+    assert service.footage_readiness(video)["issues"] == []
+    assert service.footage_assignments() == {video: camera}
+    service.save_camera_line(camera, {"video": video, **line, "counting_line_x1": "30"})
+    after = service.store.entries("camera")
+    assert len(after) == 1 and after[0]["id"] == first["id"]
+    assert after[0]["catalog"] == {**first["catalog"], "counting_line_x1": "30"}
+
+
+def test_readiness_uses_manifest_rules_and_reports_timestamp_and_dimensions(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    with patch.object(service.source, "frame", wraps=service.source.frame) as decoded:
+        ready = service.footage_readiness(form["video"])
+    decoded.assert_called_once_with(form["video"])
+    assert ready["issues"] == [] and ready["media_ok"]
+    assert ready["config_id"] == service.store.entries("camera")[0]["id"]
+    assert ready["camera_values"] == service.store.entries("camera")[0]["catalog"]
+    assert ready["captured_at_utc"] == "2026-01-01T12:00:00Z"
+    monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(1280, 720, 30))
+    issue = service.footage_readiness(form["video"])["issues"][0]
+    assert issue["code"] == "VIDEO_DIMENSION_MISMATCH"
+    assert issue["scope"] == "package"
+    config = service.store.entries("camera")[0]
+    service.update_camera_metadata(form["camera_id"], config["id"], {
+        **config["catalog"], "capture_time_source": "inventory",
+        "capture_time_regex": "", "capture_time_format": "",
+    })
+    assert service.footage_readiness(form["video"])["issues"][0]["code"] == "CAPTURE_TIME_MISSING"
+
+
+@pytest.mark.parametrize("line_source", ["camera", "video"])
+def test_dimension_mismatch_explains_reference_and_links_to_video_confirmation(service, monkeypatch, line_source):
+    form = save_camera(service, monkeypatch)
+    if line_source == "video":
+        service.update_video_exception(form["video"], {
+            "captured_at_utc": "2026-01-01T12:00:00Z",
+            "frame_width": "2560", "frame_height": "1440",
+            **{name: form[name] for name in ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")},
+        })
+    camera = service.store.entries("camera")
+    exceptions = service.store.entries("exception")
+    monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(3840, 2160, 30))
+    monkeypatch.setattr(service.source, "frame", lambda *args: (b"jpeg", 3840, 2160))
+    client = create_app(service).test_client()
+    page = client.get("/review", query_string={"video": form["video"]}).get_data(as_text=True)
+    assert "3840 &times; 2160 px" in page
+    expected = "2560 &times; 1440 px" if line_source == "video" else "1920 &times; 1080 px"
+    assert expected in page
+    assert ("Saved video line reference" if line_source == "video" else "Camera calibration reference") in page
+    assert 'href="#video-line-editor"' in page and 'id="video-line-editor"' in page
+    assert "The line can look right" in page
+    assert "Correct the catalog dimensions" not in page
+    assert service.store.entries("camera") == camera
+    assert service.store.entries("exception") == exceptions
+    response = client.post("/footage/line", data={
+        **form, "csrf": csrf(client), "scope": "video",
+    }, follow_redirects=True)
+    assert response.status_code == 200 and b"VIDEO_DIMENSION_MISMATCH" not in response.data
+    saved = service.store.entries("exception")[0]
+    assert (saved["frame_width"], saved["frame_height"]) == ("3840", "2160")
+    assert [saved[name] for name in ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")] == ["10", "20", "1900", "900"]
+    assert service.store.entries("camera") == camera
+    if line_source == "video":
+        assert saved["captured_at_utc"] == "2026-01-01T12:00:00Z"
+
+
+def test_invalid_media_remains_reviewable_but_assignment_is_blocked(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    other = service.store.add_camera("Other", form["location_id"])
+    def broken(path):
+        raise VideoValidationError("Unreadable video", reason_code="VIDEO_PROBE_FAILED",
+                                   suggested_action="Replace the damaged file")
+    monkeypatch.setattr("people_counter.portal_service.probe_video", broken)
+    client = create_app(service).test_client()
+    page = client.get("/review", query_string={"video": form["video"]})
+    assert page.status_code == 200 and b"Unreadable video" in page.data
+    assert b"Readiness" in page.data and b'id="line-canvas"' not in page.data
+    result = service.footage_readiness(form["video"])
+    assert not result["media_ok"]
+    assert result["issues"][0]["action"] == "Replace the damaged file"
+    with pytest.raises(VideoValidationError, match="Unreadable"):
+        service.assign_footage(other, [form["video"]])
+    assert service.footage_assignments()[form["video"]] == form["camera_id"]
+
+
+def test_reassignment_requires_geometry_choice_and_preserves_capture_time(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    service.save_calibration({**form, "scope": "video", "captured_at_utc": "2026-01-01T12:00:00Z"})
+    other = service.store.add_camera("Other", form["location_id"])
+    before = service.store.entries("exception")
+    with pytest.raises(ValueError, match="keep or clear"):
+        service.assign_footage(other, [form["video"]])
+    assert service.footage_assignments()[form["video"]] == form["camera_id"]
+    service.assign_footage(other, [form["video"]], geometry_action="keep")
+    assert service.store.entries("exception") == before
+    assert service.footage_readiness(form["video"])["issues"][0]["code"] == "CAMERA_NOT_CALIBRATED"
+    service.assign_footage(form["camera_id"], [form["video"]], geometry_action="clear")
+    exception = service.store.entries("exception")[0]
+    assert exception["captured_at_utc"] == "2026-01-01T12:00:00Z"
+    assert "frame_width" not in exception
+
+
+def test_bad_media_blocks_entire_assignment_and_keeps_exception_choices_atomic(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    other = service.store.add_camera("Other", form["location_id"])
+    service.save_calibration({**form, "scope": "video", "captured_at_utc": "2026-01-01T12:00:00Z"})
+    (service.source.root / "bad.mp4").write_bytes(b"bad")
+    before = service.store.entries("exception")
+    def probe(path):
+        if path.name == "bad.mp4":
+            raise VideoValidationError("Broken media")
+        return VideoMetadata(1920, 1080, 30)
+    monkeypatch.setattr("people_counter.portal_service.probe_video", probe)
+    with pytest.raises(VideoValidationError):
+        service.assign_footage(other, [form["video"], "bad.mp4"], geometry_action="clear")
+    assert service.store.entries("exception") == before
+    assert service.footage_assignments() == {form["video"]: form["camera_id"]}
+
+
+def test_unreadable_media_has_actionable_assignment_error(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    with patch("people_counter.portal_service.probe_video", side_effect=PermissionError("permission denied")):
+        client = create_app(service).test_client()
+        response = client.post("/footage/assign", data={
+            "csrf": csrf(client), "videos": [form["video"]], "camera_id": form["camera_id"],
+        })
+    assert response.status_code == 400
+    assert b"permission denied" in response.data
 
 
 def test_assign_many_videos_without_counting_line_and_restore(service):
@@ -80,7 +272,7 @@ def test_bulk_assignment_form_and_camera_page_show_all_footage(service, monkeypa
     assert b"Calibration example" in page
     assert b"Edit metadata" in client.get("/cameras").data
     existing = service.store.entries("camera")[0]
-    page = client.get("/calibrate", query_string={"video": videos[1], "camera_id": form["camera_id"]}).data
+    page = client.get("/calibrate", query_string={"video": videos[1], "camera_id": form["camera_id"]}, follow_redirects=True).data
     assert f'name="config_id" value="{existing["id"]}"'.encode() in page
     assert b'value="1900"' in page
 
@@ -142,7 +334,8 @@ def test_footage_review_has_independent_geometry_and_recording_forms(service, mo
     assert "Review footage" in library
     response = client.get("/review", query_string={"video": form["video"], "folder": "lobby"})
     assert response.status_code == 200
-    assert b"Save counting line" in response.data
+    assert b"Save video line exception" in response.data
+    assert b"Camera association" in response.data and b"Readiness" in response.data
     assert b"Save recording details" in response.data
     assert b'action="/footage/recording"' in response.data
     assert b"Effective dates select" in response.data
@@ -209,7 +402,12 @@ def test_camera_line_save_retains_recording_rules(service, monkeypatch):
         "capture_time_regex": "", "capture_time_format": "",
     })
     client = create_app(service).test_client()
+    before = service.store.entries("camera")
     assert client.post("/footage/line", data={
+        **form, "csrf": csrf(client), "config_id": config["id"], "counting_line_x1": "77",
+    }).status_code == 400
+    assert service.store.entries("camera") == before
+    assert client.post(f"/cameras/{form['camera_id']}/calibrate", data={
         **form, "csrf": csrf(client), "config_id": config["id"], "counting_line_x1": "77",
     }).status_code == 302
     updated = service.store.entries("camera")[0]["catalog"]
@@ -322,8 +520,9 @@ def test_review_keeps_recording_details_available_with_multiple_camera_configura
     response = client.get("/review", query_string={"video": form["video"], "folder": "lobby"})
     assert response.status_code == 200
     assert b"Save recording details" in response.data
-    assert b"Choose a camera configuration" in response.data
+    assert b"Save video line exception" in response.data
     assert b"Save counting line" not in response.data
+    assert b"Choose the recording period" in client.get(f"/cameras/{form['camera_id']}/calibrate").data
 
 
 def test_package_path_rejects_replaced_revision_symlink(service):
@@ -704,16 +903,16 @@ def test_legacy_calibration_examples_migrate_without_losing_assignment(service, 
     }]
 
 
-def test_new_effective_dated_calibration_does_not_edit_existing_configuration(service, monkeypatch):
+def test_legacy_new_flag_does_not_create_another_calibration(service, monkeypatch):
     form = save_camera(service, monkeypatch)
     client = create_app(service).test_client()
     page = client.get("/calibrate", query_string={
         "video": form["video"], "camera_id": form["camera_id"], "new": "1",
-    })
+    }, follow_redirects=True)
     assert page.status_code == 200
-    assert b'name="config_id" value=""' in page.data
-    assert b'name="new" value="1"' in page.data
-    assert b'value="1900"' not in page.data
+    assert b'name="new"' not in page.data
+    assert b'value="1900"' in page.data
+    assert len(service.store.entries("camera")) == 1
 
 
 @pytest.mark.parametrize("count,has_next", [(0, False), (50, False), (51, True)])

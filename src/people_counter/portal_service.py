@@ -30,7 +30,8 @@ from people_counter import backfill_operator as backfill
 from people_counter.adls import AzureDataLakeStorage
 from people_counter.fabric_automation import redact_evidence
 from people_counter.manifest import (
-    CATALOG_COLUMNS, CONTENT_TYPES, inspect_video, load_camera_catalog, load_video_inventory,
+    CATALOG_COLUMNS, CONTENT_TYPES, ManifestPublisherError, VideoMetadata, VideoValidationError, inspect_video,
+    load_camera_catalog, load_video_inventory, parse_utc_timestamp, probe_video, resolve_video_metadata,
 )
 from people_counter.manifest_publisher import (
     MANIFEST_PACKAGE_VERSION, PublisherConfig, publish_manifest_package, run_publisher, validate_manifest_package,
@@ -503,16 +504,157 @@ class PortalService:
         })
         return assignments
 
-    def assign_footage(self, camera_id: str, videos: list[str]) -> None:
+    def media_metadata(self, video: str) -> VideoMetadata:
+        path = self.source.resolve(video)
+        if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES:
+            raise ValueError("Select a supported video file")
+        try:
+            metadata = probe_video(path)
+            self.source.frame(video)
+        except OSError as error:
+            logging.getLogger(__name__).warning("Cannot read footage %s: %s", video, error)
+            raise VideoValidationError(
+                f"Cannot read footage: {error}", reason_code="VIDEO_UNREADABLE",
+                suggested_action="Restore access to the source file, then recheck.",
+            ) from error
+        return metadata
+
+    def registered_camera(self, camera_id: str) -> dict[str, Any]:
+        camera = next((row for row in self.store.entries("camera_identity") if row["id"] == camera_id), None)
+        if camera is None:
+            raise ValueError("Select an existing registered camera")
+        if not any(row["id"] == camera["location_id"] for row in self.store.entries("location")):
+            raise ValueError("The camera's location is missing; correct its location before preparation")
+        return camera
+
+    def footage_readiness(self, video: str) -> dict[str, Any]:
+        self.source.resolve(video)
+        result: dict[str, Any] = {
+            "media_ok": False, "metadata": None, "issues": [], "config_id": "",
+            "camera_values": {}, "captured_at_utc": "", "capture_time_source": "",
+            "camera_id": self.footage_assignments().get(video, ""),
+        }
+        try:
+            result["metadata"] = self.media_metadata(video)
+            result["media_ok"] = True
+        except (ManifestPublisherError, ValueError, OSError) as error:
+            logging.getLogger(__name__).warning("Media readiness failed for %s: %s", video, error)
+            result["issues"].append({
+                "code": getattr(error, "reason_code", "MEDIA_UNREADABLE"), "scope": "assignment",
+                "message": str(error), "action": getattr(error, "suggested_action", "Repair or replace this video, then recheck."),
+            })
+        if not result["camera_id"]:
+            result["issues"].append({
+                "code": "CAMERA_UNASSIGNED", "scope": "package",
+                "message": "This footage has no camera.", "action": "Choose a camera in Camera association.",
+            })
+            return result
+        try:
+            self.registered_camera(result["camera_id"])
+            configs = [row for row in self.store.entries("camera") if row["catalog"]["camera_id"] == result["camera_id"]]
+            if not configs:
+                raise VideoValidationError(
+                    "Camera is not calibrated. Assign valid reference footage, then choose Calibrate camera.",
+                    reason_code="CAMERA_NOT_CALIBRATED",
+                )
+            if len(configs) == 1:
+                result.update(camera_values=configs[0]["catalog"], config_id=configs[0]["id"])
+            with TemporaryDirectory(dir=self.state) as directory:
+                catalog = Path(directory) / "camera.csv"
+                inventory = Path(directory) / "inventory.csv"
+                catalog.write_text(csv_text(PORTAL_CATALOG_FIELDS, self.camera_catalog()), encoding="utf-8")
+                inventory.write_text(csv_text(EXCEPTION_FIELDS, self.store.entries("exception")), encoding="utf-8")
+                entries = load_camera_catalog(catalog)
+                exceptions = load_video_inventory(inventory)
+            if result["media_ok"]:
+                relative = self.source.resolve(video).relative_to(self.source.video_root).as_posix()
+                entry, captured_at, source = resolve_video_metadata(relative, entries, exceptions, result["metadata"])
+                result.update(captured_at_utc=captured_at.isoformat().replace("+00:00", "Z"), capture_time_source=source)
+                applicable = [
+                    row for row in configs
+                    if parse_utc_timestamp(row["catalog"]["effective_from_utc"], "effective from") == entry.effective_from_utc
+                    and (not row["folder"] or video.startswith(row["folder"].rstrip("/") + "/"))
+                ]
+                if len(applicable) == 1:
+                    result.update(camera_values=applicable[0]["catalog"], config_id=applicable[0]["id"])
+        except (ManifestPublisherError, ValueError, OSError) as error:
+            logging.getLogger(__name__).warning("Package readiness failed for %s: %s", video, error)
+            result["issues"].append({
+                "code": getattr(error, "reason_code", "CAMERA_METADATA_INVALID"),
+                "scope": "package", "message": str(error),
+                "action": getattr(error, "suggested_action", "Review the camera calibration and recording rules."),
+            })
+        return result
+
+    def assign_footage(self, camera_id: str, videos: list[str], *, geometry_action: str = "") -> None:
         if not videos:
             raise ValueError("Select one or more video files")
+        self.registered_camera(camera_id)
         canonical = []
         for video in videos:
             path = self.source.resolve(video)
             if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES:
                 raise ValueError("Select supported video files")
+            self.media_metadata(video)
             canonical.append(path.relative_to(self.source.root).as_posix())
-        self.store.assign_footage(camera_id, sorted(set(canonical)))
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for video in sorted(set(canonical)):
+                previous = db.execute("SELECT data FROM entries WHERE kind='footage' AND id=?", (video,)).fetchone()
+                if previous and json.loads(previous["data"])["camera_id"] == camera_id:
+                    continue
+                relative = self.source.root.name + "/" + video
+                saved = db.execute("SELECT data FROM entries WHERE kind='exception' AND id=?", (relative,)).fetchone()
+                exception = json.loads(saved["data"]) if saved else {}
+                if exception.get("frame_width"):
+                    if geometry_action not in {"keep", "clear"}:
+                        raise ValueError("Choose whether to keep or clear the video line before reassignment")
+                    if geometry_action == "clear":
+                        for name in ("frame_width", "frame_height", *LINE_FIELDS):
+                            exception.pop(name, None)
+                        db.execute("DELETE FROM entries WHERE kind='exception' AND id=?", (relative,))
+                        if exception.get("captured_at_utc"):
+                            db.execute("INSERT INTO entries VALUES ('exception',?,?)", (relative, json.dumps(exception)))
+                db.execute(
+                    "INSERT INTO entries VALUES ('footage',?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                    (video, json.dumps({"camera_id": camera_id})),
+                )
+
+    def save_camera_line(self, camera_id: str, form: Mapping[str, str]) -> None:
+        camera = self.registered_camera(camera_id)
+        if form.get("camera_id", camera_id) != camera_id or form.get("location_id", camera["location_id"]) != camera["location_id"]:
+            raise ValueError("Camera calibration cannot change camera or location")
+        video = form.get("video", "")
+        metadata = self.media_metadata(video)
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            owner = db.execute("SELECT data FROM entries WHERE kind='footage' AND id=?", (video,)).fetchone()
+            if owner is None or json.loads(owner["data"])["camera_id"] != camera_id:
+                raise ValueError("Choose reference footage already associated with this camera")
+            configs = [row for row in self.store.entries("camera") if row["catalog"]["camera_id"] == camera_id]
+            config_id = form.get("config_id", "")
+            if not config_id and len(configs) == 1:
+                config_id = configs[0]["id"]
+            found = next((row for row in configs if row["id"] == config_id), None)
+            if configs and found is None:
+                raise ValueError("Choose the existing recording period to recalibrate")
+            row = dict(found["catalog"]) if found else {
+                "catalog_version": "1", "source_path_prefix": self.source.prefix(""),
+                "camera_id": camera_id, "location_id": camera["location_id"],
+                "camera_timezone": "UTC", "capture_time_source": "auto",
+                "capture_time_regex": "", "capture_time_format": "",
+                "effective_from_utc": "1970-01-01T00:00:00Z", "effective_to_utc": "",
+            }
+            row.update(
+                frame_width=str(metadata.width), frame_height=str(metadata.height),
+                **{name: str(int(form.get(name, ""))) for name in LINE_FIELDS},
+            )
+            config_id = config_id or uuid.uuid4().hex
+            self.validate_csv(tuple(sorted(CATALOG_COLUMNS)), [
+                other["catalog"] for other in configs if other["id"] != config_id
+            ] + [row])
+            data = {"catalog": row, "folder": found["folder"] if found else "", "video": video}
+            db.execute("INSERT OR REPLACE INTO entries VALUES ('camera',?,?)", (config_id, json.dumps(data)))
 
     def camera_catalog(self) -> list[dict[str, Any]]:
         cameras = self.store.entries("camera")
@@ -655,13 +797,7 @@ class PortalService:
                 **{name: str(int(form.get(name, ""))) for name in LINE_FIELDS},
             })
         else:
-            config = next((
-                item["catalog"] for item in self.store.entries("camera")
-                if item["id"] == form.get("config_id")
-            ), {})
-            self.save_calibration({
-                **form, **{name: config[name] for name in METADATA_FIELDS if name in config},
-            })
+            raise ValueError("Footage line edits are video-only; use camera calibration to change its default")
 
     def enqueue(self, kind: str, payload: Mapping[str, Any]) -> str:
         if kind not in {"prepare", "profiles", "publish", "submit"}:

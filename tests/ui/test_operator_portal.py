@@ -113,9 +113,14 @@ def ensure_location(page, portal, location):
 def open_camera_line_for_footage(page, video, camera_id):
     row = page.locator("tr[data-entry-path]").filter(has=page.get_by_text(video.rsplit("/", 1)[-1], exact=True))
     row.get_by_role("link", name="Camera " + camera_id, exact=True).click()
-    page.get_by_role("table", name="Associated footage", exact=True).get_by_role("row").filter(
-        has=page.get_by_role("cell", name=video, exact=True),
-    ).get_by_role("link", name=re.compile(r"^(Calibrate|Review) counting line$")).click()
+    page.get_by_role("link", name=re.compile(r"^(Calibrate|Recalibrate) camera$")).click()
+    page.get_by_label("Reference footage", exact=True).select_option(video)
+    page.get_by_role("button", name="Load reference frame", exact=True).click()
+
+
+def open_footage_review(page, video):
+    row = page.locator("tr[data-entry-path]").filter(has=page.get_by_text(video.rsplit("/", 1)[-1], exact=True))
+    row.get_by_role("link", name="Review footage", exact=True).click()
 
 
 @pytest.mark.parametrize("width", [375, 768, 1024, 1440])
@@ -182,14 +187,15 @@ def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-ent
     expect(page.get_by_label("X1", exact=True)).to_have_value("32")
     expect(page.get_by_label("X2", exact=True)).to_have_value("288")
     expect(page.get_by_label("Y1", exact=True)).to_have_value("90")
-    page.get_by_label("Location", exact=True).select_option(location)
-    page.get_by_label("Camera", exact=True).select_option(registered_id)
-    page.get_by_label("Camera timezone", exact=True).select_option("America/Denver")
+    expect(page.locator('[name="camera_id"]')).to_have_count(0)
     page.get_by_label("Preview time in seconds", exact=True).fill("0.2")
     page.get_by_role("button", name="Show frame", exact=True).click()
-    expect(page.get_by_label("Camera", exact=True)).to_have_value(registered_id)
+    expect(page.get_by_label("Reference footage", exact=True)).to_have_value(folder + "/clip.mp4")
     expect(page.get_by_label("X1", exact=True)).to_have_value("32")
-    page.get_by_role("button", name="Save calibration", exact=True).click()
+    page.get_by_role("button", name="Save camera calibration", exact=True).click()
+    page.get_by_role("link", name="Edit metadata and recording rules", exact=True).click()
+    page.get_by_label("Camera timezone", exact=True).select_option("America/Denver")
+    page.get_by_role("button", name="Save metadata", exact=True).click()
     expect(page.get_by_role("heading", name="Camera metadata", exact=True)).to_be_visible()
     row = page.locator("section").filter(
         has=page.get_by_role("heading", name="Camera configurations", exact=True),
@@ -216,6 +222,9 @@ def test_review_footage_layout_a_saves_details_independently(page, portal, viewp
     page.goto(portal.url + "/?folder=lobby")
     page.get_by_role("link", name="Review footage", exact=True).click()
     expect(page.get_by_role("heading", name="Review footage", exact=True)).to_be_visible()
+    field = page.get_by_label("Capture time override (UTC, optional)", exact=True).locator("..").bounding_box()
+    save = page.get_by_role("button", name="Save recording details", exact=True).bounding_box()
+    assert save["y"] >= field["y"] + field["height"] + 16
     counting = page.get_by_role("heading", name="Counting line", exact=True)
     recording = page.get_by_role("heading", name="Recording details", exact=True)
     if viewport["width"] >= 1024:
@@ -224,13 +233,88 @@ def test_review_footage_layout_a_saves_details_independently(page, portal, viewp
     page.get_by_role("button", name="Save recording details", exact=True).click()
     expect(page.get_by_label("Capture time override (UTC, optional)", exact=True)).to_have_value("2026-01-02T13:14:15")
     assert portal.service.store.entries("camera") == camera_before
-    page.get_by_label("Line applies to", exact=True).select_option("video")
-    page.get_by_role("button", name="Save counting line", exact=True).click()
+    expect(page.get_by_label("Line applies to", exact=True)).to_have_count(0)
+    page.get_by_role("button", name="Save video line exception", exact=True).click()
     expect(page.get_by_label("Capture time override (UTC, optional)", exact=True)).to_have_value("2026-01-02T13:14:15")
     page.get_by_role("button", name="Use camera line", exact=True).click()
     assert "frame_width" not in portal.service.store.entries("exception")[0]
     assert portal.service.store.entries("exception")[0]["captured_at_utc"] == "2026-01-02T13:14:15Z"
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 375, "height": 844}])
+def test_readiness_blocks_bad_media_then_allows_initial_camera_assignment(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    location = portal.service.store.add_location("Entrance")
+    camera = portal.service.store.add_camera("Main", location)
+    bad = portal.source / "broken.mp4"
+    bad.write_bytes(b"not a video")
+    page.goto(portal.url + "/review?video=broken.mp4")
+    expect(page.get_by_text("Blocks assignment and preparation", exact=True)).to_be_visible()
+    expect(page.get_by_role("button", name="Save camera association", exact=True)).to_be_disabled()
+    expect(page.locator("#line-canvas")).to_have_count(0)
+    bad.unlink()
+    portal.make_video("broken.mp4")
+    page.get_by_role("link", name="Recheck", exact=True).click()
+    page.get_by_label("Assign footage to camera", exact=True).select_option(camera)
+    page.get_by_role("button", name="Save camera association", exact=True).click()
+    expect(page.get_by_text("Camera is not calibrated.", exact=False)).to_be_visible()
+    assert portal.service.footage_assignments()["broken.mp4"] == camera
+    assert portal.service.store.jobs() == []
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+def test_camera_reference_and_review_reassignment_are_independent(page, portal):
+    calibrate_camera(page, portal)
+    camera = "north-entrance-camera-17"
+    portal.make_video("lobby/second.mp4")
+    portal.service.assign_footage(camera, ["lobby/second.mp4"])
+    portal.service.update_video_exception("lobby/clip.mp4", {
+        "captured_at_utc": "2026-01-02T12:00:00Z",
+        "frame_width": "320", "frame_height": "180",
+        "counting_line_x1": "20", "counting_line_y1": "90",
+        "counting_line_x2": "280", "counting_line_y2": "90",
+    })
+    before = portal.service.store.entries("exception")
+    assignments = portal.service.footage_assignments()
+    page.goto(portal.url + f"/cameras/{camera}/calibrate")
+    page.get_by_label("Reference footage", exact=True).select_option("lobby/second.mp4")
+    page.get_by_role("button", name="Load reference frame", exact=True).click()
+    expect(page.locator('[name="camera_id"]')).to_have_count(0)
+    page.get_by_role("button", name="Save camera calibration", exact=True).click()
+    assert portal.service.store.entries("exception") == before
+    assert portal.service.footage_assignments() == assignments
+    assert len(portal.service.store.entries("camera")) == 1
+    other = portal.service.store.add_camera("Other", "north-entrance")
+    page.goto(portal.url + "/review?video=lobby/clip.mp4")
+    page.get_by_label("Assign footage to camera", exact=True).select_option(other)
+    page.get_by_label("Video line on reassignment", exact=True).select_option("clear")
+    page.get_by_role("button", name="Save camera association", exact=True).click()
+    saved = portal.service.store.entries("exception")[0]
+    assert saved["captured_at_utc"] == "2026-01-02T12:00:00Z" and "frame_width" not in saved
+    assert portal.service.footage_assignments()["lobby/clip.mp4"] == other
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 375, "height": 844}])
+def test_dimension_mismatch_guides_video_confirmation_without_changing_camera(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    calibrate_camera(page, portal)
+    camera_before = portal.service.store.entries("camera")
+    portal.make_video("lobby/wide.mp4", width=640, height=360)
+    portal.service.assign_footage("north-entrance-camera-17", ["lobby/wide.mp4"])
+    page.goto(portal.url + "/review?video=lobby/wide.mp4")
+    readiness = page.get_by_role("region", name="Readiness", exact=True)
+    expect(readiness.get_by_text("640 \u00d7 360 px", exact=True)).to_be_visible()
+    expect(readiness.get_by_text("320 \u00d7 180 px", exact=True)).to_be_visible()
+    expect(readiness.get_by_text("The line can look right", exact=False)).to_be_visible()
+    readiness.get_by_role("link", name="Review and confirm this video's line", exact=True).click()
+    expect(page.get_by_role("heading", name="Counting line", exact=True)).to_be_in_viewport()
+    page.get_by_role("button", name="Save video line exception", exact=True).click()
+    expect(page.get_by_text("Local checks passed", exact=True)).to_be_visible()
+    assert portal.service.store.entries("camera") == camera_before
+    exception = portal.service.store.entries("exception")[0]
+    assert (exception["frame_width"], exception["frame_height"]) == ("640", "360")
+    assert [exception[name] for name in ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")] == ["32", "90", "288", "90"]
 
 
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
@@ -246,8 +330,7 @@ def test_camera_owns_multiple_recordings_and_reports_open_inline(page, portal, v
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
     expect(page.get_by_text("Not calibrated", exact=True)).to_have_count(0)
     open_camera_line_for_footage(page, "lobby/clip.mp4", camera)
-    page.get_by_role("button", name="Save calibration", exact=True).click()
-    page.get_by_role("link", name="2 video files / manage footage", exact=True).click()
+    page.get_by_role("button", name="Save camera calibration", exact=True).click()
     table = page.get_by_role("table", name="Associated footage", exact=True)
     expect(table).to_contain_text("lobby/clip.mp4")
     expect(table).to_contain_text("lobby/tomorrow.mp4")
@@ -295,18 +378,17 @@ def test_per_video_exception_preserves_camera_defaults_and_original_timestamp(pa
     page.get_by_label("Select wide.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option("north-entrance-camera-17")
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
-    open_camera_line_for_footage(page, "lobby/wide.mp4", "north-entrance-camera-17")
-    page.get_by_label("Apply calibration to", exact=True).select_option("video")
-    expect(page.get_by_label("Location", exact=True)).to_be_disabled()
-    expect(page.get_by_label("Camera timezone", exact=True)).to_be_disabled()
-    expect(page.get_by_label("Authoritative capture time override (UTC, optional)", exact=True)).to_be_enabled()
+    open_footage_review(page, "lobby/wide.mp4")
+    expect(page.get_by_label("Location", exact=True)).to_have_count(0)
+    expect(page.get_by_label("Camera timezone", exact=True)).to_have_count(0)
+    expect(page.get_by_label("Capture time override (UTC, optional)", exact=True)).to_be_enabled()
     page.get_by_text("Manual line coordinates", exact=True).click()
     page.get_by_label("X1", exact=True).fill("12")
     page.get_by_label("Y1", exact=True).fill("30")
     page.get_by_label("X2", exact=True).fill("620")
     page.get_by_label("Y2", exact=True).fill("30")
-    page.get_by_role("button", name="Save calibration").click()
-    expect(page.get_by_text("videos/lobby/wide.mp4:", exact=False)).to_be_visible()
+    page.get_by_role("button", name="Save video line exception", exact=True).click()
+    expect(page.get_by_role("heading", name="Review footage", exact=True)).to_be_visible()
     identity = prepare_package(page, portal)
     index = json.loads((portal.service.package_dir(identity) / "manifest-package.json").read_text())
     entry = next(item for item in index["entries"] if item["video_relative_path"].endswith("wide.mp4"))
@@ -326,17 +408,16 @@ def test_calendar_capture_override_reaches_manifest_in_utc(browser, portal, view
     try:
         calibrate_camera(page, portal)
         page.goto(portal.url + "/?folder=lobby")
-        open_camera_line_for_footage(page, "lobby/clip.mp4", "north-entrance-camera-17")
-        page.get_by_label("Apply calibration to", exact=True).select_option("video")
-        capture = page.get_by_label("Authoritative capture time override (UTC, optional)", exact=True)
+        open_footage_review(page, "lobby/clip.mp4")
+        capture = page.get_by_label("Capture time override (UTC, optional)", exact=True)
         expect(capture).to_have_attribute("type", "datetime-local")
         expect(capture).to_have_attribute("step", "any")
         expect(capture).to_be_enabled()
         capture.fill("2026-03-08T02:30:45")
         capture.press("Tab")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-        page.get_by_role("button", name="Save calibration", exact=True).click()
-        expect(page.get_by_text("Saved per-video exception. Camera defaults are unchanged.", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Save recording details", exact=True).click()
+        expect(page.get_by_text("Recording details saved. Counting line unchanged. Prepare a new package to use these changes.", exact=True)).to_be_visible()
         assert portal.service.store.entries("exception")[0]["captured_at_utc"] == "2026-03-08T02:30:45Z"
         identity = prepare_package(page, portal)
         package = portal.service.package_dir(identity)
@@ -410,15 +491,15 @@ def test_locations_support_zero_many_cameras_and_reject_split_assignments(page, 
     expect(page.locator('tr[data-location-id="empty-warehouse"]')).to_have_attribute("data-camera-count", "0")
     page.get_by_role("link", name="Cameras", exact=True).click()
     page.get_by_role("row").filter(has_text="north-entrance-camera-17").get_by_role(
-        "link", name="Edit counting line", exact=True,
+        "link", name="Recalibrate camera", exact=True,
     ).first.click()
-    page.get_by_label("Location", exact=True).select_option("empty-warehouse")
-    expect(page.get_by_label("Camera", exact=True)).to_be_disabled()
-    page.get_by_label("Location", exact=True).select_option("north-entrance")
-    page.get_by_label("Camera", exact=True).select_option("north-entrance-camera-17")
-    page.locator("#camera-location").evaluate("element => element.value = 'empty-warehouse'")
-    page.get_by_role("button", name="Save calibration", exact=True).click()
-    expect(page.get_by_role("alert")).to_contain_text("location")
+    expect(page.get_by_label("Location", exact=True)).to_have_count(0)
+    response = page.request.post(page.url, form={
+        "csrf": page.locator('[name=csrf]').input_value(), "video": "lobby/clip.mp4",
+        "location_id": "empty-warehouse", "counting_line_x1": "32",
+        "counting_line_y1": "90", "counting_line_x2": "288", "counting_line_y2": "90",
+    })
+    assert response.status == 400 and "location" in response.text()
     assert all(
         item["catalog"]["location_id"] == "north-entrance"
         for item in portal.service.store.entries("camera")
@@ -503,28 +584,17 @@ def test_named_camera_registration_and_location_filtered_calibration(page, porta
     expect(page.get_by_role("link", name="Calibrate counting line for clip.mp4", exact=True)).to_have_count(0)
     expect(page.get_by_role("link", name="Video exception for clip.mp4", exact=True)).to_have_count(0)
     open_camera_line_for_footage(page, "lobby/clip.mp4", "south-store-main-entrance")
-    location = page.get_by_label("Location", exact=True)
-    camera = page.get_by_label("Camera", exact=True)
-    expect(camera).to_have_value("south-store-main-entrance")
-    location.select_option("north-store")
-    expect(camera.locator('option:not([value=""])')).to_have_count(1)
-    location.select_option("south-store")
-    expect(camera).to_have_value("")
-    expect(camera.locator('option[value="north-store-main-entrance"]')).to_have_count(0)
-    camera.select_option("south-store-main-entrance")
-    timezone = page.get_by_label("Camera timezone", exact=True)
-    expect(timezone).to_have_js_property("tagName", "SELECT")
-    timezone.select_option("America/Denver")
-    page.get_by_role("button", name="Save calibration", exact=True).click()
-    expect(page.get_by_role("heading", name="Camera metadata", exact=True)).to_be_visible()
+    expect(page.get_by_label("Location", exact=True)).to_have_count(0)
+    expect(page.locator('[name="camera_id"]')).to_have_count(0)
+    expect(page.get_by_label("Reference footage", exact=True)).to_have_value("lobby/clip.mp4")
+    page.get_by_role("button", name="Save camera calibration", exact=True).click()
     saved = portal.service.store.entries("camera")[0]["catalog"]
     assert saved["camera_id"] == "south-store-main-entrance"
     assert saved["location_id"] == "south-store"
-    assert saved["camera_timezone"] == "America/Denver"
-    page.get_by_role("link", name="Edit counting line", exact=True).click()
-    expect(page.get_by_label("Location", exact=True)).to_have_value("south-store")
-    expect(page.get_by_label("Camera", exact=True)).to_have_value("south-store-main-entrance")
-    expect(page.get_by_label("Camera timezone", exact=True)).to_have_value("America/Denver")
+    assert saved["camera_timezone"] == "UTC"
+    page.get_by_role("link", name="Recalibrate camera", exact=True).click()
+    expect(page.get_by_label("Reference footage", exact=True)).to_have_value("lobby/clip.mp4")
+    assert portal.service.footage_assignments()["lobby/clip.mp4"] == "south-store-main-entrance"
 
 
 @pytest.mark.portal_cloud
@@ -542,33 +612,27 @@ def test_progressive_disclosure_keeps_primary_tasks_and_safety_visible(page, por
     expect(page.get_by_text("Frame", exact=True)).not_to_be_visible()
     page.get_by_text("Geometry and effective dates", exact=True).click()
     expect(page.get_by_text("Frame", exact=True)).to_be_visible()
-    page.get_by_role("link", name="Edit counting line", exact=True).click()
-    expect(page.get_by_label("Location", exact=True)).to_be_visible()
-    expect(page.get_by_label("Camera timezone", exact=True)).to_be_visible()
+    page.get_by_role("link", name="Recalibrate camera", exact=True).click()
+    expect(page.get_by_label("Location", exact=True)).to_have_count(0)
+    expect(page.get_by_label("Camera timezone", exact=True)).to_have_count(0)
     expect(page.get_by_label("X2", exact=True)).not_to_be_visible()
     expect(page.get_by_label("Effective from (UTC)", exact=True)).not_to_be_visible()
     coordinates = page.get_by_text("Manual line coordinates", exact=True)
     coordinates.click()
     page.get_by_label("X2", exact=True).fill("320")
     coordinates.click()
-    page.get_by_role("button", name="Save calibration", exact=True).click()
+    page.get_by_role("button", name="Save camera calibration", exact=True).click()
     expect(page.get_by_label("X2", exact=True)).to_be_visible()
     expect(page.get_by_label("X2", exact=True)).to_be_focused()
     page.get_by_label("X2", exact=True).fill("288")
-    recording = page.get_by_text("Recording time and effective dates", exact=True)
-    recording.click()
-    page.get_by_label("Effective from (UTC)", exact=True).fill("2025-01-01T00:00:00Z")
-    recording.click()
-    page.get_by_role("button", name="Save calibration", exact=True).click()
-    page.get_by_role("link", name="Edit counting line", exact=True).click()
-    expect(page.get_by_label("Effective from (UTC)", exact=True)).to_be_visible()
-    expect(page.get_by_label("Effective from (UTC)", exact=True)).to_have_value("2025-01-01T00:00:00Z")
-    page.get_by_label("Apply calibration to", exact=True).select_option("video")
-    expect(page.get_by_label("Location", exact=True)).not_to_be_visible()
-    expect(page.get_by_label("Authoritative capture time override (UTC, optional)", exact=True)).to_be_visible()
-    page.get_by_label("Apply calibration to", exact=True).select_option("camera")
-    expect(page.get_by_label("Camera timezone", exact=True)).to_have_value("America/Denver")
-    expect(page.get_by_label("Authoritative capture time override (UTC, optional)", exact=True)).not_to_be_visible()
+    page.get_by_role("button", name="Save camera calibration", exact=True).click()
+    page.get_by_role("link", name="Edit metadata and recording rules", exact=True).click()
+    page.get_by_label("Effective from utc", exact=True).fill("2025-01-01T00:00:00Z")
+    page.get_by_role("button", name="Save metadata", exact=True).click()
+    page.goto(portal.url + "/?folder=lobby")
+    open_footage_review(page, "lobby/clip.mp4")
+    expect(page.get_by_label("Capture time override (UTC, optional)", exact=True)).to_be_visible()
+    expect(page.get_by_label("Apply calibration to", exact=True)).to_have_count(0)
     page.goto(portal.url + "/profiles")
     page.get_by_role("button", name="Add target and profiles", exact=True).click()
     expect(page.get_by_label("Target name", exact=True)).to_be_visible()

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% from "components.html" import heading, frame_editor %}
+{% block title %}Calibrate camera{% endblock %}
+{% block content %}
+{% call heading('Recalibrate camera' if configs else 'Calibrate camera', camera.display_name ~ ' (' ~ camera.id ~ ')', 'Camera calibration') %}
+<a class="btn btn-secondary" href="{{ url_for('camera_footage', camera_id=camera.id) }}">&larr; Camera footage</a>
+{% endcall %}
+<div class="workflow-note"><p>The camera and location are fixed. Reference footage supplies a frame only. Saving replaces this camera line for future packages; it never changes footage ownership, capture times, or video exceptions.</p></div>
+<section class="card"><div class="card-body">
+  {% if not videos %}<p>Assign valid footage to this camera before calibrating it.</p><a class="btn" href="{{ url_for('footage') }}">Assign footage</a>
+  {% elif configs|length > 1 and not config %}
+  <h2>Choose the recording period to recalibrate</h2><p>These are existing applicability periods, not video exceptions. Only the selected period will change; no new history is created.</p>
+  {% for item in configs %}<p><a href="{{ url_for('camera_calibration', camera_id=camera.id, config_id=item.id, video=video) }}">{{ item.catalog.effective_from_utc }} to {{ item.catalog.effective_to_utc or 'no end date' }}</a></p>{% endfor %}
+  {% else %}
+  <form method="get" class="space-y-4"><input type="hidden" name="config_id" value="{{ config_id }}">
+    <div class="field"><label for="reference-video">Reference footage</label><select id="reference-video" name="video">{% for path in videos %}<option value="{{ path }}" {% if path == video %}selected{% endif %}>{{ path }}</option>{% endfor %}</select><p class="help">Only recordings already associated with this camera are available. Choosing a recording does not reassign it.</p></div>
+    <button class="btn-secondary">Load reference frame</button>
+  </form>
+  {% if readiness.media_ok %}
+  {{ frame_editor(video, width, height, values, seconds, config_id) }}
+  <form method="post" id="calibration-form" class="space-y-5">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="config_id" value="{{ config_id }}">
+    <p class="help">Camera recording rules and existing applicability dates stay unchanged. Existing packages retain their snapshots.</p>
+    <button>Save camera calibration</button>
+  </form>
+  {% else %}<div class="alert alert-warning" role="alert"><div>{% for issue in readiness.issues if issue.scope == 'assignment' %}<p>{{ issue.message }} {{ issue.action }}</p>{% endfor %}<p>Choose another associated reference or repair the video.</p></div></div>{% endif %}
+  {% endif %}
+</div></section>
+{% endblock %}
