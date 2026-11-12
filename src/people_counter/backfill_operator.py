@@ -28,7 +28,7 @@ from people_counter.fabric_automation import (
     AzureCliResourceTokenProvider,
     FabricAutomationClient,
 )
-from people_counter.fabric_release_provenance import resolve_published_release
+from people_counter.fabric_release_provenance import installed_release
 from people_counter.fabric_sjd import FILES_ROOT, FabricSjdConfig
 from people_counter.fabric_target import validate_artifact_id
 from people_counter.fabric_rest import UrllibTransport
@@ -380,8 +380,8 @@ class OneLakeFiles:
             if isinstance(error, ResourceNotFoundError):
                 guidance = (
                     "Check the target workspace/Lakehouse and restore the required artifact. "
-                    "Release evidence must match the published SDK release and Environment; "
-                    "models must exist under Files/models; source files must be exposed by the shortcut."
+                    "Models must exist under Files/models; "
+                    "source files must be exposed by the shortcut."
                 )
             elif status in (401, 403):
                 guidance = "Check the notebook/operator identity's OneLake permissions and token access."
@@ -645,19 +645,14 @@ def submit(
     if fabric:
         _validate_notebook_target(config)
         credentials["credential"] = NotebookStorageCredential()
-    _progress("Verifying published release evidence...")
+    release = installed_release()
+    _progress(f"Using SDK {release.package_version}")
     files = OneLakeFiles(config, **credentials)
-    release = resolve_published_release(
-        files.read_text, deployment=config,
-        expected_sjd_ids={"stable-control": config.control_sjd_id},
-    )
-    if release.manifest.environment_id != config.environment_id:
-        raise ValueError("published release Environment does not match the configured Environment")
     _progress("Verifying deployed model artifacts...")
     for name, digest in config.profile["model_artifact_sha256"].items():
         _progress(f"Verifying model: Files/models/{name}")
         files.verify_video(f"Files/models/{name}", None, digest)
-    records = registration_records(package, config, release.manifest_sha256)
+    records = registration_records(package, config, release.digest)
     plan = {
         "target": {
             "workspace_id": config.workspace_id,

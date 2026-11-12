@@ -121,11 +121,8 @@ def test_process_main_resumes_committed_batch_before_live_probing(
     store = object()
     attempts = object()
     release_evidence = SimpleNamespace(
-        identity_sha256="a" * 64,
-        manifest_sha256="b" * 64,
-        receipt_sha256="c" * 64,
-        manifest=SimpleNamespace(package_version="0.9.48"),
-        receipt=SimpleNamespace(environment_target_version="target-version"),
+        digest="b" * 64,
+        package_version="0.9.48",
     )
     result = ProcessResult(
         batch_id="batch-1",
@@ -143,7 +140,7 @@ def test_process_main_resumes_committed_batch_before_live_probing(
     monkeypatch.setattr(runtime, "_spark", lambda: spark)
     monkeypatch.setattr(
         runtime,
-        "_load_runtime_release_evidence",
+        "_runtime_release",
         lambda *_args, **_kwargs: release_evidence,
     )
     monkeypatch.setattr(
@@ -713,8 +710,8 @@ def test_stable_registration_rejects_old_release_before_creating_ready_work(monk
     store = MemoryControlStore(MemoryFiles())
     store.config = FabricSjdConfig(**TARGET_IDS)
     monkeypatch.setattr(
-        provenance, "resolve_published_release",
-        lambda read_text, *, deployment: SimpleNamespace(manifest_sha256="b" * 64),
+        provenance, "installed_release",
+        lambda: SimpleNamespace(digest="b" * 64),
     )
     with pytest.raises(ImmutableConflictError, match="release"):
         store.register(
@@ -765,8 +762,8 @@ def test_stable_claim_validates_dispatcher_binding_before_claim(monkeypatch) -> 
     store = MemoryControlStore(MemoryFiles())
     store.config = FabricSjdConfig(**TARGET_IDS)
     monkeypatch.setattr(
-        provenance, "resolve_published_release",
-        lambda read_text, *, deployment: SimpleNamespace(manifest_sha256="b" * 64),
+        provenance, "installed_release",
+        lambda: SimpleNamespace(digest="b" * 64),
     )
     with pytest.raises(ImmutableConflictError, match="release"):
         store.claim(
@@ -777,25 +774,20 @@ def test_stable_claim_validates_dispatcher_binding_before_claim(monkeypatch) -> 
     assert not store.data["batches"]
 
 
-def test_stable_dispatcher_validates_full_release_evidence_before_claim(monkeypatch) -> None:
+def test_stable_dispatcher_validates_installed_sdk_before_claim(monkeypatch) -> None:
     from people_counter.fabric_sjd import FabricSjdConfig
     import people_counter.fabric_sjd_runtime as runtime
 
     store = MagicMock()
     monkeypatch.setattr("people_counter.sjd_control.FabricControlStore", lambda *args, **kwargs: store)
     monkeypatch.setattr(runtime, "_spark", lambda: object())
-    loader = MagicMock(side_effect=ValueError("release manifest path differs"))
-    monkeypatch.setattr(runtime, "_load_runtime_release_evidence", loader)
+    loader = MagicMock(side_effect=ValueError("SDK metadata missing"))
+    monkeypatch.setattr(runtime, "_runtime_release", loader)
     monkeypatch.setattr(runtime, "_write_control_diagnostic", MagicMock())
-    with pytest.raises(ValueError, match="manifest path differs"):
-        runtime.dispatcher_main([
-            "--release-manifest-path", "wrong-path",
-            "--release-manifest-sha256", "a" * 64,
-            "--release-receipt-path", "wrong-receipt",
-            "--release-receipt-sha256", "b" * 64,
-        ], config=FabricSjdConfig(**TARGET_IDS))
+    with pytest.raises(ValueError, match="SDK metadata missing"):
+        runtime.dispatcher_main([], config=FabricSjdConfig(**TARGET_IDS))
     store.claim.assert_not_called()
-    assert loader.call_args.kwargs["manifest_path"] == "wrong-path"
+    loader.assert_called_once()
 
 
 def test_stable_dispatcher_rejects_bad_compute_before_claim(monkeypatch) -> None:
@@ -805,7 +797,6 @@ def test_stable_dispatcher_rejects_bad_compute_before_claim(monkeypatch) -> None
     store = MagicMock()
     monkeypatch.setattr("people_counter.sjd_control.FabricControlStore", lambda *args, **kwargs: store)
     monkeypatch.setattr(runtime, "_spark", lambda: object())
-    monkeypatch.setattr(runtime, "_load_runtime_release_evidence", lambda *args, **kwargs: object())
     validation = MagicMock(side_effect=RuntimeError("fixed live pool required"))
     monkeypatch.setattr(runtime, "_validate_fabric_runtime", validation)
     monkeypatch.setattr(runtime, "_write_control_diagnostic", MagicMock())
@@ -1730,7 +1721,6 @@ def test_control_parser_rejects_missing_required_and_non_numeric_values() -> Non
         "--runtime-key",
         "--duration-seconds",
         "--config-sha256",
-        "--release-digest",
     ):
         omitted = list(register_arguments)
         index = omitted.index(option)
@@ -3629,6 +3619,199 @@ def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+@pytest.fixture
+def control_driver(monkeypatch):
+    runtime = sys.modules["people_counter.fabric_sjd_runtime"]
+    store = MagicMock()
+    files = MemoryFiles()
+    file_client = MagicMock(return_value=files)
+    diagnostic = MagicMock()
+    monkeypatch.setattr(
+        "people_counter.sjd_control.FabricControlStore",
+        lambda *args, **kwargs: store,
+    )
+    monkeypatch.setattr(runtime, "_spark", lambda: object())
+    monkeypatch.setattr(runtime, "_write_control_diagnostic", diagnostic)
+    monkeypatch.setattr(
+        "people_counter.fabric_control_store.NotebookUtilsOneLakeFiles",
+        file_client,
+    )
+    return SimpleNamespace(
+        store=store, files=files, file_client=file_client, diagnostic=diagnostic,
+        config=FabricNamespaceConfig.benchmark(target=TEST_TARGET),
+    )
+
+
+@pytest.fixture
+def backfill_partition(control_driver):
+    requests = [
+        {
+            "work_id": work_id, "payload": {"asset": work_id},
+            "runtime_key": "cpu", "duration_seconds": 1.0,
+            "config_sha256": "c" * 64, "release_digest": "d" * 64,
+            "max_attempts": 3, "available_at": None,
+        }
+        for work_id in ("work-1", "work-2")
+    ]
+    path = control_driver.config.file_path("intake/backfill/run-1/partition.json")
+    content = json.dumps({"items": requests}, separators=(",", ":"), sort_keys=True)
+    control_driver.files.content[path] = content
+    return SimpleNamespace(
+        path=path, content=content, requests=requests,
+        digest=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    )
+
+
+@pytest.mark.parametrize("flag,payload,message", [
+    ("--payload-base64", "\N{LATIN SMALL LETTER E WITH ACUTE}", "canonical UTF-8 JSON"),
+    ("--payload-base64", "abc", "canonical UTF-8 JSON"),
+    ("--payload-base64", base64.urlsafe_b64encode(b"\xff").decode(), "canonical UTF-8 JSON"),
+    ("--payload-json", "[]", "decode to an object"),
+    ("--payload-base64", base64.urlsafe_b64encode(b"null").decode(), "decode to an object"),
+])
+def test_control_register_rejects_bad_payload_before_writing(
+    control_driver, capsys, flag, payload, message,
+):
+    with pytest.raises(ValueError, match=message) as raised:
+        control_main([
+            "register", "--work-id", "work-1", flag, payload,
+            "--runtime-key", "cpu", "--duration-seconds", "1",
+            "--config-sha256", "c" * 64,
+        ], config=control_driver.config)
+    control_driver.store.register.assert_not_called()
+    control_driver.file_client.assert_not_called()
+    control_driver.diagnostic.assert_called_once_with(
+        control_driver.config, "register", raised.value,
+    )
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("case,message,read_count", [
+    ("zero-limit", "--max-items must be between 1 and 10000", 0),
+    ("over-limit", "--max-items must be between 1 and 10000", 0),
+    ("wrong-root", "stable backfill intake root", 0),
+    ("invalid-digest", "64 lowercase hexadecimal characters", 0),
+    ("digest-mismatch", "backfill partition digest mismatch", 1),
+    ("too-many-items", "2 items; maximum is 1", 1),
+])
+def test_control_bulk_register_rejects_invalid_partition_before_writing(
+    control_driver, backfill_partition, capsys, case, message, read_count,
+):
+    path = backfill_partition.path
+    digest = backfill_partition.digest
+    maximum = 2
+    if case == "zero-limit":
+        maximum = 0
+    elif case == "over-limit":
+        maximum = 10_001
+    elif case == "wrong-root":
+        path = control_driver.config.file_path("intake/other/partition.json")
+    elif case == "invalid-digest":
+        digest = "A" * 64
+    elif case == "digest-mismatch":
+        digest = "0" * 64
+    else:
+        maximum = 1
+    with pytest.raises(ValueError, match=message) as raised:
+        control_main([
+            "bulk-register", "--partition-path", path,
+            "--partition-sha256", digest, "--max-items", str(maximum),
+        ], config=control_driver.config)
+    control_driver.store.register_many.assert_not_called()
+    assert control_driver.files.read_calls == read_count
+    if read_count == 0:
+        control_driver.file_client.assert_not_called()
+    control_driver.diagnostic.assert_called_once_with(
+        control_driver.config, "bulk-register", raised.value,
+    )
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("maximum", [2, 10_000])
+def test_control_bulk_register_accepts_limits_and_hashes_ordered_work_ids(
+    control_driver, backfill_partition, capsys, maximum,
+):
+    control_driver.store.register_many.return_value = (
+        SimpleNamespace(work_id="work-1"), SimpleNamespace(work_id="work-2"),
+    )
+    assert control_main([
+        "bulk-register", "--partition-path", backfill_partition.path,
+        "--partition-sha256", backfill_partition.digest,
+        "--max-items", str(maximum),
+    ], config=control_driver.config) == 0
+    control_driver.store.register_many.assert_called_once_with(backfill_partition.requests)
+    assert control_driver.files.read_calls == 1
+    control_driver.diagnostic.assert_not_called()
+    assert json.loads(capsys.readouterr().out) == {
+        "partition_path": backfill_partition.path,
+        "partition_sha256": backfill_partition.digest,
+        "item_count": 2,
+        "work_ids_sha256": hashlib.sha256(b"work-1\nwork-2").hexdigest(),
+    }
+
+
+def test_control_bulk_register_identifies_the_source_of_malformed_json(
+    control_driver, backfill_partition,
+):
+    content = "{"
+    control_driver.files.content[backfill_partition.path] = content
+    with pytest.raises(ValueError) as raised:
+        control_main([
+            "bulk-register", "--partition-path", backfill_partition.path,
+            "--partition-sha256", hashlib.sha256(content.encode()).hexdigest(),
+            "--max-items", "1",
+        ], config=control_driver.config)
+    assert str(raised.value) == f"invalid JSONL at {backfill_partition.path}:1"
+    assert isinstance(raised.value.__cause__, json.JSONDecodeError)
+    control_driver.store.register_many.assert_not_called()
+    control_driver.diagnostic.assert_called_once_with(
+        control_driver.config, "bulk-register", raised.value,
+    )
+
+
+@pytest.mark.parametrize("evidence", [
+    ["work-1"],
+    ["work-1=" + "a" * 64, "work-1=" + "b" * 64],
+])
+def test_control_quarantine_rejects_ambiguous_evidence_before_writing(
+    control_driver, capsys, evidence,
+):
+    arguments = ["quarantine", "--operator", "operator", "--reason", "obsolete SDK"]
+    for value in evidence:
+        arguments.extend(["--work-evidence", value])
+    with pytest.raises(ValueError, match="unique WORK_ID=SHA256") as raised:
+        control_main(arguments, config=control_driver.config)
+    control_driver.store.quarantine.assert_not_called()
+    control_driver.diagnostic.assert_called_once_with(
+        control_driver.config, "quarantine", raised.value,
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_control_claim_reports_no_available_batch(control_driver, capsys):
+    control_driver.store.claim.return_value = None
+    assert control_main([
+        "claim", "--owner", "owner", "--max-items", "1",
+        "--lease-seconds", "60",
+    ], config=control_driver.config) == 0
+    assert json.loads(capsys.readouterr().out) is None
+    control_driver.diagnostic.assert_not_called()
+
+
+def test_control_rejects_nonfinite_results_and_records_diagnostic(control_driver, capsys):
+    @dataclass
+    class Result:
+        value: float
+
+    control_driver.store.recover.return_value = Result(float("nan"))
+    with pytest.raises(ValueError, match="Out of range float") as raised:
+        control_main(["recover"], config=control_driver.config)
+    control_driver.diagnostic.assert_called_once_with(
+        control_driver.config, "recover", raised.value,
+    )
+    assert capsys.readouterr().out == ""
+
+
 def test_control_main_dispatches_all_safe_commands(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3639,11 +3822,11 @@ def test_control_main_dispatches_all_safe_commands(
     store = MagicMock()
     store.register.return_value = Result("work-1")
     store.register_many.return_value = (SimpleNamespace(work_id="bulk-work"),)
-    store.claim.return_value = None
+    store.claim.return_value = Result("batch-1")
     store.replay.return_value = Result("replay-1")
     store.quarantine.return_value = Result(["work-1"])
     store.recover.return_value = Result(1)
-    store.reconcile.return_value = []
+    store.reconcile.return_value = [Result(Path("stage/committed-1"))]
     store_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     def _store_factory(*args: object, **kwargs: object) -> object:
@@ -3653,6 +3836,10 @@ def test_control_main_dispatches_all_safe_commands(
     monkeypatch.setattr(
         "people_counter.sjd_control.FabricControlStore", _store_factory
     )
+    gold_store = MagicMock()
+    gold_state = MagicMock()
+    monkeypatch.setattr("people_counter.fabric_gold.FabricGoldStoreImpl", gold_store)
+    monkeypatch.setattr("people_counter.fabric_gold.FabricGoldState", gold_state)
     spark_sentinel = object()
     monkeypatch.setattr(
         "people_counter.fabric_sjd_runtime._spark", lambda: spark_sentinel
@@ -3750,7 +3937,7 @@ def test_control_main_dispatches_all_safe_commands(
             "--reason",
             "obsolete release",
         ],
-        ["recover"],
+        ["recover", "--now", "123"],
         ["clear-stale-lock", "--expected-owner-id", "owner"],
         ["reconcile"],
     )
@@ -3765,18 +3952,37 @@ def test_control_main_dispatches_all_safe_commands(
             "item_count": 1,
             "work_ids_sha256": hashlib.sha256(b"bulk-work").hexdigest(),
         },
-        None,
+        {"value": "batch-1"},
         {"value": "replay-1"},
         {"value": ["work-1"]},
         {"value": 1},
         {"cleared_owner_id": "owner", "acquired_at": "never"},
-        [],
+        [{"value": "stage/committed-1"}],
     ]
     for command, expected in zip(commands, expected_outputs, strict=True):
         assert control_main(command, config=shared_config) == 0
-        printed = json.loads(capsys.readouterr().out)
-        assert printed == expected
-    assert store.claim.call_args.kwargs["allowed_work_ids"] == ["work-1"]
+        printed = capsys.readouterr().out
+        assert printed == json.dumps(expected, allow_nan=False, sort_keys=True) + "\n"
+    gold_store.assert_called_once_with(store.spark, config=shared_config)
+    gold_store.return_value.bootstrap.assert_called_once_with()
+    gold_state.assert_called_once_with(store.spark, config=shared_config)
+    store.register.assert_called_once_with(
+        "work-1", {"asset": "safe"}, runtime_key="cpu", duration_seconds=1.0,
+        config_sha256="c" * 64, release_digest="release", max_attempts=3,
+    )
+    store.claim.assert_called_once_with(
+        "owner", max_items=1, lease_seconds=60.0, minimum_speed_x=1.0,
+        safety_factor=1.25, margin_seconds=30.0, minimum_items=1,
+        allowed_work_ids=["work-1"],
+    )
+    store.replay.assert_called_once_with(
+        "work-1", operator="operator", reason="test", additional_attempts=1,
+    )
+    store.quarantine.assert_called_once_with(
+        {"work-1": "a" * 64}, operator="operator", reason="obsolete release",
+    )
+    store.recover.assert_called_once_with(now=123.0)
+    store.reconcile.assert_called_once_with()
     registered_request = store.register_many.call_args.args[0]
     assert registered_request == [
         {
@@ -3946,14 +4152,6 @@ def test_dispatcher_main_claims_one_bounded_batch_and_processes_it(
                 "batch-1",
                 "--mode",
                 "sdk",
-                "--release-manifest-path",
-                "Files/releases/manifest.json",
-                "--release-manifest-sha256",
-                "a" * 64,
-                "--release-receipt-path",
-                "Files/releases/receipt.json",
-                "--release-receipt-sha256",
-                "b" * 64,
             ],
             {"config": shared_config, "route_mode": "PRODUCTION"},
         )

@@ -196,7 +196,7 @@ def test_submission_summary_and_progress_do_not_claim_processing_or_gold_complet
     with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
         operator, "AzureDataLakeStorage", return_value=storage,
     ), patch.object(
-        operator, "resolve_published_release", return_value=release,
+        operator, "installed_release", return_value=release,
     ), patch.object(
         operator, "FabricAutomationClient", return_value=client,
     ), operator.progress_reporter(progress.append):
@@ -209,7 +209,7 @@ def test_submission_summary_and_progress_do_not_claim_processing_or_gold_complet
     }
     assert json.loads((setup.root / "state/registration-summary.json").read_bytes()) == report
     assert progress[0:2] == [
-        "Verifying published release evidence...", "Verifying deployed model artifacts...",
+        "Using SDK 1.2.3", "Verifying deployed model artifacts...",
     ]
     expected_models = [
         f"Verifying model: Files/models/{name}" for name in config.profile["model_artifact_sha256"]
@@ -262,7 +262,7 @@ def test_submission_keeps_source_order_and_reuses_the_validated_multi_video_pack
     with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
         operator, "AzureDataLakeStorage", return_value=storage,
     ), patch.object(
-        operator, "resolve_published_release", return_value=release,
+        operator, "installed_release", return_value=release,
     ), patch.object(
         operator, "FabricAutomationClient", return_value=client,
     ), patch.object(
@@ -277,7 +277,7 @@ def test_submission_keeps_source_order_and_reuses_the_validated_multi_video_pack
     ]
 
 
-@pytest.mark.parametrize("stage", ["release", "state", "publication", "missing_video"])
+@pytest.mark.parametrize("stage", ["model", "state", "publication", "missing_video"])
 def test_submission_failures_keep_the_correct_operator_recovery_instruction(setup, stage):
     from types import SimpleNamespace
 
@@ -286,9 +286,9 @@ def test_submission_failures_keep_the_correct_operator_recovery_instruction(setu
     state = setup.root / "state"
     publication = operator.publication_config(setup.package, setup.root, state, config)
     package = operator.validate_manifest_package(publication)
-    if stage == "release":
-        release.manifest.environment_id = "another"
-        message = "published release Environment does not match the configured Environment"
+    if stage == "model":
+        files.verify_video.side_effect = ValueError("model hash mismatch")
+        message = "model hash mismatch"
     elif stage == "state":
         state.mkdir()
         (state / "registration-plan.json").write_text("{}")
@@ -304,11 +304,11 @@ def test_submission_failures_keep_the_correct_operator_recovery_instruction(setu
     with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
         operator, "AzureDataLakeStorage", return_value=storage,
     ), patch.object(
-        operator, "resolve_published_release", return_value=release,
+        operator, "installed_release", return_value=release,
     ), patch.object(operator, "publish_manifest_package", publisher):
         with pytest.raises((ValueError, RuntimeError)) as error:
             operator.submit(package, publication, config, state)
     assert str(error.value) == message
-    if stage in {"release", "state"}:
+    if stage in {"model", "state"}:
         publisher.assert_not_called()
     files.write_partition.assert_not_called()

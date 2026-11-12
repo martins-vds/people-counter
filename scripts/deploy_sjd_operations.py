@@ -129,19 +129,11 @@ def bind_registration_notebook(definition: Mapping[str, Any]) -> dict[str, Any]:
     if len(assignments) != 1:
         raise OperationsDeploymentError("expected exactly one release_digest assignment")
     assignment = assignments[0]
-    expression = (
-        "registration_release_digest(NotebookUtilsOneLakeFiles().read_text, "
-        "deployment=release_deployment, "
-        "expected_digest=RELEASE_MANIFEST_SHA256)"
-    )
+    expression = "registration_release_digest()"
     if ast.dump(assignment.value) == ast.dump(ast.parse(expression, mode="eval").body):
         return updated
     replacement = (
         "from people_counter.fabric_release_provenance import registration_release_digest\n"
-        "from people_counter.fabric_control_store import NotebookUtilsOneLakeFiles\n"
-        "from people_counter.fabric_sjd import ManualFabricSjdConfig\n"
-        "import notebookutils\n"
-        "release_deployment = ManualFabricSjdConfig.from_runtime_context(notebookutils.runtime.context)\n"
         f"release_digest = {expression}\n"
     )
     lines = source.splitlines(keepends=True)
@@ -710,16 +702,20 @@ def _activate_schedules(
 
 def _validate_configuration(
     *,
-    release_manifest_sha256: str,
-    release_receipt_sha256: str,
+    release_manifest_sha256: str | None,
+    release_receipt_sha256: str | None,
     semantic_model_id: str,
     additional_semantic_model_ids: Sequence[str],
     intake_pipeline_id: str | None,
     registration_notebook_id: str | None,
     enable_schedules: bool,
 ) -> None:
-    _release_digest(release_manifest_sha256, "release manifest hash")
-    _release_digest(release_receipt_sha256, "release receipt hash")
+    if (release_manifest_sha256 is None) != (release_receipt_sha256 is None):
+        raise OperationsDeploymentError("legacy release hashes must be supplied together")
+    if release_manifest_sha256 is not None:
+        _release_digest(release_manifest_sha256, "release manifest hash")
+    if release_receipt_sha256 is not None:
+        _release_digest(release_receipt_sha256, "release receipt hash")
     validate_artifact_id(semantic_model_id, "semantic model ID")
     for model_id in additional_semantic_model_ids:
         validate_artifact_id(model_id, "additional semantic model ID")
@@ -736,8 +732,8 @@ def deploy_operations(
     api: FabricApi,
     *,
     manifest: DeploymentManifest,
-    release_manifest_sha256: str,
-    release_receipt_sha256: str,
+    release_manifest_sha256: str | None = None,
+    release_receipt_sha256: str | None = None,
     semantic_model_id: str,
     additional_semantic_model_ids: Sequence[str] = (),
     enable_schedules: bool,
@@ -762,7 +758,6 @@ def deploy_operations(
     result = provision_operations(api, manifest=manifest)
     items = result["items"]
     if intake_pipeline_id is not None and registration_notebook_id is not None:
-        api.reconcile_intake_release(intake_pipeline_id, release_manifest_sha256)
         api.reconcile_registration_notebook(registration_notebook_id)
     resolved = parse_deployment_manifest(result["deployment"], manifest.stage)
     resolved = dataclasses.replace(
@@ -841,10 +836,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     target = manifest.runtime_config()
     if arguments.provision_only and arguments.enable_schedules:
         parser.error("--provision-only cannot enable schedules")
-    if not arguments.provision_only and (
-        not arguments.release_manifest_sha256 or not arguments.release_receipt_sha256
-    ):
-        parser.error("configuration requires both release hashes; use --provision-only before release admission")
+    if (arguments.release_manifest_sha256 is None) != (arguments.release_receipt_sha256 is None):
+        parser.error("legacy release hashes must be supplied together")
     model_id = arguments.semantic_model_id or manifest.analytics_reporting.semantic_model.target_item_id
     if not arguments.provision_only and model_id is None:
         parser.error("configuration requires --semantic-model-id or a resolved reporting target ID")

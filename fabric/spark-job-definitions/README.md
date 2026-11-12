@@ -41,35 +41,30 @@ Cutover tooling and its SJD have been removed. Use Control `bootstrap` for
 greenfield initialization and keep all schedules disabled until acceptance.
 Removal does not delete existing Lakehouse tables or migrate old work.
 
-## Release admission
+## SDK compatibility
 
-SDK release identity is deployment-independent. Its v2 embedded identity
-contains release metadata only; workspace, Lakehouse, Environment, SJD IDs,
-and deployment intent belong in deployment configuration and detached evidence.
-Use the same approved wheel across targets. Runtime admission checks the
-evidence against the selected configuration (including explicit manual artifact
-bindings), rather than requiring a target-specific SDK build. The reference
-production role IDs are resolved into deployment state, not SDK defaults.
-Existing v1 wheels require a new approved release and matching deployment
-evidence to adopt this separation; do not edit an installed wheel in place.
+Upload the SDK wheel to the Fabric Environment, publish it, and start fresh
+sessions. Use the same SDK version in the notebook and jobs. No embedded
+identity, detached manifest, postpublish receipt, or versioned release directory
+is required. Target IDs come only from configuration and runtime context.
 
-Stable production registration resolves the installed SDK's immutable detached
-manifest and postpublish receipt before creating `READY` work. A supplied
-release digest must match that verified release. Bulk registration validates
-the whole partition before writing any rows.
+Stable production registration derives a compatibility digest from standard
+installed package metadata before creating `READY` work. A supplied work digest
+must match that SDK version. Bulk registration validates the whole partition
+before writing any rows.
 
 Stable claims verify the Dispatcher binding and reject incompatible eligible
-work before creating attempts, envelopes, or leases. Dispatcher also verifies
-its complete manifest/receipt arguments before calling claim. Local and
+work before creating attempts, envelopes, or leases. Dispatcher and Process
+need no release-file arguments. Legacy flags are deprecated and ignored with
+a warning. Local and
 benchmark stores retain their existing behavior unless an expected release
 digest is supplied explicitly.
 
 For the optional legacy event-intake deployment, `scripts/deploy_sjd_operations.py`
 accepts `--intake-pipeline-id` and `--registration-notebook-id` together.
-It derives the pipeline and Dispatcher configuration from the same
-`--release-manifest-sha256` value and verifies readback before enabling schedules.
-The registration notebook resolves the SDK release itself; the pipeline value
-is a compatibility assertion, not an independent release authority.
+It updates the registration notebook to derive compatibility from its installed
+SDK version, without reading release evidence. No pipeline release digest needs
+to be configured.
 
 For a new deployment, first use `--provision-only --config <target-config>
 --output <resolved-deployment.json>`. This creates or uniquely resolves all six
@@ -77,8 +72,8 @@ SJDs, verifies target-bound definitions, disables existing schedules before
 updates, and captures Fabric's assigned IDs. No release receipt or preassigned
 SJD IDs are needed at this stage. Retry with the resolved output to pin those
 IDs. Conflicting IDs, duplicate names, and ambiguous discovery stop the run.
-The later configuration pass requires both real release hashes and resolved
-reporting IDs. All schedule arguments use that same target; enablement occurs
+The later configuration pass requires resolved reporting IDs, not release
+hashes. All schedule arguments use that same target; enablement occurs
 only after every disabled schedule's readback matches.
 
 Drain or explicitly quarantine/re-register incompatible work during a release

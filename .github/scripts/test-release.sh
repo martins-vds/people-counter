@@ -9,27 +9,9 @@ git init --quiet
 git config user.name "Release test"
 git config user.email "release-test@example.invalid"
 printf '[project]\nname = "release-test"\nversion = "1.2.3"\n' > pyproject.toml
-mkdir -p src/people_counter/data
-cp "${scripts}/../../src/people_counter/fabric_release_provenance.py" src/people_counter/
 printf 'Release fixture\n' > README.md
-uv run --no-project python - "${scripts}/../../src/people_counter" <<'PY'
-import json
-import runpy
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1])
-module = runpy.run_path(str(source / "fabric_release_provenance.py"))
-identity = json.loads((source / "data/sjd_release_identity.json").read_text())
-identity["package_version"] = "1.2.3"
-identity["release_evidence_root"] = "Files/releases/1.2.3"
-path = Path("src/people_counter/data/sjd_release_identity.json")
-path.write_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
-identity["build_input_sha256"] = module["release_build_input_sha256"](Path("."))
-path.write_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
-PY
 uv lock --offline
-git add pyproject.toml uv.lock README.md src
+git add pyproject.toml uv.lock README.md
 git commit --quiet -m "Release fixture"
 commit="$(git rev-parse HEAD)"
 export GITHUB_OUTPUT="${temp}/output"
@@ -47,8 +29,8 @@ expect_failure() {
 mkdir -p scripts .github/scripts original-release
 cp "${scripts}/../../scripts/bump-sdk-version.sh" scripts/
 cp "${scripts}/validate-release.sh" .github/scripts/
-cp pyproject.toml uv.lock src/people_counter/data/sjd_release_identity.json original-release/
-release_files=(pyproject.toml uv.lock src/people_counter/data/sjd_release_identity.json)
+cp pyproject.toml uv.lock original-release/
+release_files=(pyproject.toml uv.lock)
 sha256sum "${release_files[@]}" > "${temp}/original-release.sha256"
 expect_failure "Usage:" bash scripts/bump-sdk-version.sh
 for version in v1.2.4 1.2 01.2.4 1.2.4-rc1 '1.2.4 '; do
@@ -65,20 +47,6 @@ git tag -d v1.2.4
 (cd /; bash "${temp}/scripts/bump-sdk-version.sh" 1.2.4)
 [[ "$(uv version --short)" == 1.2.4 ]]
 bash "${scripts}/validate-release.sh" pr releases/v1.2.4
-uv run --no-project python - <<'PY'
-import json
-from pathlib import Path
-
-original = json.loads(Path("original-release/sjd_release_identity.json").read_text())
-path = Path("src/people_counter/data/sjd_release_identity.json")
-updated = json.loads(path.read_text())
-assert updated["package_version"] == "1.2.4"
-assert updated["release_evidence_root"] == "Files/releases/1.2.4"
-assert updated["build_input_sha256"] != original["build_input_sha256"]
-for key in original.keys() - {"package_version", "release_evidence_root", "build_input_sha256"}:
-    assert updated[key] == original[key], key
-assert path.read_text() == json.dumps(updated, sort_keys=True, separators=(",", ":")) + "\n"
-PY
 sha256sum "${release_files[@]}" > "${temp}/bumped-release.sha256"
 bash scripts/bump-sdk-version.sh 1.2.4
 sha256sum --check "${temp}/bumped-release.sha256"
@@ -115,13 +83,6 @@ cp "${scripts}/validate-release.sh" .github/scripts/
 
 cp original-release/pyproject.toml pyproject.toml
 cp original-release/uv.lock uv.lock
-cp original-release/sjd_release_identity.json src/people_counter/data/
-printf 'Release fixture\n' > README.md
-
-uv run --no-project python -S src/people_counter/fabric_release_provenance.py 1.2.3
-printf 'Changed release fixture\n' > README.md
-expect_failure "release identity build_input_sha256" \
-  uv run --no-project python -S src/people_counter/fabric_release_provenance.py 1.2.3
 printf 'Release fixture\n' > README.md
 bash "${scripts}/validate-release.sh" pr releases/v1.2.3
 grep -Fx "tag=v1.2.3" "${GITHUB_OUTPUT}"

@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from people_counter import fabric_deployment_manifest as deploy
-from people_counter import fabric_release_provenance as provenance
 from people_counter.fabric_sjd import (
     FABRIC_RUNTIME,
     FILES_ROOT,
@@ -50,11 +49,9 @@ def test_production_role_ids_come_from_deployment_configuration() -> None:
         assert manifest.role(role).item_id is None
 
 
-def test_production_release_provenance_is_verified() -> None:
+def test_production_requires_no_embedded_release_identity() -> None:
     manifest = deploy.load_deployment_manifest("prod", env={})
-    assert deploy.verify_release_provenance(manifest) == (
-        provenance.RELEASE_IDENTITY_SHA256
-    )
+    assert manifest.release.require_identity is False
 
 
 @pytest.mark.parametrize("stage", ["dev", "test"])
@@ -65,7 +62,6 @@ def test_nonproduction_stages_have_no_fixed_resource_ids(stage: str) -> None:
     assert manifest.fabric_environment_id is None
     assert manifest.lakehouse.lakehouse_id is None
     assert manifest.release.require_identity is False
-    assert deploy.verify_release_provenance(manifest) is None
 
 
 def test_nonproduction_namespaces_are_isolated() -> None:
@@ -310,8 +306,7 @@ def test_production_target_is_configured_without_disabling_release_checks() -> N
     assert manifest.lakehouse.lakehouse_id == changed_lakehouse
     assert manifest.fabric_environment_id == changed_environment
     assert manifest.role("control").item_id == changed_control
-    assert manifest.release.require_identity is True
-    assert deploy.verify_release_provenance(manifest) == provenance.RELEASE_IDENTITY_SHA256
+    assert manifest.release.require_identity is False
 
 
 def test_identity_requirement_allows_unresolved_ids_before_provisioning() -> None:
@@ -349,8 +344,8 @@ def test_release_hashes_must_be_valid_and_supplied_as_a_pair(release):
         deploy.parse_deployment_manifest(document, deploy.DeploymentEnvironment.PROD)
 
 
-def test_release_schema_cannot_be_disabled_by_using_another_target():
+def test_legacy_release_schema_does_not_bind_the_installed_sdk():
     document = deploy.load_manifest_document(deploy.DeploymentEnvironment.PROD, env={})
     document["release"]["identity_schema"] = "unknown"
-    with pytest.raises(deploy.ManifestValidationError, match="schema"):
-        deploy.parse_deployment_manifest(document, deploy.DeploymentEnvironment.PROD)
+    manifest = deploy.parse_deployment_manifest(document, deploy.DeploymentEnvironment.PROD)
+    assert manifest.release.identity_schema == "unknown"

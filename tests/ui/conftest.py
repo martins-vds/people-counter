@@ -107,9 +107,9 @@ def portal(tmp_path, monkeypatch, request):
         monkeypatch.setattr(backfill, "FabricAutomationClient", lambda *args, **kwargs: Fabric())
         monkeypatch.setattr(backfill, "processing_reader", reader)
         monkeypatch.setattr(backfill, "read_demo_delta", rows)
-        monkeypatch.setattr(backfill, "resolve_published_release", lambda read, **kwargs: SimpleNamespace(
-            manifest_sha256="d" * 64,
-            manifest=SimpleNamespace(environment_id="33333333-3333-3333-3333-333333333333"),
+        monkeypatch.setattr(backfill, "installed_release", lambda: SimpleNamespace(
+            digest="d" * 64,
+            package_version="1.2.3",
         ))
     app = create_app(service)
     server = make_server("127.0.0.1", 0, app, threaded=True)

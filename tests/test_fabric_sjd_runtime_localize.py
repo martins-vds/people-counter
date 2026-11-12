@@ -24,7 +24,7 @@ from people_counter.fabric_sjd_runtime import (
     _check_synthetic_model_identity,
     _check_synthetic_video_identity,
     _fallback_localize,
-    _load_runtime_release_evidence,
+    _runtime_release,
     _resolve_localized_models,
     _resolve_localized_video,
 )
@@ -823,17 +823,15 @@ def test_real_local_spark_fallback_is_collision_safe_before_staging(
         spark.stop()
 
 
-def test_release_evidence_rejects_nonfixed_paths_before_reading() -> None:
-    from people_counter.fabric_sjd import FabricSjdConfig
+def test_legacy_release_arguments_warn_without_reading_files() -> None:
+    import argparse
+    from people_counter.fabric_release_provenance import installed_release
 
-    files = MagicMock()
-    with pytest.raises(ValueError, match="fixed release identity"):
-        _load_runtime_release_evidence(
-            files,
-            config=FabricSjdConfig(**TARGET_IDS),
-            manifest_path="Files/arbitrary/manifest.json",
-            manifest_sha256="a" * 64,
-            receipt_path="Files/arbitrary/receipt.json",
-            receipt_sha256="b" * 64,
-        )
-    files.read_text.assert_not_called()
+    with pytest.warns(FutureWarning, match="obsolete"):
+        release = _runtime_release(argparse.Namespace(
+            release_manifest_path="Files/arbitrary/manifest.json",
+            release_manifest_sha256="a" * 64,
+            release_receipt_path="Files/arbitrary/receipt.json",
+            release_receipt_sha256="b" * 64,
+        ))
+    assert release == installed_release()

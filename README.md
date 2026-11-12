@@ -458,27 +458,21 @@ git switch -c releases/v1.0.0
 bash scripts/bump-sdk-version.sh 1.0.0
 ```
 
-The script updates `pyproject.toml`, resolves `uv.lock`, and synchronizes
-`src/people_counter/data/sjd_release_identity.json`: `package_version`,
-the version suffix in `release_evidence_root`, and `build_input_sha256`.
-The v2 identity contains no Fabric target IDs or deployment intent; one SDK
-wheel can be used in multiple deployments. Target IDs belong in deployment
-configuration and runtime bindings, and detached deployment evidence is checked
-against that selected target. The script then runs the same
-release validator as the PR check. On failure it restores the original three
-files. No SDK dependencies are installed. Run it again with the same version
-after finalizing source, package data, build configuration, or this README,
-because those files contribute to the build-input digest.
+The script updates `pyproject.toml`, resolves `uv.lock`, and runs the same
+release validator as the PR check. On failure it restores those two files.
+No SDK dependencies are installed. The wheel uses standard Python package
+metadata for its version; it contains no custom release identity or target IDs.
+The same wheel works across deployments, using configuration, environment
+variables, and runtime context to select resources.
 
 The script does not switch branches, create commits or tags, fetch remote
 tags, or rewrite historical release evidence. Fetch tags before preparation
 (`git fetch origin --tags`) and use the matching release branch for the PR.
 
-The identity is shipped in the wheel; its version must match the installed
-package. Commit it with the version and lockfile changes:
+Commit the version and lockfile changes:
 
 ```bash
-git add pyproject.toml uv.lock src/people_counter/data/sjd_release_identity.json
+git add pyproject.toml uv.lock
 git commit -m "Prepare SDK v1.0.0"
 git push -u origin releases/v1.0.0
 gh pr create --base main --title "Release SDK v1.0.0" --body "Prepare SDK v1.0.0."
@@ -486,12 +480,18 @@ gh pr create --base main --title "Release SDK v1.0.0" --body "Prepare SDK v1.0.0
 
 The **Release version and unused tag** PR check fails if the branch version
 does not exactly match `pyproject.toml`, the branch name is malformed, or the
-tag already exists. It also checks that `uv.lock` is current and the embedded
-release identity's version, evidence root, and source/build-input digest match
-the release source. These checks run without installing SDK dependencies and
+tag already exists. It also checks that `uv.lock` is current.
+These checks run without installing SDK dependencies and
 run again before a merge creates a tag. Rerun the preparation script to fix stale
 release files; CI does not edit files or open a PR. Make this check required in the `main`
 branch ruleset to prevent merging a failing release PR.
+
+To upgrade Fabric, upload the wheel to the Environment, publish it, and start
+a fresh session with that Environment. Merely storing a wheel in Lakehouse
+Files does not install it. No versioned OneLake release directory, detached
+manifest, or publication receipt is required. Notebook and SJD Environments
+must use the same SDK version; work compatibility is derived automatically
+from the installed package version, not from deployment evidence.
 
 Merging a release PR creates the matching tag at the exact merged commit and
 builds that commit. Closing without merging, merging an ordinary branch, or

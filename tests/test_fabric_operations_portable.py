@@ -486,13 +486,13 @@ def test_resolved_manifest_supplies_target_checked_schedule_arguments(role):
     arguments = shlex.split(selected.schedule_arguments(role, enabled=True))
     assert arguments[:4] == selected.target().command_line_arguments()
     if role == "dispatcher":
-        assert arguments[arguments.index("--release-manifest-sha256") + 1] == "a" * 64
-        assert arguments[arguments.index("--release-receipt-sha256") + 1] == "b" * 64
+        assert "--release-manifest-sha256" not in arguments
+        assert "--release-receipt-sha256" not in arguments
     if role == "refresh":
         assert arguments[arguments.index("--semantic-model-id") + 1] == str(UUID(int=80))
 
 
-@pytest.mark.parametrize("role", ["dispatcher", "refresh"])
+@pytest.mark.parametrize("role", ["refresh"])
 def test_missing_admission_or_reporting_bindings_cannot_enable_recurring_work(role):
     selected = manifest()
     assert selected.schedule_arguments(role, enabled=False)

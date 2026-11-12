@@ -2889,15 +2889,12 @@ def _patch_process_dispatch_collaborators(
     monkeypatch.setattr(sjd_control_module, "FabricControlStore", _FakeControlStore)
 
     release_evidence = SimpleNamespace(
-        identity_sha256="a" * 64,
-        manifest_sha256="b" * 64,
-        receipt_sha256="c" * 64,
-        manifest=SimpleNamespace(package_version="0.9.29"),
-        receipt=SimpleNamespace(environment_target_version="target"),
+        package_version="0.9.29",
+        digest="b" * 64,
     )
     monkeypatch.setattr(
         candidate_jobs,
-        "_load_runtime_release_evidence",
+        "_runtime_release",
         lambda *args, **kwargs: release_evidence,
     )
 

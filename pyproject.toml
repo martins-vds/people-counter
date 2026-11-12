@@ -83,7 +83,6 @@ also_copy = [
     "src/people_counter/portal_static/",
     "samples/",
     "scripts/",
-    "src/people_counter/data/sjd_release_identity.json",
     "src/people_counter/data/deploy/dev.json",
     "src/people_counter/data/deploy/test.json",
     "src/people_counter/data/deploy/prod.json",

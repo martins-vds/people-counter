@@ -30,7 +30,7 @@ def test_operations_cli_writes_and_prints_stable_sorted_json(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize("kind,message", [
-    ("partial_hashes", "configuration requires both release hashes; use --provision-only before release admission"),
+    ("partial_hashes", "legacy release hashes must be supplied together"),
     ("model", "configuration requires --semantic-model-id or a resolved reporting target ID"),
 ])
 def test_configuration_usage_errors_include_the_complete_next_action(

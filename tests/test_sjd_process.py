@@ -2087,8 +2087,8 @@ class SjdProcessTests(unittest.TestCase):
     def test_committed_preflight_validates_release_before_state_short_circuit(self):
         batch = self.claim((10,))
         evidence = SimpleNamespace(
-            manifest=SimpleNamespace(package_version="release-version"),
-            manifest_sha256="release-a",
+            package_version="release-version",
+            digest="release-a",
         )
 
         with patch(
@@ -2110,8 +2110,8 @@ class SjdProcessTests(unittest.TestCase):
     def test_committed_preflight_rejects_release_digest_mismatch(self):
         batch = self.claim((10,))
         evidence = SimpleNamespace(
-            manifest=SimpleNamespace(package_version="release-version"),
-            manifest_sha256="different-release",
+            package_version="release-version",
+            digest="different-release",
         )
 
         with (
@@ -2121,7 +2121,7 @@ class SjdProcessTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(
                 ProcessValidationError,
-                "^claim release digest differs from detached manifest "
+                "^claim release digest differs from installed SDK "
                 "for \\['work-0'\\]$",
             ),
         ):

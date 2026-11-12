@@ -1608,32 +1608,15 @@ any gate below is unresolved.
    `Files/deployment-evidence` and release artifacts under their reviewed
    release root. An inventory/evidence record must clearly distinguish
    **configured**, **verified**, **blocked**, and **not tested**. It is not
-   a substitute for the SDK's detached manifest and postpublish receipt.
+   required SDK runtime dependency.
 
 ### Manual SDK upgrade workflow
 
-Use this workflow for both first admission and later SDK upgrades. The
-backfill notebook is a consumer of a completed deployment, not its release
-installer. Assign one release owner to complete the checkpoints below before
-asking operators to switch versions.
+The SDK uses standard wheel metadata for version compatibility. It has no
+custom embedded identity and requires no detached manifest, postpublish
+receipt, or versioned release directory in OneLake.
 
-The [version bump script](../scripts/bump-sdk-version.sh) only prepares source
-metadata. Its v2 SDK identity contains no deployment IDs; it changes the versioned evidence path
-and does not publish an Environment or generate/upload admission evidence.
-Installing its resulting wheel alone leaves the new evidence path unresolved.
-This missing deployment handoff, rather than a model configuration change, can
-produce the same OneLake 404 on each version change.
-
-| Checkpoint | Release owner action | Required result before continuing |
-|---|---|---|
-| Target | Configure actual workspace, Lakehouse, Environment, and role IDs in deployment configuration and runtime bindings | No reference-deployment IDs remain in the selected runtime configuration |
-| Build | Finalize source, run version preparation, then build and approve the SDK once for all deployments | Version, release identity, build-input digest, and artifact hashes agree |
-| Review | Prepare the detached manifest from those artifacts and real review data | Reviewed, target-bound manifest; no placeholders |
-| Publish | Use the Environment UI to publish the approved wheel/dependencies and read back publication, compute, and job bindings | Successful publication observations, not just saved staging settings |
-| Evidence | Prepare the receipt from those observations; upload both immutable files through the Lakehouse UI | Exact embedded paths exist and readback validates with the matching SDK |
-| Handoff | Complete release acceptance, coordinate old work, and start a fresh notebook session with the published Environment | Backfill operators can use the release without editing evidence or calculating digests |
-
-#### Prepare once on the release owner's machine
+#### Build the wheel
 
 Use the [SDK release procedure](../README.md#github-sdk-releases). For example,
 when preparing a new `1.0.0` release:
@@ -1645,68 +1628,25 @@ bash scripts/bump-sdk-version.sh 1.0.0
 ```
 
 Replace the example version with the intended unused release version. The
-SDK build is independent of the target: do not put workspace, Lakehouse,
-Environment, or job IDs into its embedded release identity. Rerun the script
-with the same version after finalizing source,
-package data, or other build inputs, before committing and building. Do not
-edit the identity inside an installed wheel or publish a locally modified wheel
-under the assumption that it still matches an already reviewed release.
+SDK build is independent of the target. Workspace, Lakehouse, Environment,
+and job IDs belong in configuration, environment variables, or runtime context,
+not the wheel. Do not publish different builds under the same package version.
 
-Keep the exact wheel, locks, bundles, detached manifest, and publication
-readback together as the release handoff. Use their actual hashes, not hashes
-from another build with the same version number. Steps 4-7 below describe
-the review and browser-publication checkpoints; the existing reporting
-publication notebook does not perform SDK release admission.
+#### Install in Fabric
 
-#### Prepare and verify admission artifacts
+1. Upload the wheel to the Fabric Environment's custom libraries and publish
+   the Environment. Uploading the wheel to Lakehouse Files alone does not install it.
+2. Attach the notebook and SJDs to Environments with the same SDK version.
+   Start fresh sessions so they load that version.
+3. Keep the existing target configuration, models, shortcuts, and processing
+   state. No release-evidence upload or digest entry is needed.
 
-4. Use the same approved SDK wheel in every deployment. Its v2
-   `sjd_release_identity.json` contains the package version, build-input digest,
-   and versioned evidence root, **not** workspace, Lakehouse, Environment,
-   job IDs, or deployment intent. Configure those IDs in the deployment
-   configuration and runtime bindings: use the actual IDs in the backfill
-   notebook's `TARGET_BINDING` and the SJD `--manual-artifacts` prefix.
-   The SDK validates the detached deployment evidence against that selected
-   target at runtime; a new target does not require a new wheel.
-5. Use the existing
-   [release-provenance helpers](../src/people_counter/fabric_release_provenance.py)
-   to prepare canonical immutable JSON. The detached manifest must bind
-   the shared SDK release identity, exact wheel, dependency
-   lock, bundle, dependency source hashes, reviewer, review time, and target
-   references. Review data must be real, not placeholders.
-6. Publish the approved wheel/dependencies through the Environment UI.
-   Wait for successful publication and read back its **published target
-   version**, libraries, public-package policy, compute settings, and all
-   six job bindings before preparing the postpublish receipt.
-7. Bind the receipt to the detached-manifest SHA-256 and those actual
-   publication observations. Upload the immutable files through the
-   Lakehouse UI to the **exact paths embedded in that wheel's identity**.
-   Re-read their contents/hashes and validate them with the matching SDK and
-   the actual deployment configuration.
-   Do not disable identity requirements or create a success-shaped receipt
-   from requested settings.
-
-#### Verify the handoff before resuming backfill
-
-In the target Lakehouse's **Files** explorer, open the exact
-`release_evidence_root` embedded in the approved wheel. Confirm it contains
-both `detached-manifest.json` and `postpublish-receipt.json`. A previous
-version's directory or an unrelated `Files/deployment-evidence` record is
-not sufficient. Validate both files with the matching SDK as described above;
-existence alone is not release acceptance.
-
-After publication, start a fresh backfill notebook session attached to the
-matching Environment and intended default Lakehouse. Do not install a newer
-SDK over a running kernel. Confirm the notebook's configured Environment and
-Control SJD match the release, then resume with the retained state directory.
-Previously accepted jobs are not cancelled by a failed notebook attempt.
-For incompatible registered work, drain it or explicitly quarantine/re-register
-it before switching releases; never rewrite its immutable release digest.
-
-If evidence resolution still fails, use the
-[backfill release-evidence checklist](explicit-backfill.md#http-404-for-release-evidence).
-Do not repair an upgrade by copying the old version's evidence into the new
-directory, changing `MODELS_DIR`, deleting state, or bypassing admission.
+Registration, claims, and workers derive a compatibility digest automatically
+from the installed SDK version. This is not a hash of the wheel or proof of an
+Environment publication. Model and source hashes remain independently verified.
+Drain old registered work with the old SDK or explicitly quarantine/re-register
+it before switching; do not rewrite immutable work digests or delete retry state.
+See [SDK upgrades](explicit-backfill.md#sdk-upgrades) for migration details.
 
 #### Optional API-assisted provisioning
 
@@ -1743,14 +1683,12 @@ are rendered for the selected target, and model/report IDs come from Fabric.
 Existing unmanaged items still require explicit ownership approval through
 their configured target IDs.
 
-After publishing and validating the real release evidence, configure the
+After publishing the SDK in the Environment, configure the
 disabled schedules using that same resolved target:
 
 ```bash
 uv run --frozen python scripts/deploy_sjd_operations.py \
   --stage dev --config outputs/reporting.json \
-  --release-manifest-sha256 <reviewed-manifest-sha256> \
-  --release-receipt-sha256 <actual-publication-receipt-sha256> \
   --output outputs/configured-deployment.json
 ```
 
@@ -1760,15 +1698,12 @@ attempts to disable all recurring schedules again and reports any disablement
 it cannot confirm. Accepted jobs are not cancelled. No command here fabricates
 review data, a publication receipt, or executor qualification.
 
-**Migration and admission gate:** older SDK wheels with a v1 embedded identity
-still contain the former fixed-target restriction. Publish a new approved
-release with the portable v2 identity and prepare new evidence binding its
-release digest to this deployment. Do not patch an installed wheel or reuse
-the old receipt. No new target-valid immutable admission manifest/receipt or
-Fabric x86_64 executor qualification is demonstrated by this documentation
-update. Dispatcher/Process must remain unscheduled until those checks pass.
+**Migration:** older SDK wheels still read release-evidence files. Publish
+the updated wheel and restart the attached sessions to remove that dependency.
+Model/source integrity, target bindings, and executor qualification remain
+required; this packaging change does not demonstrate live Fabric qualification.
 
-### Configure recurring roles only after release arguments are valid
+### Configure recurring roles after target and compute checks
 
 8. The script's Development schedule cadences are:
 
@@ -1920,9 +1855,8 @@ Before calling this a working application, independently verify:
   Lakehouse in this workspace.
 - Deployment references and release provenance contain the **new** workspace,
   Lakehouse, Environment, and job IDs, not copied IDs from another environment.
-- The immutable release manifest, postpublish receipt, and published release
-  references are valid. See
-  [canonical job release admission](../fabric/spark-job-definitions/README.md#release-admission).
+- Notebook and job Environments use the same SDK version. See
+  [canonical job SDK compatibility](../fabric/spark-job-definitions/README.md#sdk-compatibility).
 - Both analytics and operational semantic models/reports are bound to the
   new Gold tables; refresh and readback succeed.
 - Required RTI queries/dashboard and Activator rules/actions are configured

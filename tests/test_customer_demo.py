@@ -19,7 +19,6 @@ from people_counter.customer_demo import (
     promote_staged,
     read_demo_delta,
     verify_arrival_runtime,
-    verify_release_alignment,
     raise_processing_failure,
     verify_compute_policy,
     stage_videos,
@@ -302,15 +301,13 @@ def test_fabric_demo_derives_release_metadata_from_its_installed_sdk():
     path = NOTEBOOK.parent / "fabric/18_sjd_getting_started_demo.ipynb"
     notebook = json.loads(path.read_text())
     source = "".join(next(cell["source"] for cell in notebook["cells"] if cell["id"] == "reviewed-inputs"))
-    assert "resolve_published_release(" in source
+    assert "registration_release_digest()" in source
     assignments = {
         node.targets[0].id: node.value
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
     }
-    for field in ("RELEASE_MANIFEST_PATH", "RELEASE_MANIFEST_SHA256",
-                  "RELEASE_RECEIPT_PATH", "RELEASE_RECEIPT_SHA256"):
-        assert not isinstance(assignments[field], ast.Constant)
+    assert not isinstance(assignments["SDK_RELEASE_DIGEST"], ast.Constant)
 
 
 def test_notebook_uses_schema_directory_and_deletion_vector_reader():
@@ -487,38 +484,6 @@ def test_notebook_checks_arrival_before_each_side_effect_and_monitor_poll():
         ("monitor-results", "work_rows = read_delta("),
     ]:
         assert cells[cell_id].index("check_arrival_runtime()") < cells[cell_id].index(operation)
-
-
-def test_release_alignment_detects_pipeline_and_dispatcher_drift():
-    import base64
-
-    def definition(path, content):
-        return SimpleNamespace(status="succeeded", error=None, resource={"definition": {"parts": [{
-            "path": path, "payloadType": "InlineBase64",
-            "payload": base64.b64encode(json.dumps(content).encode()).decode(),
-        }]}})
-
-    pipeline = {"properties": {"activities": [{
-        "name": "ValidateManifest", "typeProperties": {"parameters": {
-            "RELEASE_MANIFEST_SHA256": {"type": "string", "value": "a" * 64},
-        }},
-    }]}}
-    schedule = {"schedules": [{"executionData": {
-        "commandLineArguments": "--release-manifest-sha256 " + "b" * 64,
-    }}]}
-    client = Mock()
-    client.run_operation.side_effect = [
-        definition("pipeline-content.json", pipeline),
-        definition(".schedules", schedule),
-    ]
-    with pytest.raises(RuntimeError, match="release mismatch"):
-        verify_release_alignment(client, "workspace", "intake", "dispatcher")
-    schedule["schedules"][0]["executionData"]["commandLineArguments"] = "--release-manifest-sha256 " + "a" * 64
-    client.run_operation.side_effect = [
-        definition("pipeline-content.json", pipeline),
-        definition(".schedules", schedule),
-    ]
-    assert verify_release_alignment(client, "workspace", "intake", "dispatcher") == "a" * 64
 
 
 def test_preflight_validates_published_not_staged_compute():

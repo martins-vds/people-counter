@@ -220,28 +220,19 @@ def resolved():
 ])
 def test_schedule_arguments_are_executable_role_contracts_not_just_target_prefixes(role, tail):
     value = resolved()
-    if role == "dispatcher":
-        from people_counter.fabric_release_provenance import (
-            detached_manifest_evidence_path, postpublish_receipt_evidence_path,
-        )
-        tail = [*tail,
-            "--release-manifest-path", detached_manifest_evidence_path(),
-            "--release-manifest-sha256", "a" * 64,
-            "--release-receipt-path", postpublish_receipt_evidence_path(),
-            "--release-receipt-sha256", "b" * 64,
-        ]
     assert shlex.split(value.schedule_arguments(role, enabled=True)) == [
         *TEST_TARGET.command_line_arguments(), *tail,
     ]
 
 
 @pytest.mark.parametrize("field", ["manifest_sha256", "receipt_sha256"])
-def test_schedule_cannot_activate_a_partially_constructed_release_pair(field):
+def test_dispatcher_schedule_does_not_depend_on_legacy_release_hashes(field):
     value = resolved()
     value = dataclasses.replace(value, release=dataclasses.replace(value.release, **{field: None}))
-    with pytest.raises(ValueError) as error:
-        value.schedule_arguments("dispatcher", enabled=True)
-    assert str(error.value) == "Dispatcher activation requires both release hashes"
+    arguments = shlex.split(value.schedule_arguments("dispatcher", enabled=True))
+    assert "--max-items" in arguments
+    assert "--release-manifest-sha256" not in arguments
+    assert "--release-receipt-sha256" not in arguments
 
 
 def test_process_is_not_a_scheduled_role_even_with_complete_admission():
@@ -376,9 +367,9 @@ def test_operations_cli_configures_with_real_arguments_and_returns_resolved_stat
     (["--provision-only", "--enable-schedules", "--output", "ignored"],
      "--provision-only cannot enable schedules"),
     (["--release-manifest-sha256", "a" * 64, "--output", "ignored"],
-     "configuration requires both release hashes"),
+     "legacy release hashes must be supplied together"),
     (["--release-receipt-sha256", "b" * 64, "--output", "ignored"],
-     "configuration requires both release hashes"),
+     "legacy release hashes must be supplied together"),
 ])
 def test_operations_cli_usage_errors_are_explicit_and_never_request_credentials(
     monkeypatch, tmp_path, capsys, arguments, expected_message,
@@ -397,9 +388,9 @@ def test_operations_cli_usage_errors_are_explicit_and_never_request_credentials(
 
 
 @pytest.mark.parametrize("field,value,message", [
-    ("release_manifest_sha256", None, "release manifest hash must be a SHA-256 digest"),
+    ("release_manifest_sha256", None, "legacy release hashes must be supplied together"),
     ("release_manifest_sha256", "z" * 64, "release manifest hash must be a SHA-256 digest"),
-    ("release_receipt_sha256", None, "release receipt hash must be a SHA-256 digest"),
+    ("release_receipt_sha256", None, "legacy release hashes must be supplied together"),
     ("semantic_model_id", "", "semantic model ID must be a canonical UUID"),
     ("additional_semantic_model_ids", [""], "additional semantic model ID must be a canonical UUID"),
     ("enable_schedules", 1, "enable_schedules must be a boolean"),

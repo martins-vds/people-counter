@@ -656,11 +656,9 @@ class FabricControlStoreImpl:
     def _release_digest(self, expected: str | None) -> str | None:
         if not getattr(self.config, "stable_production", False):
             return expected
-        from people_counter.fabric_release_provenance import resolve_published_release
+        from people_counter.fabric_release_provenance import installed_release
 
-        published = resolve_published_release(
-            self.envelopes.files.read_text, deployment=self.config,
-        ).manifest_sha256
+        published = installed_release().digest
         if expected is not None and expected != published:
             raise ImmutableConflictError(
                 f"dispatcher release binding {expected} differs from installed release {published}"

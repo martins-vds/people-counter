@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import base64
 import re
-import shlex
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -224,48 +223,6 @@ def verify_arrival_runtime(
         "source_status": source["status"], "stream_status": stream["status"],
         "destination_status": destination["status"], "rule_enabled": True,
     }
-
-
-def _read_definition_part(client: Any, workspace_id: str, item_id: str, path: str) -> Any:
-    readback = client.run_operation(
-        "POST", f"/workspaces/{workspace_id}/items/{item_id}/getDefinition",
-        action="verify_release_alignment",
-    )
-    if readback.status != "succeeded" or readback.resource is None:
-        raise RuntimeError(f"Cannot read release configuration: {readback.error}")
-    parts = readback.resource.get("definition", {}).get("parts", [])
-    matches = [part for part in parts if part.get("path") == path]
-    if len(matches) != 1 or matches[0].get("payloadType") != "InlineBase64":
-        raise RuntimeError(f"Expected exactly one InlineBase64 {path} definition part")
-    try:
-        return json.loads(base64.b64decode(matches[0]["payload"], validate=True))
-    except (ValueError, KeyError) as error:
-        raise RuntimeError(f"Invalid release configuration in {path}") from error
-
-
-def verify_release_alignment(
-    client: Any, workspace_id: str, intake_id: str, dispatcher_id: str,
-) -> str:
-    pipeline = _read_definition_part(client, workspace_id, intake_id, "pipeline-content.json")
-    schedules = _read_definition_part(client, workspace_id, dispatcher_id, ".schedules")
-    activities = [
-        row for row in pipeline["properties"]["activities"]
-        if row.get("name") == "ValidateManifest"
-    ]
-    if len(activities) != 1 or len(schedules.get("schedules", [])) != 1:
-        raise RuntimeError("Release alignment requires one intake validation activity and one Dispatcher schedule")
-    intake = activities[0]["typeProperties"]["parameters"]["RELEASE_MANIFEST_SHA256"]["value"]
-    arguments = shlex.split(schedules["schedules"][0]["executionData"]["commandLineArguments"])
-    flag = "--release-manifest-sha256"
-    if arguments.count(flag) != 1 or arguments.index(flag) + 1 >= len(arguments):
-        raise RuntimeError("Dispatcher schedule must provide one release-manifest digest")
-    dispatcher = arguments[arguments.index(flag) + 1]
-    if not isinstance(intake, str) or re.fullmatch(r"[0-9a-f]{64}", intake) is None or intake != dispatcher:
-        raise RuntimeError(
-            f"Intake/Dispatcher release mismatch: intake={intake}, dispatcher={dispatcher}. "
-            "Deploy both from one verified release before uploading files."
-        )
-    return dispatcher
 
 
 def verify_compute_policy(client: Any, workspace_id: str, environment_id: str) -> None:

@@ -17,6 +17,7 @@ import traceback
 import urllib.error
 import urllib.request
 import uuid
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
@@ -33,6 +34,7 @@ from people_counter.fabric_input_resolver import (
 )
 from people_counter.fabric_source_cache import LocalizedSourceCache
 from people_counter.fabric_sjd import FabricSjdConfig
+from people_counter.fabric_release_provenance import InstalledRelease
 
 
 FabricRuntimeConfig = FabricNamespaceConfig | FabricSjdConfig
@@ -1076,7 +1078,7 @@ def _control_parser() -> argparse.ArgumentParser:
     register.add_argument("--runtime-key", required=True)
     register.add_argument("--duration-seconds", required=True, type=float)
     register.add_argument("--config-sha256", required=True)
-    register.add_argument("--release-digest", required=True)
+    register.add_argument("--release-digest")
     register.add_argument("--max-attempts", type=int, default=3)
     bulk_register = commands.add_parser("bulk-register")
     bulk_register.add_argument("--partition-path", required=True)
@@ -1231,6 +1233,54 @@ def control_main(
         raise
 
 
+def _register_backfill_partition(
+    store: Any,
+    selected: FabricRuntimeConfig,
+    *,
+    partition_path: str,
+    partition_sha256: str,
+    max_items: int,
+) -> dict[str, object]:
+    from people_counter.fabric_control_store import NotebookUtilsOneLakeFiles
+    from people_counter.sjd_control import parse_registration_manifest
+
+    if not 1 <= max_items <= 10_000:
+        raise ValueError("--max-items must be between 1 and 10000")
+    expected_prefix = selected.file_path("intake/backfill") + "/"
+    partition_path = selected.validate_files_path(partition_path)
+    if not partition_path.startswith(expected_prefix):
+        raise ValueError(
+            "--partition-path must be under the stable backfill intake root"
+        )
+    if re.fullmatch(r"[0-9a-f]{64}", partition_sha256) is None:
+        raise ValueError(
+            "--partition-sha256 must be 64 lowercase hexadecimal characters"
+        )
+    content = NotebookUtilsOneLakeFiles().read_text(partition_path)
+    actual_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if actual_sha256 != partition_sha256:
+        raise ValueError(
+            "backfill partition digest mismatch: "
+            f"expected {partition_sha256}, got {actual_sha256}"
+        )
+    requests = parse_registration_manifest(content, source=partition_path)
+    if len(requests) > max_items:
+        raise ValueError(
+            "backfill partition contains "
+            f"{len(requests)} items; maximum is {max_items}"
+        )
+    registered = store.register_many(requests)
+    identities = "\n".join(item.work_id for item in registered)
+    return {
+        "partition_path": partition_path,
+        "partition_sha256": partition_sha256,
+        "item_count": len(registered),
+        "work_ids_sha256": hashlib.sha256(
+            identities.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 def _control_dispatch(
     arguments: argparse.Namespace,
     store: Any,
@@ -1248,6 +1298,8 @@ def _control_dispatch(
         FabricGoldState(store.spark, config=selected)
         result: object = {"bootstrapped": True}
     elif arguments.command == "register":
+        from people_counter.fabric_release_provenance import installed_release
+
         encoded = arguments.payload_json
         if arguments.payload_base64 is not None:
             try:
@@ -1266,55 +1318,20 @@ def _control_dispatch(
                 runtime_key=arguments.runtime_key,
                 duration_seconds=arguments.duration_seconds,
                 config_sha256=arguments.config_sha256,
-                release_digest=arguments.release_digest,
+                release_digest=(
+                    installed_release().digest
+                    if arguments.release_digest is None else arguments.release_digest
+                ),
                 max_attempts=arguments.max_attempts,
             )
         )
     elif arguments.command == "bulk-register":
-        from people_counter.fabric_control_store import (
-            NotebookUtilsOneLakeFiles,
+        result = _register_backfill_partition(
+            store, selected,
+            partition_path=arguments.partition_path,
+            partition_sha256=arguments.partition_sha256,
+            max_items=arguments.max_items,
         )
-        from people_counter.sjd_control import parse_registration_manifest
-
-        if not 1 <= arguments.max_items <= 10_000:
-            raise ValueError("--max-items must be between 1 and 10000")
-        expected_prefix = selected.file_path("intake/backfill") + "/"
-        partition_path = selected.validate_files_path(arguments.partition_path)
-        if not partition_path.startswith(expected_prefix):
-            raise ValueError(
-                "--partition-path must be under the stable backfill intake root"
-            )
-        partition_sha256 = arguments.partition_sha256
-        if re.fullmatch(r"[0-9a-f]{64}", partition_sha256) is None:
-            raise ValueError(
-                "--partition-sha256 must be 64 lowercase hexadecimal characters"
-            )
-        content = NotebookUtilsOneLakeFiles().read_text(partition_path)
-        actual_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        if actual_sha256 != partition_sha256:
-            raise ValueError(
-                "backfill partition digest mismatch: "
-                f"expected {partition_sha256}, got {actual_sha256}"
-            )
-        requests = parse_registration_manifest(
-            content,
-            source=partition_path,
-        )
-        if len(requests) > arguments.max_items:
-            raise ValueError(
-                "backfill partition contains "
-                f"{len(requests)} items; maximum is {arguments.max_items}"
-            )
-        registered = store.register_many(requests)
-        identities = "\n".join(item.work_id for item in registered)
-        result = {
-            "partition_path": partition_path,
-            "partition_sha256": partition_sha256,
-            "item_count": len(registered),
-            "work_ids_sha256": hashlib.sha256(
-                identities.encode("utf-8")
-            ).hexdigest(),
-        }
     elif arguments.command == "claim":
         claimed = store.claim(
             arguments.owner,
@@ -1383,10 +1400,7 @@ def _process_parser() -> argparse.ArgumentParser:
             "concurrency; defaults to the profile's own measured value."
         ),
     )
-    parser.add_argument("--release-manifest-path", required=True)
-    parser.add_argument("--release-manifest-sha256", required=True)
-    parser.add_argument("--release-receipt-path", required=True)
-    parser.add_argument("--release-receipt-sha256", required=True)
+    _legacy_release_arguments(parser)
     parser.add_argument(
         "--inject-failure-after-stage-before-receipt",
         action="store_true",
@@ -1406,10 +1420,7 @@ def _dispatcher_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-items", type=int, default=1)
     parser.add_argument("--mode", choices=("probe", "sdk"), default="sdk")
     parser.add_argument("--peak-rss-mib", type=int)
-    parser.add_argument("--release-manifest-path", required=True)
-    parser.add_argument("--release-manifest-sha256", required=True)
-    parser.add_argument("--release-receipt-path", required=True)
-    parser.add_argument("--release-receipt-sha256", required=True)
+    _legacy_release_arguments(parser)
     return parser
 
 
@@ -1428,17 +1439,8 @@ def dispatcher_main(
     owner = arguments.owner or f"pc-production-dispatcher-{uuid.uuid4().hex}"
     store = FabricControlStore(_spark(), config=selected)
     try:
+        release = _runtime_release(arguments)
         if getattr(selected, "stable_production", False):
-            from people_counter.fabric_control_store import NotebookUtilsOneLakeFiles
-
-            _load_runtime_release_evidence(
-                NotebookUtilsOneLakeFiles(),
-                config=selected,
-                manifest_path=arguments.release_manifest_path,
-                manifest_sha256=arguments.release_manifest_sha256,
-                receipt_path=arguments.release_receipt_path,
-                receipt_sha256=arguments.release_receipt_sha256,
-            )
             _validate_fabric_runtime(store.spark)
         claimed = store.claim(
             owner,
@@ -1449,7 +1451,7 @@ def dispatcher_main(
             safety_factor=arguments.safety_factor,
             margin_seconds=arguments.margin_seconds,
             minimum_items=arguments.minimum_items,
-            expected_release_digest=arguments.release_manifest_sha256,
+            expected_release_digest=release.digest,
         )
         if claimed is None:
             print(
@@ -1470,14 +1472,6 @@ def dispatcher_main(
             claimed.batch_id,
             "--mode",
             arguments.mode,
-            "--release-manifest-path",
-            arguments.release_manifest_path,
-            "--release-manifest-sha256",
-            arguments.release_manifest_sha256,
-            "--release-receipt-path",
-            arguments.release_receipt_path,
-            "--release-receipt-sha256",
-            arguments.release_receipt_sha256,
         ]
         if arguments.peak_rss_mib is not None:
             process_arguments.extend(
@@ -1719,53 +1713,33 @@ def _configure_after_stage_failure(harness: Any, enabled: bool) -> None:
     harness.after_stage_hook = fail_after_stage
 
 
-def _load_runtime_release_evidence(
-    files: Any,
-    *,
-    config: FabricRuntimeConfig,
-    manifest_path: str,
-    manifest_sha256: str,
-    receipt_path: str,
-    receipt_sha256: str,
-) -> Any:
-    """Load detached OneLake objects through independent expected hashes."""
-    from people_counter.fabric_release_provenance import (
-        detached_manifest_evidence_path,
-        load_runtime_release_evidence,
-        postpublish_receipt_evidence_path,
-    )
+def _legacy_release_arguments(parser: argparse.ArgumentParser) -> None:
+    for flag in (
+        "--release-manifest-path", "--release-manifest-sha256",
+        "--release-receipt-path", "--release-receipt-sha256",
+    ):
+        parser.add_argument(flag, default="", help=argparse.SUPPRESS)
 
-    expected_manifest_path = detached_manifest_evidence_path()
-    expected_receipt_path = postpublish_receipt_evidence_path()
-    if manifest_path != expected_manifest_path:
-        raise ValueError(
-            "release manifest path differs from the fixed release identity: "
-            f"{manifest_path!r} != {expected_manifest_path!r}"
+
+def _runtime_release(arguments: argparse.Namespace) -> InstalledRelease:
+    from people_counter.fabric_release_provenance import installed_release
+
+    if any(getattr(arguments, field, "") for field in (
+        "release_manifest_path", "release_manifest_sha256",
+        "release_receipt_path", "release_receipt_sha256",
+    )):
+        warnings.warn(
+            "Release manifest/receipt arguments are obsolete and ignored; "
+            "SDK compatibility comes from the installed package version.",
+            FutureWarning,
+            stacklevel=2,
         )
-    if receipt_path != expected_receipt_path:
-        raise ValueError(
-            "release receipt path differs from the fixed release identity: "
-            f"{receipt_path!r} != {expected_receipt_path!r}"
-        )
-    manifest_text = files.read_text(manifest_path)
-    receipt_text = files.read_text(receipt_path)
-    with tempfile.TemporaryDirectory(prefix="pc-release-evidence-") as root:
-        local_manifest = Path(root) / "manifest.json"
-        local_receipt = Path(root) / "receipt.json"
-        local_manifest.write_text(manifest_text, encoding="utf-8")
-        local_receipt.write_text(receipt_text, encoding="utf-8")
-        return load_runtime_release_evidence(
-            local_manifest,
-            local_receipt,
-            expected_manifest_sha256=manifest_sha256,
-            expected_receipt_sha256=receipt_sha256,
-            deployment=config,
-        )
+    return installed_release()
 
 
 def _process_output(
     result: Any,
-    release_evidence: Any,
+    release_evidence: InstalledRelease,
     *,
     harness_capability: Any,
     resolver_capability: Any,
@@ -1776,13 +1750,9 @@ def _process_output(
     payload["harness_capability"] = harness_capability
     payload["resolver_capability"] = resolver_capability
     payload["consumer_probe_decision"] = consumer_decision
-    payload["release_evidence"] = {
-        "identity_sha256": release_evidence.identity_sha256,
-        "manifest_sha256": release_evidence.manifest_sha256,
-        "receipt_sha256": release_evidence.receipt_sha256,
-        "environment_target_version": (
-            release_evidence.receipt.environment_target_version
-        ),
+    payload["sdk_release"] = {
+        "package_version": release_evidence.package_version,
+        "digest": release_evidence.digest,
     }
     return payload
 
@@ -1805,22 +1775,11 @@ def process_main(
         warm_executor_for_works,
     )
     import functools
-    from people_counter.fabric_control_store import (
-        NotebookUtilsOneLakeFiles,
-    )
-
     spark = _spark()
     config = config or FabricNamespaceConfig.current()
     config.require_write_enabled()
     store = FabricControlStore(spark, config=config)
-    release_evidence = _load_runtime_release_evidence(
-        NotebookUtilsOneLakeFiles(),
-        config=config,
-        manifest_path=arguments.release_manifest_path,
-        manifest_sha256=arguments.release_manifest_sha256,
-        receipt_path=arguments.release_receipt_path,
-        receipt_sha256=arguments.release_receipt_sha256,
-    )
+    release_evidence = _runtime_release(arguments)
     attempts = OneLakeDeltaAttemptAdapter(
         config.file_path("attempts"),
         spark,
@@ -1878,15 +1837,15 @@ def process_main(
         enrichment,
         executor_cores=executor_cores,
         task_cpus=task_cpus,
-        package_version=release_evidence.manifest.package_version,
-        manifest_sha256=release_evidence.manifest_sha256,
+        package_version=release_evidence.package_version,
+        manifest_sha256=release_evidence.digest,
     )
     for values in enrichment.values():
         values["_expected_release_package_version"] = (
-            release_evidence.manifest.package_version
+            release_evidence.package_version
         )
         values["_expected_release_manifest_sha256"] = (
-            release_evidence.manifest_sha256
+            release_evidence.digest
         )
     profile = _fabric_process_profile(
         spark,

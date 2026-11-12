@@ -371,16 +371,6 @@ def test_runtime_binding_does_not_discard_invalid_typed_manifest_contract_fields
     assert str(error.value).startswith("stable production configuration is fixed:")
 
 
-def test_release_verification_error_keeps_the_stage_context_for_an_invalid_schema():
-    selected = manifest()
-    selected = dataclasses.replace(
-        selected, release=dataclasses.replace(selected.release, identity_schema="unknown"),
-    )
-    with pytest.raises(deployment.ManifestValidationError) as error:
-        deployment.verify_release_provenance(selected)
-    assert str(error.value) == "prod release identity schema does not match the manifest"
-
-
 def test_schedule_default_enabled_value_is_false_not_an_implicit_activation():
     value = manifest().to_document()
     del value["roles"]["control"]["schedule"]["enabled"]

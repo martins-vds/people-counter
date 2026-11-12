@@ -230,8 +230,8 @@ def cloud_mocks(setup):
         source_etag='"video-etag"',
     )
     release = SimpleNamespace(
-        manifest_sha256="d" * 64,
-        manifest=SimpleNamespace(environment_id=config.environment_id),
+        digest="d" * 64,
+        package_version="1.2.3",
     )
     return storage, files, release
 
@@ -246,7 +246,7 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage) as storage_client, patch.object(
         operator, "OneLakeFiles", return_value=files
     ) as onelake_client, patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ) as resolver, patch.object(operator, "FabricAutomationClient", return_value=fabric) as client:
         assert operator.main(setup.args + ["--submit"]) == 0
         assert operator.main(setup.args + ["--submit"]) == 0
@@ -269,10 +269,8 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     assert json.loads((setup.root / "state/registration-summary.json").read_text()) == report
     config = operator.load_config(setup.config_path)
     onelake_client.assert_called_with(config)
-    resolver.assert_called_with(
-        files.read_text, deployment=config,
-        expected_sjd_ids={"stable-control": config.control_sjd_id},
-    )
+    resolver.assert_called_with()
+    files.read_text.assert_not_called()
     storage_client.assert_called_with("account", "footage", chunk_size=8 * 1024 * 1024)
     assert client.call_args.args[0] == operator.AzureCliResourceTokenProvider(
         "https://api.fabric.microsoft.com",
@@ -307,13 +305,13 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     )
 
 
-@pytest.mark.parametrize("failure", ["publication", "shortcut", "release"])
+@pytest.mark.parametrize("failure", ["publication", "shortcut", "model"])
 def test_preflight_failure_never_submits_control(setup, failure):
     storage, files, release = cloud_mocks(setup)
     if failure == "shortcut":
         files.read_bytes.return_value = b"{}"
-    if failure == "release":
-        release.manifest.environment_id = "wrong-environment"
+    if failure == "model":
+        files.verify_video.side_effect = ValueError("model hash mismatch")
     publication = patch.object(
         operator, "publish_manifest_package",
         return_value=SimpleNamespace(rejected=1),
@@ -323,9 +321,9 @@ def test_preflight_failure_never_submits_control(setup, failure):
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ), patch.object(operator, "FabricAutomationClient") as fabric, publication, pytest.raises(
-        (ValueError, RuntimeError), match="publication|manifest|Environment"
+        (ValueError, RuntimeError), match="publication|manifest|model"
     ):
         operator.main(setup.args + ["--submit"])
     assert not fabric.return_value.request_response.called
@@ -340,7 +338,7 @@ def test_failed_job_is_not_success_and_retry_does_not_resubmit(setup, status):
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ), patch.object(operator, "FabricAutomationClient", return_value=fabric):
         for _ in range(2):
             with pytest.raises(RuntimeError, match=status):
@@ -678,7 +676,7 @@ def test_onelake_read_errors_identify_resource_and_preserve_cause(operation, fai
         error = error_type("The specified blob does not exist." if failure == "missing" else "Denied")
         error.status_code = 404 if failure == "missing" else 403
         error.response = SimpleNamespace(headers={"x-ms-request-id": "request-123"})
-        guidance = "published SDK release" if failure == "missing" else "permissions"
+        guidance = "Files/models" if failure == "missing" else "permissions"
     path = "Files/models/rtdetr_osnet/model.onnx"
     if operation == "download":
         file.download_file.side_effect = error
@@ -709,9 +707,8 @@ def test_onelake_read_errors_identify_resource_and_preserve_cause(operation, fai
     assert raised.value.__cause__ is error
 
 
-def test_missing_release_evidence_stops_before_publication(setup):
+def test_missing_model_stops_before_publication(setup):
     from azure.core.exceptions import ResourceNotFoundError
-    from people_counter.fabric_release_provenance import detached_manifest_evidence_path
 
     files = operator.OneLakeFiles.__new__(operator.OneLakeFiles)
     files._workspace = setup.config["workspace_id"]
@@ -723,7 +720,7 @@ def test_missing_release_evidence_stops_before_publication(setup):
     with patch.object(operator, "OneLakeFiles", return_value=files), patch.object(
         operator, "AzureDataLakeStorage",
     ) as storage, patch.object(operator, "FabricAutomationClient") as fabric, pytest.raises(
-        RuntimeError, match=detached_manifest_evidence_path(),
+        RuntimeError, match="Files/models/",
     ):
         operator.main(setup.args + ["--submit"])
     storage.assert_not_called()
@@ -801,7 +798,7 @@ def test_partition_bounds_are_exact(setup):
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ), patch.object(
         operator, "registration_records", return_value=records
     ), patch.object(
@@ -857,10 +854,10 @@ def test_state_directory_cannot_change_release_or_target(setup):
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ), patch.object(operator, "FabricAutomationClient", return_value=fabric):
         assert operator.main(setup.args + ["--submit"]) == 0
-        release.manifest_sha256 = "e" * 64
+        release.digest = "e" * 64
         with pytest.raises(ValueError, match="different package"):
             operator.main(setup.args + ["--submit"])
     assert fabric.request_response.call_count == 1
@@ -896,7 +893,7 @@ def test_backfill_namespace_matches_the_deployed_control_job_and_retry_state(set
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ), patch.object(operator, "FabricAutomationClient", return_value=fabric):
         assert operator.main(setup.args + ["--submit"]) == 0
         path = files.write_partition.call_args.args[0]
@@ -1174,7 +1171,7 @@ def test_fabric_submit_uses_notebook_credentials_and_local_sqlite(setup, noteboo
     ) as adls, patch.object(
         operator, "OneLakeFiles", return_value=files,
     ) as onelake, patch.object(
-        operator, "resolve_published_release", return_value=release,
+        operator, "installed_release", return_value=release,
     ), patch.object(
         operator, "FabricAutomationClient", return_value=fabric,
     ) as client, patch.object(
@@ -1342,7 +1339,7 @@ def test_publication_and_registration_print_progress_to_stderr(setup, capsys):
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ), patch.object(operator, "FabricAutomationClient", return_value=fabric):
         assert operator.main(setup.args + ["--submit"]) == 0
     output = capsys.readouterr()
@@ -1497,7 +1494,7 @@ def test_submit_wait_integrates_publication_registration_processing_and_resume(s
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ), patch.object(
         operator, "FabricAutomationClient", return_value=fabric
     ), patch.object(
@@ -1605,7 +1602,7 @@ def test_named_target_submit_uses_derived_config_and_runtime_identities(setup, c
     with patch.object(operator, "AzureDataLakeStorage", return_value=storage), patch.object(
         operator, "OneLakeFiles", return_value=files
     ), patch.object(
-        operator, "resolve_published_release", return_value=release
+        operator, "installed_release", return_value=release
     ), patch.object(
         operator, "FabricAutomationClient", return_value=fabric
     ):

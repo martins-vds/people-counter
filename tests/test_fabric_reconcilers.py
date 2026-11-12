@@ -19,10 +19,13 @@ _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _BASE = "/workspaces/ws/items/item-1/jobs/sparkjob/schedules"
 
 
-def test_schedule_reconciliation_cannot_enable_jobs_without_admission_inputs() -> None:
-    manifest = _resolved_manifest()
+def test_schedule_reconciliation_still_requires_reporting_bindings() -> None:
+    document = _resolved_manifest().to_document()
+    for key in ("analytics_reporting", "operational_reporting"):
+        document[key]["semantic_model"]["target_item_id"] = None
+    manifest = parse_deployment_manifest(document, DeploymentEnvironment(document["stage"]))
     client = _FakeClient()
-    with pytest.raises(ValueError, match="release"):
+    with pytest.raises(ValueError, match="semantic model"):
         reconcilers._reconcile_all_schedules(client, manifest, enabled=True, now=_NOW)
     assert client.calls == []
 

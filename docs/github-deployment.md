@@ -776,7 +776,7 @@ gh workflow run promote.yml \
     follow-up in the release record. The deployment is complete after this
     step. Missing configuration or source bundles block deployment.
 
-### Portable target and admission inputs
+### Portable target configuration
 
 Bundled deployment manifests have no preassigned resource IDs, including
 Production. Terraform outputs supply the workspace, Lakehouse, Environment,
@@ -785,17 +785,13 @@ conflicts with those outputs is an error, not a value to silently retain.
 Postconfiguration uses the resolved target and Files root for bootstrap and
 every scheduled role.
 
-Before the final enablement gate, set the target GitHub Environment variables
-`FABRIC_RELEASE_MANIFEST_SHA256` and `FABRIC_RELEASE_RECEIPT_SHA256` to the real,
-reviewed detached admission evidence for that SDK and target. The workflow
-passes them as `PEOPLE_COUNTER_RELEASE_MANIFEST_SHA256` and
-`PEOPLE_COUNTER_RELEASE_RECEIPT_SHA256`; CLI callers can instead use
-`--release-manifest-sha256` and `--release-receipt-sha256`, or a resolved
-manifest's `release.manifest_sha256` and `release.receipt_sha256`.
-These hashes are deployment inputs, not SDK build inputs. Neither hash is
-fabricated by the version bump or postconfiguration scripts. Dispatcher and
-Refresh cannot be enabled with missing release or reporting bindings.
-Actual evidence publication and executor qualification remain release gates.
+Publish the SDK wheel in the Fabric Environment and use the same SDK version
+for notebooks and jobs. Runtime compatibility comes from standard package
+metadata; no embedded identity, detached manifest, postpublish receipt, or
+OneLake release directory is required. Do not set
+`FABRIC_RELEASE_MANIFEST_SHA256` or `FABRIC_RELEASE_RECEIPT_SHA256` for new
+deployments. Resolved reporting IDs, target checks, model/source integrity,
+and compute qualification remain required.
 
 Cutover code and the Terraform role were removed. Review the infrastructure
 plan for removal of a previously deployed Cutover SJD. This removal does not

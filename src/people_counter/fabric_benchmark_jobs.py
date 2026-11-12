@@ -828,7 +828,7 @@ def _process_dispatch(
     """Pure extraction of ``process_main``'s body for a thin, covered wrapper."""
 
     from people_counter.fabric_sjd_runtime import (
-        _load_runtime_release_evidence,
+        _runtime_release,
         _bind_consumer_probe_to_executor_inventory,
         _localize_process_inputs,
         _probe_and_persist_consumer_decision,
@@ -837,9 +837,6 @@ def _process_dispatch(
     )
     from people_counter.sjd_control import FabricControlStore
     from people_counter.sjd_process import OneLakeDeltaAttemptAdapter, run_process_batch
-    from people_counter.fabric_control_store import (
-        NotebookUtilsOneLakeFiles,
-    )
 
     batch_id = arguments.batch_id
     _write_process_stage_marker(config, batch_id, 0, "bootstrap")
@@ -871,14 +868,7 @@ def _process_dispatch(
                 f"work payload differs from CPU profile: "
                 f"observed={observed!r}, expected={expected!r}"
             )
-    release_evidence = _load_runtime_release_evidence(
-        NotebookUtilsOneLakeFiles(),
-        config=config,
-        manifest_path=getattr(arguments, "release_manifest_path", ""),
-        manifest_sha256=getattr(arguments, "release_manifest_sha256", ""),
-        receipt_path=getattr(arguments, "release_receipt_path", ""),
-        receipt_sha256=getattr(arguments, "release_receipt_sha256", ""),
-    )
+    release_evidence = _runtime_release(arguments)
     consumer_result, consumer_decision = _probe_and_persist_consumer_decision(
         spark,
         config,
@@ -908,15 +898,15 @@ def _process_dispatch(
         enrichment,
         executor_cores=executor_cores,
         task_cpus=task_cpus,
-        package_version=release_evidence.manifest.package_version,
-        manifest_sha256=release_evidence.manifest_sha256,
+        package_version=release_evidence.package_version,
+        manifest_sha256=release_evidence.digest,
     )
     for values in enrichment.values():
         values["_expected_release_package_version"] = (
-            release_evidence.manifest.package_version
+            release_evidence.package_version
         )
         values["_expected_release_manifest_sha256"] = (
-            release_evidence.manifest_sha256
+            release_evidence.digest
         )
     profile = _benchmark_execution_profile(
         spark,
@@ -951,13 +941,9 @@ def _process_dispatch(
     payload["harness_capability"] = harness_capability
     payload["resolver_capability"] = resolver_capability
     payload["consumer_probe_decision"] = consumer_decision
-    payload["release_evidence"] = {
-        "identity_sha256": release_evidence.identity_sha256,
-        "manifest_sha256": release_evidence.manifest_sha256,
-        "receipt_sha256": release_evidence.receipt_sha256,
-        "environment_target_version": (
-            release_evidence.receipt.environment_target_version
-        ),
+    payload["sdk_release"] = {
+        "package_version": release_evidence.package_version,
+        "digest": release_evidence.digest,
     }
     payload["cpu_profile"] = {
         **asdict(cpu_profile),

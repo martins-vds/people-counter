@@ -2417,16 +2417,16 @@ def _load_process_context(
         )
 
         validate_installed_package_version(
-            expected_version=release_evidence.manifest.package_version
+            expected_version=release_evidence.package_version
         )
         mismatched = sorted(
             item.work_id
             for item in envelope.items
-            if item.release_digest != release_evidence.manifest_sha256
+            if item.release_digest != release_evidence.digest
         )
         if mismatched:
             raise ProcessValidationError(
-                "claim release digest differs from detached manifest for "
+                "claim release digest differs from installed SDK for "
                 f"{mismatched!r}"
             )
     return envelope, ProcessControl(store).live_batch(envelope)

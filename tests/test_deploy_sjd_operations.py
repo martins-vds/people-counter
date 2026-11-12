@@ -153,8 +153,6 @@ def test_deploy_operations_reconciles_all_stable_jobs_and_schedules() -> None:
     result = deploy_operations(
         api,
         manifest=portable_manifest(),
-        release_manifest_sha256="a" * 64,
-        release_receipt_sha256="b" * 64,
         semantic_model_id=str(UUID(int=80)),
         additional_semantic_model_ids=(str(UUID(int=81)),),
         enable_schedules=False,
@@ -179,7 +177,8 @@ def test_deploy_operations_reconciles_all_stable_jobs_and_schedules() -> None:
         "commandLineArguments"
     ]
     assert "--maximum-active-batches 1" in dispatcher
-    assert "--release-manifest-sha256 " + "a" * 64 in dispatcher
+    assert "--release-manifest" not in dispatcher
+    assert "--release-receipt" not in dispatcher
     refresh = api.schedules[-1][1]["executionData"][
         "commandLineArguments"
     ]
@@ -190,7 +189,7 @@ def test_deploy_operations_reconciles_all_stable_jobs_and_schedules() -> None:
     )
     assert result["enabled"] is False
     assert api.compute_verified is True
-    assert api.intake_bindings == [(str(UUID(int=82)), "a" * 64)]
+    assert api.intake_bindings == []
     assert api.notebook_bindings == [str(UUID(int=83))]
 
 
@@ -281,11 +280,7 @@ def test_registration_notebook_uses_sdk_release_without_literal_versions(monkeyp
     )
     namespace = {}
     exec(compile(observed, "<registration-metadata>", "exec"), namespace)
-    resolver.assert_called_once_with(
-        files.read_text,
-        deployment=ManualFabricSjdConfig.from_runtime_context(CONTEXT),
-        expected_digest="",
-    )
+    resolver.assert_called_once_with()
     assert namespace["result"] == {"release_digest": "b" * 64}
 
 

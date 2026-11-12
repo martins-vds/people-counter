@@ -209,21 +209,10 @@ class DeploymentManifest:
         if role in simple:
             return shlex.join([*arguments, *simple[role]])
         if role == "dispatcher":
-            if self.release.manifest_sha256 is None or self.release.receipt_sha256 is None:
-                if enabled:
-                    raise ManifestValidationError("Dispatcher activation requires both release hashes")
-                return shlex.join(arguments)
-            from people_counter.fabric_release_provenance import (
-                detached_manifest_evidence_path, postpublish_receipt_evidence_path,
-            )
             arguments.extend([
                 "--max-items", "64", "--maximum-active-batches", "1",
                 "--lease-seconds", "14400", "--minimum-speed-x", "1",
                 "--safety-factor", "1.25", "--margin-seconds", "60",
-                "--release-manifest-path", detached_manifest_evidence_path(),
-                "--release-manifest-sha256", self.release.manifest_sha256,
-                "--release-receipt-path", postpublish_receipt_evidence_path(),
-                "--release-receipt-sha256", self.release.receipt_sha256,
             ])
         elif role == "refresh":
             model_ids = list(semantic_model_ids) if semantic_model_ids is not None else [
@@ -459,30 +448,6 @@ def _parse_reporting(value: object, label: str) -> ReportingBundle:
     )
 
 
-def _verify_release_identity(
-    stage: DeploymentEnvironment,
-    release: ReleaseProvenanceRef,
-) -> None:
-    from people_counter import fabric_release_provenance as provenance
-
-    identity = provenance.RELEASE_IDENTITY
-    if identity.schema != release.identity_schema:
-        raise ManifestValidationError(
-            f"{stage.value} release identity schema does not match the manifest"
-        )
-
-
-def verify_release_provenance(manifest: DeploymentManifest) -> str | None:
-    if not manifest.release.require_identity:
-        return None
-    _verify_release_identity(
-        manifest.stage, manifest.release,
-    )
-    from people_counter import fabric_release_provenance as provenance
-
-    return provenance.RELEASE_IDENTITY_SHA256
-
-
 def parse_deployment_manifest(
     document: Mapping[str, Any],
     stage: DeploymentEnvironment,
@@ -556,10 +521,6 @@ def parse_deployment_manifest(
             raise ManifestValidationError(f"release.{label} must be a SHA-256 digest")
     if (release.manifest_sha256 is None) != (release.receipt_sha256 is None):
         raise ManifestValidationError("release manifest and receipt hashes must be supplied together")
-    if release.require_identity:
-        _verify_release_identity(
-            stage, release,
-        )
 
     rti_document = _mapping(
         document.get("real_time_intelligence"), "real_time_intelligence"
