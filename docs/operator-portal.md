@@ -552,6 +552,13 @@ uv run --no-sync pytest tests/ui --portal-e2e --browser chromium \
 ```
 
 Ordinary pytest runs skip browser tests unless `--portal-e2e` is specified.
+Python CRAP reports calculate function coverage over the complete source-line
+span, including non-executable continuation and control lines. Read those values
+alongside coverage.py's executable-line and branch coverage. Its JSON report
+contains per-function coverage and missing branches. Reduce complex validation
+stages and test missing decision paths; do not compress formatting or exclude
+lines merely to raise the CRAP coverage percentage.
+
 CI's credential-free validation builds and health-checks the Compose image,
 runs Playwright, and retains failed-test traces/screenshots and Compose logs.
 Tests cover desktop/mobile line drawing, different-resolution video exceptions,

@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.sha }}
+          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -67,6 +67,10 @@ jobs:
             commit=$(git rev-parse --verify "${MERGE_COMMIT}^{commit}")
             branch="${RELEASE_BRANCH}"
             RELEASE_TAG="${branch#releases/}"
+          fi
+          if ! git merge-base --is-ancestor "${commit}" refs/remotes/origin/main; then
+            echo "::error::Release source ${commit} is not part of main"
+            exit 1
           fi
           {
             echo "tag=${RELEASE_TAG}"

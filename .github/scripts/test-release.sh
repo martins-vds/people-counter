@@ -26,6 +26,42 @@ expect_failure() {
   grep -F "${message}" "${temp}/error"
 }
 
+# Exercise the workflow's trust check before any selected release code runs.
+awk '
+  /      - name: Resolve immutable release source/ { source = 1; next }
+  source && /        run: \|/ { script = 1; next }
+  script && /^      - / { exit }
+  script { sub(/^          /, ""); print }
+' "${scripts}/../workflows/release.yml" > "${temp}/resolve-release-source.sh"
+git update-ref refs/remotes/origin/main "${commit}"
+unmerged="$(printf 'Unmerged release\n' | git commit-tree "HEAD^{tree}" -p HEAD)"
+git tag v9.0.0 "${unmerged}"
+expect_failure "is not part of main" \
+  env EVENT_NAME=workflow_dispatch RELEASE_TAG=v9.0.0 \
+  bash -e -o pipefail "${temp}/resolve-release-source.sh"
+test ! -s "${GITHUB_OUTPUT}"
+git tag v1.2.3 "${commit}"
+env EVENT_NAME=workflow_dispatch RELEASE_TAG=v1.2.3 \
+  bash -e -o pipefail "${temp}/resolve-release-source.sh"
+grep -Fx "commit=${commit}" "${GITHUB_OUTPUT}"
+grep -Fx "tag=v1.2.3" "${GITHUB_OUTPUT}"
+: > "${GITHUB_OUTPUT}"
+git update-ref refs/remotes/origin/main "${unmerged}"
+env EVENT_NAME=workflow_dispatch RELEASE_TAG=v1.2.3 \
+  bash -e -o pipefail "${temp}/resolve-release-source.sh"
+grep -Fx "commit=${commit}" "${GITHUB_OUTPUT}"
+: > "${GITHUB_OUTPUT}"
+env EVENT_NAME=pull_request MERGE_COMMIT="${unmerged}" RELEASE_BRANCH=releases/v9.0.0 \
+  bash -e -o pipefail "${temp}/resolve-release-source.sh"
+grep -Fx "commit=${unmerged}" "${GITHUB_OUTPUT}"
+git update-ref -d refs/remotes/origin/main
+: > "${GITHUB_OUTPUT}"
+expect_failure "is not part of main" \
+  env EVENT_NAME=workflow_dispatch RELEASE_TAG=v1.2.3 \
+  bash -e -o pipefail "${temp}/resolve-release-source.sh"
+test ! -s "${GITHUB_OUTPUT}"
+git tag -d v1.2.3 v9.0.0
+
 mkdir -p scripts .github/scripts original-release
 cp "${scripts}/../../scripts/bump-sdk-version.sh" scripts/
 cp "${scripts}/validate-release.sh" .github/scripts/

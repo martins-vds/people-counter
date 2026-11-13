@@ -111,6 +111,75 @@ def test_readiness_uses_manifest_rules_and_reports_timestamp_and_dimensions(serv
     assert service.footage_readiness(form["video"])["issues"][0]["code"] == "CAPTURE_TIME_MISSING"
 
 
+def test_draft_line_without_readable_media_reports_both_failures_without_writing(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    before = {kind: service.store.entries(kind) for kind in ("camera", "footage", "exception")}
+    with patch.object(service, "media_metadata", side_effect=ValueError("Frame unavailable")):
+        result = service.footage_readiness(form["video"], draft={"line_override": "yes"})
+    assert result["metadata"] is None and not result["media_ok"]
+    assert [issue["code"] for issue in result["issues"]] == ["MEDIA_UNREADABLE", "VIDEO_LINE_INVALID"]
+    assert result["issues"][0]["action"] == "Repair or replace this video, then recheck."
+    assert {kind: service.store.entries(kind) for kind in before} == before
+
+
+def test_catalog_readiness_io_failure_is_not_reported_as_ready(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    with patch("pathlib.Path.write_text", side_effect=PermissionError("Catalog directory unavailable")):
+        result = service.footage_readiness(form["video"])
+    assert result["media_ok"]
+    assert result["issues"] == [{
+        "code": "CAMERA_METADATA_INVALID", "scope": "package",
+        "message": "Catalog directory unavailable",
+        "action": "Review the camera calibration and recording rules.",
+    }]
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_readiness_outside_calibration_folder_preserves_configuration_fallback(service, monkeypatch, multiple):
+    form = save_camera(service, monkeypatch)
+    first = service.store.entries("camera")[0]
+    if multiple:
+        service.update_camera_metadata(form["camera_id"], first["id"], {
+            **first["catalog"], "effective_to_utc": "2026-01-01T00:00:00Z",
+        })
+        (service.source.root / "side").mkdir()
+        (service.source.root / "side/reference.mp4").write_bytes(b"video")
+        service.save_calibration({
+            **form, "folder": "side", "video": "side/reference.mp4",
+            "effective_from_utc": "2026-01-01T00:00:00Z",
+        })
+    (service.source.root / "archive").mkdir()
+    video = "archive/20260102T120000Z.mp4"
+    (service.source.root / video).write_bytes(b"video")
+    service.assign_footage(form["camera_id"], [video])
+    result = service.footage_readiness(video)
+    assert result["issues"] == []
+    assert result["captured_at_utc"] == "2026-01-02T12:00:00Z"
+    assert result["config_id"] == ("" if multiple else first["id"])
+    assert result["camera_values"] == ({} if multiple else first["catalog"])
+
+
+@pytest.mark.parametrize("folder", ["separate", "lobby/nested", "lobby/"])
+def test_catalog_prefix_conflicts_keep_only_unambiguous_defaults_and_exact_ownership(service, monkeypatch, folder):
+    form = save_camera(service, monkeypatch)
+    other = service.store.add_camera("Other", form["location_id"])
+    directory = service.source.root / folder
+    directory.mkdir(parents=True, exist_ok=True)
+    video = directory / "20260102T120000Z.mp4"
+    video.write_bytes(b"video")
+    relative = video.relative_to(service.source.root).as_posix()
+    service.assign_footage(other, [relative])
+    service.save_calibration({**form, "camera_id": other, "folder": folder, "video": relative})
+    rows = service.camera_catalog()
+    defaults = [row for row in rows if not row.get("video_relative_path")]
+    assert len(defaults) == (2 if folder == "separate" else 0)
+    exact = {row["video_relative_path"]: row["camera_id"] for row in rows if row.get("video_relative_path")}
+    assert exact == {"videos/" + form["video"]: form["camera_id"], "videos/" + relative: other}
+    path = service.state / "catalog-check.csv"
+    path.write_text(client_get_csv(service))
+    assert len(load_camera_catalog(path)) == len(rows)
+
+
 @pytest.mark.parametrize("line_source", ["camera", "video"])
 def test_dimension_mismatch_explains_reference_and_links_to_video_confirmation(service, monkeypatch, line_source):
     form = save_camera(service, monkeypatch)

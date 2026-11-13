@@ -25,7 +25,8 @@ it safely.
 - actionlint, ShellCheck, immutable action-pin checks, and a zizmor audit of
   every workflow, including deployment and drift workflows.
 - shell regression tests for SDK version preparation and rollback, release
-  version validation, tag conflicts, draft recovery, and idempotent publication.
+  source ancestry, version validation, tag conflicts, draft recovery, and
+  idempotent publication.
 
 The separate [CodeQL Advanced workflow](../.github/workflows/codeql.yml) analyzes
 GitHub Actions, portal JavaScript, and Python on pushes and pull requests to
@@ -68,6 +69,12 @@ skip this check. See the SDK release instructions for refreshing these files.
 Require this check in the `main` ruleset. On merge, the release workflow
 revalidates all release files before creating the tag, and publishes both SDK bundles
 and the model archive. See [SDK releases](../README.md#github-sdk-releases).
+
+The release workflow first checks out `main` with full history. Before checking
+out or executing the selected release revision, it requires that revision to be
+an ancestor of `origin/main`. Manual dispatch accepts historical release tags
+from `main`, but rejects tags pointing to unmerged commits. Release jobs keep
+dependency caching disabled.
 
 Each job uploads machine-readable or text evidence for 14 days. Mutmut requires
 a green changed-test baseline and complete results for every test-associated

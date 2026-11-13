@@ -3,6 +3,9 @@
 A CPU/GPU distinct-person counter with a stable Microsoft Fabric Spark Job
 Definition (SJD) pipeline for reliable, observable video processing.
 
+See the [security policy](SECURITY.md) for supported versions, private
+vulnerability reporting, and deployment boundaries.
+
 ## Stable Fabric SJD pipeline
 
 The Fabric solution starts with six Spark Job Definitions:

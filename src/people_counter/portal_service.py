@@ -30,7 +30,8 @@ from people_counter import backfill_operator as backfill
 from people_counter.adls import AzureDataLakeStorage
 from people_counter.fabric_automation import redact_evidence
 from people_counter.manifest import (
-    CATALOG_COLUMNS, CONTENT_TYPES, ManifestPublisherError, VideoMetadata, VideoValidationError, inspect_video,
+    CATALOG_COLUMNS, CONTENT_TYPES, CameraCatalogEntry, InventoryEntry, ManifestPublisherError,
+    VideoMetadata, VideoValidationError, inspect_video,
     load_camera_catalog, load_video_inventory, parse_utc_timestamp, probe_video, resolve_video_metadata,
 )
 from people_counter.manifest_publisher import (
@@ -61,6 +62,19 @@ def report_type(name: str) -> tuple[str, str, str]:
     raise ValueError("Unknown report")
 
 
+def _draft_line(draft: Mapping[str, str], metadata: VideoMetadata | None) -> dict[str, str]:
+    if metadata is None:
+        raise VideoValidationError("Repair the media before checking its line.", reason_code="VIDEO_LINE_INVALID")
+    try:
+        line = {name: str(int(draft.get(name, ""))) for name in LINE_FIELDS}
+    except ValueError as error:
+        raise VideoValidationError(
+            "Enter all four video-line coordinates as whole numbers.",
+            reason_code="VIDEO_LINE_INVALID", suggested_action="Complete the manual line coordinates.",
+        ) from error
+    return {"frame_width": str(metadata.width), "frame_height": str(metadata.height), **line}
+
+
 def _draft_exception(
     saved: Mapping[str, Any], draft: Mapping[str, str],
     metadata: VideoMetadata | None, camera_changed: bool,
@@ -80,17 +94,52 @@ def _draft_exception(
     if "captured_at_utc" in draft:
         row["captured_at_utc"] = draft["captured_at_utc"]
     if draft.get("line_override") == "yes":
-        if metadata is None:
-            raise VideoValidationError("Repair the media before checking its line.", reason_code="VIDEO_LINE_INVALID")
-        try:
-            line = {name: str(int(draft.get(name, ""))) for name in LINE_FIELDS}
-        except ValueError as error:
-            raise VideoValidationError(
-                "Enter all four video-line coordinates as whole numbers.",
-                reason_code="VIDEO_LINE_INVALID", suggested_action="Complete the manual line coordinates.",
-            ) from error
-        row.update(frame_width=str(metadata.width), frame_height=str(metadata.height), **line)
+        row.update(_draft_line(draft, metadata))
     return row
+
+
+def _configuration_covers_video(config: Mapping[str, Any], video: str) -> bool:
+    folder = config["folder"]
+    return not folder or video.startswith(folder.rstrip("/") + "/")
+
+
+def _camera_configurations(
+    cameras: list[dict[str, Any]], camera_id: str, video: str | None = None,
+) -> list[dict[str, Any]]:
+    configs = [item for item in cameras if item["catalog"]["camera_id"] == camera_id]
+    if video is None:
+        return configs
+    matching = [item for item in configs if _configuration_covers_video(item, video)]
+    return matching or configs
+
+
+def _prefix_conflicts(row: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    return row["camera_id"] != other["camera_id"] and (
+        other["source_path_prefix"].startswith(row["source_path_prefix"])
+        or row["source_path_prefix"].startswith(other["source_path_prefix"])
+    )
+
+
+def _replace_inventory_exception(
+    rows: list[dict[str, Any]], relative: str, exception: dict[str, Any],
+) -> list[dict[str, Any]]:
+    remaining = [row for row in rows if row["id"] != relative]
+    if exception.get("captured_at_utc") or exception.get("frame_width"):
+        remaining.append(exception)
+    return remaining
+
+
+def _readiness_issue(error: Exception, scope: str) -> dict[str, str]:
+    code, action = {
+        "assignment": ("MEDIA_UNREADABLE", "Repair or replace this video, then recheck."),
+        "package": ("CAMERA_METADATA_INVALID", "Review the camera calibration and recording rules."),
+    }[scope]
+    return {
+        "code": getattr(error, "reason_code", code), "scope": scope, "message": str(error),
+        "action": getattr(error, "suggested_action", action),
+    }
+
+
 PORTAL_CATALOG_FIELDS = (*sorted(CATALOG_COLUMNS), "video_relative_path")
 METADATA_FIELDS = (
     "camera_timezone", "capture_time_source", "capture_time_regex", "capture_time_format",
@@ -573,15 +622,7 @@ class PortalService:
             "camera_id": assignments.get(video, ""),
             "exception": next((row for row in inventory_rows if row["id"] == relative), {"video_relative_path": relative}),
         }
-        try:
-            result["metadata"] = self.media_metadata(video)
-            result["media_ok"] = True
-        except (ManifestPublisherError, ValueError, OSError) as error:
-            logging.getLogger(__name__).warning("Media readiness failed for %s: %s", video, error)
-            result["issues"].append({
-                "code": getattr(error, "reason_code", "MEDIA_UNREADABLE"), "scope": "assignment",
-                "message": str(error), "action": getattr(error, "suggested_action", "Repair or replace this video, then recheck."),
-            })
+        self._check_readiness_media(video, result)
         if not result["camera_id"]:
             result["issues"].append({
                 "code": "CAMERA_UNASSIGNED", "scope": "package",
@@ -589,47 +630,66 @@ class PortalService:
             })
             return result
         try:
-            self.registered_camera(result["camera_id"])
-            configs = [row for row in self.store.entries("camera") if row["catalog"]["camera_id"] == result["camera_id"]]
-            if not configs:
-                raise VideoValidationError(
-                    "Camera is not calibrated. Assign valid reference footage, then choose Calibrate camera.",
-                    reason_code="CAMERA_NOT_CALIBRATED",
-                )
-            if len(configs) == 1:
-                result.update(camera_values=configs[0]["catalog"], config_id=configs[0]["id"])
-            if draft is not None:
-                result["exception"] = _draft_exception(
-                    result["exception"], draft, result["metadata"], result["camera_id"] != saved_camera,
-                )
-                inventory_rows = [row for row in inventory_rows if row["id"] != relative]
-                if result["exception"].get("captured_at_utc") or result["exception"].get("frame_width"):
-                    inventory_rows.append(result["exception"])
-            with TemporaryDirectory(dir=self.state) as directory:
-                catalog = Path(directory) / "camera.csv"
-                inventory = Path(directory) / "inventory.csv"
-                catalog.write_text(csv_text(PORTAL_CATALOG_FIELDS, self.camera_catalog(assignments=assignments)), encoding="utf-8")
-                inventory.write_text(csv_text(EXCEPTION_FIELDS, inventory_rows), encoding="utf-8")
-                entries = load_camera_catalog(catalog)
-                exceptions = load_video_inventory(inventory)
-            if result["media_ok"]:
-                entry, captured_at, source = resolve_video_metadata(relative, entries, exceptions, result["metadata"])
-                result.update(captured_at_utc=captured_at.isoformat().replace("+00:00", "Z"), capture_time_source=source)
-                applicable = [
-                    row for row in configs
-                    if parse_utc_timestamp(row["catalog"]["effective_from_utc"], "effective from") == entry.effective_from_utc
-                    and (not row["folder"] or video.startswith(row["folder"].rstrip("/") + "/"))
-                ]
-                if len(applicable) == 1:
-                    result.update(camera_values=applicable[0]["catalog"], config_id=applicable[0]["id"])
+            self._check_readiness_camera(
+                video, relative, assignments, inventory_rows, result, draft, result["camera_id"] != saved_camera,
+            )
         except (ManifestPublisherError, ValueError, OSError) as error:
             logging.getLogger(__name__).warning("Package readiness failed for %s: %s", video, error)
-            result["issues"].append({
-                "code": getattr(error, "reason_code", "CAMERA_METADATA_INVALID"),
-                "scope": "package", "message": str(error),
-                "action": getattr(error, "suggested_action", "Review the camera calibration and recording rules."),
-            })
+            result["issues"].append(_readiness_issue(error, "package"))
         return result
+
+    def _check_readiness_media(self, video: str, result: dict[str, Any]) -> None:
+        try:
+            result["metadata"] = self.media_metadata(video)
+            result["media_ok"] = True
+        except (ManifestPublisherError, ValueError, OSError) as error:
+            logging.getLogger(__name__).warning("Media readiness failed for %s: %s", video, error)
+            result["issues"].append(_readiness_issue(error, "assignment"))
+
+    def _readiness_catalogs(
+        self, assignments: Mapping[str, str], inventory_rows: list[dict[str, Any]],
+    ) -> tuple[list[CameraCatalogEntry], dict[str, InventoryEntry]]:
+        with TemporaryDirectory(dir=self.state) as directory:
+            catalog = Path(directory) / "camera.csv"
+            inventory = Path(directory) / "inventory.csv"
+            catalog.write_text(csv_text(PORTAL_CATALOG_FIELDS, self.camera_catalog(assignments=assignments)), encoding="utf-8")
+            inventory.write_text(csv_text(EXCEPTION_FIELDS, inventory_rows), encoding="utf-8")
+            return load_camera_catalog(catalog), load_video_inventory(inventory)
+
+    def _check_readiness_camera(
+        self, video: str, relative: str, assignments: Mapping[str, str],
+        inventory_rows: list[dict[str, Any]], result: dict[str, Any],
+        draft: Mapping[str, str] | None, camera_changed: bool,
+    ) -> None:
+        self.registered_camera(result["camera_id"])
+        configs = _camera_configurations(self.store.entries("camera"), result["camera_id"])
+        if not configs:
+            raise VideoValidationError(
+                "Camera is not calibrated. Assign valid reference footage, then choose Calibrate camera.",
+                reason_code="CAMERA_NOT_CALIBRATED",
+            )
+        if len(configs) == 1:
+            result.update(camera_values=configs[0]["catalog"], config_id=configs[0]["id"])
+        if draft is not None:
+            result["exception"] = _draft_exception(result["exception"], draft, result["metadata"], camera_changed)
+            inventory_rows = _replace_inventory_exception(inventory_rows, relative, result["exception"])
+        entries, exceptions = self._readiness_catalogs(assignments, inventory_rows)
+        if result["media_ok"]:
+            self._resolve_readiness_geometry(video, relative, configs, result, entries, exceptions)
+
+    def _resolve_readiness_geometry(
+        self, video: str, relative: str, configs: list[dict[str, Any]], result: dict[str, Any],
+        entries: list[CameraCatalogEntry], exceptions: dict[str, InventoryEntry],
+    ) -> None:
+        entry, captured_at, source = resolve_video_metadata(relative, entries, exceptions, result["metadata"])
+        result.update(captured_at_utc=captured_at.isoformat().replace("+00:00", "Z"), capture_time_source=source)
+        applicable = [
+            row for row in configs
+            if parse_utc_timestamp(row["catalog"]["effective_from_utc"], "effective from") == entry.effective_from_utc
+            and _configuration_covers_video(row, video)
+        ]
+        if len(applicable) == 1:
+            result.update(camera_values=applicable[0]["catalog"], config_id=applicable[0]["id"])
 
     def assign_footage(self, camera_id: str, videos: list[str], *, geometry_action: str = "") -> None:
         if not videos:
@@ -704,28 +764,16 @@ class PortalService:
     def camera_catalog(self, *, assignments: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
         cameras = self.store.entries("camera")
         assignments = self.footage_assignments() if assignments is None else assignments
-        rows = []
-        for item in cameras:
-            row = item["catalog"]
-            if not any(
-                other["catalog"]["camera_id"] != row["camera_id"] and (
-                    other["catalog"]["source_path_prefix"].startswith(row["source_path_prefix"])
-                    or row["source_path_prefix"].startswith(other["catalog"]["source_path_prefix"])
-                ) for other in cameras
-            ):
-                rows.append(row)
+        rows = [
+            item["catalog"] for item in cameras
+            if not any(_prefix_conflicts(item["catalog"], other["catalog"]) for other in cameras)
+        ]
         for video, camera_id in assignments.items():
-            configs = [item for item in cameras if item["catalog"]["camera_id"] == camera_id]
-            matching = [
-                item for item in configs
-                if not item["folder"] or video.startswith(item["folder"].rstrip("/") + "/")
-            ]
-            for item in matching or configs:
-                relative = self.source.root.name + "/" + video
-                rows.append({
-                    **item["catalog"], "video_relative_path": relative,
-                    "source_path_prefix": relative.rsplit("/", 1)[0] + "/",
-                })
+            relative = self.source.root.name + "/" + video
+            rows.extend({
+                **item["catalog"], "video_relative_path": relative,
+                "source_path_prefix": relative.rsplit("/", 1)[0] + "/",
+            } for item in _camera_configurations(cameras, camera_id, video))
         return rows
 
     def update_camera_metadata(
