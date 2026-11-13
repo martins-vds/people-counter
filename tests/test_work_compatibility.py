@@ -1,9 +1,11 @@
 import json
 import sqlite3
+import hashlib
 
 import pytest
 
-from people_counter.work_compatibility import evaluate_compatibility
+from people_counter.config import DETECTOR_FLOOR
+from people_counter.work_compatibility import compatibility_evaluation, evaluate_compatibility
 from people_counter.sjd_control import ControlError, SQLiteControlStore
 from tests.test_fabric_sjd_runtime import MemoryControlStore, MemoryFiles
 
@@ -29,6 +31,13 @@ def claim(store, **kwargs):
     )
 
 
+def stored_work(store, work_id):
+    if isinstance(store, SQLiteControlStore):
+        with store._connect() as connection:
+            return dict(connection.execute("SELECT * FROM work WHERE work_id=?", (work_id,)).fetchone())
+    return next(row for row in store._rows("work") if row["work_id"] == work_id)
+
+
 def test_mixed_queue_blocks_one_item_without_starving_supported_work(store):
     register(store, "unsupported", {"work_schema_version": 2}, submitted_sdk_version="0.9.0")
     register(store, "supported", {})
@@ -40,6 +49,8 @@ def test_mixed_queue_blocks_one_item_without_starving_supported_work(store):
     assert blocked.compatibility["reason_code"] == "UNSUPPORTED_WORK_SCHEMA"
     assert blocked.compatibility["required_contract"]["work_schema_version"] == 2
     assert blocked.compatibility["evaluating_sdk_version"]
+    assert blocked.compatibility["evaluated_at"] == 100
+    assert blocked.compatibility["reason"] == "Unsupported work_schema_version: 2"
     store.recover(now=100000)
     assert store.get_work("unsupported").status == "BLOCKED_INCOMPATIBLE"
     with pytest.raises(ControlError, match="blocked|BLOCKED"):
@@ -48,8 +59,37 @@ def test_mixed_queue_blocks_one_item_without_starving_supported_work(store):
 
 @pytest.mark.parametrize("scope", [[], "", [""]])
 def test_recheck_requires_explicit_nonempty_ids(store, scope):
-    with pytest.raises(ValueError, match="recheck|work"):
+    messages = {
+        "[]": "recheck requires selected work IDs",
+        "''": "allowed_work_ids must be a collection",
+        "['']": "allowed work_id must be a non-empty string",
+    }
+    with pytest.raises(ValueError) as error:
         store.recheck_compatibility(scope, operator="ops", reason="upgrade")
+    assert str(error.value) == messages[repr(scope)]
+
+
+@pytest.mark.parametrize("field", ["operator", "reason"])
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_recheck_rejects_invalid_attribution_without_changing_work(store, field, value):
+    register(store, "blocked", {"work_schema_version": 2})
+    claim(store)
+    before = stored_work(store, "blocked")
+    arguments = {"operator": "ops", "reason": "upgrade", field: value}
+    with pytest.raises(ValueError) as error:
+        store.recheck_compatibility(["blocked"], **arguments)
+    assert str(error.value) == f"{field} must be a non-empty string"
+    assert stored_work(store, "blocked") == before
+
+
+def test_recheck_identifies_missing_work_without_changing_selected_work(store):
+    register(store, "blocked", {"work_schema_version": 2})
+    claim(store)
+    before = stored_work(store, "blocked")
+    with pytest.raises(KeyError) as error:
+        store.recheck_compatibility(["blocked", "missing"], operator="ops", reason="upgrade")
+    assert error.value.args == ("missing",)
+    assert stored_work(store, "blocked") == before
 
 
 def test_blocking_persists_when_supported_items_cannot_form_a_batch(store):
@@ -65,16 +105,24 @@ def test_explicit_recheck_keeps_unsupported_then_releases_after_upgrade(store, m
 
     register(store, "unsupported", {"work_schema_version": 2})
     assert claim(store) is None
+    before = stored_work(store, "unsupported")
+    monkeypatch.setattr(store, "_clock", lambda: 125)
     report = store.recheck_compatibility(
         ["unsupported"], operator="ops", reason="new SDK",
     )
     assert report[0].status == "BLOCKED_INCOMPATIBLE"
     assert report[0].compatibility["operator"] == "ops"
+    assert report[0].compatibility["supported"] is False
+    assert report[0].compatibility["evaluated_at"] == 125
+    rejected = stored_work(store, "unsupported")
+    assert rejected["updated_at"] == 125
+    assert json.loads(rejected["last_error"]) == report[0].compatibility
     monkeypatch.setattr(
         compatibility, "evaluate_compatibility",
         lambda payload, **kwargs: compatibility.CompatibilityDecision(True, dict(payload)),
     )
     monkeypatch.setattr(compatibility, "resolve_installed_package_version", lambda: "0.10.2")
+    monkeypatch.setattr(store, "_clock", lambda: 150)
     report = store.recheck_compatibility(
         ["unsupported"], operator="ops", reason="supported now",
     )
@@ -83,6 +131,15 @@ def test_explicit_recheck_keeps_unsupported_then_releases_after_upgrade(store, m
     assert report[0].max_attempts == 3
     assert report[0].compatibility["operator_reason"] == "supported now"
     assert report[0].compatibility["evaluating_sdk_version"] == "0.10.2"
+    assert report[0].compatibility["supported"] is True
+    assert report[0].compatibility["evaluated_at"] == 150
+    accepted = stored_work(store, "unsupported")
+    assert accepted["updated_at"] == 150
+    assert accepted["last_error"] is None
+    mutable = {"status", "compatibility_json", "last_error", "updated_at"}
+    assert {key: value for key, value in accepted.items() if key not in mutable} == {
+        key: value for key, value in before.items() if key not in mutable
+    }
     assert claim(store) is not None
 
 
@@ -251,6 +308,7 @@ def test_submission_version_is_not_an_eligibility_rule(version):
         ({"detector_model": "r101"}, "UNSUPPORTED_DETECTOR"),
         ({"model_format": "openvino"}, "UNSUPPORTED_MODEL_FORMAT"),
         ({"device": "cuda"}, "UNSUPPORTED_DEVICE"),
+        ({"device_variant": "gpu"}, "UNSUPPORTED_DEVICE"),
         ({"batch_size": 3}, "UNSUPPORTED_INFERENCE_SETTINGS"),
         ({"sample_fps": -1}, "UNSUPPORTED_INFERENCE_SETTINGS"),
         ({"detection_threshold": 0.01}, "UNSUPPORTED_INFERENCE_SETTINGS"),
@@ -266,12 +324,114 @@ def test_submission_version_is_not_an_eligibility_rule(version):
 )
 def test_unsupported_contract_reports_the_actual_requirement(payload, code):
     decision = evaluate_compatibility(payload, fabric=True)
-    assert not decision.supported
+    assert decision.supported is False
     assert decision.reason_code == code
-    assert decision.reason
+    fields = {
+        "UNSUPPORTED_WORK_SCHEMA": "work_schema_version",
+        "UNSUPPORTED_PAYLOAD_SCHEMA": "payload_schema_version",
+        "UNSUPPORTED_PIPELINE": "pipeline",
+        "UNSUPPORTED_DETECTOR": "detector_model",
+        "UNSUPPORTED_MODEL_FORMAT": "model_format",
+        "UNSUPPORTED_DEVICE": "device_variant" if "device_variant" in payload else "device",
+    }
+    messages = {
+        "UNSUPPORTED_PROFILE_SCHEMA": "Unsupported profile schema: 'future-v2'",
+        "UNSUPPORTED_INFERENCE_PROFILE": "Unsupported inference profile: 'future-model'",
+        "UNSUPPORTED_INFERENCE_SETTINGS": (
+            "Inference profile requires unsupported overrides"
+            if "profile_overrides" in payload
+            else "Inference settings are not supported by the CPU worker"
+        ),
+        "UNSUPPORTED_MODEL_REQUIREMENTS": "Model artifact declarations differ from the required pipeline artifacts",
+    }
+    expected = (
+        f"Unsupported {fields[code]}: {payload[fields[code]]!r}"
+        if code in fields else messages[code]
+    )
+    assert decision.reason == expected
+    assert isinstance(decision.required_contract, dict)
     assert json.loads(json.dumps(decision.required_contract)) == decision.required_contract
     for field, value in payload.items():
         assert decision.required_contract[field] == value
+
+
+def test_legacy_contract_defaults_match_the_worker_configuration(tmp_path):
+    from people_counter.local_spark import _config_from_work
+
+    video = tmp_path / "legacy.mp4"
+    content = b"legacy-video-input"
+    video.write_bytes(content)
+    payload = {"source_video": str(video), "source_sha256": hashlib.sha256(content).hexdigest()}
+    configuration = _config_from_work(payload)
+    decision = evaluate_compatibility(payload)
+    assert decision.supported is True
+    for field in (
+        "detector_model", "model_format", "device_variant", "device", "batch_size",
+        "sample_fps", "detection_threshold", "use_fp16",
+    ):
+        assert decision.required_contract[field] == getattr(configuration, field)
+
+
+@pytest.mark.parametrize("payload", [
+    {"sample_fps": 0}, {"sample_fps": float("inf")},
+    {"detection_threshold": True}, {"detection_threshold": 1.01},
+])
+def test_invalid_inference_numbers_are_not_supported(payload):
+    decision = evaluate_compatibility(payload)
+    assert decision.supported is False
+    assert decision.reason_code == "UNSUPPORTED_INFERENCE_SETTINGS"
+    assert decision.reason == "Inference settings are not supported by the CPU worker"
+
+
+@pytest.mark.parametrize("payload", [
+    {"detection_threshold": DETECTOR_FLOOR},
+    {"detection_threshold": 1.0},
+    {"sample_fps": None},
+])
+def test_supported_inference_boundaries_are_retained(payload):
+    decision = evaluate_compatibility(payload)
+    assert decision.supported is True
+    for field, value in payload.items():
+        assert decision.required_contract[field] == value
+
+
+@pytest.mark.parametrize("value", [None, [], "model"])
+def test_malformed_artifact_declarations_have_an_explicit_error(value):
+    with pytest.raises(ValueError) as error:
+        evaluate_compatibility({"model_artifact_sha256": value})
+    assert str(error.value) == "model_artifact_sha256 must be an object"
+
+
+@pytest.mark.parametrize("fabric", [False, True])
+def test_compatibility_evaluation_preserves_backend_policy_and_audit_schema(monkeypatch, fabric):
+    import people_counter.work_compatibility as compatibility
+
+    payload = {"pipeline": "rfdetr-botsort"}
+    decision = evaluate_compatibility(payload, fabric=fabric)
+    monkeypatch.setattr(compatibility, "resolve_installed_package_version", lambda: "0.10.2")
+    evaluation = compatibility_evaluation(
+        payload, fabric=fabric, now=175.25, operator="ops", reason="upgrade",
+    )
+    assert evaluation == {
+        "supported": not fabric,
+        "reason_code": "UNSUPPORTED_PIPELINE" if fabric else None,
+        "reason": "Unsupported pipeline: 'rfdetr-botsort'" if fabric else None,
+        "required_contract": decision.required_contract,
+        "evaluating_sdk_version": "0.10.2",
+        "evaluated_at": 175.25,
+        "operator": "ops",
+        "operator_reason": "upgrade",
+    }
+
+
+def test_fabric_recheck_does_not_use_the_broader_local_sdk_policy(fabric_runtime_context):
+    store = MemoryControlStore(MemoryFiles())
+    register(store, "unsupported-pipeline", {"pipeline": "rfdetr-botsort"})
+    assert claim(store) is None
+    report = store.recheck_compatibility(["unsupported-pipeline"], operator="ops", reason="upgrade")
+    assert report[0].status == "BLOCKED_INCOMPATIBLE"
+    assert report[0].compatibility["supported"] is False
+    assert report[0].compatibility["reason_code"] == "UNSUPPORTED_PIPELINE"
 
 
 def test_local_sdk_retains_rfdetr_support():

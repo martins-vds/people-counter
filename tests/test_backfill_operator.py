@@ -1039,10 +1039,11 @@ def test_submission_resume_rejects_independently_mixed_provenance(setup, field, 
         package, config, "d" * 64, submitted_sdk_version="0.10.1",
     )
     original = [*records, {**records[0], "work_id": "other", field: value}]
-    with pytest.raises(ValueError, match="inconsistent submission provenance"):
+    with pytest.raises(ValueError) as error:
         operator._submission_records(
             package, config, operator.InstalledRelease("0.10.2", "e" * 64), {"items": original},
         )
+    assert str(error.value) == "saved registration plan has inconsistent submission provenance"
 
 
 def test_registration_in_progress_is_polled_once_then_persisted_as_completed(setup, tmp_path):
