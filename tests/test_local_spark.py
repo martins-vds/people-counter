@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from people_counter.local_spark import (
     ManifestValidationError,
     StagingValidationError,
@@ -16,7 +18,10 @@ from people_counter.local_spark import (
     _process_partition,
     _require_primitive_tree,
     _verified_video,
+    create_local_spark_session,
+    process_claimed_batch,
     read_claimed_manifest,
+    runtime_identity,
     validate_delta_staging,
 )
 
@@ -42,6 +47,63 @@ def manifest(item_updates=None):
         "expected_staging_path": "/staging",
         "items": [item],
     }
+
+
+def test_real_local_delta_probe_stages_and_verifies_a_whole_video(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPARK_LOCAL_IP", "127.0.0.1")
+    monkeypatch.setenv("SPARK_DRIVER_HOST", "127.0.0.1")
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"probe-input")
+    staging_root = tmp_path / "staging"
+    destination = staging_root / "batch-a" / "batch-attempt-a"
+    document = manifest({
+        "source_video": str(video),
+        "source_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
+    })
+    document["expected_staging_path"] = str(destination)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(document))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    spark = create_local_spark_session(
+        master="local[1]", app_name="people-counter-quality-probe", correlation_id="quality-probe",
+    )
+    try:
+        result = process_claimed_batch(
+            spark, path, staging_root, expected_manifest_sha256=digest,
+        )
+        assert result.path == destination
+        assert result.record_count == 1
+        assert result.failed_work_ids == ()
+        assert len(result.executor_identities) == 1
+        assert result.manifest_sha256 == digest
+        rows = spark.read.format("delta").load(str(destination)).collect()
+        assert rows[0]["work_id"] == "work-a"
+        assert rows[0]["record_type"] == "video_result"
+        identity = runtime_identity(spark)
+        assert identity["spark"] == spark.version
+        assert identity["delta"] != "unavailable"
+        assert identity["scala"] != "unavailable"
+        assert identity["java"] not in {"", "unavailable"}
+        assert process_claimed_batch(spark, path, staging_root) == result
+        assert spark.read.format("delta").load(str(destination)).count() == 1
+    finally:
+        spark.stop()
+
+
+@pytest.mark.parametrize("changes,message", [
+    ({"processor_mode": "unsupported"}, "unsupported processor mode"),
+    ({"minimum_executor_identities": 0}, "at least one"),
+])
+def test_invalid_local_processing_settings_fail_before_manifest_read(tmp_path, changes, message):
+    with pytest.raises(ValueError, match=message):
+        process_claimed_batch(None, tmp_path / "absent.json", tmp_path, **changes)
+
+
+def test_local_processing_rejects_manifest_staging_mismatch_before_spark(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest()))
+    with pytest.raises(ManifestValidationError, match="does not match its batch attempt"):
+        process_claimed_batch(None, path, tmp_path)
 
 
 class LocalSparkTests(unittest.TestCase):

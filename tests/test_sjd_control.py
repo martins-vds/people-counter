@@ -3,11 +3,14 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from people_counter.sjd_control import (
     BatchValidationError,
+    ControlError,
     FabricControlStore,
     ImmutableConflictError,
     LeaseBudgetError,
@@ -16,8 +19,11 @@ from people_counter.sjd_control import (
     UnsupportedControlStoreError,
     main,
     normalize_registration_requests,
+    parse_registration_manifest,
+    read_registration_manifest,
+    require_release_compatibility,
 )
-from people_counter.sjd_process import LOCAL_TWO_WORKERS
+from people_counter.sjd_process import LOCAL_TWO_WORKERS, verify_envelope
 
 
 class MutableClock:
@@ -89,6 +95,389 @@ class SJDControlTests(unittest.TestCase):
             }
             for ordinal, item in enumerate(batch.items)
         ]
+
+    @staticmethod
+    def request(**overrides):
+        return {
+            "work_id": "work",
+            "payload": {"source_video": "video.mp4"},
+            "runtime_key": "runtime-a",
+            "duration_seconds": 10,
+            "config_sha256": "config-a",
+            "release_digest": "release-a",
+            **overrides,
+        }
+
+    def test_registration_manifests_accept_json_and_jsonl_without_losing_defaults(self):
+        request = self.request()
+        for text in (
+            json.dumps(request),
+            json.dumps([request]),
+            json.dumps({"items": [request]}),
+            "\n" + json.dumps(request) + "\n\n" + json.dumps(self.request(work_id="other")),
+        ):
+            with self.subTest(text=text):
+                normalized = parse_registration_manifest(text)
+                self.assertEqual(normalized[0]["work_id"], "work")
+                self.assertEqual(normalized[0]["max_attempts"], 3)
+                self.assertIsNone(normalized[0]["available_at"])
+        manifest = self.store.database.parent / "manifest.jsonl"
+        manifest.write_text(json.dumps(request) + "\n", encoding="utf-8")
+        works = self.store.register_manifest(manifest)
+        self.assertEqual([work.work_id for work in works], ["work"])
+        self.assertEqual(self.store.get_work("work"), works[0])
+        self.assertEqual(self.store.register_many([request]), works)
+        self.assertEqual(
+            read_registration_manifest(manifest),
+            parse_registration_manifest(manifest.read_text(encoding="utf-8")),
+        )
+
+    def test_invalid_registration_is_rejected_before_writing_work(self):
+        class IntegerSubclass(int):
+            pass
+
+        class FloatSubclass(float):
+            pass
+
+        invalid = (
+            ("work_id", " "),
+            ("payload", []),
+            ("payload", {"invalid": float("nan")}),
+            ("duration_seconds", 0),
+            ("duration_seconds", True),
+            ("duration_seconds", float("inf")),
+            ("duration_seconds", IntegerSubclass(10)),
+            ("duration_seconds", FloatSubclass(10)),
+            ("max_attempts", 0),
+            ("max_attempts", 101),
+            ("max_attempts", True),
+            ("available_at", "tomorrow"),
+        )
+        for field, value in invalid:
+            request = self.request(**{field: value})
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValueError):
+                    self.store.register(**request)
+                with self.assertRaises(ValueError):
+                    self.store.register_many([request])
+        self.assertEqual(self.store.status()["work"], {})
+        for text in ("", "[]", "null", "3", '{"items": []}', "[4]", "[{}]"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_registration_manifest(text)
+        with self.assertRaisesRegex(ValueError, "source.jsonl:3"):
+            parse_registration_manifest(
+                json.dumps(self.request()) + "\n\nnot-json", source="source.jsonl"
+            )
+        with self.assertRaisesRegex(ValueError, "cannot read"):
+            read_registration_manifest(self.store.database.parent / "missing.json")
+
+    def test_claim_rejects_invalid_admission_without_leasing(self):
+        self.register("work")
+        for overrides in (
+            {"max_items": True},
+            {"minimum_items": 0},
+            {"minimum_items": 11},
+            {"maximum_active_batches": 0},
+            {"maximum_active_batches": True},
+            {"safety_factor": 0.9},
+            {"allowed_work_ids": "work"},
+            {"allowed_work_ids": iter(["work"])},
+            {"allowed_work_ids": [""]},
+            {"peak_rss_bytes": 1},
+            {"minimum_speed_x": None},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                self.claim(**overrides)
+        self.assertIsNone(self.claim(allowed_work_ids=[]))
+        require_release_compatibility([], None)
+        self.assertEqual(self.store.get_work("work").attempt_count, 0)
+
+    def test_profile_admission_checks_memory_and_legacy_conflicts(self):
+        self.register("work")
+        arguments = {
+            "process_profile": LOCAL_TWO_WORKERS,
+            "minimum_speed_x": None,
+            "safety_factor": None,
+            "margin_seconds": None,
+        }
+        cases = (
+            ({"peak_rss_bytes": 2**30}, LeaseBudgetError),
+            ({"peak_rss_bytes": True}, ValueError),
+            ({"minimum_speed_x": 2}, ValueError),
+            ({"process_profile": replace(LOCAL_TWO_WORKERS, task_cpus=3)}, ValueError),
+            ({"process_profile": replace(LOCAL_TWO_WORKERS, memory_reserve_bytes=-1),
+              "peak_rss_bytes": 1}, ValueError),
+            ({"process_profile": replace(LOCAL_TWO_WORKERS, name="")}, ValueError),
+        )
+        for overrides, error in cases:
+            with self.subTest(overrides=overrides), self.assertRaises(error):
+                self.claim(**(arguments | overrides))
+        batch = self.claim(**arguments, peak_rss_bytes=512 * 2**20)
+        self.assertEqual([item.work_id for item in batch.items], ["work"])
+
+    def test_missing_work_and_batch_interfaces_fail_explicitly(self):
+        for operation in (
+            lambda: self.store.get_work("missing"),
+            lambda: self.store.load_claim_envelope("missing"),
+            lambda: self.store.load_claim_envelope_with_digest("missing"),
+            lambda: self.store.process_batch_state(SimpleNamespace(batch_id="missing")),
+            lambda: self.store.commit_batch("missing"),
+            lambda: self.store.replay("missing", operator="ops", reason="retry"),
+            lambda: self.store.seal_batch(
+                "missing", [], envelope_sha256="a" * 64, membership_sha256="b" * 64
+            ),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(KeyError):
+                operation()
+
+    def test_envelope_read_detects_missing_tampered_and_invalid_content(self):
+        self.register("work")
+        batch = self.claim()
+        path = Path(batch.envelope_path)
+        original = path.read_bytes()
+        for content, message in (
+            (b"tampered", "digest mismatch"),
+            (None, "missing"),
+        ):
+            if content is None:
+                path.unlink()
+            else:
+                path.write_bytes(content)
+            with self.assertRaisesRegex(BatchValidationError, message):
+                self.store.load_claim_envelope(batch.batch_id)
+        path.write_bytes(original)
+        for content in (b"{", b'{"schema_version":2}', b"null", b"[]"):
+            path.write_bytes(content)
+            digest = hashlib.sha256(content).hexdigest()
+            with sqlite3.connect(self.store.database) as connection:
+                connection.execute(
+                    "UPDATE batches SET envelope_sha256=? WHERE batch_id=?",
+                    (digest, batch.batch_id),
+                )
+            with self.subTest(content=content), self.assertRaises(BatchValidationError):
+                self.store.load_claim_envelope(batch.batch_id)
+
+    def test_process_heartbeat_extends_all_fences_and_never_shortens_them(self):
+        self.register("work")
+        batch = self.claim()
+        raw = self.store.load_claim_envelope(batch.batch_id)
+        envelope = verify_envelope(
+            raw, batch_id=batch.batch_id, envelope_sha256=batch.envelope_sha256
+        )
+        self.store.heartbeat_process(envelope, 1)
+        self.assertEqual(self.store.process_batch_state(envelope).lease_expires_at, 200)
+        self.clock.value = 150
+        self.store.heartbeat_process(envelope, 100)
+        self.assertEqual(self.store.process_batch_state(envelope).lease_expires_at, 250)
+        with sqlite3.connect(self.store.database) as connection:
+            for table in ("work", "attempts", "batches"):
+                self.assertEqual(
+                    connection.execute(f"SELECT lease_expires_at FROM {table}").fetchone()[0],
+                    250,
+                )
+        with self.assertRaisesRegex(BatchValidationError, "identity changed"):
+            self.store.assert_process_fence(replace(envelope, envelope_sha256="a" * 64))
+        with self.assertRaisesRegex(LeaseLostError, "membership changed"):
+            self.store.assert_process_fence(replace(envelope, items=()))
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("UPDATE work SET fence=fence+1")
+        with self.assertRaisesRegex(LeaseLostError, "lost its work fence"):
+            self.store.heartbeat_process(envelope, 100)
+
+    def test_seal_validation_is_atomic_and_repeated_seals_are_immutable(self):
+        self.register("work")
+        batch = self.claim()
+        envelope = self.store.load_claim_envelope(batch.batch_id)
+        hashes = {
+            "envelope_sha256": batch.envelope_sha256,
+            "membership_sha256": envelope["membership_sha256"],
+        }
+        output = self.outputs(batch)[0]
+        for outputs, error in (
+            ("invalid", ValueError),
+            ([None], ValueError),
+            ([output, output], BatchValidationError),
+            ([output | {"records": "invalid"}], BatchValidationError),
+            ([output | {"records": [None]}], BatchValidationError),
+            ([output | {"records": []}], BatchValidationError),
+            ([output | {"succeeded": 1}], ValueError),
+            ([output | {"output_sha256": "invalid"}], ValueError),
+            ([output | {"records": [output["records"][0] | {"partition_id": -1}]}], ValueError),
+        ):
+            with self.subTest(outputs=outputs), self.assertRaises(error):
+                self.store.seal_batch(batch.batch_id, outputs, **hashes)
+        with self.assertRaisesRegex(BatchValidationError, "hash mismatch"):
+            self.store.seal_batch(
+                batch.batch_id, [output], **(hashes | {"membership_sha256": "a" * 64})
+            )
+        self.store.seal_batch(batch.batch_id, [output], **hashes)
+        self.store.seal_batch(batch.batch_id, [output], **hashes)
+        for outputs, override in (
+            ([output], {"envelope_sha256": "b" * 64}),
+            ([output | {"output_path": "/different"}], {}),
+            ([output | {"records": [output["records"][0] | {"executor_identity": "other"}]}], {}),
+        ):
+            with self.subTest(outputs=outputs), self.assertRaises(ImmutableConflictError):
+                self.store.seal_batch(batch.batch_id, outputs, **(hashes | override))
+        self.assertEqual(self.store.commit_batch(batch.batch_id), (1,))
+
+    def test_failed_attempts_retry_then_die_without_publication(self):
+        self.register("work", max_attempts=2)
+        for status in ("READY", "DEAD"):
+            batch = self.claim()
+            envelope = self.store.load_claim_envelope(batch.batch_id)
+            outputs = [output | {"succeeded": False} for output in self.outputs(batch)]
+            self.store.seal_batch(
+                batch.batch_id, outputs, envelope_sha256=batch.envelope_sha256,
+                membership_sha256=envelope["membership_sha256"],
+            )
+            self.assertEqual(self.store.commit_batch(batch.batch_id), ())
+            self.assertEqual(self.store.commit_batch(batch.batch_id), ())
+            self.assertEqual(self.store.get_work("work").status, status)
+        self.assertIsNone(self.store.status()["last_publication_sequence"])
+
+    def test_bootstrap_migrates_retry_budget_and_rejects_incompatible_metadata(self):
+        self.register("work", max_attempts=7)
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("ALTER TABLE work DROP COLUMN original_max_attempts")
+        self.store.bootstrap()
+        self.assertEqual(self.store.get_work("work").original_max_attempts, 7)
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("PRAGMA user_version=999")
+        with self.assertRaisesRegex(ControlError, "unsupported control schema"):
+            self.store.bootstrap()
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("PRAGMA user_version=1")
+            connection.execute("UPDATE control_metadata SET schema_version=999")
+        with self.assertRaisesRegex(ControlError, "metadata conflicts"):
+            self.store.bootstrap()
+        for timeout in (0, 60_001):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                SQLiteControlStore(self.store.database, busy_timeout_ms=timeout)
+
+    def test_reconciliation_tracks_tampering_and_resolves_restored_artifacts(self):
+        self.register("work")
+        batch = self.claim()
+        path = Path(batch.envelope_path)
+        original = path.read_bytes()
+        for content in (None, b"tampered"):
+            if content is None:
+                path.unlink()
+            else:
+                path.write_bytes(content)
+            findings = self.store.reconcile()
+            self.assertEqual([finding.finding_type for finding in findings], ["ENVELOPE_HASH_MISMATCH"])
+        path.write_bytes(original)
+        self.assertEqual(self.store.reconcile(), [])
+        for content in (b"{", b"{}", b'{"items":[],"membership_sha256":"wrong"}'):
+            path.write_bytes(content)
+            with sqlite3.connect(self.store.database) as connection:
+                connection.execute(
+                    "UPDATE batches SET envelope_sha256=?",
+                    (hashlib.sha256(content).hexdigest(),),
+                )
+            self.assertEqual(
+                [finding.finding_type for finding in self.store.reconcile()],
+                ["MEMBERSHIP_HASH_MISMATCH"],
+            )
+        with sqlite3.connect(self.store.database) as connection:
+            path.write_bytes(original)
+            connection.execute(
+                "UPDATE batches SET envelope_sha256=?", (batch.envelope_sha256,)
+            )
+            connection.execute("UPDATE attempts SET fence=fence+1")
+        findings = self.store.reconcile()
+        self.assertEqual(findings[0].details["reason"], "attempt rows differ from batch membership")
+
+    def test_manifest_cli_registers_atomically_and_rejects_mixed_arguments(self):
+        manifest = self.store.database.parent / "requests.json"
+        manifest.write_text(json.dumps([self.request()]), encoding="utf-8")
+        base = ["--database", str(self.store.database), "register"]
+        with patch("sys.stdout"):
+            self.assertEqual(main(base + ["--manifest", str(manifest)]), 0)
+        self.assertEqual(self.store.get_work("work").status, "READY")
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            main(base + ["--manifest", str(manifest), "--work-id", "other"])
+        with self.assertRaisesRegex(ValueError, "single-item registration requires"):
+            main(base)
+
+    def test_replay_rejects_changed_requests_and_committed_work(self):
+        self.register("work", max_attempts=1)
+        batch = self.claim()
+        self.clock.value = batch.lease_expires_at
+        self.store.recover()
+        for attempts in (0, True, 101):
+            with self.subTest(attempts=attempts), self.assertRaises(ValueError):
+                self.store.replay("work", operator="ops", reason="retry", additional_attempts=attempts)
+        replay = self.store.replay("work", operator="ops", reason="retry")
+        with self.assertRaisesRegex(ControlError, "not replay-eligible"):
+            self.store.replay("work", operator="other", reason="retry")
+        self.assertEqual(self.store.get_work("work").last_replay_id, replay.replay_id)
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("UPDATE work SET status='DEAD', committed_attempt_id='corrupt'")
+        with self.assertRaisesRegex(ControlError, "committed work"):
+            self.store.replay("work", operator="ops", reason="retry")
+
+    def test_quarantine_rejects_missing_mismatched_and_already_leased_work(self):
+        digest = "a" * 64
+        self.store.register(**self.request(release_digest=digest))
+        for values, error in (
+            ({}, ValueError),
+            ([], ValueError),
+            ({"missing": digest}, KeyError),
+            ({"work": "b" * 64}, ImmutableConflictError),
+        ):
+            with self.subTest(values=values), self.assertRaises(error):
+                self.store.quarantine(values, operator="ops", reason="obsolete")
+        self.claim()
+        with self.assertRaisesRegex(ControlError, "not quarantine-eligible"):
+            self.store.quarantine({"work": digest}, operator="ops", reason="obsolete")
+
+    def test_seal_and_commit_reject_corrupt_authoritative_attempts(self):
+        self.register("work")
+        batch = self.claim()
+        envelope = self.store.load_claim_envelope(batch.batch_id)
+        hashes = {
+            "envelope_sha256": batch.envelope_sha256,
+            "membership_sha256": envelope["membership_sha256"],
+        }
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("UPDATE work SET fence=fence+1")
+        with self.assertRaisesRegex(LeaseLostError, "lost its work fence"):
+            self.store.seal_batch(batch.batch_id, self.outputs(batch), **hashes)
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("UPDATE work SET fence=fence-1")
+        self.store.seal_batch(batch.batch_id, self.outputs(batch), **hashes)
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("UPDATE attempts SET output_path=NULL")
+        with self.assertRaisesRegex(LeaseLostError, "cannot advance its pointer"):
+            self.store.commit_batch(batch.batch_id)
+        self.assertEqual(self.store.get_work("work").status, "LEASED")
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("DELETE FROM attempts")
+        with self.assertRaisesRegex(BatchValidationError, "cardinality"):
+            self.store.commit_batch(batch.batch_id)
+
+    def test_legacy_duplicate_output_corruption_is_detected_before_bootstrap(self):
+        self.register("work")
+        batch = self.claim()
+        envelope = self.store.load_claim_envelope(batch.batch_id)
+        self.store.seal_batch(
+            batch.batch_id, self.outputs(batch), envelope_sha256=batch.envelope_sha256,
+            membership_sha256=envelope["membership_sha256"],
+        )
+        with sqlite3.connect(self.store.database) as connection:
+            connection.execute("ALTER TABLE output_records RENAME TO modern_output_records")
+            connection.execute("CREATE TABLE output_records AS SELECT * FROM modern_output_records")
+            connection.execute("INSERT INTO output_records SELECT * FROM modern_output_records")
+            connection.execute("DROP TABLE modern_output_records")
+        duplicate = next(
+            finding for finding in self.store.reconcile()
+            if finding.finding_type == "DUPLICATE_OUTPUT_IDENTITY"
+        )
+        self.assertEqual(duplicate.details, {"count": 2})
+        with self.assertRaisesRegex(ControlError, "duplicate immutable identities"):
+            self.store.bootstrap()
 
     def test_register_is_idempotent_but_rejects_immutable_conflicts(self):
         first = self.register("work-1")

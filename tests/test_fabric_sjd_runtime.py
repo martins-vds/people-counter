@@ -14,11 +14,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-pytestmark = pytest.mark.usefixtures("fabric_runtime_context")
 
 from people_counter.fabric_namespace import (
     FILES_ROOT,
@@ -59,7 +58,6 @@ from people_counter.fabric_sjd_runtime import (
 )
 from people_counter.fabric_capability_probe import CapabilityStatus
 from people_counter.sjd_gold import (
-    FACT_TABLES,
     FACT_TARGET_TABLES,
     GoldSourceError,
     SourceCheckpoint,
@@ -82,6 +80,8 @@ from tests.fabric_fixtures import (
     TEST_TARGET,
     WORKSPACE_ID,
 )
+
+pytestmark = pytest.mark.usefixtures("fabric_runtime_context")
 
 
 class MemoryFiles:
@@ -649,6 +649,167 @@ def test_consumer_decision_uses_default_discovery_and_probe(
     assert probed[0][0] is spark
     assert probed[0][1] == executors
     assert probed[0][2].planned_concurrent_tasks == 4
+
+
+@pytest.mark.parametrize("body,expected", [(b'{"status":"Completed"}', {"status": "Completed"}), (b"", {})])
+@pytest.mark.parametrize("method", ["POST", "GET", "DELETE"])
+def test_power_bi_transport_serializes_requests_and_reads_response(monkeypatch, body, expected, method):
+    import io
+    import people_counter.fabric_sjd_runtime as runtime
+
+    calls = []
+
+    def open_url(request, *, timeout):
+        calls.append((request, timeout))
+        response = io.BytesIO(body)
+        response.headers = {"Request-Id": "request"}
+        return response
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", open_url)
+    payload = {"z": 2, "a": 1} if method == "POST" else None
+    result, headers = runtime._power_bi_json(
+        method, "https://api.powerbi.com/refresh", "test-token", payload,
+    )
+    assert result == expected and headers == {"Request-Id": "request"}
+    request, timeout = calls[0]
+    assert request.data == (b'{"a":1,"z":2}' if payload is not None else None)
+    assert request.get_method() == method
+    assert request.get_header("Accept").lower() == "application/json"
+    assert request.get_header("Authorization") == "Bearer test-token"
+    assert request.get_header("Content-type") == ("application/json" if payload is not None else None)
+    assert timeout == 120
+
+
+@pytest.mark.parametrize("failure", ["non-object", "http-error"])
+def test_power_bi_transport_surfaces_invalid_responses(monkeypatch, failure):
+    import io
+    import people_counter.fabric_sjd_runtime as runtime
+
+    def open_url(request, *, timeout):
+        if failure == "http-error":
+            raise runtime.urllib.error.HTTPError(
+                request.full_url, 503, "unavailable", {}, io.BytesIO(b"service \xff"),
+            )
+        response = io.BytesIO(b"[]")
+        response.headers = {}
+        return response
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", open_url)
+    detail = "returned 503: service \ufffd" if failure == "http-error" else "returned non-object JSON"
+    with pytest.raises(RuntimeError) as caught:
+        runtime._power_bi_json("GET", "https://api.powerbi.com/refresh", "test-token")
+    assert str(caught.value) == "GET https://api.powerbi.com/refresh " + detail
+
+
+def test_power_bi_transport_rejects_nonfinite_payload_before_network(monkeypatch):
+    import people_counter.fabric_sjd_runtime as runtime
+
+    monkeypatch.setattr(
+        runtime.urllib.request, "urlopen",
+        lambda *args, **kwargs: pytest.fail("Nonfinite payload must not reach Power BI"),
+    )
+    with pytest.raises(ValueError, match="Out of range float values"):
+        runtime._power_bi_json("POST", "https://api.powerbi.com/refresh", "test-token", {"value": float("nan")})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("poll_seconds", 0), ("poll_seconds", float("nan")),
+    ("timeout_seconds", 0), ("timeout_seconds", float("inf")),
+])
+def test_semantic_refresh_rejects_invalid_wait_settings_before_network(field, value):
+    arguments = dict(poll_seconds=1, timeout_seconds=1)
+    arguments[field] = value
+    with pytest.raises(ValueError) as caught:
+        _refresh_semantic_model(
+            "workspace", "model", token="test-token", **arguments,
+            request_json=lambda *args: pytest.fail("Invalid wait settings must not reach Power BI"),
+        )
+    assert str(caught.value) == f"{field} must be finite and positive"
+
+
+@pytest.mark.parametrize("status", [
+    "Failed", "Cancelled", "Disabled", "Unexpected", "InProgress",
+])
+def test_semantic_refresh_fails_on_terminal_errors_or_expired_deadline(status):
+    responses = iter([
+        ({}, {"Location": "https://api.powerbi.com/refresh"}),
+        ({"status": status, "detail": "service unavailable"}, {}),
+    ])
+    clock = iter([0, 1])
+    with pytest.raises((RuntimeError, TimeoutError)) as caught:
+        _refresh_semantic_model(
+            "workspace", "model", token="test-token", poll_seconds=1, timeout_seconds=1,
+            request_json=lambda *args: next(responses), clock=lambda: next(clock),
+            sleep=lambda _: pytest.fail("Expired or terminal refresh must not sleep"),
+        )
+    if status in {"Failed", "Cancelled", "Disabled"}:
+        assert str(caught.value) == (
+            'Power BI semantic refresh failed: {"detail": "service unavailable", '
+            f'"status": "{status}"}}'
+        )
+    elif status == "Unexpected":
+        assert str(caught.value) == "Power BI semantic refresh returned unknown status 'Unexpected'"
+    else:
+        assert isinstance(caught.value, TimeoutError)
+        assert str(caught.value) == "Power BI semantic refresh exceeded 1 seconds"
+
+
+@pytest.mark.parametrize("location", [None, "", 42])
+def test_semantic_refresh_requires_a_location_to_poll(location):
+    def request(method, *args):
+        assert method == "POST", "Invalid Location must not start polling"
+        return {}, {"Location": location}
+
+    with pytest.raises(RuntimeError) as caught:
+        _refresh_semantic_model(
+            "workspace", "model", token="test-token", poll_seconds=1, timeout_seconds=1,
+            request_json=request,
+        )
+    assert str(caught.value) == "Power BI refresh response omitted Location"
+
+
+@pytest.mark.parametrize("initial", [None, "", "Unknown", "NotStarted", "InProgress"])
+def test_semantic_refresh_retries_pending_or_missing_status_with_authenticated_get(initial):
+    location = "https://api.powerbi.com/refresh"
+    responses = iter([
+        ({}, {"location": location}),
+        ({} if initial is None else {"status": initial}, {}),
+        ({"status": "Completed", "requestId": "request"}, {}),
+    ])
+    requests = []
+    sleeps = []
+
+    def request(*args):
+        requests.append(args)
+        return next(responses)
+
+    result = _refresh_semantic_model(
+        "workspace", "model", token="test-token", poll_seconds=1, timeout_seconds=10,
+        request_json=request, clock=lambda: 0, sleep=sleeps.append,
+    )
+    assert result == {"location": location, "request_id": "request", "status": "Completed"}
+    assert requests == [
+        (
+            "POST", "https://api.powerbi.com/v1.0/myorg/groups/workspace/datasets/model/refreshes",
+            "test-token",
+            {"applyRefreshPolicy": False, "commitMode": "transactional", "retryCount": 2, "type": "Full"},
+        ),
+        ("GET", location, "test-token"),
+        ("GET", location, "test-token"),
+    ]
+    assert sleeps == [1]
+
+
+def test_semantic_refresh_rejects_nonfinite_failure_diagnostics():
+    responses = iter([
+        ({}, {"Location": "https://api.powerbi.com/refresh"}),
+        ({"status": "Failed", "value": float("nan")}, {}),
+    ])
+    with pytest.raises(ValueError, match="Out of range float values"):
+        _refresh_semantic_model(
+            "workspace", "model", token="test-token", poll_seconds=1, timeout_seconds=1,
+            request_json=lambda *args: next(responses),
+        )
 
 
 class MemoryControlStore(FabricControlStoreImpl):

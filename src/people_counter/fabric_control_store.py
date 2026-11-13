@@ -8,6 +8,7 @@ ambiguous failure therefore retains the global lock and fails closed.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import logging
 import math
@@ -28,7 +29,6 @@ from people_counter.sjd_control import (
     ControlBatchState,
     ControlError,
     ImmutableConflictError,
-    LeaseBudgetError,
     LeaseLostError,
     RecoveryReport,
     QuarantineReport,
@@ -115,9 +115,7 @@ class NotebookUtilsOneLakeFiles:
 
     @staticmethod
     def _fs() -> Any:
-        import notebookutils
-
-        return notebookutils.fs
+        return importlib.import_module("notebookutils").fs
 
     def exists(self, path: str) -> bool:
         return bool(self._fs().exists(path))
@@ -1085,34 +1083,50 @@ class FabricControlStoreImpl:
                 int(member["fence"]),
                 member["payload_sha256"],
             )
+            related_attempts = [
+                row for row in attempt_rows if row["work_id"] == work_id
+            ]
+            # Both initial recovery and its retry require the same immutable claim.
+            try:
+                identity = (
+                    int(work["fence"]),
+                    int(attempt["fence"]),
+                    observed_member,
+                    float(batch["lease_expires_at"]),
+                    float(attempt["lease_expires_at"]),
+                    batch["envelope_sha256"],
+                    batch["membership_sha256"],
+                    work["committed_attempt_id"],
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise LeaseLostError(
+                    "exact recovery identity or fence differs"
+                ) from error
+            expected_identity = (
+                expected_fence,
+                expected_fence,
+                expected_member,
+                expected_expiry,
+                expected_expiry,
+                envelope_sha256,
+                membership_sha256,
+                None,
+            )
+            if (
+                identity != expected_identity
+                or len(related_attempts) != 1
+                or any(row["work_id"] == work_id for row in publication_rows)
+            ):
+                raise LeaseLostError("exact recovery identity or fence differs")
             terminal = (
                 work["status"] == "DEAD"
                 and batch["status"] == "EXPIRED"
                 and attempt["status"] == "EXPIRED"
                 and attempt["recovery_outcome"] == "DEAD"
                 and batch["owner"] == owner
-                and int(work["fence"]) == expected_fence
-                and int(attempt["fence"]) == expected_fence
-                and observed_member == expected_member
-                and float(batch["lease_expires_at"]) == expected_expiry
-                and float(attempt["lease_expires_at"]) == expected_expiry
-                and batch["envelope_sha256"] == envelope_sha256
-                and batch["membership_sha256"] == membership_sha256
                 and work["lease_owner"] is None
                 and work["lease_attempt_id"] is None
                 and work["lease_expires_at"] is None
-                and work["committed_attempt_id"] is None
-                and not any(
-                    row["work_id"] == work_id for row in publication_rows
-                )
-                and len(
-                    [
-                        row
-                        for row in attempt_rows
-                        if row["work_id"] == work_id
-                    ]
-                )
-                == 1
             )
             if terminal:
                 return {
@@ -1131,60 +1145,19 @@ class FabricControlStoreImpl:
                 and work["lease_attempt_id"] == attempt_id
                 and attempt["work_id"] == work_id
                 and attempt["batch_id"] == batch_id
-                and int(work["fence"]) == expected_fence
-                and int(attempt["fence"]) == expected_fence
-                and observed_member == expected_member
                 and float(work["lease_expires_at"]) == expected_expiry
-                and float(batch["lease_expires_at"]) == expected_expiry
-                and float(attempt["lease_expires_at"]) == expected_expiry
-                and batch["envelope_sha256"] == envelope_sha256
-                and batch["membership_sha256"] == membership_sha256
                 and int(work["attempt_count"]) >= int(work["max_attempts"])
-                and work["committed_attempt_id"] is None
-                and not any(
-                    row["work_id"] == work_id for row in publication_rows
-                )
             )
-            related_attempts = [
-                row for row in attempt_rows if row["work_id"] == work_id
-            ]
-            if (
-                not exact
-                or len(related_attempts) != 1
-                or max(int(row["fence"]) for row in related_attempts)
-                != expected_fence
-            ):
+            if not exact:
                 raise LeaseLostError("exact recovery identity or fence differs")
-            envelope = self.envelopes.read(
-                str(batch["envelope_path"]), envelope_sha256
-            )
-            if (
-                envelope.get("batch_id") != batch_id
-                or envelope.get("owner") != owner
-                or envelope.get("membership_sha256") != membership_sha256
-                or len(envelope.get("items", [])) != 1
-                or envelope["items"][0].get("attempt_id") != attempt_id
-            ):
-                raise BatchValidationError(
-                    "exact recovery immutable envelope differs"
-                )
-            from people_counter.sjd_process import verify_envelope
-
-            verified = verify_envelope(
-                envelope,
+            self._verify_exact_recovery_output(
+                batch,
                 batch_id=batch_id,
+                attempt_id=attempt_id,
+                owner=owner,
                 envelope_sha256=envelope_sha256,
+                membership_sha256=membership_sha256,
             )
-            attempt_root = (
-                f"{self.config.file_path('attempts')}/process/"
-                f"batch={batch_id}/attempt={verified.execution_attempt_id}"
-            )
-            if self.envelopes.files.exists(
-                f"{attempt_root}/_delta_log"
-            ) or self.envelopes.files.exists(f"{attempt_root}/_SUCCESS"):
-                raise BatchValidationError(
-                    "exact recovery found staged or committed output"
-                )
             attempt["status"] = "EXPIRED"
             attempt["recovery_outcome"] = "DEAD"
             batch["status"] = "EXPIRED"
@@ -1204,23 +1177,7 @@ class FabricControlStoreImpl:
                 batches=batch_rows,
                 attempts=attempt_rows,
             )
-            readback_work = _require_one(
-                self._rows("work"), "work_id", work_id
-            )
-            readback_batch = _require_one(
-                self._rows("batches"), "batch_id", batch_id
-            )
-            readback_attempt = _require_one(
-                self._rows("attempts"), "attempt_id", attempt_id
-            )
-            if (
-                readback_work["status"] != "DEAD"
-                or readback_work["lease_owner"] is not None
-                or readback_batch["status"] != "EXPIRED"
-                or readback_attempt["status"] != "EXPIRED"
-                or readback_attempt["recovery_outcome"] != "DEAD"
-            ):
-                raise LeaseLostError("exact recovery readback differs")
+            self._verify_exact_recovery_readback(work_id, batch_id, attempt_id)
             return {
                 "attempt_id": attempt_id,
                 "batch_id": batch_id,
@@ -1231,6 +1188,63 @@ class FabricControlStoreImpl:
             }
 
         return self.writer.run(operation)
+
+    def _verify_exact_recovery_readback(
+        self, work_id: str, batch_id: str, attempt_id: str,
+    ) -> None:
+        work = _require_one(self._rows("work"), "work_id", work_id)
+        batch = _require_one(self._rows("batches"), "batch_id", batch_id)
+        attempt = _require_one(self._rows("attempts"), "attempt_id", attempt_id)
+        if (
+            work["status"] != "DEAD"
+            or work["lease_owner"] is not None
+            or batch["status"] != "EXPIRED"
+            or attempt["status"] != "EXPIRED"
+            or attempt["recovery_outcome"] != "DEAD"
+        ):
+            raise LeaseLostError("exact recovery readback differs")
+
+    def _verify_exact_recovery_output(
+        self,
+        batch: Mapping[str, Any],
+        *,
+        batch_id: str,
+        attempt_id: str,
+        owner: str,
+        envelope_sha256: str,
+        membership_sha256: str,
+    ) -> None:
+        """Require immutable evidence that this exact claim has no staged output."""
+        from people_counter.sjd_process import verify_envelope
+
+        envelope = self.envelopes.read(
+            str(batch["envelope_path"]), envelope_sha256
+        )
+        if (
+            envelope.get("batch_id") != batch_id
+            or envelope.get("owner") != owner
+            or envelope.get("membership_sha256") != membership_sha256
+            or len(envelope.get("items", [])) != 1
+            or envelope["items"][0].get("attempt_id") != attempt_id
+        ):
+            raise BatchValidationError(
+                "exact recovery immutable envelope differs"
+            )
+        verified = verify_envelope(
+            envelope,
+            batch_id=batch_id,
+            envelope_sha256=envelope_sha256,
+        )
+        attempt_root = (
+            f"{self.config.file_path('attempts')}/process/"
+            f"batch={batch_id}/attempt={verified.execution_attempt_id}"
+        )
+        if self.envelopes.files.exists(
+            f"{attempt_root}/_delta_log"
+        ) or self.envelopes.files.exists(f"{attempt_root}/_SUCCESS"):
+            raise BatchValidationError(
+                "exact recovery found staged or committed output"
+            )
 
     def replay(
         self,
@@ -1627,7 +1641,7 @@ def _text(value: object, name: str) -> str:
 
 
 def _finite(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(float(value)):
+    if not (type(value) is int or type(value) is float) or not math.isfinite(float(value)):
         raise ValueError(f"{name} must be finite")
     return float(value)
 

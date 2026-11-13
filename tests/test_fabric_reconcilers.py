@@ -1187,3 +1187,131 @@ def test_runtime_disables_schedules_before_a_postconfiguration_failure(
         if call in scheduled_mutations
     )
     assert last_schedule_mutation < first_environment_mutation
+
+
+def test_reconciler_cli_runs_real_orchestration_with_injected_external_clients(
+    tmp_path, monkeypatch, capsys,
+):
+    from people_counter import fabric_automation, fabric_rest
+
+    manifest = _resolved_manifest()
+    document = manifest.to_document()
+    whl = tmp_path / "people_counter-1.0.0-py3-none-any.whl"
+    whl.write_bytes(b"wheel")
+    client = _FakeClient(get_results={
+        f"/workspaces/{manifest.workspace_id}/environments/{manifest.fabric_environment_id}": [
+            {"properties": {"publishDetails": {"state": "Success"}}},
+        ],
+    })
+    roots = []
+
+    def make_client(token_provider, **kwargs):
+        roots.append(kwargs["api_root"])
+        return client
+
+    monkeypatch.setattr(fabric_automation, "FabricAutomationClient", make_client)
+    monkeypatch.setattr(reconcilers, "make_resource_token_provider", lambda resource: lambda: "test-token")
+    monkeypatch.setattr(fabric_rest, "UrllibTransport", lambda: None)
+    args = ["--stage", "dev", "--whl-path", str(whl), "--commit-sha", "a" * 40]
+    for option, value in (
+        ("manifest", document), ("terraform-output", {}),
+        ("runtime-contract", {"schema": reconcilers.RUNTIME_CONTRACT_SCHEMA}),
+        ("definition-evidence", {"bundles": [{"contentSha256": "B" * 64}]}),
+    ):
+        path = tmp_path / f"{option}.json"
+        path.write_text(json.dumps(value))
+        args.extend([f"--{option}-path", str(path)])
+    assert reconcilers.main(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "succeeded"
+    assert result["context"]["definitionHashes"] == {"bundles[0].contentSha256": "b" * 64}
+    assert result["schedulesEnabled"] is False
+    assert len(roots) == 3
+    assert roots[-1] == "https://api.powerbi.com/v1.0/myorg"
+    (tmp_path / "manifest.json").write_text("[]")
+    assert reconcilers.main(args) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["status"] == "failed"
+    assert "must be a JSON object" in captured.err
+    (tmp_path / "manifest.json").write_text("{")
+    assert reconcilers.main(args) == 1
+    assert "could not be read as JSON" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("release,arguments,message", [
+    ({}, ["--release-manifest-sha256", "a" * 64], "both release"),
+    ([], ["--release-manifest-sha256", "a" * 64, "--release-receipt-sha256", "b" * 64], "release must be an object"),
+])
+def test_reconciler_cli_rejects_incomplete_release_binding_before_clients(
+    tmp_path, release, arguments, message, capsys,
+):
+    document = _resolved_manifest().to_document()
+    document["release"] = release
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(document))
+    assert reconcilers.main([
+        "--manifest-path", str(path), "--stage", "dev", "--whl-path", "unused.whl",
+        *arguments,
+    ]) == 1
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("authentication,env,message", [
+    ({"type": "Unsupported"}, {}, "unsupported connection authentication"),
+    ({"type": "Basic", "valuesFromEnvironment": {}}, {}, "documented fields"),
+    ({"type": "Key", "valuesFromEnvironment": {"key": "BAD-NAME"}}, {}, "reference.*invalid"),
+    ({"type": "Key", "valuesFromEnvironment": {"key": "UNSET"}}, {}, "is unset"),
+])
+def test_connection_credentials_are_validated_before_remote_mutation(authentication, env, message):
+    client = _FakeClient()
+    with pytest.raises(reconcilers.ReconcileError, match=message):
+        reconcilers.reconcile_connection_authentication(
+            client, connection_ids={"source": _uid("connection")},
+            configurations=[{
+                "key": "source", "connectivityType": "ShareableCloud",
+                "authentication": authentication,
+            }], env=env,
+        )
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("outputs,message", [
+    ({"spark_job_definition_ids": {"value": ["invalid"]}}, "spark_job_definition_ids"),
+    ({"semantic_model_ids": {"value": ["invalid"]}}, "reporting outputs"),
+    ({"report_ids": {"value": ["invalid"]}}, "reporting outputs"),
+    ({"activator_ids": {"value": ["invalid"]}}, "activator_ids"),
+])
+def test_terraform_merge_rejects_wrong_output_shapes_without_changing_input(outputs, message):
+    document = _resolved_manifest().to_document()
+    original = copy.deepcopy(document)
+    with pytest.raises(reconcilers.ReconcileError, match=message):
+        reconcilers.merge_terraform_output(document, outputs)
+    assert document == original
+
+
+@pytest.mark.parametrize("contract,message", [
+    ({"lakehouse": {"folders": [""]}}, "non-empty"),
+    ({"lakehouse": {"folders": ["folder"]}}, "OneLake client"),
+    ({"powerBi": {"takeover": []}}, "Power BI client"),
+    ({"connections": {}}, "must be a list"),
+])
+def test_runtime_contract_missing_adapters_fails_with_schedules_disabled(tmp_path, contract, message):
+    manifest = _resolved_manifest()
+    whl = tmp_path / "people_counter-1.0.0-py3-none-any.whl"
+    whl.write_bytes(b"wheel")
+    client = _FakeClient(get_results={
+        f"/workspaces/{manifest.workspace_id}/environments/{manifest.fabric_environment_id}": [
+            {"properties": {"publishDetails": {"state": "Success"}}},
+        ],
+    })
+    with pytest.raises(reconcilers.ReconcileError, match=message):
+        reconcilers.reconcile_runtime(
+            client, manifest, whl_path=whl, enable_schedules=False,
+            runtime_contract={"schema": reconcilers.RUNTIME_CONTRACT_SCHEMA, **contract},
+            onelake_client=client if contract.get("lakehouse", {}).get("folders") == [""] else None,
+            now=_NOW, sleep=lambda _: None, monotonic=lambda: 0,
+        )
+    assert all(
+        call[2]["enabled"] is False for call in client.calls
+        if call[0] in {"POST", "PATCH"} and call[1].endswith("/schedules")
+    )

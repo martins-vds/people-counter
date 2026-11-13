@@ -3533,6 +3533,7 @@ dev = [
     { name = "mutmut" },
     { name = "pytest-cov" },
     { name = "pytest-crap" },
+    { name = "radon" },
     { name = "toml" },
 ]
 ui = [
@@ -3585,6 +3586,7 @@ dev = [
     { name = "mutmut", specifier = ">=3.8.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-crap", specifier = ">=0.3.0" },
+    { name = "radon", specifier = ">=6.0.1,<7" },
     { name = "toml", specifier = ">=0.10.2" },
 ]
 ui = [{ name = "pytest-playwright", specifier = ">=0.7,<1" }]

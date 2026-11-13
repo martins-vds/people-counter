@@ -25,6 +25,7 @@ dev = [
     "mutmut>=3.8.0",
     "pytest-cov>=7.1.0",
     "pytest-crap>=0.3.0",
+    "radon>=6.0.1,<7",
     "toml>=0.10.2",
 ]
 ui = ["pytest-playwright>=0.7,<1"]
@@ -67,6 +68,7 @@ source_paths = [
     "scripts/deploy_sjd_operations.py",
     "scripts/deploy_sjd_operational_report.py",
     "scripts/check_fabric_definition_drift.py",
+    "scripts/check_python_crap.py",
     "scripts/validate_fabric_deployment.py",
     "scripts/download_models.py",
     "scripts/prepare_manual_fabric_assets.py",

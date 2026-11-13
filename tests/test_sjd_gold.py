@@ -2,45 +2,46 @@ import hashlib
 import json
 import sqlite3
 import sys
-import tempfile
 import types
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, call
 
 import pytest
 
-import people_counter.fabric_gold as fabric_gold
+from people_counter import fabric_gold
 from people_counter.fabric_gold import FabricGoldStoreImpl
 from people_counter.fabric_sjd_runtime import _control_dispatch
 from people_counter.sjd_control import SQLiteControlStore
 from people_counter.sjd_gold import (
-    CommittedOutput,
     DIMENSION_TABLES,
     FACT_TABLES,
     OPERATIONAL_TABLES,
-    FabricGoldStore,
+    CommittedOutput,
     FabricGoldSource,
     FabricGoldState,
+    FabricGoldStore,
     GoldSourceError,
     GoldValidationError,
     LocalGoldJob,
     LocalJsonGoldStore,
     SourceCheckpoint,
     UnsupportedGoldBackendError,
-    _dimension_rows,
-    _dimension_fact_dates,
-    _dimension_source_rows,
-    _load_delta_output_document,
-    _read_delta_records,
     _checkpoint_targets_match,
+    _dimension_fact_dates,
+    _dimension_rows,
+    _dimension_source_rows,
     _fact_rows_for_date,
-    _optional_float,
+    _load_delta_output_document,
     _operational_rows,
+    _optional_float,
     _output_dates,
+    _read_delta_records,
     _sha256_json,
     main,
 )
+
+pytest_plugins = ("tests.test_fabric_gold",)
 
 
 def test_fabric_gold_store_bootstrap_creates_missing_typed_tables() -> None:
@@ -415,35 +416,23 @@ def test_delta_output_decoder_uses_active_session_and_verifies_records():
     assert document["run"]["captured_at_utc"] == "2026-01-01T00:00:00Z"
 
 
-def test_delta_reader_treats_quotes_and_backslashes_as_literal_identifiers(tmp_path):
-    from pyspark.sql import SparkSession
-
-    spark = (
-        SparkSession.builder.master("local[1]")
-        .appName("gold-literal-regression")
-        .config("spark.ui.enabled", "false")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.sql.warehouse.dir", str(tmp_path / "warehouse"))
-        .getOrCreate()
+def test_delta_reader_treats_quotes_and_backslashes_as_literal_identifiers(
+    tmp_path, gold_spark
+):
+    work_id = r"work\' OR true --"
+    attempt_id = r"attempt\' OR true --"
+    expected = {"value": "selected"}
+    frame = gold_spark.createDataFrame([
+        (work_id, attempt_id, json.dumps(expected)),
+        ("other", attempt_id, '{"value":"wrong work"}'),
+        (work_id, "other", '{"value":"wrong attempt"}'),
+    ], ["work_id", "attempt_id", "record_json"])
+    reader = types.SimpleNamespace(
+        read=types.SimpleNamespace(format=lambda _: types.SimpleNamespace(load=lambda _: frame)),
     )
-    try:
-        work_id = r"work\' OR true --"
-        attempt_id = r"attempt\' OR true --"
-        expected = {"value": "selected"}
-        frame = spark.createDataFrame([
-            (work_id, attempt_id, json.dumps(expected)),
-            ("other", attempt_id, '{"value":"wrong work"}'),
-            (work_id, "other", '{"value":"wrong attempt"}'),
-        ], ["work_id", "attempt_id", "record_json"])
-        reader = types.SimpleNamespace(
-            read=types.SimpleNamespace(format=lambda _: types.SimpleNamespace(load=lambda _: frame)),
-        )
-        for escaped in ("false", "true"):
-            spark.conf.set("spark.sql.parser.escapedStringLiterals", escaped)
-            assert _read_delta_records(reader, tmp_path, work_id, attempt_id) == [expected]
-    finally:
-        spark.stop()
+    for escaped in ("false", "true"):
+        gold_spark.conf.set("spark.sql.parser.escapedStringLiterals", escaped)
+        assert _read_delta_records(reader, tmp_path, work_id, attempt_id) == [expected]
 
 
 def test_delta_output_decoder_rejects_missing_identity_and_bad_digest():
@@ -648,9 +637,8 @@ class GoldFixture:
 
 
 @pytest.fixture
-def gold_fixture():
-    with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
-        yield GoldFixture(Path(temporary))
+def gold_fixture(tmp_path):
+    return GoldFixture(tmp_path)
 
 
 def test_only_committed_pointer_output_is_visible(gold_fixture):
@@ -1473,3 +1461,550 @@ def test_dimension_build_rejects_invalid_camera_timezone(gold_fixture):
 
     with pytest.raises(GoldSourceError, match="invalid IANA timezone"):
         job.build_dimensions()
+
+
+@pytest.mark.parametrize(
+    "content,message",
+    [
+        ("not JSON", "cannot read local table"),
+        ("[]", "must contain a JSON object"),
+        ('{"rows": {}}', "not a JSON row table"),
+        ('{"rows": [1]}', "not a JSON row table"),
+    ],
+)
+def test_local_json_store_rejects_corrupted_tables(tmp_path, content, message):
+    store = LocalJsonGoldStore(tmp_path)
+    (tmp_path / "gold_video.json").write_text(content)
+    with pytest.raises(GoldValidationError, match=message):
+        store.read_table("gold_video")
+
+
+@pytest.mark.parametrize("name", ["", "../escape", "GoldVideo", "gold-video"])
+def test_local_json_store_rejects_unsafe_names(tmp_path, name):
+    store = LocalJsonGoldStore(tmp_path)
+    with pytest.raises(ValueError, match="invalid local table name"):
+        store.read_table(name)
+
+
+def test_local_json_store_versions_and_partition_isolation(tmp_path):
+    store = LocalJsonGoldStore(tmp_path)
+    assert store.read_table("gold_video") == []
+    assert store.versions(["gold_video"]) == {"gold_video": 0}
+    old = {"capture_date": "2026-10-01", "work_id": "old"}
+    retained = {"capture_date": "2026-10-02", "work_id": "retained"}
+    assert store.replace_table("gold_video", [old, retained]) == 2
+    replacement = old | {"work_id": "new"}
+    assert store.replace_partition(
+        "gold_video", "capture_date", "2026-10-01", [replacement]
+    ) == 1
+    assert store.read_table("gold_video") == [retained, replacement]
+    assert store.version("gold_video") == 2
+    assert not list(tmp_path.glob("*.pending"))
+
+
+@pytest.mark.parametrize("lookback", [0, -1, True, 1.5, "48"])
+def test_plan_rejects_invalid_lookback(gold_fixture, lookback):
+    with pytest.raises(ValueError, match="at least 1"):
+        gold_fixture.job().plan(lookback_hours=lookback)
+
+
+def test_missing_database_and_control_tables_fail_closed(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        LocalGoldJob(tmp_path / "missing.sqlite3", tmp_path / "gold")
+    database = tmp_path / "empty.sqlite3"
+    database.touch()
+    job = LocalGoldJob(database, tmp_path / "gold")
+    assert job.source_checkpoint().publication_sequence == 0
+    assert job.operations_source_checkpoint().publication_sequence == 0
+    with pytest.raises(GoldSourceError, match="lacks required tables"):
+        job.committed_outputs()
+    with sqlite3.connect(database) as connection:
+        for table in ("work", "attempts", "publications"):
+            connection.execute(f"CREATE TABLE {table} (id INTEGER)")
+    with pytest.raises(GoldSourceError, match="committed_attempt_id is required"):
+        job.committed_outputs()
+
+
+@pytest.mark.parametrize(
+    "table,column,value,message",
+    [
+        ("attempts", "output_path", "different", "output paths differ"),
+        ("attempts", "output_sha256", "different", "output digests differ"),
+        ("work", "publication_sequence", 99, "sequence differ"),
+        ("work", "payload_json", "not-json", "payload_json is invalid"),
+        ("work", "payload_json", "[]", "must be a JSON object"),
+    ],
+)
+def test_committed_pointer_metadata_is_verified(
+    gold_fixture, table, column, value, message
+):
+    gold_fixture.publish("work")
+    with sqlite3.connect(gold_fixture.database) as connection:
+        connection.execute(
+            f"UPDATE {table} SET {column} = ?", (value,)
+        )
+    with pytest.raises(GoldSourceError, match=message):
+        gold_fixture.job().committed_outputs()
+
+
+def _replace_committed_document(fixture, attempt_id, document, *, raw=False):
+    path = fixture.root / f"{attempt_id}.json"
+    content = document.encode() if raw else json.dumps(document, sort_keys=True).encode()
+    path.write_bytes(content)
+    if isinstance(document, list):
+        matching = [
+            row for row in document
+            if isinstance(row, dict)
+            and row.get("work_id") == "work"
+            and row.get("attempt_id") == attempt_id
+        ]
+        digest = _sha256_json(sorted(
+            matching,
+            key=lambda row: (
+                str(row.get("work_id", "")), str(row.get("attempt_id", "")),
+                str(row.get("record_type", "")), int(row.get("record_sequence", -1)),
+            ),
+        ))
+    else:
+        digest = hashlib.sha256(content).hexdigest()
+    with sqlite3.connect(fixture.database) as connection:
+        for table in ("attempts", "publications"):
+            connection.execute(
+                f"UPDATE {table} SET output_sha256 = ? WHERE attempt_id = ?",
+                (digest, attempt_id),
+            )
+    return path
+
+
+@pytest.mark.parametrize(
+    "document,message",
+    [
+        (None, "must be a JSON object"),
+        ({}, "no unique run record"),
+        ({"run": []}, "no unique run record"),
+        ({"runs": "not a list"}, "no unique run record"),
+        ({"runs": [{}, {}]}, "no unique run record"),
+        ({"run": {"work_id": "other"}}, "does not match committed pointer"),
+        ({"run": {"attempt_id": "other"}}, "does not match committed pointer"),
+        ({"run": {}, "line_counts": {}}, "list of JSON objects"),
+        ({"run": {}, "line_counts": [1]}, "list of JSON objects"),
+    ],
+)
+def test_committed_documents_reject_invalid_contract(gold_fixture, document, message):
+    attempt = gold_fixture.publish("work")
+    _replace_committed_document(gold_fixture, attempt, document)
+    with pytest.raises(GoldSourceError, match=message):
+        gold_fixture.job().committed_outputs()
+
+
+@pytest.mark.parametrize("kind", ["missing", "malformed", "digest"])
+def test_committed_output_file_is_verified(gold_fixture, kind):
+    attempt = gold_fixture.publish("work")
+    path = gold_fixture.root / f"{attempt}.json"
+    if kind == "missing":
+        path.unlink()
+        message = "does not exist"
+    elif kind == "malformed":
+        path.write_text("not JSON")
+        message = "not valid JSON"
+    else:
+        path.write_text('{"run": {}}')
+        message = "digest mismatch"
+    with pytest.raises(GoldSourceError, match=message):
+        gold_fixture.job().committed_outputs()
+    if kind == "digest":
+        job = LocalGoldJob(
+            gold_fixture.database, gold_fixture.gold_root, verify_output_hash=False
+        )
+        assert job.committed_outputs()[0].run == {}
+
+
+@pytest.mark.parametrize("filename", ["output.json", "result.json", "records.json"])
+def test_committed_output_supports_exactly_one_directory_document(
+    gold_fixture, filename
+):
+    attempt = gold_fixture.publish("work")
+    path = gold_fixture.root / f"{attempt}.json"
+    content = path.read_bytes()
+    path.unlink()
+    path.mkdir()
+    with pytest.raises(GoldSourceError, match="exactly one"):
+        gold_fixture.job().committed_outputs()
+    (path / filename).write_bytes(content)
+    assert gold_fixture.job().committed_outputs()[0].work_id == "work"
+    (path / ("result.json" if filename != "result.json" else "output.json")).write_bytes(
+        content
+    )
+    with pytest.raises(GoldSourceError, match="exactly one"):
+        gold_fixture.job().committed_outputs()
+
+
+@pytest.mark.parametrize("shape", ["runs", "flat"])
+def test_legacy_committed_document_shapes_filter_other_identities(gold_fixture, shape):
+    attempt = gold_fixture.publish("work")
+    capture = "2026-10-01T23:59:30Z"
+    run = {"work_id": "work", "attempt_id": attempt, "captured_at_utc": capture}
+    lines = [
+        {"work_id": "other"},
+        {"attempt_id": "other"},
+        {"work_id": "work", "attempt_id": attempt, "video_seconds": 0},
+    ]
+    document = (
+        {"runs": [None, {"work_id": "other"}, {"attempt_id": "other"}, run], "lines": lines}
+        if shape == "runs"
+        else run | {"lines": lines}
+    )
+    _replace_committed_document(gold_fixture, attempt, document)
+    output = gold_fixture.job().committed_outputs()[0]
+    assert output.run["captured_at_utc"] == capture
+    assert output.line_counts == (lines[-1],)
+
+
+def _terminal_records(attempt):
+    return [
+        {
+            "work_id": "work", "attempt_id": attempt,
+            "record_type": "video_result", "record_sequence": 0,
+            "payload_json": '{"captured_at_utc":"2026-10-01T23:59:30Z"}',
+            "processing_seconds": 0, "processed_frames": 0, "status": "SUCCEEDED",
+        },
+        {
+            "work_id": "work", "attempt_id": attempt,
+            "record_type": "line_count", "record_sequence": 1,
+            "payload_json": '{"video_seconds":0,"frame_in_count":0,"frame_out_count":0}',
+        },
+    ]
+
+
+def test_committed_record_array_filters_attempts_and_builds_facts(gold_fixture):
+    attempt = gold_fixture.publish("work")
+    records = _terminal_records(attempt)
+    _replace_committed_document(
+        gold_fixture, attempt,
+        [records[1], {"work_id": "other"}, None, records[0]],
+    )
+    job = gold_fixture.job()
+    assert job.committed_outputs()[0].run["processed_frames"] == 0
+    job.build_facts()
+    assert job.store.read_table("gold_flow_minute")[0]["entries"] == 0
+    path = gold_fixture.root / f"{attempt}.json"
+    changed = json.loads(path.read_text())
+    changed[-1]["processing_seconds"] = 1
+    path.write_text(json.dumps(changed))
+    with pytest.raises(GoldSourceError, match="digest mismatch"):
+        job.committed_outputs()
+
+
+@pytest.mark.parametrize(
+    "update,message",
+    [
+        (lambda rows: rows.clear(), "one success terminal"),
+        (lambda rows: rows.append(dict(rows[0])), "one success terminal"),
+        (lambda rows: rows[0].update(record_type="error"), "one success terminal"),
+        (lambda rows: rows[0].update(payload_json="bad"), "video_result payload_json is invalid"),
+        (lambda rows: rows[0].update(payload_json="[]"), "video_result payload_json must be an object"),
+        (lambda rows: rows[1].update(payload_json="bad"), "line_count payload_json is invalid"),
+        (lambda rows: rows[1].update(payload_json="[]"), "line_count payload_json must be an object"),
+    ],
+)
+def test_committed_record_array_rejects_invalid_payload(gold_fixture, update, message):
+    attempt = gold_fixture.publish("work")
+    rows = _terminal_records(attempt)
+    update(rows)
+    _replace_committed_document(gold_fixture, attempt, rows)
+    with pytest.raises(GoldSourceError, match=message):
+        gold_fixture.job().committed_outputs()
+
+
+@pytest.mark.parametrize("seconds", [None, True, "bad", -1, float("inf")])
+def test_relative_flow_times_reject_invalid_values(gold_fixture, seconds):
+    attempt = gold_fixture.publish("work")
+    gold_fixture.rewrite_output(
+        attempt,
+        lambda document: document.update(line_counts=[{"video_seconds": seconds}]),
+    )
+    with pytest.raises(GoldSourceError, match="line count"):
+        gold_fixture.job().plan()
+
+
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("distinct_people", True, "integer"),
+        ("distinct_people", "bad", "integer"),
+        ("distinct_people", 1.2, "integer"),
+        ("processing_seconds", "bad", "numeric"),
+        ("processing_seconds", {}, "numeric"),
+        ("processing_seconds", -1, "finite and non-negative"),
+    ],
+)
+def test_fact_metrics_reject_invalid_values(gold_fixture, field, value, message):
+    attempt = gold_fixture.publish("work")
+    gold_fixture.rewrite_output(
+        attempt, lambda document: document["run"].update({field: value})
+    )
+    with pytest.raises(GoldSourceError, match=message):
+        gold_fixture.job().build_facts()
+
+
+@pytest.mark.parametrize(
+    "config,message",
+    [
+        ("bad", "config_json is invalid"),
+        ("[]", "must contain an object"),
+        ([], "must be an object or JSON string"),
+    ],
+)
+def test_dimension_config_rejects_invalid_values(gold_fixture, config, message):
+    attempt = gold_fixture.publish("work")
+    gold_fixture.rewrite_output(
+        attempt, lambda document: document["run"].update(config_json=config)
+    )
+    job = gold_fixture.job()
+    job.build_facts()
+    with pytest.raises(GoldSourceError, match=message):
+        job.build_dimensions()
+
+
+@pytest.mark.parametrize(
+    "change,message",
+    [
+        ({"location_id": "different"}, "one location and timezone"),
+        ({"camera_timezone": "America/Chicago"}, "one location and timezone"),
+        ({"config_json": {"pipeline": "different"}}, "multiple configurations"),
+    ],
+)
+def test_dimensions_reject_conflicting_metadata(gold_fixture, change, message):
+    gold_fixture.publish("first")
+    attempt = gold_fixture.publish("second")
+    gold_fixture.rewrite_output(
+        attempt, lambda document: document["run"].update(change)
+    )
+    job = gold_fixture.job()
+    job.build_facts()
+    with pytest.raises(GoldValidationError, match=message):
+        job.build_dimensions()
+
+
+def test_validation_rejects_orphan_attempts_and_duplicate_dimension(gold_fixture):
+    gold_fixture.publish("work")
+    job = gold_fixture.job()
+    job.run()
+    cameras = job.store.read_table("gold_dim_camera")
+    job.store.replace_table("gold_dim_camera", cameras * 2)
+    with pytest.raises(GoldValidationError, match="non-null and unique"):
+        job.validate()
+    job.store.replace_table("gold_dim_camera", cameras)
+    job.store.replace_table("gold_work_operations", [])
+    with pytest.raises(GoldValidationError, match="unresolved gold_work_operations"):
+        job.validate()
+
+
+def test_sqlite_state_direct_checkpoint_and_ack_actor(gold_fixture):
+    state = gold_fixture.job().state
+    source = SourceCheckpoint(1, {"work": "first"})
+    state.save_checkpoint("facts", source, {"gold_video": 1})
+    assert state.checkpoint("facts")["source_key"] == source.key
+    newer = SourceCheckpoint(2, {"work": "second"})
+    state.save_checkpoint("facts", newer, {"gold_video": 2})
+    assert state.checkpoint("facts")["source_key"] == newer.key
+    first = state.enqueue_refresh("changed", source, {})
+    assert state.enqueue_refresh("changed", source, {}) == first
+    with pytest.raises(ValueError, match="actor is required"):
+        state.acknowledge_refresh(first, " ")
+    assert state.acknowledge_refresh(first, " operator ")
+    with sqlite3.connect(gold_fixture.database) as connection:
+        assert connection.execute(
+            "SELECT acked_by FROM semantic_refresh_outbox WHERE outbox_id=?", (first,)
+        ).fetchone()[0] == "operator"
+
+
+@pytest.mark.parametrize(
+    "mode", ["plan", "build-facts", "build-dimensions", "validate", "run"]
+)
+def test_json_cli_executes_real_gold_job(gold_fixture, capsys, mode):
+    gold_fixture.publish("work")
+    gold_fixture.job().run()
+    assert main([
+        mode, "--control-db", str(gold_fixture.database),
+        "--gold-root", str(gold_fixture.gold_root), "--backend", "json",
+    ] + (["--force"] if mode == "plan" else [])) == 0
+    result = json.loads(capsys.readouterr().out)
+    if mode == "plan":
+        assert result["partition_count"] == 2
+        assert result["items"] == [
+            {"partition_date": "2026-10-01"}, {"partition_date": "2026-10-02"}
+        ]
+    elif mode in {"build-facts", "build-dimensions"}:
+        assert result["skipped"] is True
+    elif mode == "validate":
+        assert result["valid"] is True
+    else:
+        assert result["validation"]["valid"] is True
+
+
+@pytest.mark.parametrize(
+    "record_json,message",
+    [(None, None), ("bad JSON", "record_json is invalid"), ("[]", "must be an object")],
+)
+def test_committed_delta_output_reads_real_records(
+    gold_fixture, gold_spark, record_json, message
+):
+    attempt = gold_fixture.publish("work")
+    records = _terminal_records(attempt)
+    path = _replace_committed_document(gold_fixture, attempt, records)
+    path.unlink()
+    rows = [
+        ("work", attempt, json.dumps(record))
+        for record in records
+    ] if record_json is None else [("work", attempt, record_json)]
+    rows.append(("other", attempt, "not parsed because not committed"))
+    gold_spark.createDataFrame(
+        rows, "work_id string, attempt_id string, record_json string"
+    ).write.format("delta").save(str(path))
+    if message:
+        with pytest.raises(GoldSourceError, match=message):
+            gold_fixture.job().committed_outputs()
+    else:
+        output = gold_fixture.job().committed_outputs()[0]
+        assert output.run["processed_frames"] == 0
+        assert output.line_counts[0]["video_seconds"] == 0
+
+
+@pytest.mark.parametrize("capture", [True, {}, float("inf"), 1e100, "bad", ""])
+def test_invalid_capture_timestamp_fails_closed(gold_fixture, capture):
+    attempt = gold_fixture.publish("work")
+    gold_fixture.rewrite_output(
+        attempt, lambda document: document["run"].update(captured_at_utc=capture)
+    )
+    with pytest.raises(GoldSourceError, match="invalid UTC timestamp"):
+        gold_fixture.job().plan()
+
+
+def test_empty_job_and_date_objects_have_stable_public_results(gold_fixture):
+    from datetime import date
+
+    job = gold_fixture.job()
+    plan = job.plan(now=NOW.replace(tzinfo=None))
+    assert plan.planned_at == "2026-10-02T17:00:00Z"
+    assert plan.items == ()
+    result = job.run()
+    assert result["facts"]["partition_count"] == 0
+    assert result["validation"]["valid"] is True
+    assert job.store.read_table("gold_dim_date")[0]["date_key"] == "2026-10-02"
+    with pytest.raises(ValueError, match="invalid date"):
+        job.build_facts(dates=["invalid"])
+    explicit = job.build_facts(dates=[date(2026, 10, 1)])
+    assert explicit["dates"] == ["2026-10-01"]
+
+
+def test_operations_rollups_include_expired_failed_and_deferred_attempts():
+    # Control rows are the adapter's input contract, including Fabric-only timestamps.
+    control = {
+        "work": [{"queued_at": "2026-10-01T10:00:00Z"}, {}],
+        "attempts": [
+            {"attempt_id": "expired", "status": "EXPIRED",
+             "batch_expired_at": "2026-10-01T12:00:00Z", "processing_seconds": 1},
+            {"attempt_id": "failed", "status": "FAILED",
+             "failed_at": "2026-10-01T12:00:00Z", "processing_seconds": 3},
+            {"attempt_id": "released", "status": "RELEASED",
+             "completed_at": "2026-10-01T12:00:00Z"},
+            {"attempt_id": "running", "status": "RUNNING"},
+            {"attempt_id": "earlier", "status": "FAILED",
+             "failed_at": "2026-09-01T12:00:00Z"},
+            {"attempt_id": "unpublished", "status": "SUCCEEDED",
+             "completed_at": "2026-10-01T12:00:00Z"},
+        ],
+    }
+    rows = _fact_rows_for_date([], control, "2026-10-01", NOW.isoformat())
+    operations = rows["gold_operations_hour"]
+    assert len(operations) == 2
+    assert operations[0]["queued"] == 1
+    assert operations[0]["average_processing_seconds"] is None
+    assert operations[1]["failed"] == 2
+    assert operations[1]["deferred"] == 1
+    assert operations[1]["succeeded"] == 0
+    assert operations[1]["average_processing_seconds"] == 2
+    assert operations[1]["p95_processing_seconds"] == 3
+
+
+def test_plan_revisits_old_flow_when_committed_metadata_changes(gold_fixture):
+    gold_fixture.publish("work")
+    job = gold_fixture.job()
+    job.build_facts()
+    with sqlite3.connect(gold_fixture.database) as connection:
+        connection.execute("UPDATE work SET duration_seconds=121")
+    assert job.plan(now=NOW + timedelta(days=100), lookback_hours=1).items == (
+        "2026-10-01", "2026-10-02"
+    )
+
+
+def test_plan_revisits_old_operations_when_no_recent_control_dates(gold_fixture):
+    gold_fixture.register("work")
+    job = gold_fixture.job()
+    job.build_facts()
+    old = datetime(2026, 9, 1, tzinfo=UTC).timestamp()
+    with sqlite3.connect(gold_fixture.database) as connection:
+        connection.execute(
+            "UPDATE work SET created_at=?, updated_at=?, available_at=?", (old, old, old)
+        )
+    assert job.plan(now=NOW + timedelta(days=100), lookback_hours=1).items == (
+        "2026-09-01",
+    )
+
+
+def test_source_change_during_build_does_not_advance_complete_checkpoint(gold_fixture):
+    gold_fixture.publish("first")
+
+    class RegisteringStore(LocalJsonGoldStore):
+        registered = False
+
+        def replace_partition(self, *args, **kwargs):
+            if not self.registered:
+                self.registered = True
+                gold_fixture.register("arrived-during-build")
+            return super().replace_partition(*args, **kwargs)
+
+    job = LocalGoldJob(
+        gold_fixture.database, gold_fixture.gold_root,
+        store=RegisteringStore(gold_fixture.gold_root), clock=lambda: NOW,
+    )
+    result = job.build_facts()
+    assert result["complete_checkpoint_advanced"] is False
+    assert job.state.checkpoint("facts") is None
+    assert job.state.checkpoint("facts:partition:2026-10-01") is not None
+    assert job.build_facts()["complete_checkpoint_advanced"] is True
+
+
+@pytest.mark.parametrize("config", [None, "", '{"pipeline":"rtdetr"}'])
+def test_dimension_config_normalizes_supported_legacy_values(gold_fixture, config):
+    attempt = gold_fixture.publish("work")
+    gold_fixture.rewrite_output(
+        attempt, lambda document: document["run"].update(config_json=config)
+    )
+    job = gold_fixture.job()
+    job.run()
+    dimension = job.store.read_table("gold_dim_model_config")[0]
+    assert json.loads(dimension["config_json"]) == (
+        {"pipeline": "rtdetr"} if config else {}
+    )
+    assert dimension["counting_line_json"] is None
+
+
+@pytest.mark.parametrize(
+    "metadata,message",
+    [
+        ({"config_sha256": ""}, "config_sha256 is required"),
+        ({"retryable": 1}, "metric must be boolean"),
+        ({"source_size_bytes": True}, "source_size_bytes is invalid"),
+    ],
+)
+def test_fact_projection_rejects_invalid_operational_metadata(
+    gold_fixture, metadata, message
+):
+    attempt = gold_fixture.publish("work")
+    gold_fixture.rewrite_output(
+        attempt, lambda document: document["run"].update(metadata)
+    )
+    with pytest.raises(GoldSourceError, match=message):
+        gold_fixture.job().build_facts()

@@ -580,7 +580,9 @@ covers the editor.
 
 ![Wheel staging in Full mode; this earlier example filename differs from the final manual-binding build.](images/manual-deployment/23-wheel-staged.png)
 
-7. Under **Spark compute** > **Compute**, set:
+7. First calculate the capacity budget in
+   [Calculate an executor budget](#calculate-an-executor-budget), then under
+   **Spark compute** > **Compute**, set the reviewed profile below if it fits:
 
    | Setting | Reviewed value |
    |---|---|
@@ -645,20 +647,111 @@ the others:
 | Workspace Spark pool | Sets the available node sizes and scaling limits. Check **Workspace settings > Data Engineering/Science > Spark settings** and the pool selected for the Environment. Its limits must accommodate the reviewed session. |
 | Driver cores / memory | Resources for coordinating the Spark application. The driver is not an inference executor. The reviewed request is 8 cores / 56 GB. |
 | Executor cores / memory | Resources per worker executor, not the total for the job. The reviewed request is 8 cores / 56 GB per executor. |
-| `spark.executor.instances=2` | Requests two executors for one session. It does not mean two job executions and does not prove that two were allocated. |
-| Dynamic executor allocation off | Keeps the reviewed fixed-allocation request; do not turn it on merely to fit a smaller capacity. Pool node autoscaling and Spark executor allocation are separate controls. |
+| `spark.executor.instances=N` | Requests the calculated and approved fixed executor count for one session. The reviewed example uses `N=2`. It does not mean two job executions and does not prove that two were allocated. |
+| Dynamic executor allocation | Off uses the fixed count. On uses an approved minimum/maximum range within the same capacity budget. Runtime validation supports both modes; pool node autoscaling and Spark executor allocation are separate controls. |
 | `spark.task.cpus=1` | Reserves one executor core per Spark task. Two 8-core executors give a nominal ceiling of 16 simultaneous task slots, not a guarantee of 16 safe inference workers. Memory, model/thread budgets, partitions, and runtime admission can lower it. |
 | `spark.speculation=false` | Disables speculative duplicate task execution. This is a correctness setting, not a capacity-tuning knob. |
 | Dispatcher `--maximum-active-batches` | Application-level limit on active batches; the current default is 1. It is not an Environment Spark property or a Fabric capacity quota. Increase only after the release, resource, and concurrency checks have passed. |
 | Dispatcher `--max-items` | Maximum items considered for a claimed batch; the current default is 64. It does not request 64 executors or 64 concurrent Spark jobs. |
 | Schedule frequency / overlapping runs | Controls how often jobs are submitted. More frequent schedules can create overlap or queueing, not more compute. Keep schedules disabled throughout this walkthrough. |
 
-The requested sizes therefore depend on capacity and workload, but the values
-in this guide are a **reviewed deployment profile**, not an automatic SKU-to-
-executor sizing formula. The source of that profile is
+The requested sizes depend on capacity and workload. The values in this guide
+are a **reviewed deployment profile**, not a guarantee of available resources.
+Calculate the capacity ceiling below before selecting an executor count.
+The source of the default profile is
 [`reviewed_compute_settings`](../src/people_counter/fabric_sjd_definition.py);
 the [runtime admission code](../src/people_counter/fabric_sjd_runtime.py)
 also checks live runtime/executor evidence and memory-safe placement.
+
+#### Calculate an executor budget
+
+1. In **Workspace settings**, identify the assigned capacity. Have the capacity
+   administrator confirm its current SKU, whether Spark Autoscale Billing is
+   enabled, and whether job-level bursting is allowed. Check **Monitoring hub**
+   and the **Capacity Metrics** app for other active Spark sessions. Include
+   the explicit backfill notebook: its Spark-based monitoring can run alongside
+   Dispatcher and consume a separate session's allocation.
+2. Select the Spark core budget `B`:
+   - Without Autoscale Billing, base Spark vCores are `2 * capacity CUs`.
+     For example, F16 has `2 * 16 = 32` base Spark vCores.
+   - For planning without bursting, use that base figure. If the capacity
+     owner explicitly budgets burst resources, use Microsoft's
+     [SKU maximum Spark vCores table](https://learn.microsoft.com/en-us/fabric/data-engineering/spark-job-concurrency-and-queueing#spark-capacity-sku-limits)
+     and the effective per-job bursting policy, not an assumed multiplier.
+     In particular, F2's documented burst limit is **20**, not `4 * 3 = 12`.
+     Burst resources are shared and are not a guaranteed sustained allocation.
+   - With **Autoscale Billing for Spark**, use `2 * configured maximum Spark
+     CUs` instead of the workspace capacity SKU. This is a separate serverless
+     compute/billing budget; do not add Fabric burst cores to it.
+3. Reserve `R` Spark vCores for other simultaneous sessions and operating
+   headroom. Cap the remaining budget by the selected pool and per-job limit:
+   `J = min(B - R, pool/job core limit)`. If `B - R <= 0`, wait or revise
+   the operating plan rather than starting another session.
+4. With driver cores `D` and executor cores `E`, calculate a **core-budget
+   ceiling** for a conventional separate-driver session:
+
+   ```text
+   N_core = floor((J - D) / E)
+   session core request = D + N * E
+   ```
+
+   Choose a positive integer `N <= N_core`, subject to pool worker/node limits
+   and memory placement. Do not round up. If `N_core < 1`, the selected profile
+   does not fit: reduce approved resource sizes, stop competing sessions, or
+   use a larger approved budget. Do not force `N=1` and assume it fits.
+   Node-size rounding, memory overhead, driver placement, and single-node pools
+   can change physical allocation; this arithmetic is a planning ceiling, not
+   Fabric's admission algorithm or proof that executors will be assigned.
+
+Worked examples below use **D=8, E=8**, no competing sessions (`R=0`), a pool
+large enough for the request, and the separate-driver model:
+
+| Capacity | Base Spark vCores | Base-budget executor ceiling | Documented burst maximum | Burst-budget executor ceiling |
+|---|---:|---:|---:|---:|
+| F2 | 4 | Profile does not fit | 20 | 1 |
+| F4 | 8 | Profile does not fit | 24 | 2 |
+| F8 | 16 | 1 | 48 | 5 |
+| F16 | 32 | 3 | 96 | 11 |
+| F32 | 64 | 7 | 192 | 23 |
+| F64 | 128 | 15 | 384 | 47 |
+
+These are ceilings, **not recommended executor counts**. For the reviewed
+two-executor profile, `8 + 2 * 8 = 24` Spark vCores per session. It fits an
+otherwise free F16 base budget or an F4 burst budget, but not F4's base budget.
+On F16, reserving 16 cores for another session leaves `J=16`, so the ceiling
+becomes `floor((16 - 8) / 8) = 1`, not 3. Use the other session's actual resource
+budget; 16 is only an example. More executors do not necessarily help a
+three-video batch and can increase cost without increasing useful parallelism.
+
+#### Apply and verify the calculated count
+
+- **Fixed allocation:** turn dynamic allocation off and set
+  `spark.executor.instances=N` in the Environment's Spark properties.
+  Remove or correct obsolete dynamic-allocation bounds so the saved settings
+  are understandable; the SDK ignores them when dynamic allocation is off.
+- **Dynamic allocation:** enable it and configure the approved minimum and
+  maximum executor counts in the Environment UI. Keep the maximum within the
+  calculated ceiling and the minimum within the available startup budget.
+  Verify `spark.dynamicAllocation.enabled`, `.minExecutors`, and `.maxExecutors`
+  in the resulting Spark configuration. Do not treat a stale
+  `spark.executor.instances` value as the dynamic maximum.
+- Publish the Environment and start a fresh session. In **Monitoring hub >
+  run details > Spark UI > Executors**, exclude the driver and record actual
+  executor count, cores, and memory. Compare those observations with the
+  requested allocation and check for queueing/throttling. Dynamic counts can
+  change while the session runs; the runtime's discovery minimum is not a
+  promise of a fixed executor count.
+- Keep model warm-up, measured-memory, and task-placement checks. A core-budget
+  fit does not prove that each executor has enough memory for concurrent models.
+
+The deployment helper still validates its default fixed two-executor profile.
+A calculated count or dynamic range does **not** silently update that contract.
+If it differs, complete the approval and corresponding application/deployment
+changes below before applying it as a supported deployment.
+
+Sources: [Spark concurrency, bursting, and SKU limits](https://learn.microsoft.com/en-us/fabric/data-engineering/spark-job-concurrency-and-queueing),
+[Spark billing and Autoscale Billing](https://learn.microsoft.com/en-us/fabric/data-engineering/billing-capacity-management-for-spark),
+and [Spark pools and node placement](https://learn.microsoft.com/en-us/fabric/data-engineering/spark-compute).
 
 Before approving a different profile:
 
@@ -1739,13 +1832,20 @@ remains `READY`.
 
 ![Refresh schedule read back as Every 15 minutes, Inactive, UTC.](images/manual-deployment/75-refresh-schedule-inactive.png)
 
-10. Set and verify the role-specific execution arguments:
-    - Control: manual-artifact prefix followed by `reconcile`, **not**
-      the initial `bootstrap` command.
+10. Set and verify the role-specific execution arguments. Save the normal
+    recurring command in the SJD settings as well as any explicit schedule
+    execution override; a schedule without an override uses the job's saved
+    arguments. Reopen both surfaces to verify the effective command.
+    - Control: manual-artifact prefix followed by **`recover`**, **not**
+      `bootstrap` or `reconcile`. `bootstrap` is one-time initialization;
+      `recover` expires elapsed work/batch leases and makes retryable work
+      available again. `reconcile` records findings but does not release leases.
     - Reconciliation: its entry point performs `reconcile`; retain the
       manual-artifact prefix.
     - Gold: manual-artifact prefix followed by its required mode, `run`.
     - Refresh: the workspace and **both new model IDs**, as shown above.
+      Keep this schedule disabled until those models have been published and
+      their actual IDs are configured.
     - Dispatcher: the `--artifacts <workspace-id> <lakehouse-id>
       <environment-id>` prefix (`--manual-artifacts` remains an alias), plus
       `--files-root` when the deployment uses a non-default state root.
@@ -1775,6 +1875,40 @@ remains `READY`.
     An explicitly approved manual Dispatcher run can process a batch once;
     it does not replace the recurring schedule. Do not resubmit the backfill
     merely because its work is waiting for Dispatcher.
+
+#### Verify recovery and downstream schedules before handover
+
+All six role definitions must exist, but that alone does not configure the
+application. Verify these five recurring commands and keep Process on demand:
+
+| Role | Normal command after the target/state-root prefix | Cadence |
+|---|---|---|
+| Control | `recover` | Every 5 minutes |
+| Dispatcher | Approved batch bounds, or their defaults | Every 5 minutes |
+| Reconciliation | `reconcile` (also the entry point's default) | Every 15 minutes |
+| Gold | `run --lookback-hours 48` | Every 15 minutes |
+| Refresh | `--workspace-id <workspace-id> --semantic-model-id <analytics-model-id> --semantic-model-id <operations-model-id>` | Every 15 minutes |
+
+After acceptance, require an active, unexpired schedule for each recurring
+role. Check its effective arguments, target, Environment, and next run time.
+Do not leave Control's saved command at `bootstrap` after initialization.
+Do not schedule Process without a claimed batch ID.
+
+If work stays `READY` and completed Dispatcher runs print `{"status": "IDLE", ...}`,
+inspect `people_counter_sjd_batches` for `LEASED` or `SEALED` rows and compare
+their lease expiry with current time. The active-batch limit counts these
+statuses until recovery changes them; elapsed wall-clock time alone does not
+clear their stored status. An old expired batch can block new work even when
+all the newly registered items are `READY`.
+
+Verify the old owning job has terminated and review its staging/publication
+evidence before an approved recovery run. Review any old work returned to
+`READY` for SDK-version compatibility; quarantine incompatible old work through
+the supported operator command rather than editing immutable work digests.
+Keep the current registration state and published files. Do not delete table
+rows, clear locks blindly, increase the active-batch limit to bypass stale
+state, or resubmit the backfill. Verify recovery output and batch state before
+expecting the next Dispatcher run to claim work.
 
 ### Captured configuration checkpoint (historical)
 

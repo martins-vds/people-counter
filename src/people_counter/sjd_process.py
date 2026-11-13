@@ -14,7 +14,6 @@ import math
 import os
 import socket
 import threading
-import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
@@ -107,13 +106,15 @@ class ExecutionProfile:
     rss_headroom_fraction: float = 0.20
 
     def __post_init__(self) -> None:
-        if self.planned_task_count is None:
+        planned_task_count = self.planned_task_count
+        if planned_task_count is None:
             # Backward-compatible default for profiles constructed before
             # real per-executor slot planning existed: one physical task per
             # discovered executor, matching the prior (now-corrected) literal
             # executor-count assumption.
-            object.__setattr__(self, "planned_task_count", self.executor_instances)
-        if self.planned_task_count < 1:
+            planned_task_count = self.executor_instances
+            object.__setattr__(self, "planned_task_count", planned_task_count)
+        if planned_task_count < 1:
             raise ProcessValidationError("planned_task_count must be positive")
         if not 0.0 <= self.rss_headroom_fraction < 1.0:
             raise ProcessValidationError(
@@ -122,7 +123,8 @@ class ExecutionProfile:
 
     @property
     def physical_partitions(self) -> tuple[int, ...]:
-        return tuple(range(self.planned_task_count))
+        count = self.planned_task_count
+        return tuple(range(self.executor_instances if count is None else count))
 
     @property
     def spark_settings(self) -> dict[str, str]:
@@ -419,7 +421,7 @@ def conservative_concurrency(
 ) -> ConcurrencyDecision:
     """Bound concurrency by items, placement, CPU, and measured peak RSS."""
     count = _positive_int(item_count, "item_count")
-    profile_limit = profile.planned_task_count
+    profile_limit = len(profile.physical_partitions)
     cpu_limit = (
         profile.executor_instances
         * profile.executor_cores
@@ -693,7 +695,7 @@ def sparse_line_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, 
 
 def execute_sjd_partition(
     rows: Iterable[Mapping[str, Any]],
-) -> Iterable[dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Installed top-level Spark callable with one runtime cache per partition."""
     materialized = [dict(row) for row in rows]
     if not materialized:
@@ -1451,7 +1453,10 @@ def _delta_receipts(frame: Any, maximum_receipts: int) -> list[PartitionStagingR
     receipts: list[PartitionStagingReceipt] = []
     for raw in rows:
         row = raw.asDict(recursive=True) if hasattr(raw, "asDict") else dict(raw)
-        work_ids = json.loads(str(row["work_ids_json"]))
+        try:
+            work_ids = json.loads(str(row["work_ids_json"]))
+        except json.JSONDecodeError as error:
+            raise StagingConflictError("Delta receipt work IDs are invalid") from error
         if not isinstance(work_ids, list) or any(
             not isinstance(value, str) for value in work_ids
         ):
@@ -1496,7 +1501,10 @@ def _read_selected_delta_records(
     grouped: dict[tuple[int, int, int], list[tuple[int, dict[str, Any]]]] = {}
     for raw in selected.toLocalIterator():
         row = raw.asDict(recursive=True) if hasattr(raw, "asDict") else dict(raw)
-        value = json.loads(str(row["record_json"]))
+        try:
+            value = json.loads(str(row["record_json"]))
+        except json.JSONDecodeError as error:
+            raise StagingConflictError("Delta staged record JSON is invalid") from error
         if not isinstance(value, dict):
             raise StagingConflictError("Delta staged record is not an object")
         identity = (
@@ -1541,6 +1549,7 @@ class StreamingSparkExecutionHarness:
     per-partition receipts. The full record set is reconstructed by reading
     the already-staged files directly from storage, which removes the
     per-row Spark network/serialization path entirely.
+    Malformed staged JSON raises ``StagingConflictError`` before publication.
     """
 
     def __init__(
@@ -1607,6 +1616,7 @@ class StreamingSparkExecutionHarness:
             for bucket in plan.buckets
             if bucket.items
         }
+        frame = None
         if self.staging_backend == "spark_delta":
             frame = _stage_delta_once(
                 self.spark_session,
@@ -1652,7 +1662,7 @@ class StreamingSparkExecutionHarness:
                     f"partition {receipt.physical_partition} receipt work IDs "
                     "do not match its planned bucket"
                 )
-        if self.staging_backend == "spark_delta":
+        if frame is not None:
             return _read_selected_delta_records(frame, selected)
         records: list[dict[str, Any]] = []
         for receipt in sorted(selected, key=lambda item: item.physical_partition):
@@ -2720,7 +2730,7 @@ def _sha_text(value: object, name: str) -> str:
 
 
 def _finite(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(float(value)):
+    if not (type(value) is int or type(value) is float) or not math.isfinite(value):
         raise ProcessValidationError(f"{name} must be a finite number")
     return float(value)
 

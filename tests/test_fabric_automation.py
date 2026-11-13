@@ -398,6 +398,64 @@ def test_resource_token_provider_falls_back_and_rejects_partial_oidc() -> None:
         )
 
 
+@pytest.mark.parametrize("changes,message", [
+    ({"resource": "http://insecure.example"}, "HTTPS origin"),
+    ({"client_id": "invalid"}, "client ID"),
+    ({"tenant_id": "invalid"}, "tenant ID"),
+    ({"request_token": ""}, "request token"),
+])
+def test_oidc_provider_rejects_invalid_identity_before_network(changes, message):
+    arguments = dict(
+        resource="https://storage.azure.com/",
+        client_id="88fb936a-6e03-42f2-9ca9-6a0869e1523e",
+        tenant_id="b8005d83-0703-4f94-8749-5c3e02f07bba",
+        request_url="https://vstoken.actions.githubusercontent.com/oidc",
+        request_token="test-token",
+    )
+    with pytest.raises(ValueError, match=message):
+        GitHubOidcResourceTokenProvider(**(arguments | changes))
+
+
+@pytest.mark.parametrize("responses,message", [
+    ([_UrlResponse(b"{}")], "omitted the assertion"),
+    ([_UrlResponse(b'{"value":"assertion"}'), _UrlResponse(b"{}")], "omitted the access token"),
+    ([_UrlResponse(b'{"value":"assertion"}'), _UrlResponse(b'{"access_token":"token","expires_in":true}')], "lifetime is invalid"),
+    ([_UrlResponse(b'{"value":"assertion"}'), _UrlResponse(b'{"access_token":"token","expires_in":60}')], "lifetime is invalid"),
+    ([OSError("unavailable")], "assertion request failed"),
+    ([_UrlResponse(b'{"value":"assertion"}'), OSError("unavailable")], "token exchange failed"),
+])
+def test_oidc_exchange_reports_external_failures(monkeypatch, responses, message):
+    def open_url(*args, **kwargs):
+        response = responses.pop(0)
+        if isinstance(response, OSError):
+            raise response
+        return response
+
+    monkeypatch.setattr(fabric_automation, "urlopen", open_url)
+    provider = GitHubOidcResourceTokenProvider(
+        resource="https://storage.azure.com/",
+        client_id="88fb936a-6e03-42f2-9ca9-6a0869e1523e",
+        tenant_id="b8005d83-0703-4f94-8749-5c3e02f07bba",
+        request_url="https://vstoken.actions.githubusercontent.com/oidc",
+        request_token="test-token",
+    )
+    with pytest.raises(FabricApiError, match=message):
+        provider.get_token()
+    assert responses == []
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_resource_cli_token_failures_are_explicit(monkeypatch, failure):
+    def run(*args, **kwargs):
+        if failure:
+            raise OSError("az unavailable")
+        return SimpleNamespace(stdout=" \n")
+
+    monkeypatch.setattr(fabric_automation.subprocess, "run", run)
+    with pytest.raises(FabricApiError, match="token acquisition failed|empty access token"):
+        AzureCliResourceTokenProvider("https://storage.azure.com/").get_token()
+
+
 # --- TokenProvider structural compatibility --------------------------------
 
 

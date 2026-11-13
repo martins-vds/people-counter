@@ -1,6 +1,7 @@
 import csv
 import json
 import io
+import time
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -11,6 +12,9 @@ from people_counter.portal_service import PortalService
 from people_counter.manifest import CatalogError, VideoMetadata, VideoValidationError, load_camera_catalog, match_catalog_entry
 from tests.test_manifest_publisher import inspection
 from tests.test_operator_portal import csrf, save_camera
+import tests.ui.conftest as portal_fixtures
+
+portal = portal_fixtures.portal
 
 
 @pytest.fixture
@@ -21,6 +25,147 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(1920, 1080, 30))
     monkeypatch.setattr(service.source, "frame", lambda *args: (b"jpeg", 1920, 1080))
     return service
+
+
+@pytest.mark.portal_cloud
+def test_backend_profile_publication_and_submission_use_real_local_workflow(portal):
+    service = portal.service
+    location = service.store.add_location("Entrance")
+    camera = service.store.add_camera("Main", location)
+    service.assign_footage(camera, ["lobby/clip.mp4"])
+    service.save_camera_line(camera, {
+        "video": "lobby/clip.mp4", "counting_line_x1": "0", "counting_line_y1": "90",
+        "counting_line_x2": "319", "counting_line_y2": "90",
+    })
+    client = create_app(service).test_client()
+    token = csrf(client)
+
+    def completed(response):
+        assert response.status_code == 302
+        identity = response.headers["Location"].rsplit("/", 1)[-1]
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            job = service.store.job(identity)
+            if job["status"] in {"SUCCEEDED", "FAILED"}:
+                assert job["status"] == "SUCCEEDED", job.get("error")
+                return identity
+            time.sleep(0.05)
+        pytest.fail(f"Local job {identity} did not complete")
+
+    package_id = completed(client.post("/packages", data={
+        "csrf": token, "folder": "lobby", "package_name": "backend-smoke",
+    }))
+    completed(client.post("/profiles", data={
+        "csrf": token, "target": "ci", "profiles": "rtdetr-r18-onnx-cpu",
+        "workspace_id": "11111111-1111-1111-1111-111111111111",
+        "lakehouse_id": "22222222-2222-2222-2222-222222222222",
+        "environment_id": "33333333-3333-3333-3333-333333333333",
+        "control_sjd_id": "44444444-4444-4444-4444-444444444444",
+        "storage_account": "testaccount", "filesystem": "footage",
+        "shortcut_path": "Files/videos", "table_directory": "Tables/dbo",
+    }))
+    assert b"ci" in client.get("/cloud").data
+    for action, wait in (("publish", False), ("submit", False), ("submit", True)):
+        form = {
+            "csrf": token, "confirm": "yes", "package_id": package_id,
+            "selection": "ci::rtdetr-r18-onnx-cpu", "action": action,
+            "wait": "yes" if wait else "no",
+        }
+        before = len(service.store.jobs())
+        review = client.post("/cloud", data={**form, "preview": "yes"})
+        assert review.status_code == 200 and b"Effective inference settings" in review.data
+        assert len(service.store.jobs()) == before
+        completed(client.post("/cloud", data=form))
+    assert len(portal.calls) == 2
+    assert all(job["status"] == "SUCCEEDED" for job in service.store.jobs())
+
+
+@pytest.mark.parametrize("changes,status,message", [
+    ({"confirm": "no"}, 403, b"Explicit confirmation"),
+    ({"selection": "missing-separator"}, 400, b"approved target and profile"),
+    ({"wait": "yes", "action": "publish"}, 400, b"requires explicit submission"),
+    ({"preview": "yes", "package_id": "missing"}, 400, b"successfully prepared"),
+    ({"preview": "yes", "action": "invalid"}, 400, b"publication or explicit submission"),
+    ({"preview": "yes", "action": "publish", "batch_size": "2"}, 400, b"only to processing"),
+])
+def test_cloud_review_rejects_invalid_actions_without_queueing(service, changes, status, message):
+    service.allow_cloud = True
+    identity = service.enqueue("prepare", {})
+    service.store.finish(identity, result={"planned": 1})
+    client = create_app(service).test_client()
+    before = service.store.jobs()
+    response = client.post("/cloud", data={
+        "csrf": csrf(client), "confirm": "yes", "selection": "prod::rtdetr-r18-onnx-cpu",
+        "action": "submit", "package_id": identity, **changes,
+    })
+    assert response.status_code == status
+    assert message in response.data
+    assert service.store.jobs() == before
+
+
+@pytest.mark.parametrize("profile", [None, "unsupported"])
+def test_profile_route_rejects_empty_or_unknown_selection(service, profile):
+    client = create_app(service).test_client()
+    data = {"csrf": csrf(client)}
+    if profile is not None:
+        data["profiles"] = profile
+    response = client.post("/profiles", data=data)
+    assert response.status_code == 400
+    assert b"supported profile" in response.data
+    assert service.store.jobs() == []
+
+
+def test_calibration_routes_keep_reference_ownership_and_unknown_configs_explicit(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    client = create_app(service).test_client()
+    assert client.get("/calibrate", query_string={
+        "video": form["video"], "camera_id": "wrong-camera",
+    }).status_code == 400
+    camera_url = f"/cameras/{form['camera_id']}"
+    assert client.get(camera_url + "/calibrate?config_id=unknown").status_code == 404
+    assert client.get(camera_url + "/metadata/unknown").status_code == 404
+    assert client.get("/cameras/unknown/footage").status_code == 404
+    response = client.get("/calibrate", query_string={"video": form["video"], "scope": "video"})
+    assert response.status_code == 302 and "/review?" in response.headers["Location"]
+    before = service.store.entries("camera")
+    response = client.post("/calibrate", data={
+        **form, "csrf": csrf(client), "config_id": before[0]["id"], "counting_line_x1": "42",
+    })
+    assert response.status_code == 302
+    assert service.store.entries("camera")[0]["catalog"]["counting_line_x1"] == "42"
+    assert service.footage_assignments() == {form["video"]: form["camera_id"]}
+
+
+def test_failed_job_retry_preserves_identity_and_cloud_confirmation(service):
+    client = create_app(service).test_client()
+    identity = service.enqueue("prepare", {})
+    service.store.finish(identity, error="metadata missing")
+    url = f"/jobs/{identity}/resume"
+    response = client.post(url, data={"csrf": csrf(client)})
+    assert response.status_code == 302
+    assert service.store.job(identity)["status"] == "QUEUED"
+    assert client.post("/jobs/missing/resume", data={"csrf": csrf(client)}).status_code == 404
+    identity = service.store.enqueue("submit", {})
+    service.store.finish(identity, error="submission unavailable")
+    assert client.post(f"/jobs/{identity}/resume", data={
+        "csrf": csrf(client), "confirm": "yes",
+    }).status_code == 403
+    assert service.store.job(identity)["status"] == "FAILED"
+
+
+def test_report_routes_explain_invalid_summary_and_reject_invalid_page(service):
+    identity = service.enqueue("prepare", {})
+    root = service.job_dir(identity)
+    root.mkdir(parents=True)
+    (root / "summary.json").write_text("{")
+    client = create_app(service).test_client()
+    response = client.get(f"/jobs/{identity}")
+    assert response.status_code == 200 and b"Cannot display JSON" in response.data
+    assert client.get(f"/jobs/{identity}/reports/summary?page=abc").status_code == 400
+    assert client.get("/jobs/missing/reports/summary").status_code == 404
+    assert client.get("/jobs/missing/package.zip").status_code == 404
+    assert client.get("/jobs/missing/files/summary").status_code == 404
+    assert client.get(f"/jobs/{identity}/files/rejections").status_code == 404
 
 
 def test_camera_calibration_is_scoped_and_replaces_only_camera_geometry(service, monkeypatch):

@@ -1,11 +1,13 @@
 import argparse
-import hashlib
 import importlib.metadata
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
-from dataclasses import asdict
+from contextlib import redirect_stdout
+from dataclasses import asdict, replace
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,9 +15,13 @@ from unittest.mock import patch
 import pytest
 
 import people_counter.sjd_process as process_module
-from people_counter.models import LineCountRecord, RunResult
 from people_counter.fabric_executor_inventory import ExecutorRecord
-from people_counter.sjd_control import LeaseLostError, SQLiteControlStore
+from people_counter.models import LineCountRecord, RunResult
+from people_counter.sjd_control import (
+    BatchValidationError,
+    LeaseLostError,
+    SQLiteControlStore,
+)
 from people_counter.sjd_process import (
     LOCAL_TWO_WORKERS,
     DirectExecutionHarness,
@@ -23,8 +29,10 @@ from people_counter.sjd_process import (
     FabricAttemptAdapter,
     LeaseAdmissionError,
     LocalJsonAttemptAdapter,
+    OneLakeDeltaAttemptAdapter,
     PartitionStagingReceipt,
     ProcessValidationError,
+    SparkDeltaAttemptAdapter,
     SparkExecutionHarness,
     StagingConflictError,
     StreamingSparkExecutionHarness,
@@ -317,6 +325,207 @@ class SjdProcessTests(unittest.TestCase):
             envelope_sha256=batch.envelope_sha256,
         )
 
+    def test_envelope_validation_rejects_malformed_shapes_and_membership(self):
+        batch = self.claim((10, 20))
+        original = self.store.load_claim_envelope(batch.batch_id)
+        mutations = (
+            ({"schema_version": 2}, None),
+            ({"items": []}, None),
+            ({"items": [None]}, None),
+            ({}, {"ordinal": 2}),
+            ({}, {"payload": []}),
+            ({}, {"runtime_key": "other-runtime"}),
+            ({}, {"fence": 0}),
+            ({}, {"duration_seconds": 0}),
+            ({}, {"duration_seconds": float("inf")}),
+            ({}, {"payload_sha256": "z" * 64}),
+            ({"membership_sha256": "0" * 64}, None),
+            ({"owner": " "}, None),
+        )
+        for top, item in mutations:
+            envelope = json.loads(json.dumps(original))
+            envelope.update(top)
+            if item is not None:
+                envelope["items"][0].update(item)
+            with self.subTest(top=top, item=item), self.assertRaises(
+                (BatchValidationError, ProcessValidationError)
+            ):
+                verify_envelope(
+                    envelope, batch_id=batch.batch_id,
+                    envelope_sha256=batch.envelope_sha256,
+                )
+        duplicate = json.loads(json.dumps(original))
+        duplicate["items"][1] = {**duplicate["items"][0], "ordinal": 1}
+        with self.assertRaisesRegex(BatchValidationError, "duplicate claim identity"):
+            verify_envelope(
+                duplicate, batch_id=batch.batch_id,
+                envelope_sha256=batch.envelope_sha256,
+            )
+
+    def test_execution_profile_rejects_invalid_planning_limits(self):
+        for overrides in (
+            {"planned_task_count": 0},
+            {"rss_headroom_fraction": -0.1},
+            {"rss_headroom_fraction": 1},
+        ):
+            with self.subTest(overrides=overrides), self.assertRaises(ProcessValidationError):
+                replace(LOCAL_TWO_WORKERS, **overrides)
+        profile = replace(LOCAL_TWO_WORKERS, planned_task_count=None)
+        self.assertEqual(profile.planned_task_count, 2)
+        self.assertEqual(profile.physical_partitions, (0, 1))
+        decision = conservative_concurrency(5, profile, peak_rss_bytes=None)
+        self.assertEqual(decision.profile_limit, 2)
+        self.assertEqual(decision.concurrency, 2)
+        with self.assertRaisesRegex(ProcessValidationError, "unsupported execution profile"):
+            resolve_profile("unreviewed")
+        with self.assertRaisesRegex(ProcessValidationError, "unsupported Spark profile overrides"):
+            resolve_profile("sjd-local", spark_overrides={"spark.unreviewed": "true"})
+        with self.assertRaisesRegex(ProcessValidationError, "unsupported streaming staging backend"):
+            StreamingSparkExecutionHarness(object(), self.root, staging_backend="unknown")
+        with self.assertRaisesRegex(ProcessValidationError, "Spark TaskContext"):
+            list(execute_sjd_partition([{"physical_partition": 0}]))
+
+    def test_local_attempts_reject_existing_missing_unsafe_and_corrupt_files(self):
+        with self.assertRaisesRegex(StagingConflictError, "records are missing"):
+            self.attempts.read_records("batch", "attempt")
+        for value in (".", "..", "a/b", r"a\b"):
+            with self.subTest(value=value), self.assertRaisesRegex(ProcessValidationError, "unsafe"):
+                self.attempts.attempt_path(value, "attempt")
+        records = [{"work_id": "work", "record_sequence": 0}]
+        path = self.attempts.write_records("batch", "attempt", records)
+        with self.assertRaisesRegex(StagingConflictError, "already exists"):
+            self.attempts.write_records("batch", "attempt", records)
+        self.attempts.create_success("batch", "attempt", {"complete": True})
+        for filename, content in (
+            ("records.json", "{"),
+            ("records.json", "{}"),
+            ("_SUCCESS", "[]"),
+        ):
+            target = path / filename
+            previous = target.read_text(encoding="utf-8")
+            target.write_text(content, encoding="utf-8")
+            with self.subTest(filename=filename, content=content), self.assertRaises(
+                StagingConflictError
+            ):
+                self.attempts.load_complete("batch", "attempt")
+            target.write_text(previous, encoding="utf-8")
+        with self.assertRaisesRegex(ProcessValidationError, "finite JSON"):
+            self.attempts.write_records("batch", "nonfinite", [{"value": float("nan")}])
+
+    def test_delta_bucket_adapters_handle_empty_and_malformed_containers(self):
+        for containers in ([], [None], [{"rows": []}]):
+            with self.subTest(containers=containers):
+                self.assertEqual(list(execute_sjd_bucket_partition_delta(iter(containers))), [])
+                self.assertEqual(
+                    list(execute_sjd_bucket_partition_streaming(str(self.root))(iter(containers))),
+                    [],
+                )
+        for containers in ([{}], [{"rows": "wrong"}], [{"rows": []}, {"rows": []}]):
+            with self.subTest(containers=containers), self.assertRaisesRegex(
+                ProcessValidationError, "exactly one bucket"
+            ):
+                list(execute_sjd_bucket_partition_delta(iter(containers)))
+
+    def test_executor_checks_detached_release_before_loading_runtime(self):
+        row = {
+            "physical_partition": 0,
+            "executor_cores": 1,
+            "task_cpus": 1,
+            "_task_identity": {"partition_id": 0, "executor_identity": "executor@host"},
+            "_expected_release_package_version": "wrong-version",
+            "_expected_release_manifest_sha256": "a" * 64,
+        }
+        with self.assertRaisesRegex(ProcessValidationError, "package version differs"):
+            list(execute_sjd_partition([row]))
+        row["_expected_release_package_version"] = _package_version()
+        row["release_digest"] = "b" * 64
+        with self.assertRaisesRegex(ProcessValidationError, "work release digest differs"):
+            list(execute_sjd_partition([row]))
+
+    def test_heartbeat_failure_prevents_staging_and_publication(self):
+        batch = self.claim()
+        store, clock = self.store, self.clock
+
+        class LosingFenceHarness(DirectExecutionHarness):
+            def execute(inner, *args, **kwargs):
+                clock.value = batch.lease_expires_at
+                store.recover()
+                time.sleep(0.05)
+                return super().execute(*args, **kwargs)
+
+        with self.assertRaisesRegex(LeaseLostError, "heartbeat failed"):
+            run_process_batch(
+                self.store, batch.batch_id,
+                replace(LOCAL_TWO_WORKERS, heartbeat_seconds=0.001),
+                "probe", LosingFenceHarness(), self.attempts,
+            )
+        self.assertFalse(self.attempts.root.exists())
+        self.assertIsNone(self.store.get_work("work-0").committed_attempt_id)
+
+    def test_run_rejects_invalid_mode_and_marker_tampering(self):
+        batch = self.claim()
+        with self.assertRaisesRegex(ProcessValidationError, "unsupported processor mode"):
+            run_process_batch(
+                self.store, batch.batch_id, LOCAL_TWO_WORKERS,
+                "invalid", DirectExecutionHarness(), self.attempts,
+            )
+
+        def crash(point):
+            if point == "after_marker":
+                raise RuntimeError("interrupt")
+
+        with self.assertRaisesRegex(RuntimeError, "interrupt"):
+            run_process_batch(
+                self.store, batch.batch_id, LOCAL_TWO_WORKERS,
+                "probe", DirectExecutionHarness(), self.attempts, crash_hook=crash,
+            )
+        marker = self.attempts.attempt_path(
+            batch.batch_id, self.verified(batch).execution_attempt_id
+        ) / "_SUCCESS"
+        marker.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(StagingConflictError, "marker"):
+            run_process_batch(
+                self.store, batch.batch_id, LOCAL_TWO_WORKERS,
+                "probe", DirectExecutionHarness(), self.attempts,
+            )
+        self.assertIsNone(self.store.get_work("work-0").committed_attempt_id)
+
+    def test_staged_record_status_and_type_are_semantically_validated(self):
+        batch = self.claim()
+        envelope = self.verified(batch)
+        plan = plan_duration_lpt(envelope.items, LOCAL_TWO_WORKERS, peak_rss_bytes=None)
+        record = DirectExecutionHarness().execute(envelope, plan, LOCAL_TWO_WORKERS, "probe")[0]
+        for overrides, message in (
+            ({"record_type": "unknown"}, "unsupported staged record_type"),
+            ({"status": "FAILED"}, "status does not match"),
+            ({"processing_seconds": -1}, "non-negative"),
+            ({"detector_batch_size": 3}, "detector_batch_size must be one of"),
+            ({"work_id": "unexpected"}, "unexpected staged identity"),
+        ):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                ProcessValidationError, message
+            ):
+                validate_staged_records([record | overrides], envelope, plan)
+
+    def test_direct_process_cli_commits_and_reports_real_local_staging(self):
+        self.clock.value = time.time()
+        batch = self.claim()
+        output = StringIO()
+        with redirect_stdout(output):
+            result = process_module.main([
+                "run", "--profile", "local-two-workers",
+                "--database", str(self.store.database),
+                "--staging-root", str(self.root / "cli-attempts"),
+                "--batch-id", batch.batch_id,
+                "--harness", "direct", "--mode", "probe",
+                "--peak-rss-mib", "100",
+            ])
+        self.assertEqual(result, 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["publication_sequences"], [1])
+        self.assertTrue(Path(report["staging_path"]).joinpath("_SUCCESS").is_file())
+        self.assertEqual(self.store.get_work("work-0").status, "SUCCEEDED")
+
     def test_cli_help_and_required_run_contract_do_not_import_spark(self):
         parser = _parser()
         with self.assertRaises(SystemExit) as raised:
@@ -472,6 +681,33 @@ class SjdProcessTests(unittest.TestCase):
                 LOCAL_TWO_WORKERS,
                 peak_rss_bytes=900 * 1024 * 1024,
             )
+
+    def test_lease_admission_requires_finite_builtin_numbers(self):
+        class IntegerSubclass(int):
+            pass
+
+        class FloatSubclass(float):
+            pass
+
+        batch = self.claim((10,))
+        plan = plan_duration_lpt(
+            self.verified(batch).items, LOCAL_TWO_WORKERS, peak_rss_bytes=None
+        )
+        for field in ("now", "lease_expires_at"):
+            for value in (
+                True, "100", None, float("nan"), float("inf"),
+                IntegerSubclass(100), FloatSubclass(100),
+            ):
+                arguments = {"lease_expires_at": 200.0, "now": 100}
+                arguments[field] = value
+                with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    ProcessValidationError, f"{field} must be a finite number"
+                ):
+                    admit_lease(plan, LOCAL_TWO_WORKERS, **arguments)
+        self.assertEqual(
+            admit_lease(plan, LOCAL_TWO_WORKERS, lease_expires_at=200, now=100.0),
+            12.5,
+        )
 
     def test_concurrency_profile_limit_uses_planned_task_count_not_executor_count(
         self,
@@ -1041,8 +1277,198 @@ class SjdProcessTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["work_id"], "work-0")
             validate_staged_records(records, envelope, plan)
+
+            frame = spark.read.format("delta").load(str(staged))
+            schema = frame.schema
+            original = [row.asDict() for row in frame.collect()]
+            cases = (
+                ("record", {"record_json": "[]"}, "not an object"),
+                ("record", {"record_json": "{"}, "record JSON"),
+                ("record", {"record_ordinal": 10}, "ordinals differ"),
+                ("record", {"record_json": "{}"}, "content differs"),
+                ("receipt", {"work_ids_json": "[4]"}, "work IDs are invalid"),
+                ("receipt", {"work_ids_json": "{"}, "work IDs are invalid"),
+                ("receipt", {"work_ids_json": '["other"]'}, "planned bucket"),
+            )
+            for kind, overrides, message in cases:
+                corrupted = [
+                    row | overrides if row["row_kind"] == kind else row
+                    for row in original
+                ]
+                spark.createDataFrame(corrupted, schema=schema).write.format("delta").mode(
+                    "overwrite"
+                ).save(str(staged))
+                with self.subTest(overrides=overrides), self.assertRaisesRegex(
+                    StagingConflictError, message
+                ):
+                    harness.execute(envelope, plan, LOCAL_TWO_WORKERS, "probe")
+            duplicated = original + [row for row in original if row["row_kind"] == "receipt"]
+            spark.createDataFrame(duplicated, schema=schema).write.format("delta").mode(
+                "overwrite"
+            ).save(str(staged))
+            with self.assertRaisesRegex(StagingConflictError, "excess receipt"):
+                harness.execute(envelope, plan, LOCAL_TWO_WORKERS, "probe")
+            wrong_schema = self.root / "wrong-delta-schema"
+            spark.range(1).write.format("delta").save(str(wrong_schema))
+            with self.assertRaisesRegex(StagingConflictError, "schema differs"):
+                StreamingSparkExecutionHarness(
+                    spark, wrong_schema, verify_settings=False, staging_backend="spark_delta"
+                ).execute(envelope, plan, LOCAL_TWO_WORKERS, "probe")
         finally:
             spark.stop()
+
+    def test_delta_attempt_adapters_round_trip_and_reject_corrupt_storage(self):
+        pytest.importorskip("pyspark.sql")
+        pytest.importorskip("delta")
+        from people_counter.fabric_namespace import FabricNamespaceConfig
+        from people_counter.local_spark import create_local_spark_session
+        from people_counter.sjd_control import (
+            FabricControlStore,
+            ImmutableConflictError,
+            OneLakeEnvelopeWriter,
+        )
+        from tests.fabric_fixtures import RUNTIME_CONTEXT
+
+        cloud_root = self.root / "onelake"
+
+        class LocalNamespace(FabricNamespaceConfig):
+            def abfss_path(self, path):
+                return str(cloud_root / path)
+
+        class LocalOneLakeFiles:
+            def exists(self, path):
+                return (cloud_root / path).exists()
+
+            def read_text(self, path):
+                return (cloud_root / path).read_text(encoding="utf-8")
+
+            def create_text(self, path, content):
+                target = cloud_root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("x", encoding="utf-8") as stream:
+                    stream.write(content)
+
+        config = LocalNamespace(
+            workspace_id="00000000-0000-4000-8000-000000000001",
+            lakehouse_id="00000000-0000-4000-8000-000000000002",
+            environment_id="00000000-0000-4000-8000-000000000003",
+        )
+        spark = create_local_spark_session(
+            master="local[2]", app_name="sjd-attempt-storage",
+            correlation_id="sjd-attempt-storage",
+        )
+        try:
+            facade = FabricControlStore(
+                spark, config=config, files=LocalOneLakeFiles(),
+                auto_bootstrap=False, clock=lambda: 123,
+            )
+            self.assertEqual(facade.now(), 123)
+            notebookutils = SimpleNamespace(runtime=SimpleNamespace(context=RUNTIME_CONTEXT))
+            with patch.dict("sys.modules", {"notebookutils": notebookutils}):
+                writer = OneLakeEnvelopeWriter(config.file_path("control"), LocalOneLakeFiles())
+            envelope_path, digest = writer.write("batch", {"schema_version": 1})
+            self.assertEqual(writer.read(envelope_path, digest), {"schema_version": 1})
+            local = SparkDeltaAttemptAdapter(self.root / "delta", spark)
+            cloud = OneLakeDeltaAttemptAdapter(
+                config.file_path("attempts"), spark, LocalOneLakeFiles(), config=config
+            )
+            records = [
+                {"work_id": "work", "attempt_id": "attempt", "record_type": "video_result",
+                 "record_sequence": 0, "payload_json": '{"location":"caf\u00e9"}'},
+                {"work_id": "work", "attempt_id": "attempt", "record_type": "line_count",
+                 "record_sequence": 1, "payload_json": "{}"},
+            ]
+            expected = [records[1], records[0]]
+            marker = {"batch_id": "batch", "record_count": 2}
+            for adapter in (local, cloud):
+                with self.subTest(adapter=type(adapter).__name__):
+                    self.assertIsNone(adapter.load_complete("batch", "attempt"))
+                    with self.assertRaisesRegex(StagingConflictError, "records are missing"):
+                        adapter.read_records("batch", "attempt")
+                    adapter.write_records("batch", "attempt", records)
+                    self.assertEqual(adapter.read_records("batch", "attempt"), expected)
+                    with self.assertRaisesRegex(StagingConflictError, "partial"):
+                        adapter.load_complete("batch", "attempt")
+                    with self.assertRaisesRegex(StagingConflictError, "already exists"):
+                        adapter.write_records("batch", "attempt", records)
+                    adapter.create_success("batch", "attempt", marker)
+                    adapter.create_success("batch", "attempt", marker)
+                    self.assertEqual(adapter.load_complete("batch", "attempt"), (expected, marker))
+                    with self.assertRaises(ImmutableConflictError):
+                        adapter.create_success("batch", "attempt", {"record_count": 3})
+
+            cloud_path = cloud_root / cloud.attempt_path("batch", "attempt")
+            for content in ("{", "[]"):
+                (cloud_path / "_SUCCESS").write_text(content, encoding="utf-8")
+                with self.subTest(marker=content), self.assertRaises(StagingConflictError):
+                    cloud.load_complete("batch", "attempt")
+            (cloud_path / "_SUCCESS").unlink()
+            spark.sql(
+                f"UPDATE delta.`{cloud_path}` SET record_json='invalid' WHERE record_sequence=0"
+            )
+            with self.assertRaisesRegex(StagingConflictError, "record_json is invalid"):
+                cloud.read_records("batch", "attempt")
+            spark.sql(
+                f"UPDATE delta.`{cloud_path}` SET record_json='[]' WHERE record_sequence=0"
+            )
+            with self.assertRaisesRegex(StagingConflictError, "columns differ"):
+                cloud.read_records("batch", "attempt")
+            cloud.create_success("marker-only", "attempt", marker)
+            with self.assertRaisesRegex(StagingConflictError, "partial"):
+                cloud.load_complete("marker-only", "attempt")
+            with self.assertRaisesRegex(StagingConflictError, "already exists"):
+                cloud.write_records("marker-only", "attempt", records)
+            self.clock.value = time.time()
+            batch = self.claim()
+            output = StringIO()
+            with redirect_stdout(output):
+                result = process_module.main([
+                    "run", "--profile", "local-two-workers",
+                    "--database", str(self.store.database),
+                    "--staging-root", str(self.root / "spark-cli"),
+                    "--batch-id", batch.batch_id, "--harness", "spark",
+                    "--spark-master", "local[2]", "--mode", "probe",
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(json.loads(output.getvalue())["publication_sequences"], [1])
+        finally:
+            spark.stop()
+
+    def test_onelake_attempt_routes_validate_real_namespace_configuration(self):
+        from people_counter.fabric_namespace import (
+            FabricNamespaceConfig,
+            FabricNamespaceMode,
+        )
+
+        config = FabricNamespaceConfig(
+            workspace_id="00000000-0000-4000-8000-000000000001",
+            lakehouse_id="00000000-0000-4000-8000-000000000002",
+            environment_id="00000000-0000-4000-8000-000000000003",
+        )
+        for route, root, message in (
+            ("invalid", config.file_path("attempts"), "route mode is invalid"),
+            ("BENCHMARK", config.file_path("attempts"), "does not match"),
+            (None, "Files/wrong", "fixed Fabric SJD root"),
+        ):
+            with self.subTest(route=route, root=root), self.assertRaisesRegex(
+                ProcessValidationError, message
+            ):
+                OneLakeDeltaAttemptAdapter(
+                    root, object(), object(), config=config, route_mode=route
+                )
+        production = replace(config, mode=FabricNamespaceMode.PRODUCTION, table_prefix=None, files_root=None)
+        with self.assertRaisesRegex(ProcessValidationError, "direct production"):
+            OneLakeDeltaAttemptAdapter(
+                production.file_path("attempts"), object(), object(), config=production
+            )
+        shadow = replace(
+            config, mode=FabricNamespaceMode.PRODUCTION_SHADOW, table_prefix=None, files_root=None
+        )
+        adapter = OneLakeDeltaAttemptAdapter(
+            shadow.file_path("attempts") + "/", object(), object(),
+            config=shadow, route_mode="SHADOW_SYNTHETIC",
+        )
+        self.assertIn("/process/batch=batch/attempt=attempt", adapter.attempt_path("batch", "attempt"))
 
     def test_stage_partition_records_rejects_conflicting_content_for_same_partition(
         self,
@@ -1207,7 +1633,7 @@ class SjdProcessTests(unittest.TestCase):
         self,
     ):
         staging_root = self.root / "streaming-staging"
-        receipt = stage_partition_records(
+        stage_partition_records(
             staging_root,
             0,
             [{"work_id": "work-0", "value": 1}],

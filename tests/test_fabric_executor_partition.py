@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from people_counter.config import RFDetrBotsortConfig, RTDetrOsnetConfig
 from people_counter.fabric_dispatch import (
     EXECUTOR_PARTITION,
@@ -40,6 +42,138 @@ from people_counter.fabric_executor_production import (
     validate_staging_records,
 )
 from people_counter.models import LineCountRecord, PersonTelemetry, RunResult
+
+
+@pytest.mark.parametrize("value,message", [
+    ("{", "valid JSON"), ({}, "decode to an array"),
+    ([None], "must be an object"), ([{"work_id": ""}], "work_id"),
+])
+def test_claim_parser_rejects_malformed_work_before_dispatch(value, message):
+    with pytest.raises(ValueError, match=message):
+        parse_claimed_items(value, 1)
+
+
+@pytest.mark.parametrize("maximum", [True, None, 0, "1.5"])
+def test_claim_parser_rejects_invalid_worker_bounds(maximum):
+    with pytest.raises(ValueError, match="positive integer"):
+        parse_claimed_items([], maximum)
+
+
+def test_attempt_state_tracking_rejects_duplicate_and_unknown_identities():
+    with pytest.raises(ValueError, match="unique"):
+        DriverAttemptStates(["attempt", "attempt"])
+    states = DriverAttemptStates(["attempt"])
+    assert states.nonterminal() == {"attempt": "LEASED"}
+    for action in (lambda: states.status("unknown"), lambda: states.transition("unknown", "STAGING")):
+        with pytest.raises(KeyError, match="Unknown attempt_id"):
+            action()
+    states.transition("attempt", "STAGING")
+    states.transition("attempt", "RUNNING")
+    states.transition("attempt", "WRITING")
+    states.transition("attempt", "SUCCEEDED")
+    assert states.nonterminal() == {}
+
+
+@pytest.mark.parametrize("failure,message", [
+    ("duplicate", "Duplicate queue row"),
+    ("unexpected", "does not match the claimed batch"),
+    ("inactive", "not active"),
+    ("missing", "rows are missing"),
+])
+def test_claimed_rows_require_exact_active_membership(failure, message):
+    row = FabricExecutorProductionTests.queue_row()
+    rows = [row]
+    if failure == "duplicate":
+        rows.append(dict(row))
+    elif failure == "unexpected":
+        row["work_id"] = "another"
+    elif failure == "inactive":
+        row["status"] = "SUCCEEDED"
+    elif failure == "missing":
+        rows = []
+    with pytest.raises(ExecutorPreflightError, match=message):
+        validate_claimed_rows(
+            [{"work_id": "work-a", "attempt_id": "attempt-a"}], rows,
+            dispatcher_id="dispatcher-a",
+        )
+
+
+@pytest.mark.parametrize("duration", [True, float("nan"), 0])
+def test_lease_estimates_reject_nonphysical_durations(duration):
+    controls = LeaseSafetyControls.create(1, 1, 120, 60)
+    with pytest.raises(ValueError, match="positive finite"):
+        controls.projected_wall_seconds(duration)
+
+
+def test_live_lease_budget_requires_real_expirations_and_normalizes_spark_utc():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    arguments = dict(projected_wave_seconds=1, margin_seconds=1, now=now)
+    for values, message in (([], "must not be empty"), (["not a datetime"], "contain datetimes")):
+        with pytest.raises(ValueError, match=message):
+            require_live_wave_budget(lease_expirations=values, **arguments)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        require_live_wave_budget(
+            1, [now + timedelta(seconds=10)], margin_seconds=1, now=now.replace(tzinfo=None),
+        )
+    assert require_live_wave_budget(
+        1, [(now + timedelta(seconds=10)).replace(tzinfo=None)], margin_seconds=1, now=now,
+    ) == now + timedelta(seconds=1)
+
+
+@pytest.mark.parametrize("failure,message", [
+    ("digest", "hexadecimal"), ("missing", "not found"), ("size", "size mismatch"),
+])
+def test_executor_staging_validates_source_and_cleans_failed_copy(tmp_path, failure, message):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    if failure == "missing":
+        source.unlink()
+    with pytest.raises((ValueError, FileNotFoundError), match=message):
+        with staged_executor_source(
+            source, attempt_id="attempt", expected_size_bytes=6 if failure == "size" else 5,
+            expected_sha256="bad" if failure == "digest" else hashlib.sha256(b"video").hexdigest(),
+            temporary_root=tmp_path,
+        ):
+            pytest.fail("Invalid source must not reach executor processing")
+    assert list(tmp_path.glob("people-counter-attempt-*")) == []
+
+
+@pytest.mark.parametrize("changes,message", [
+    ({"work_id": "unexpected"}, "Unexpected staging identity: ('unexpected', 'attempt')"),
+    ({"work_id": None}, "work_id must be a non-empty string"),
+    ({"attempt_id": None}, "attempt_id must be a non-empty string"),
+    ({"txn_app_id": "another"}, "Staging txn_app_id does not match the wave"),
+    ({"txn_version": 1}, "Staging txn_version does not match the wave"),
+    ({"record_sequence": True}, "record_sequence must be a non-negative integer"),
+    ({"record_sequence": None}, "record_sequence must be a non-negative integer"),
+    ({"record_sequence": -1}, "record_sequence must be a non-negative integer"),
+    ({"record_type": ""}, "record_type must be a non-empty string"),
+])
+def test_staging_verification_requires_exact_transaction_and_record_identity(changes, message):
+    transaction = staging_transaction("worker", 0)
+    record = {
+        "work_id": "work", "attempt_id": "attempt", "record_type": "video_result",
+        "record_sequence": 0, "txn_app_id": transaction.app_id, "txn_version": transaction.version,
+    }
+    with pytest.raises((ValueError, StagingConflictError)) as caught:
+        validate_staging_records(
+            [{**record, **changes}], [{"work_id": "work", "attempt_id": "attempt"}], transaction,
+        )
+    assert str(caught.value) == message
+
+
+def test_staging_verification_rejects_distinct_terminal_records_for_one_claim():
+    transaction = staging_transaction("worker", 0)
+    record = {
+        "work_id": "work", "attempt_id": "attempt", "record_type": "video_result",
+        "record_sequence": 0, "txn_app_id": transaction.app_id, "txn_version": transaction.version,
+    }
+    with pytest.raises(StagingConflictError) as caught:
+        validate_staging_records(
+            [record, {**record, "record_type": "error", "record_sequence": 1}],
+            [{"work_id": "work", "attempt_id": "attempt"}], transaction,
+        )
+    assert str(caught.value) == "Expected one terminal staging envelope for: [('work', 'attempt')]"
 
 
 class FabricDispatchTests(unittest.TestCase):

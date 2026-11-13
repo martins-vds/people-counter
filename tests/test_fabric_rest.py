@@ -478,3 +478,68 @@ def test_rest_client_rejects_invalid_or_nil_workspace_bindings(workspace_id):
             _TokenProvider(), workspace_id=workspace_id, transport=transport,
         )
     assert transport.requests == []
+
+
+@pytest.mark.parametrize("body,message", [
+    (b"{", "invalid JSON"), (b"\xff", "invalid JSON"),
+    (b"[]", "must be an object"),
+    (b'{"value":null}', "list of objects"),
+    (b'{"value":[1]}', "list of objects"),
+    (b'{"value":[],"continuationUri":1}', "ambiguous"),
+])
+def test_list_items_rejects_malformed_server_responses(body, message):
+    transport = _Transport([HTTPResponse(200, {}, body)])
+    client = FabricRESTController(_TokenProvider(), workspace_id=WORKSPACE_ID, transport=transport)
+    with pytest.raises(FabricRestError, match=message):
+        client.list_items()
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("retry_after,expected", [
+    ("2.5", 2.5), ("-1", 0.0), ("invalid-date", 1.0),
+    ("Thu, 01 Jan 1970 00:00:00 GMT", 0.0),
+])
+def test_operation_retry_headers_control_poll_delay(retry_after, expected):
+    transport = _Transport([
+        HTTPResponse(202, {"Location": "/operations/one", "Retry-After": retry_after}),
+        HTTPResponse(429, {"Retry-After": "0"}, b'{"status":"Running"}'),
+        HTTPResponse(200, {}, b'{"status":"Succeeded"}'),
+    ])
+    delays = []
+    client = FabricRESTController(
+        _TokenProvider(), workspace_id=WORKSPACE_ID, transport=transport,
+        sleep=delays.append, monotonic=lambda: 0,
+    )
+    assert client._lro_json("POST", "/items", value=b"raw") == {"status": "Succeeded"}
+    assert delays == [expected, 0]
+    assert transport.requests[0]["body"] == b"raw"
+
+
+@pytest.mark.parametrize("body", [b"", b"null"])
+def test_synchronous_empty_operation_response_is_allowed(body):
+    client = FabricRESTController(
+        _TokenProvider(), workspace_id=WORKSPACE_ID,
+        transport=_Transport([HTTPResponse(201, {}, body)]),
+    )
+    assert client._lro_json("POST", "/items") == {}
+
+
+def test_operation_polling_follows_response_location_and_enforces_deadline():
+    transport = _Transport([
+        HTTPResponse(202, {"Location": "/operations/one"}),
+        HTTPResponse(200, {"Location": "/created"}, b'{"id":"created"}'),
+        HTTPResponse(200, {}, b'{"id":"created","type":"Report"}'),
+    ])
+    client = FabricRESTController(
+        _TokenProvider(), workspace_id=WORKSPACE_ID, transport=transport,
+        sleep=lambda _: None, monotonic=lambda: 0,
+    )
+    assert client._lro_json("POST", "/items") == {"id": "created", "type": "Report"}
+    assert transport.requests[-1]["url"].endswith("/created")
+    client = FabricRESTController(
+        _TokenProvider(), workspace_id=WORKSPACE_ID,
+        transport=_Transport([HTTPResponse(202, {"Location": "/operations/one"})]),
+        lro_timeout=0, monotonic=lambda: 0,
+    )
+    with pytest.raises(TimeoutError, match="timed out"):
+        client._lro_json("POST", "/items")

@@ -18,7 +18,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from uuid import uuid4
 
 from people_counter.local_storage import ContentAddressedStore
@@ -938,7 +938,7 @@ class SQLiteControlStore:
         envelope_path: Path | None = None,
         envelope_sha256: str | None = None,
     ) -> dict[str, Any]:
-        """Read and verify all three pieces of the SJD claim reference."""
+        """Verify the SJD claim reference and reject malformed envelope objects."""
         identity = _required_text(batch_id, "batch_id")
         with self._connect() as connection:
             row = connection.execute(
@@ -967,7 +967,8 @@ class SQLiteControlStore:
         except json.JSONDecodeError as error:
             raise BatchValidationError("claim envelope is not valid JSON") from error
         if (
-            envelope.get("schema_version") != CLAIM_ENVELOPE_VERSION
+            not isinstance(envelope, dict)
+            or envelope.get("schema_version") != CLAIM_ENVELOPE_VERSION
             or envelope.get("batch_id") != identity
         ):
             raise BatchValidationError("claim envelope version or batch mismatch")
@@ -1328,7 +1329,9 @@ class SQLiteControlStore:
                 now,
             ),
         )
-        sequence = int(cursor.lastrowid)
+        sequence = cursor.lastrowid
+        if sequence is None:
+            raise ControlError("publication insert did not return a sequence")
         updated = connection.execute(
             """
             UPDATE work SET status = 'SUCCEEDED',
@@ -1911,8 +1914,9 @@ class SQLiteControlStore:
                 content = path.read_bytes()
                 actual_digest = hashlib.sha256(content).hexdigest()
             except OSError:
+                content = None
                 actual_digest = None
-            if actual_digest != batch["envelope_sha256"]:
+            if content is None or actual_digest != batch["envelope_sha256"]:
                 add(
                     "ENVELOPE_HASH_MISMATCH",
                     str(batch["batch_id"]),
@@ -2255,7 +2259,10 @@ def _claim_admission_settings(
     return profile_speed, profile_factor, profile_margin, worker_limit, profile_name
 
 
-def _lpt_makespan_seconds(rows: Sequence[sqlite3.Row], worker_count: int) -> float:
+_ClaimRow = TypeVar("_ClaimRow", bound=sqlite3.Row | Mapping[str, Any])
+
+
+def _lpt_makespan_seconds(rows: Sequence[_ClaimRow], worker_count: int) -> float:
     workers = _positive_int(worker_count, "worker_count")
     costs = [0.0] * workers
     for row in sorted(
@@ -2271,7 +2278,7 @@ def _lpt_makespan_seconds(rows: Sequence[sqlite3.Row], worker_count: int) -> flo
 
 
 def _largest_admissible_claim_prefix(
-    rows: Sequence[sqlite3.Row],
+    rows: Sequence[_ClaimRow],
     *,
     minimum_items: int,
     profile_workers: int,
@@ -2279,11 +2286,11 @@ def _largest_admissible_claim_prefix(
     safety_factor: float,
     margin_seconds: float,
     lease_seconds: float,
-) -> tuple[tuple[sqlite3.Row, ...], int, float]:
+) -> tuple[tuple[_ClaimRow, ...], int, float]:
     """Return the largest queue-ordered prefix that safely fits the lease."""
 
     def projection(
-        prefix: Sequence[sqlite3.Row],
+        prefix: Sequence[_ClaimRow],
     ) -> tuple[int, float, float]:
         workers = min(len(prefix), profile_workers)
         makespan = _lpt_makespan_seconds(prefix, workers)
@@ -2355,7 +2362,7 @@ def _required_text(value: object, name: str) -> str:
 
 
 def _finite(value: object, name: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(float(value)):
+    if not (type(value) is int or type(value) is float) or not math.isfinite(value):
         raise ValueError(f"{name} must be a finite number")
     return float(value)
 

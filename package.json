@@ -34,6 +34,14 @@
     "testMatch": ["<rootDir>/tests/js/**/*.test.cjs"],
     "collectCoverageFrom": ["src/people_counter/portal_static/**/*.js"],
     "coverageDirectory": "evidence/portal-js/coverage",
-    "coverageReporters": ["json", "text", "html"]
+    "coverageReporters": ["json", "text", "html"],
+    "coverageThreshold": {
+      "global": {
+        "statements": 95,
+        "branches": 95,
+        "functions": 95,
+        "lines": 95
+      }
+    }
   }
 }

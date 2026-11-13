@@ -8,9 +8,19 @@ it safely.
 - Pyright checks changed production and utility files using the locked uv
   environment's interpreter, including its installed optional dependencies.
 - Pytest runs the non-Compose suite with branch coverage and CRAP results.
+  The combined statement-and-branch coverage must be at least 95% across the
+  complete `people_counter` package and the Python CRAP checker; unimported
+  modules remain in the denominator.
+  `scripts/check_python_crap.py` writes `evidence/python-tests/crap-report.json`
+  and requires every function's executable-line CRAP score to be below 30.
+  It includes methods, nested functions, and executable one-line bodies. It uses
+  coverage.py's executable statements rather than counting documentation,
+  blank lines, or multiline SQL
+  as uncovered code. Existing coverage exclusions remain unchanged.
 - Jest tests portal behavior with accessible queries, user interactions, semantic
   state assertions, and Istanbul coverage. `crap-score` generates
   per-function CRAP results; every function must score strictly below 10.
+  Aggregate statement, branch, function, and line coverage must each reach 95%.
   StrykerJS mutates all portal JavaScript with its default operators and requires
   at least a 96% mutation score (strictly above 95%). JavaScript coverage and
   JSON/HTML CRAP and mutation reports are uploaded as evidence.
@@ -27,6 +37,27 @@ it safely.
 - shell regression tests for SDK version preparation and rollback, release
   source ancestry, version validation, tag conflicts, draft recovery, and
   idempotent publication.
+
+## Reproduce coverage locally
+
+Use the installed development environment, including the optional dependencies
+used by CI and Java 21 for the real local Spark/Delta tests:
+
+```bash
+uv run --no-sync pytest tests -m "not compose" \
+  --cov=people_counter --cov=scripts.check_python_crap \
+  --cov-branch --cov-precision=2 --cov-fail-under=95 --crap \
+  --cov-report=json:evidence/python-tests/coverage.json
+uv run --no-sync python scripts/check_python_crap.py evidence/python-tests/coverage.json
+npm run test:portal
+```
+
+The Python floor applies to the non-Compose suite without opt-in browser tests.
+Focused test runs can omit `--cov-fail-under`; they do not measure whole-package
+coverage. The raw `pytest-crap` 0.3.0 tables remain advisory: that release divides
+by physical source lines, which inflates risk for documentation and multiline
+data. The executable-line report is the CI gate. It rejects missing evidence
+and scores at or above 30 without rounding them below the threshold.
 
 The separate [CodeQL Advanced workflow](../.github/workflows/codeql.yml) analyzes
 GitHub Actions, portal JavaScript, and Python on pushes and pull requests to

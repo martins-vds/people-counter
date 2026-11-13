@@ -542,3 +542,209 @@ def test_export_default_format_is_local_fallback_not_api_query(
 
     assert "?" not in client.request_path
     assert result["format"] == "Default"
+
+
+@pytest.mark.parametrize("response,message", [
+    ({}, "no definition object"),
+    ({"definition": {}}, "format is missing"),
+    ({"definition": {"format": "TMDL", "parts": []}}, "no parts"),
+    ({"definition": {"format": "TMDL", "parts": [None]}}, "must be an object"),
+])
+def test_invalid_response_cannot_create_a_bundle(tmp_path, response, message):
+    destination = tmp_path / "bundle"
+    with pytest.raises(DefinitionBundleError, match=message):
+        write_definition_bundle(response, destination)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("field,value,message", [
+    ("payloadType", "Reference", "not InlineBase64"),
+    ("payload", None, "no payload"),
+    ("payload", "not base64!", "not valid base64"),
+    ("payload", "dmFsdWU=!!", "not valid base64"),
+    ("path", "", "POSIX path"),
+    ("path", "nul\0.json", "POSIX path"),
+])
+def test_invalid_parts_cannot_replace_existing_bundle(tmp_path, field, value, message):
+    original = _response({"definition.json": b"original"})
+    write_definition_bundle(original, tmp_path)
+    response = _response({"definition.json": b"replacement"})
+    response["definition"]["parts"][0][field] = value
+    with pytest.raises(DefinitionBundleError, match=message):
+        write_definition_bundle(response, tmp_path)
+    assert read_definition_bundle(tmp_path) == original
+
+
+@pytest.mark.parametrize("replacements,message", [
+    (["invalid"], "TokenReplacement"),
+    ([TokenReplacement("", "Target")], "cannot be empty"),
+    ([TokenReplacement("source", "bad-name")], "invalid token name"),
+    ([TokenReplacement("source", "Target", ("part", "part"))], "duplicate part scope"),
+])
+def test_invalid_replacements_leave_destination_untouched(tmp_path, replacements, message):
+    with pytest.raises(DefinitionBundleError, match=message):
+        write_definition_bundle(
+            _response({"part": b"source"}), tmp_path, replacements=replacements,
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("location", ["destination", "metadata", "part", "extra"])
+def test_bundle_rejects_symlinks_without_modifying_target(tmp_path, location):
+    destination = tmp_path / "bundle"
+    write_definition_bundle(_response({"part": b"value"}), destination)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"untouched")
+    if location == "destination":
+        link = tmp_path / "link"
+        link.symlink_to(destination, target_is_directory=True)
+        destination = link
+    else:
+        link = destination / {"metadata": ".fabric-item.json", "part": "part", "extra": "link"}[location]
+        link.unlink(missing_ok=True)
+        link.symlink_to(outside)
+    with pytest.raises(DefinitionBundleError, match="symlink"):
+        write_definition_bundle(_response({"part": b"new"}), destination)
+    assert outside.read_bytes() == b"untouched"
+
+
+@pytest.mark.parametrize("raw,message", [
+    (b"{", "invalid bundle metadata"),
+    (b"\xff", "invalid bundle metadata"),
+    (b"[]", "unmanaged"),
+    (b'{"schema":"old"}', "unmanaged"),
+])
+def test_bundle_rejects_unreadable_or_unmanaged_metadata(tmp_path, raw, message):
+    (tmp_path / ".fabric-item.json").write_bytes(raw)
+    with pytest.raises(DefinitionBundleError, match=message):
+        read_definition_bundle(tmp_path)
+
+
+@pytest.mark.parametrize("section,field,value,message", [
+    (None, "unexpected", True, "bundle metadata has unknown fields: unexpected"),
+    (None, "format", "", "bundle metadata format is invalid"),
+    (None, "format", None, "bundle metadata format is invalid"),
+    (None, "itemType", " Report ", "bundle metadata item type is invalid"),
+    (None, "itemType", 1, "bundle metadata item type is invalid"),
+    (None, "parts", [], "bundle metadata parts are invalid"),
+    (None, "tokens", {}, "bundle metadata tokens are invalid"),
+    (None, "contentSha256", "invalid", "bundle metadata content hash is invalid"),
+    (None, "contentSha256", "0" * 64, "bundle content hash mismatch"),
+    ("parts", "sha256", "invalid", "bundle part hash is invalid: part"),
+    ("parts", "size", True, "bundle part size is invalid: part"),
+    ("parts", "size", -1, "bundle part size is invalid: part"),
+    ("parts", "size", 999, "bundle part size mismatch: part"),
+    ("parts", "extra", True, "bundle part metadata is invalid"),
+    ("tokens", "extra", True, "bundle token metadata is invalid"),
+    ("tokens", "name", 3, "bundle token metadata is invalid"),
+    ("tokens", "name", "bad-name", "bundle token metadata is invalid"),
+    ("tokens", "occurrences", True, "bundle token metadata is invalid"),
+    ("tokens", "occurrences", 0, "bundle token metadata is invalid"),
+    ("tokens", "parts", [], "bundle token metadata is invalid"),
+    ("tokens", "parts", [None], "bundle token metadata is invalid"),
+    ("tokens", "parts", ["part", "part"], "bundle token metadata is invalid"),
+    ("tokens", "parts", ["z", "a"], "bundle token metadata is invalid"),
+    ("tokens", "parts", ["absent"], "bundle token references an unlisted part"),
+])
+def test_tampered_bundle_metadata_is_rejected(tmp_path, section, field, value, message):
+    metadata = write_definition_bundle(
+        _response({"part": b"source"}), tmp_path, replacements={"source": "Target"},
+    )
+    target = metadata if section is None else metadata[section][0]
+    target[field] = value
+    (tmp_path / ".fabric-item.json").write_text(
+        json.dumps(metadata, separators=(",", ":"), sort_keys=True) + "\n",
+    )
+    with pytest.raises(DefinitionBundleError) as caught:
+        read_definition_bundle(tmp_path)
+    assert str(caught.value) == message
+
+
+def test_unknown_metadata_fields_have_sorted_actionable_diagnostics(tmp_path):
+    metadata = write_definition_bundle(_response({"part": b"source"}), tmp_path)
+    metadata.update(z_unknown=True, a_unknown=True)
+    (tmp_path / ".fabric-item.json").write_text(
+        json.dumps(metadata, separators=(",", ":"), sort_keys=True) + "\n",
+    )
+    with pytest.raises(DefinitionBundleError) as caught:
+        read_definition_bundle(tmp_path)
+    assert str(caught.value) == "bundle metadata has unknown fields: a_unknown, z_unknown"
+
+
+def test_bundle_rejects_duplicate_token_names(tmp_path):
+    metadata = write_definition_bundle(
+        _response({"part": b"source"}), tmp_path, replacements={"source": "Target"},
+    )
+    metadata["tokens"].append(dict(metadata["tokens"][0]))
+    (tmp_path / ".fabric-item.json").write_text(
+        json.dumps(metadata, separators=(",", ":"), sort_keys=True) + "\n",
+    )
+    with pytest.raises(DefinitionBundleError, match="token metadata is invalid"):
+        read_definition_bundle(tmp_path)
+
+
+def test_bundle_requires_metadata_and_unique_sorted_parts(tmp_path):
+    with pytest.raises(DefinitionBundleError, match="metadata is missing"):
+        read_definition_bundle(tmp_path)
+    response = _response({"a": b"a", "z": b"z"})
+    response["definition"]["parts"].append(response["definition"]["parts"][0])
+    with pytest.raises(DefinitionBundleError, match="duplicate definition part"):
+        write_definition_bundle(response, tmp_path)
+    response["definition"]["parts"].pop()
+    metadata = write_definition_bundle(response, tmp_path)
+    metadata["parts"].reverse()
+    (tmp_path / ".fabric-item.json").write_text(
+        json.dumps(metadata, separators=(",", ":"), sort_keys=True) + "\n",
+    )
+    with pytest.raises(DefinitionBundleError, match="not sorted"):
+        read_definition_bundle(tmp_path)
+
+
+@pytest.mark.parametrize("section,field,value,message", [
+    (None, "schema", "unknown", "schema is unsupported"),
+    (None, "workspaceIdEnv", "BAD-NAME", "variable name is invalid"),
+    (None, "workspaceIdEnv", "UNSET", "is not set"),
+    (None, "items", [], "must contain items"),
+    ("items", "unknown", True, "unknown fields"),
+    ("items", "itemType", "", "item type is invalid"),
+    ("items", "format", 1, "format is invalid"),
+    ("items", "tokens", {}, "tokens must be a list"),
+    ("tokens", "name", None, "name is invalid"),
+    ("tokens", "parts", [1], "parts are invalid"),
+    ("tokens", "unknown", True, "unknown fields"),
+])
+def test_invalid_export_manifest_fails_before_export(tmp_path, section, field, value, message):
+    manifest = _definition_export_manifest()
+    target = manifest
+    if section is not None:
+        target = manifest["items"][0]
+        if section == "tokens":
+            target = target["tokens"][0]
+    target[field] = value
+    path = tmp_path / "export.json"
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(DefinitionBundleError, match=message):
+        load_definition_export_manifest(path, {
+            "SOURCE_WORKSPACE_ID": "workspace", "SOURCE_MODEL_ID": "model",
+        })
+
+
+@pytest.mark.parametrize("raw,message", [
+    ("{", "invalid export manifest"), ("[]", "must be an object"),
+])
+def test_unreadable_export_manifest_is_rejected(tmp_path, raw, message):
+    path = tmp_path / "export.json"
+    path.write_text(raw)
+    with pytest.raises(DefinitionBundleError, match=message):
+        load_definition_export_manifest(path, {})
+
+
+def test_export_manifest_rejects_duplicate_item_at_different_destinations(tmp_path):
+    manifest = _definition_export_manifest()
+    manifest["items"].append(dict(manifest["items"][0], destination="another"))
+    path = tmp_path / "export.json"
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(DefinitionBundleError, match="duplicate export item ID"):
+        load_definition_export_manifest(path, {
+            "SOURCE_WORKSPACE_ID": "workspace", "SOURCE_MODEL_ID": "model",
+        })

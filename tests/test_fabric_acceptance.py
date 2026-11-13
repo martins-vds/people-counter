@@ -756,21 +756,250 @@ def test_cleanroom_orchestrator_requires_zero_drift_and_matching_provenance(
         require_activator=False,
     )
 
+
     assert result["status"] == "succeeded"
     assert result["checks"]["terraform"]["driftExitCode"] == 0
     with pytest.raises(acceptance.CleanroomAcceptanceError, match="zero drift"):
         acceptance.validate_cleanroom(
-            object(),
-            object(),
-            object(),
-            manifest,
+            object(), object(), object(), manifest,
             terraform_output=outputs,
             runtime_contract={"schema": acceptance.RUNTIME_CONTRACT_SCHEMA},
             postconfigure_evidence=[postconfigure, postconfigure],
             definition_evidence=definition_evidence,
-            commit_sha=_COMMIT,
-            terraform_drift_exit_code=2,
-            require_reporting=False,
-            require_rti=False,
-            require_activator=False,
+            commit_sha=_COMMIT, terraform_drift_exit_code=2,
+            require_reporting=False, require_rti=False, require_activator=False,
         )
+
+
+@pytest.fixture
+def cleanroom_case():
+    manifest = _manifest()
+    outputs = _outputs()
+    types = {
+    "lakehouse_id": "Lakehouse", "environment_id": "Environment",
+    "eventhouse_id": "Eventhouse", "kql_database_id": "KQLDatabase",
+    "kql_queryset_id": "KQLQueryset", "kql_dashboard_id": "KQLDashboard",
+    }
+    for key in ("eventhouse_id", "kql_database_id", "kql_queryset_id", "kql_dashboard_id"):
+        outputs[key]["value"] = _uid(key)
+    outputs["activator_ids"]["value"] = {"operations": _uid("activator")}
+    items = [
+    {"id": outputs[key]["value"], "type": item_type, "displayName": key}
+    for key, item_type in types.items()
+    ]
+    for key, item_type in (
+    ("spark_job_definition_ids", "SparkJobDefinition"),
+    ("semantic_model_ids", "SemanticModel"), ("report_ids", "Report"),
+    ("activator_ids", "Reflex"),
+    ):
+        items.extend(
+            {"id": value, "type": item_type, "displayName": f"{key}-{role}"}
+            for role, value in outputs[key]["value"].items()
+        )
+    definitions = {
+    item_id: _sjd_definition(role, manifest)
+    for role, item_id in outputs["spark_job_definition_ids"]["value"].items()
+    }
+    for bundle in ("analytics", "operational"):
+        model_id = outputs["semantic_model_ids"]["value"][bundle]
+        definitions[model_id] = _definition(
+            manifest.workspace_id, manifest.lakehouse.lakehouse_id, "mode: DirectLake",
+        )
+        definitions[outputs["report_ids"]["value"][bundle]] = _definition(model_id)
+    for key in ("kql_queryset_id", "kql_dashboard_id"):
+        definitions[outputs[key]["value"]] = _definition(outputs["kql_database_id"]["value"])
+    shortcut_path = f"/workspaces/{manifest.workspace_id}/items/{manifest.lakehouse.lakehouse_id}/shortcuts"
+    client = _Client(
+    items=items, definitions=definitions, lists={shortcut_path: []},
+    schedules={
+        item_id: [{"enabled": False}] if role in SCHEDULED_ROLES else []
+        for role, item_id in outputs["spark_job_definition_ids"]["value"].items()
+    },
+    )
+    table_path = (
+    f"/{manifest.workspace_id}/{manifest.lakehouse.lakehouse_id}"
+    f"/api/2.1/unity-catalog/tables?catalog_name={manifest.lakehouse.lakehouse_id}&schema_name=dbo"
+    )
+    evidence = _postconfigure(manifest, outputs)
+    evidence["activator"] = {
+    "status": "succeeded", "resource": {"actionExecutionVerified": True},
+    }
+    return {
+    "client": client,
+    "onelake_client": _OneLakeClient({
+        "schema": acceptance.RELEASE_MANIFEST_SCHEMA,
+        "commitSha": _COMMIT,
+        "terraformOutputSha256": acceptance._sha256(outputs),
+        "status": "succeeded",
+    }),
+    "onelake_table_client": _OneLakeTableClient({
+        table_path: {"tables": [
+            {"name": manifest.lakehouse.table(suffix)}
+            for suffix in acceptance.BOOTSTRAP_TABLE_SUFFIXES
+        ]},
+    }),
+    "manifest": manifest, "terraform_output": outputs,
+    "runtime_contract": {
+        "schema": acceptance.RUNTIME_CONTRACT_SCHEMA,
+        "lakehouse": {"folders": ["releases"]},
+    },
+    "postconfigure_evidence": [evidence, json.loads(json.dumps(evidence))],
+    "definition_evidence": {}, "commit_sha": _COMMIT, "terraform_drift_exit_code": 0,
+    "require_reporting": True, "require_rti": True, "require_activator": True,
+    }
+
+
+def test_cleanroom_verifies_all_assets_through_external_adapters(cleanroom_case):
+    result = acceptance.validate_cleanroom(**cleanroom_case)
+    assert result["status"] == "succeeded"
+    assert result["checks"]["reporting"]["analytics"]["refreshRuns"] == 2
+    assert result["checks"]["activator"]["actionRuns"] == 2
+    assert result["checks"]["realTimeIntelligence"]["eventhouse_id"] == _uid("eventhouse_id")
+    assert result["checks"]["lakehouse"]["tableCount"] == len(acceptance.BOOTSTRAP_TABLE_SUFFIXES)
+    assert result["checks"]["items"]["managedItemCount"] == len(cleanroom_case["client"].items)
+
+
+def test_cleanroom_requires_action_execution_unless_explicitly_deferred(cleanroom_case):
+    for evidence in cleanroom_case["postconfigure_evidence"]:
+        evidence["activator"]["resource"] = {
+            "actionExecutionVerified": False, "actionExecutionRequired": False,
+        }
+    with pytest.raises(acceptance.CleanroomAcceptanceError, match="action evidence is absent"):
+        acceptance.validate_cleanroom(**cleanroom_case)
+    cleanroom_case["require_activator_action_checkpoint"] = False
+    result = acceptance.validate_cleanroom(**cleanroom_case)
+    assert result["status"] == "succeeded"
+    assert result["checks"]["activator"]["actionRuns"] == 2
+
+
+@pytest.mark.parametrize("section,field,value,message", [
+    (None, "commit_sha", "short", "full lowercase commit SHA"),
+    ("runtime_contract", "schema", "old", "runtime contract schema"),
+    ("context", "terraformOutputSha256", "0" * 64, "Terraform output provenance"),
+    ("context", "definitionHashes", {"treeSha256": "0" * 64}, "definition provenance"),
+    ("context", "commitSha", "b" * 40, "commit does not match"),
+    ("evidence", "operatorCheckpoints", ["pending"], "unresolved checkpoints"),
+])
+def test_cleanroom_rejects_invalid_provenance(cleanroom_case, section, field, value, message):
+    if section == "context":
+        for evidence in cleanroom_case["postconfigure_evidence"]:
+            evidence["context"][field] = value
+    elif section == "evidence":
+        cleanroom_case["postconfigure_evidence"][0][field] = value
+    else:
+        target = cleanroom_case if section is None else cleanroom_case[section]
+        target[field] = value
+    with pytest.raises(acceptance.CleanroomAcceptanceError, match=message):
+        acceptance.validate_cleanroom(**cleanroom_case)
+    assert cleanroom_case["client"].definition_calls == []
+
+
+@pytest.mark.parametrize("field,value,message", [
+    ("parts", [], "no parts"),
+    ("payload", None, "no payload"),
+    ("payloadType", "Reference", "not InlineBase64"),
+    ("path", "", "path is invalid"),
+])
+def test_cleanroom_rejects_unreadable_live_definition(cleanroom_case, field, value, message):
+    definition = cleanroom_case["client"].definitions[_uid("control")]["definition"]
+    if field == "parts":
+        definition[field] = value
+    else:
+        definition["parts"][0][field] = value
+    with pytest.raises(acceptance.CleanroomAcceptanceError, match=message):
+        acceptance.validate_cleanroom(**cleanroom_case)
+
+
+@pytest.mark.parametrize("failure,message", [
+    ("missing-item", "managed items are missing"),
+    ("wrong-type", "item readback does not match"),
+    ("wrong-schedule-count", "schedules; expected"),
+    ("missing-table", "tables are missing"),
+    ("invalid-folders", "folders must be an array"),
+    ("shortcut-mismatch", "shortcuts do not exactly match"),
+    ("wrong-release", "release manifest provenance"),
+    ("non-directlake", "not bound for Direct Lake"),
+    ("failed-refresh", "refresh did not succeed"),
+    ("missing-action-evidence", "action evidence is absent"),
+])
+def test_cleanroom_fails_closed_for_incomplete_deployments(cleanroom_case, failure, message):
+    client = cleanroom_case["client"]
+    if failure == "missing-item":
+        client.items.pop()
+    elif failure == "wrong-type":
+        next(item for item in client.items if item["id"] == _uid("control"))["type"] = "Report"
+    elif failure == "wrong-schedule-count":
+        client.schedules[_uid("control")] = []
+    elif failure == "missing-table":
+        next(iter(cleanroom_case["onelake_table_client"].pages.values()))["tables"] = []
+    elif failure == "invalid-folders":
+        cleanroom_case["runtime_contract"]["lakehouse"]["folders"] = {}
+    elif failure == "shortcut-mismatch":
+        next(iter(client.lists.values())).append({
+            "path": "Files", "name": "unexpected", "target": {"adlsGen2": {}},
+        })
+    elif failure == "wrong-release":
+        cleanroom_case["onelake_client"].release["commitSha"] = "b" * 40
+    elif failure == "non-directlake":
+        manifest = cleanroom_case["manifest"]
+        client.definitions[_uid("analytics-model")] = _definition(
+            manifest.workspace_id, manifest.lakehouse.lakehouse_id,
+        )
+    elif failure == "failed-refresh":
+        cleanroom_case["postconfigure_evidence"][0]["reporting_refresh"]["analytics"]["status"] = "failed"
+    elif failure == "missing-action-evidence":
+        cleanroom_case["postconfigure_evidence"][0]["activator"]["resource"] = None
+    with pytest.raises(acceptance.CleanroomAcceptanceError, match=message):
+        acceptance.validate_cleanroom(**cleanroom_case)
+
+
+def test_acceptance_cli_reads_documents_and_uses_separate_external_clients(
+    cleanroom_case, tmp_path, monkeypatch, capsys,
+):
+    from people_counter import fabric_automation, fabric_rest
+
+    clients = iter(cleanroom_case[key] for key in (
+    "client", "onelake_client", "onelake_table_client",
+    ))
+    roots = []
+
+    def make_client(token_provider, **kwargs):
+        roots.append(kwargs["api_root"])
+        return next(clients)
+
+    monkeypatch.setattr(fabric_automation, "FabricAutomationClient", make_client)
+    monkeypatch.setattr(acceptance, "make_resource_token_provider", lambda resource: lambda: "test-token")
+    monkeypatch.setattr(fabric_rest, "UrllibTransport", lambda: None)
+    args = []
+    for option, document in (
+    ("manifest", json.loads(Path("src/people_counter/data/deploy/dev.json").read_text())),
+    ("terraform-output", cleanroom_case["terraform_output"]),
+    ("runtime-contract", cleanroom_case["runtime_contract"]),
+    ("definition-evidence", cleanroom_case["definition_evidence"]),
+    ):
+        path = tmp_path / f"{option}.json"
+        path.write_text(json.dumps(document))
+        args.extend([f"--{option}-path", str(path)])
+    for index, document in enumerate(cleanroom_case["postconfigure_evidence"]):
+        path = tmp_path / f"postconfigure-{index}.json"
+        path.write_text(json.dumps(document))
+        args.extend(["--postconfigure-evidence-path", str(path)])
+    args.extend([
+    "--stage", "dev", "--commit-sha", _COMMIT, "--terraform-drift-exit-code", "0",
+    "--require-reporting", "--require-rti", "--require-activator",
+    ])
+    assert acceptance.main(args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "succeeded"
+    assert roots == [
+    "https://api.fabric.microsoft.com/v1",
+    "https://onelake.dfs.fabric.microsoft.com",
+    "https://onelake.table.fabric.microsoft.com/delta",
+    ]
+    (tmp_path / "terraform-output.json").write_text("[]")
+    assert acceptance.main(args) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["status"] == "failed"
+    assert "must be an object" in captured.err
+    (tmp_path / "terraform-output.json").write_text("{")
+    assert acceptance.main(args) == 1
+    assert "could not be read" in capsys.readouterr().err

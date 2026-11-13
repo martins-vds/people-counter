@@ -1679,6 +1679,87 @@ class FakeFileSystem:
         return FakeDirectoryClient(self, path)
 
 
+@pytest.fixture
+def adls_storage(monkeypatch):
+    filesystem = FakeFileSystem()
+    credential = object()
+    calls = []
+
+    def service_client(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(get_file_system_client=lambda name: filesystem)
+
+    monkeypatch.setattr("azure.storage.filedatalake.DataLakeServiceClient", service_client)
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", lambda: credential)
+    storage = AzureDataLakeStorage("testaccount", "footage", chunk_size=2)
+    assert calls == [{
+        "account_url": "https://testaccount.dfs.core.windows.net", "credential": credential,
+    }]
+    return storage, filesystem
+
+
+@pytest.mark.parametrize("operation", ["read_bytes", "sha256", "rename"])
+def test_missing_remote_objects_fail_explicitly(adls_storage, operation):
+    storage, filesystem = adls_storage
+    with pytest.raises(PublicationConflictError, match="does not exist"):
+        if operation == "rename":
+            storage.rename("absent", "new")
+        else:
+            getattr(storage, operation)("absent")
+    assert filesystem.objects == {}
+
+
+def test_staged_manifest_upload_is_idempotent_but_conflicts_are_not_overwritten(adls_storage):
+    storage, filesystem = adls_storage
+    storage.upload_bytes(b"manifest", "stage/file.json", "application/json")
+    appends = list(filesystem.appends)
+    storage.upload_bytes(b"manifest", "stage/file.json", "application/json")
+    assert filesystem.appends == appends
+    with pytest.raises(PublicationConflictError, match="conflicts"):
+        storage.upload_bytes(b"different", "stage/file.json", "application/json")
+    assert storage.read_bytes("stage/file.json") == b"manifest"
+
+
+@pytest.mark.parametrize("failure,message", [
+    ("source-size", "size changed"),
+    ("remote-size", "larger than the source"),
+    ("source-digest", "changed during upload"),
+])
+def test_video_upload_checks_source_and_staged_identity(adls_storage, tmp_path, failure, message):
+    storage, filesystem = adls_storage
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    size = 6 if failure == "source-size" else 5
+    digest = "0" * 64 if failure == "source-digest" else hashlib.sha256(b"video").hexdigest()
+    if failure == "remote-size":
+        filesystem.objects["stage/video"] = (b"too-long", "etag")
+    with pytest.raises(PublicationConflictError, match=message):
+        storage.upload_file(video, "stage/video", "video/mp4", size, digest)
+
+
+def test_upload_tolerates_concurrent_parent_creation(adls_storage, monkeypatch):
+    from azure.core.exceptions import ResourceExistsError
+
+    storage, filesystem = adls_storage
+    created = []
+
+    def create(path):
+        created.append(path)
+        raise ResourceExistsError("created concurrently")
+
+    def directory(path):
+        return SimpleNamespace(
+            exists=lambda: False,
+            create_directory=lambda: create(path),
+        )
+
+    monkeypatch.setattr(filesystem, "get_directory_client", directory)
+    storage.upload_bytes(b"data", "nested/stage/file", "application/json")
+    storage.upload_bytes(b"next", "nested/stage/another", "application/json")
+    assert storage.read_bytes("nested/stage/file") == b"data"
+    assert created == ["nested", "nested/stage"]
+
+
 class AzureDataLakeStorageTests(unittest.TestCase):
     def storage(self, filesystem, chunk_size=2):
         storage = AzureDataLakeStorage.__new__(AzureDataLakeStorage)
