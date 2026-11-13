@@ -381,7 +381,7 @@ copies of the packages it imports. The Environment must contain compatible
 versions of the complete dependency graph. This includes the base packages
 and the selected hardware extra from
 [`pyproject.toml`](../pyproject.toml): for CPU inference, that includes
-Transformers, Hugging Face Hub, OpenCV, NumPy, SciPy, LibreYOLO, RF-DETR,
+Transformers, Hugging Face Hub, OpenCV, NumPy, SciPy, Regex, LibreYOLO, RF-DETR,
 Supervision, Trackers, PyTorch, and TorchVision, plus their transitive
 dependencies. Uploading the SDK wheel alone does not request its optional
 `cpu` extra.
@@ -408,7 +408,7 @@ wheelhouse.
 
 #### Direct dependency versions for the portal
 
-This table describes the current SDK **0.9.59**, CPU variant, Linux/Python
+This table describes the current SDK **0.10.1**, CPU variant, Linux/Python
 3.13. Only some requirements in [`pyproject.toml`](../pyproject.toml) are exact
 pins; the others are ranges or unversioned names. The exact versions below
 come from the corresponding [`uv.lock`](../uv.lock), selected for this runtime,
@@ -425,12 +425,13 @@ table unchanged.
 | `opencv-python-headless` | Fabric-only requirement; SDK currently declares `opencv-python>=4.11.0.86` | `5.0.0.93`; published package, not yet Fabric-qualified here |
 | `numpy` | `>=1.24.0,<2.5` | `2.4.6` |
 | `scipy` | `>=1.10.0` | `1.18.1` |
+| `regex` | `>=2026.9.10` | `2026.9.10` |
 | `libreyolo` | `==1.5.0` | **Do not add:** current `1.5.0` metadata conflicts with the Fabric-headless requirement |
 | `rfdetr` | `==1.10.1` | `1.10.1` |
 | `supervision` | `==0.30.3` | `0.30.3` |
 | `trackers` | `==2.6.0` | **Do not add:** current `2.6.0` metadata has the same conflict |
-| `torch` | CPU index; no version constraint | `2.14.0+cpu`; see exception below |
-| `torchvision` | CPU index; no version constraint | `0.29.0+cpu`; see exception below |
+| `torch` | CPU index; `>=2.13.0` | `2.15.0+cpu`; see exception below |
+| `torchvision` | CPU index; no version constraint | `0.29.2+cpu`; see exception below |
 
 **CPU PyTorch exception:** the last two versions are from
 `https://download.pytorch.org/whl/cpu`, not the portal's default PyPI index.
