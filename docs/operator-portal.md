@@ -19,6 +19,11 @@ rewriting configuration, and exits nonzero if Compose fails. Compose waits for
 healthy services and leaves them running in the background.
 
 Open **http://127.0.0.1:8088** in your browser, or in VS Code's integrated browser.
+Standalone `pc-admin --host` accepts only loopback addresses. The Docker image
+uses `--container-loopback-publish` to listen inside its container; Compose
+publishes that port only on `127.0.0.1`. Do not use this container option on a
+host process or change the host mapping to a public interface. The portal has
+no operator authentication; CSRF and host checks are not substitutes for it.
 Specifying `portal` starts the portal and its Tailwind compiler dependency;
 existing Spark services are unchanged. The first build downloads Python
 dependencies, FFmpeg, Azure CLI, and the checksum-verified Tailwind CLI.
@@ -196,6 +201,14 @@ through the proxy, and uses secure cookies there. It does not trust wildcard
 `app.github.dev` hosts or arbitrary forwarded headers. Localhost operation is
 unchanged. Live Codespaces access requires a codespace; proxy/host behavior is
 covered by request tests.
+
+CSV downloads neutralize spreadsheet formula cells without changing stored
+catalogs, package metadata, or checkpoint inputs. Rejection CSVs are also safe
+for spreadsheet review. Generated inventories retain an exact machine-readable
+CSV and include a separate `*.spreadsheet.csv` export. Open the latter in a
+spreadsheet; use the original only as a machine input. Formula-leading values
+receive an apostrophe in spreadsheet exports and must not be copied back into
+operational catalogs or inventory inputs.
 
 ## Footage explorer
 

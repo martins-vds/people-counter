@@ -52,15 +52,15 @@ OSNET_MODEL = HuggingFaceModel(
 RFDETR_URL = (
     "https://storage.googleapis.com/rfdetr/rf-detr-large-2026.pth"
 )
-RFDETR_MD5 = "5cb72153541cbcb9aa6efa26222acc75"
+RFDETR_SHA256 = "0f4e20e19a99c0f8a62b5685f57f6c8b5c371c59081feda6752a0561a79ccf38"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs" / "models"
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 ONNX_OPSET_VERSION = 17
 ConversionFormat = Literal["onnx", "openvino"]
 
 
-def _md5(path: Path) -> str:
-    digest = hashlib.md5(usedforsecurity=False)
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open("rb") as model_file:
         for chunk in iter(lambda: model_file.read(DOWNLOAD_CHUNK_SIZE), b""):
             digest.update(chunk)
@@ -108,11 +108,11 @@ def download_rfdetr_botsort_model(
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     if destination.exists() and not force:
-        digest = _md5(destination)
-        if digest != RFDETR_MD5:
+        digest = _sha256(destination)
+        if digest != RFDETR_SHA256:
             raise RuntimeError(
                 f"Existing RF-DETR checkpoint checksum mismatch at "
-                f"{destination}: expected {RFDETR_MD5}, got {digest}. "
+                f"{destination}: expected {RFDETR_SHA256}, got {digest}. "
                 "Use --force to replace it."
             )
         return destination
@@ -133,11 +133,11 @@ def download_rfdetr_botsort_model(
                 model_file,
                 length=DOWNLOAD_CHUNK_SIZE,
             )
-        digest = _md5(partial)
-        if digest != RFDETR_MD5:
+        digest = _sha256(partial)
+        if digest != RFDETR_SHA256:
             raise RuntimeError(
                 f"Downloaded RF-DETR checkpoint checksum mismatch: "
-                f"expected {RFDETR_MD5}, got {digest}"
+                f"expected {RFDETR_SHA256}, got {digest}"
             )
         partial.replace(destination)
     finally:

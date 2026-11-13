@@ -119,6 +119,72 @@ account must have hierarchical namespace enabled.
 Bootstrap creates the configured private container in both modes. If the
 container exists, import it into bootstrap state before the bootstrap plan.
 
+### Two-stage workspace identity delegation
+
+The workspace identity does not exist until environment Terraform creates the
+Fabric workspace. Bootstrap therefore cannot safely grant delegation in the
+first apply. Leave `adls_workspace_identity_principal_ids = {}` initially.
+Bootstrap still grants the deployment identities state-container access and
+ADLS `Reader`, but **no ADLS role-assignment authority**.
+
+For each new environment:
+
+1. Apply bootstrap and complete the tenant-settings, capacity, and environment
+   variable setup below.
+2. In the normal authenticated deployment context, initialize the environment
+   Terraform root with its usual state backend and supply the same `TF_VAR_*`
+   inputs used by `_terraform.yml` or `scripts/deploy-local.sh`. Use direct
+   Terraform for this one-time workspace-only stage; the local deployment
+   helper and full workflows must wait until step 4.
+
+   ```bash
+   environment=dev
+   terraform -chdir="infra/environments/${environment}" plan -input=false \
+     -target=module.fabric_foundation.fabric_workspace.this \
+     -out=workspace-identity.tfplan
+   # Review the saved plan: only the workspace and its dependencies.
+   terraform -chdir="infra/environments/${environment}" apply \
+     workspace-identity.tfplan
+   terraform -chdir="infra/environments/${environment}" output -json \
+     workspace_identity
+   ```
+
+   Use the deployment identity that will manage the workspace. Do not create
+   the workspace out of band or grant storage roles manually. This targeted
+   apply does not create the ADLS role assignment, connection, or shortcut.
+3. Verify `workspace_identity.service_principal_id` against the intended
+   workspace's identity in Fabric. This is the Entra **service-principal object
+   ID**, not the workspace UUID, identity application/client ID, or GitHub
+   deployment principal. Add the verified ID to local bootstrap inputs:
+
+   ```hcl
+   adls_workspace_identity_principal_ids = {
+     dev = "<verified-workspace-identity-service-principal-object-id>"
+   }
+   ```
+
+4. As the privileged bootstrap operator, review and apply a new bootstrap plan.
+   It must add a `condition_version = "2.0"` grant constrained to that exact
+   principal and `Storage Blob Data Contributor`. Allow Azure RBAC propagation,
+   then run the normal full deployment. Environment Terraform continues to
+   create and manage the storage role assignment automatically.
+
+For an existing workspace, skip the workspace-only apply and obtain its
+verified identity from the existing environment state and Fabric. The
+bootstrap resource address is unchanged: populated inputs constrain existing
+managed grants; omitted inputs **remove** them. Review this migration before
+applying; there is no unconstrained legacy fallback. Terraform cannot revoke
+untracked or inherited grants: the operator must check for other effective
+Owner, User Access Administrator, RBAC Administrator, or custom assignment-write
+permissions and remove or constrain them before treating delegation as limited.
+
+On identity replacement, remove the old managed ADLS assignment while its
+principal is still permitted, then create/verify the replacement identity and
+reapply bootstrap before creating its new assignment. Changing the allowlisted
+ID first blocks deletion of the old assignment. Workspace destruction remains
+protected by `prevent_destroy`; follow the existing reviewed identity-change
+process rather than broadening delegation.
+
 Bootstrap state is local, access-restricted, and never committed. It creates
 the state backend, one OIDC application/service principal per environment,
 environment-scoped federated credentials, state-container RBAC, and Fabric
@@ -439,8 +505,20 @@ Environment Terraform enables the workspace identity. It grants that identity
 WorkspaceIdentity Fabric connection and one shortcut.
 
 Bootstrap grants the deployment principal `Reader` so Terraform can verify the
-account. Bootstrap also grants
-`User Access Administrator` for the workspace identity role assignment.
+account. After the two-stage setup above, bootstrap grants conditional
+`User Access Administrator` at that account scope. Azure permits create/update
+only when **both** request `RoleDefinitionId` is Storage Blob Data Contributor
+(`ba92f5b4-2d11-453d-a403-e96b0029c9fe`) **and** request `PrincipalId` is the
+approved workspace identity. Delete checks the same pair on the existing
+resource, not on the request. Other assignment roles and principals, including
+the deployment identity itself, are denied. Bootstrap also rejects any
+configured identity equal to a generated deployment principal.
+
+The action-specific `@Request`/`@Resource` checks follow Microsoft's
+[roles-and-specific-principals delegation example](https://learn.microsoft.com/en-us/azure/role-based-access-control/delegate-role-assignments-examples#example-constrain-roles-and-specific-groups).
+The condition limits this grant; it is not an explicit deny of permissions
+obtained through other Azure role assignments. It does not grant the deployment
+identity direct ADLS blob-data access.
 
 The storage account must use ADLS Gen2 hierarchical namespace. Fabric must be
 able to reach its DFS endpoint. This implementation does not support S3,

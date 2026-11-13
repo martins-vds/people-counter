@@ -15,6 +15,10 @@ from collections.abc import Callable
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import regex
+
+CAPTURE_TIME_REGEX_TIMEOUT_SECONDS = 0.1
+
 CATALOG_COLUMNS = {
     "catalog_version",
     "source_path_prefix",
@@ -103,7 +107,7 @@ class CameraCatalogEntry:
     frame_height: int
     counting_line: tuple[int, int, int, int]
     capture_time_source: str
-    capture_time_regex: re.Pattern[str] | None
+    capture_time_regex: regex.Pattern[str] | re.Pattern[str] | None
     capture_time_format: str | None
     effective_from_utc: datetime
     effective_to_utc: datetime | None
@@ -232,7 +236,7 @@ def _compile_capture_pattern(
     row: dict[str, str],
     line: int,
     source: str,
-) -> tuple[re.Pattern[str] | None, str | None]:
+) -> tuple[regex.Pattern[str] | None, str | None]:
     pattern_text = row["capture_time_regex"].strip()
     format_text = row["capture_time_format"].strip()
     if source in {"embedded", "inventory"}:
@@ -255,8 +259,8 @@ def _compile_capture_pattern(
             "must be provided together"
         )
     try:
-        pattern = re.compile(pattern_text)
-    except re.error as error:
+        pattern = regex.compile(pattern_text, regex.VERSION0)
+    except regex.error as error:
         raise CatalogError(
             f"Catalog row {line}: invalid capture_time_regex"
         ) from error
@@ -462,7 +466,30 @@ def _filename_capture_time(
 ) -> datetime:
     assert entry.capture_time_regex is not None
     assert entry.capture_time_format is not None
-    match = entry.capture_time_regex.search(PurePosixPath(relative_path).name)
+    pattern = entry.capture_time_regex
+    if isinstance(pattern, re.Pattern):
+        flags = regex.VERSION0
+        for name, flag in re.RegexFlag.__members__.items():
+            if pattern.flags & flag:
+                flags |= regex.RegexFlag[name]
+        pattern = regex.compile(pattern.pattern, flags)
+    filename = PurePosixPath(relative_path).name
+    try:
+        match = pattern.search(filename, timeout=CAPTURE_TIME_REGEX_TIMEOUT_SECONDS)
+    except TimeoutError as error:
+        raise VideoValidationError(
+            f"Filename capture-time regex exceeded "
+            f"{CAPTURE_TIME_REGEX_TIMEOUT_SECONDS} seconds: {relative_path}",
+            reason_code="CAPTURE_TIME_REGEX_TIMEOUT",
+            field="capture_time_regex",
+            observed_value=filename,
+            suggested_action=(
+                "Simplify capture_time_regex to avoid excessive backtracking, "
+                "or use embedded capture time or an inventory override."
+            ),
+            camera_id=entry.camera_id,
+            source_path_prefix=entry.source_path_prefix,
+        ) from error
     if match is None:
         raise VideoValidationError(
             f"Filename does not match the capture-time rule: {relative_path}",

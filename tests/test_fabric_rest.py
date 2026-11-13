@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import io
 import subprocess
+import threading
 import urllib.error
+import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 
 import pytest
@@ -146,7 +149,7 @@ def test_urllib_transport_returns_success_response(
         observed["timeout"] = timeout
         return _UrlResponse()
 
-    monkeypatch.setattr(fabric_rest.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(fabric_rest.urllib.request.OpenerDirector, "open", lambda self, request, *, timeout: urlopen(request, timeout=timeout))
 
     response = UrllibTransport().request(
         "POST",
@@ -178,7 +181,7 @@ def test_urllib_transport_returns_http_errors(
             io.BytesIO(b"retry"),
         )
 
-    monkeypatch.setattr(fabric_rest.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(fabric_rest.urllib.request.OpenerDirector, "open", lambda self, request, *, timeout: urlopen(request, timeout=timeout))
 
     response = UrllibTransport().request(
         "GET",
@@ -201,7 +204,7 @@ def test_urllib_transport_preserves_method_without_body(
         observed["timeout"] = timeout
         return _UrlResponse()
 
-    monkeypatch.setattr(fabric_rest.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(fabric_rest.urllib.request.OpenerDirector, "open", lambda self, request, *, timeout: urlopen(request, timeout=timeout))
 
     UrllibTransport().request(
         "DELETE",
@@ -295,10 +298,86 @@ def test_list_items_follows_continuation_uri() -> None:
         _TokenProvider(),
         workspace_id=WORKSPACE_ID,
         transport=transport,
+        api_root="https://fabric.example/v1",
     )
 
     assert client.list_items() == [{"id": "one"}, {"id": "two"}]
     assert transport.requests[1]["url"] == "https://fabric.example/next"
+
+
+@pytest.mark.parametrize("url", [
+    "https://attacker.invalid/next",
+    "https://api.fabric.microsoft.com.attacker.invalid/next",
+    "https://api.fabric.microsoft.com:444/next",
+    "https://user@api.fabric.microsoft.com/v1/items",
+    "https://:secret@api.fabric.microsoft.com/v1/items",
+    "https://api.fabric.microsoft.com/v1/items#fragment",
+    "http://api.fabric.microsoft.com/v1/items",
+    "//attacker.invalid/next",
+])
+def test_authenticated_requests_reject_unsafe_destinations(url):
+    transport = _Transport([])
+    client = FabricRESTController(_TokenProvider(), workspace_id=WORKSPACE_ID, transport=transport)
+    with pytest.raises(FabricRestError, match="origin"):
+        client._json("GET", url)
+    assert transport.requests == []
+
+
+@pytest.mark.parametrize("field", ["Location", "continuationUri", "resourceLocation", "resultLocation"])
+def test_server_supplied_destinations_cannot_forward_tokens(field):
+    url = "https://attacker.invalid/next"
+    responses = {
+        "Location": [HTTPResponse(202, {"Location": url}, b"{}")],
+        "continuationUri": [HTTPResponse(200, {}, ('{"value":[],"continuationUri":"' + url + '"}').encode())],
+        "resourceLocation": [
+            HTTPResponse(202, {"Location": "/operations/one"}, b"{}"),
+            HTTPResponse(200, {}, ('{"status":"Succeeded","resourceLocation":"' + url + '"}').encode()),
+        ],
+        "resultLocation": [
+            HTTPResponse(202, {"Location": "/operations/one"}, b"{}"),
+            HTTPResponse(200, {}, ('{"status":"Succeeded","resultLocation":"' + url + '"}').encode()),
+        ],
+    }
+    transport = _Transport(responses[field])
+    client = FabricRESTController(
+        _TokenProvider(), workspace_id=WORKSPACE_ID, transport=transport,
+        sleep=lambda _: None, monotonic=lambda: 0,
+    )
+    with pytest.raises(FabricRestError, match="origin"):
+        if field == "continuationUri":
+            client.list_items()
+        else:
+            client._lro_json("POST", "/items")
+    assert all(str(call["url"]).startswith("https://api.fabric.microsoft.com/") for call in transport.requests)
+
+
+def test_urllib_transport_does_not_follow_authenticated_redirects():
+    paths = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            paths.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", "/redirected")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(FabricRestError, match="redirect"):
+            UrllibTransport().request(
+                "GET", f"http://127.0.0.1:{server.server_port}/initial",
+                headers={"Authorization": "Bearer synthetic-token"}, body=None, timeout=5,
+            )
+        assert paths == ["/initial"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_lro_polls_and_reads_resource_location() -> None:

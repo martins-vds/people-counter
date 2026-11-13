@@ -1,5 +1,6 @@
 import csv
 import json
+import io
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -99,6 +100,7 @@ def test_readiness_uses_manifest_rules_and_reports_timestamp_and_dimensions(serv
     assert ready["config_id"] == service.store.entries("camera")[0]["id"]
     assert ready["camera_values"] == service.store.entries("camera")[0]["catalog"]
     assert ready["captured_at_utc"] == "2026-01-01T12:00:00Z"
+    assert ready["capture_time_source"] == "filename"
     monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(1280, 720, 30))
     issue = service.footage_readiness(form["video"])["issues"][0]
     assert issue["code"] == "VIDEO_DIMENSION_MISMATCH"
@@ -180,6 +182,22 @@ def test_catalog_prefix_conflicts_keep_only_unambiguous_defaults_and_exact_owner
     assert len(load_camera_catalog(path)) == len(rows)
 
 
+def test_catalog_trailing_slash_selects_the_matching_configuration_without_ambiguous_fallback(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    first = service.store.entries("camera")[0]
+    service.store.put("camera", first["id"], {**first, "folder": "lobby/"})
+    (service.source.root / "side").mkdir()
+    (service.source.root / "side/20260102T120000Z.mp4").write_bytes(b"video")
+    service.save_calibration({**form, "folder": "side", "video": "side/20260102T120000Z.mp4"})
+    rows = service.camera_catalog()
+    exact = [row for row in rows if row.get("video_relative_path") == "videos/" + form["video"]]
+    assert len(exact) == 1
+    assert exact[0]["counting_line_x1"] == first["catalog"]["counting_line_x1"]
+    path = service.state / "trailing-slash-catalog.csv"
+    path.write_text(client_get_csv(service))
+    assert len(load_camera_catalog(path)) == len(rows)
+
+
 @pytest.mark.parametrize("line_source", ["camera", "video"])
 def test_dimension_mismatch_explains_reference_and_links_to_video_confirmation(service, monkeypatch, line_source):
     form = save_camera(service, monkeypatch)
@@ -237,10 +255,12 @@ def test_draft_readiness_uses_unsaved_line_and_capture_time_without_persisting(s
         "csrf": token, "video": form["video"], "captured_at_utc": "2029-01-01T12:00",
     })
     assert b"CAMERA_EFFECTIVE_RANGE_MISMATCH" in invalid_time.data
-    invalid_line = client.post("/footage/readiness", data={
-        "csrf": token, "video": form["video"], "line_override": "yes", "counting_line_x1": "",
-    })
-    assert b"VIDEO_LINE_INVALID" in invalid_line.data
+    for coordinates in ({"counting_line_x1": ""}, {}):
+        invalid_line = client.post("/footage/readiness", data={
+            "csrf": token, "video": form["video"], "line_override": "yes", **coordinates,
+        })
+        assert invalid_line.status_code == 200
+        assert b"VIDEO_LINE_INVALID" in invalid_line.data
     assert {kind: service.store.entries(kind) for kind in before} == before
     assert service.store.jobs() == []
     saved = client.post("/footage/line", data={**form, "scope": "video", "csrf": token}, follow_redirects=True)
@@ -463,6 +483,26 @@ def test_same_folder_different_cameras_keep_exact_assignments_in_package(service
 
 def client_get_csv(service):
     return create_app(service).test_client().get("/cameras.csv").get_data(as_text=True)
+
+
+def test_csv_downloads_are_safe_without_rewriting_machine_inputs(service, monkeypatch):
+    row = {"camera_id": "=1+1", "video_relative_path": "+clip.mp4"}
+    monkeypatch.setattr(service, "camera_catalog", lambda: [row])
+    identity = service.enqueue("prepare", {})
+    root = service.job_dir(identity) / "package"
+    root.mkdir(parents=True)
+    report = root / "generated-video-inventory.csv"
+    original = "video_relative_path,camera_id\n+clip.mp4,=1+1\n"
+    report.write_text(original)
+    client = create_app(service).test_client()
+    for url in ("/cameras.csv", f"/jobs/{identity}/files/inventory"):
+        response = client.get(url)
+        assert response.status_code == 200
+        downloaded = next(csv.DictReader(io.StringIO(response.get_data(as_text=True))))
+        assert downloaded["camera_id"] == "'=1+1"
+        assert downloaded["video_relative_path"] == "'+clip.mp4"
+    assert report.read_text() == original
+    assert row["camera_id"] == "=1+1"
 
 
 def test_metadata_edit_does_not_change_geometry_or_require_frame_decode(service, monkeypatch):

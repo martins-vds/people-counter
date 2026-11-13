@@ -12,6 +12,20 @@ from scripts import download_models
 
 
 class DownloadModelsTests(unittest.TestCase):
+    def test_checkpoint_hash_reads_bounded_chunks_and_stops_at_eof(self):
+        handle = MagicMock()
+        handle.__enter__.return_value = handle
+        handle.read.side_effect = [
+            b"first", b"second", b"", AssertionError("Read after EOF"),
+        ]
+        with patch.object(Path, "open", return_value=handle):
+            digest = download_models._sha256(Path("checkpoint.pth"))
+        self.assertEqual(digest, hashlib.sha256(b"firstsecond").hexdigest())
+        self.assertEqual(
+            handle.read.call_args_list,
+            [unittest.mock.call(download_models.DOWNLOAD_CHUNK_SIZE)] * 3,
+        )
+
     @staticmethod
     def _fake_torch():
         class Module:
@@ -88,13 +102,10 @@ class DownloadModelsTests(unittest.TestCase):
 
     def test_downloads_and_validates_rfdetr_checkpoint(self):
         contents = b"rfdetr checkpoint"
-        expected_md5 = hashlib.md5(
-            contents,
-            usedforsecurity=False,
-        ).hexdigest()
+        expected_sha256 = hashlib.sha256(contents).hexdigest()
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(download_models, "RFDETR_MD5", expected_md5),
+            patch.object(download_models, "RFDETR_SHA256", expected_sha256),
             patch.object(
                 download_models.urllib.request,
                 "urlopen",
@@ -120,13 +131,10 @@ class DownloadModelsTests(unittest.TestCase):
 
     def test_reuses_valid_rfdetr_checkpoint(self):
         contents = b"cached checkpoint"
-        expected_md5 = hashlib.md5(
-            contents,
-            usedforsecurity=False,
-        ).hexdigest()
+        expected_sha256 = hashlib.sha256(contents).hexdigest()
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(download_models, "RFDETR_MD5", expected_md5),
+            patch.object(download_models, "RFDETR_SHA256", expected_sha256),
             patch.object(
                 download_models.urllib.request,
                 "urlopen",
@@ -150,7 +158,7 @@ class DownloadModelsTests(unittest.TestCase):
     def test_rejects_corrupt_cached_rfdetr_checkpoint(self):
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(download_models, "RFDETR_MD5", "expected"),
+            patch.object(download_models, "RFDETR_SHA256", "expected"),
         ):
             destination = (
                 Path(directory)
@@ -164,7 +172,7 @@ class DownloadModelsTests(unittest.TestCase):
                 RuntimeError,
                 (
                     f"expected expected, got "
-                    f"{hashlib.md5(b'corrupt', usedforsecurity=False).hexdigest()}"
+                    f"{hashlib.sha256(b'corrupt').hexdigest()}"
                     r"\. Use --force to replace it\."
                 ),
             ) as raised:
@@ -177,13 +185,10 @@ class DownloadModelsTests(unittest.TestCase):
 
     def test_force_replaces_corrupt_rfdetr_checkpoint(self):
         contents = b"replacement checkpoint"
-        expected_md5 = hashlib.md5(
-            contents,
-            usedforsecurity=False,
-        ).hexdigest()
+        expected_sha256 = hashlib.sha256(contents).hexdigest()
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(download_models, "RFDETR_MD5", expected_md5),
+            patch.object(download_models, "RFDETR_SHA256", expected_sha256),
             patch.object(
                 download_models.urllib.request,
                 "urlopen",
@@ -209,7 +214,7 @@ class DownloadModelsTests(unittest.TestCase):
     def test_rejects_corrupt_download_and_removes_partial_file(self):
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch.object(download_models, "RFDETR_MD5", "expected"),
+            patch.object(download_models, "RFDETR_SHA256", "expected"),
             patch.object(
                 download_models.urllib.request,
                 "urlopen",

@@ -2261,11 +2261,13 @@ def _read_delta_records(
     work_id: str,
     attempt_id: str,
 ) -> list[dict[str, Any]]:
+    from pyspark.sql.functions import col, lit
+
     rows = (
         spark.read.format("delta")
         .load(str(path))
-        .where(f"work_id = {_sql_literal(work_id)}")
-        .where(f"attempt_id = {_sql_literal(attempt_id)}")
+        .where(col("work_id") == lit(work_id))
+        .where(col("attempt_id") == lit(attempt_id))
         .select("record_json")
         .collect()
     )
@@ -2304,10 +2306,6 @@ def _verify_records_digest(
             f"committed {source} digest mismatch for {identity[0]}/{identity[1]}: "
             f"expected {expected_sha256}, observed {actual_sha256}"
         )
-
-
-def _sql_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _records_output_document(

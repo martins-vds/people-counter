@@ -324,6 +324,11 @@ Only the later configuration/enablement phase needs real release evidence.
 
 ## Every package: submission operator
 
+Custom catalog `capture_time_regex` rules use a matching timeout of 0.1 seconds
+per filename. A timed-out rule rejects the video with
+`CAPTURE_TIME_REGEX_TIMEOUT`; simplify the rule or use embedded capture time
+or an inventory override before retrying.
+
 Keep the notebook's complete package directory and unchanged source videos.
 Relative video paths under `--video-root` must remain unchanged.
 

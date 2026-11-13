@@ -32,6 +32,7 @@ from people_counter.sjd_gold import (
     _dimension_fact_dates,
     _dimension_source_rows,
     _load_delta_output_document,
+    _read_delta_records,
     _checkpoint_targets_match,
     _fact_rows_for_date,
     _optional_float,
@@ -380,7 +381,6 @@ def test_delta_output_decoder_uses_active_session_and_verifies_records():
             return self
 
         def where(self, value):
-            assert "work_id" in value or "attempt_id" in value
             return self
 
         def select(self, value):
@@ -402,6 +402,7 @@ def test_delta_output_decoder_uses_active_session_and_verifies_records():
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setitem(sys.modules, "pyspark", pyspark)
         monkeypatch.setitem(sys.modules, "pyspark.sql", pyspark_sql)
+        monkeypatch.setitem(sys.modules, "pyspark.sql.functions", types.SimpleNamespace(col=MagicMock(), lit=lambda value: value))
         document = _load_delta_output_document(
             Path("/delta/attempt"),
             _sha256_json(records),
@@ -412,6 +413,37 @@ def test_delta_output_decoder_uses_active_session_and_verifies_records():
     assert document["run"]["work_id"] == "work"
     assert document["run"]["attempt_id"] == "attempt"
     assert document["run"]["captured_at_utc"] == "2026-01-01T00:00:00Z"
+
+
+def test_delta_reader_treats_quotes_and_backslashes_as_literal_identifiers(tmp_path):
+    from pyspark.sql import SparkSession
+
+    spark = (
+        SparkSession.builder.master("local[1]")
+        .appName("gold-literal-regression")
+        .config("spark.ui.enabled", "false")
+        .config("spark.driver.bindAddress", "127.0.0.1")
+        .config("spark.driver.host", "127.0.0.1")
+        .config("spark.sql.warehouse.dir", str(tmp_path / "warehouse"))
+        .getOrCreate()
+    )
+    try:
+        work_id = r"work\' OR true --"
+        attempt_id = r"attempt\' OR true --"
+        expected = {"value": "selected"}
+        frame = spark.createDataFrame([
+            (work_id, attempt_id, json.dumps(expected)),
+            ("other", attempt_id, '{"value":"wrong work"}'),
+            (work_id, "other", '{"value":"wrong attempt"}'),
+        ], ["work_id", "attempt_id", "record_json"])
+        reader = types.SimpleNamespace(
+            read=types.SimpleNamespace(format=lambda _: types.SimpleNamespace(load=lambda _: frame)),
+        )
+        for escaped in ("false", "true"):
+            spark.conf.set("spark.sql.parser.escapedStringLiterals", escaped)
+            assert _read_delta_records(reader, tmp_path, work_id, attempt_id) == [expected]
+    finally:
+        spark.stop()
 
 
 def test_delta_output_decoder_rejects_missing_identity_and_bad_digest():
@@ -462,6 +494,7 @@ def test_delta_output_decoder_rejects_missing_identity_and_bad_digest():
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setitem(sys.modules, "pyspark", pyspark)
         monkeypatch.setitem(sys.modules, "pyspark.sql", pyspark_sql)
+        monkeypatch.setitem(sys.modules, "pyspark.sql.functions", types.SimpleNamespace(col=MagicMock(), lit=lambda value: value))
         with pytest.raises(GoldSourceError, match="digest mismatch"):
             _load_delta_output_document(
                 Path("/delta/attempt"),

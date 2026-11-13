@@ -46,6 +46,15 @@ authenticated multi-user service. Do not expose it directly to the internet or
 an untrusted network. See the [operator portal guide](docs/operator-portal.md)
 for deployment constraints and cloud-action safeguards.
 
+Standalone portal bindings are restricted to loopback. Container operation
+requires loopback-only host publication, and Codespaces forwarding must remain
+Private. Public or shared-network deployment is unsupported without an
+independent authenticated access boundary.
+
+Fabric REST tooling permits authenticated requests only to its configured
+HTTPS origin and does not follow HTTP redirects. Model downloads verify a
+pinned SHA-256 before accepting either downloaded or cached checkpoints.
+
 Keep footage, telemetry, portal state, and Azure credentials out of public
 reports and source control. Use least-privilege Azure access and the protected
 GitHub Environments described in the

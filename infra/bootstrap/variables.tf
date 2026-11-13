@@ -118,6 +118,23 @@ variable "adls_storage_by_environment" {
   }
 }
 
+variable "adls_workspace_identity_principal_ids" {
+  description = "Verified Fabric workspace identity service-principal object IDs per ADLS environment. Omit until the workspace identity exists; no delegation is granted for omitted environments."
+  type        = map(string)
+  default     = {}
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for environment, principal_id in var.adls_workspace_identity_principal_ids :
+      contains(keys(var.adls_storage_by_environment), environment)
+      && can(regex("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", principal_id))
+      && principal_id != "00000000-0000-0000-0000-000000000000"
+    ])
+    error_message = "Each workspace identity must be a nonzero service-principal object UUID for an environment configured in adls_storage_by_environment."
+  }
+}
+
 variable "tags" {
   description = "Common resource tags."
   type        = map(string)

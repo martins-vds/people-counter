@@ -147,11 +147,30 @@ resource "azurerm_role_assignment" "adls_reader" {
 }
 
 resource "azurerm_role_assignment" "adls_user_access_administrator" {
-  for_each = local.adls_storage_account_ids
+  for_each = var.adls_workspace_identity_principal_ids
 
-  scope                = each.value
+  scope                = local.adls_storage_account_ids[each.key]
   role_definition_name = "User Access Administrator"
   principal_id         = azuread_service_principal.github_oidc[each.key].object_id
+  condition_version    = "2.0"
+  condition            = <<-EOT
+    ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR
+    (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {ba92f5b4-2d11-453d-a403-e96b0029c9fe}
+    AND @Request[Microsoft.Authorization/roleAssignments:PrincipalId] ForAnyOfAnyValues:GuidEquals {${each.value}}))
+    AND ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})) OR
+    (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {ba92f5b4-2d11-453d-a403-e96b0029c9fe}
+    AND @Resource[Microsoft.Authorization/roleAssignments:PrincipalId] ForAnyOfAnyValues:GuidEquals {${each.value}}))
+  EOT
+
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        for principal in azuread_service_principal.github_oidc :
+        lower(each.value) != lower(principal.object_id)
+      ])
+      error_message = "The approved workspace identity must not be any GitHub deployment service principal."
+    }
+  }
 }
 
 resource "azurerm_fabric_capacity" "environment" {

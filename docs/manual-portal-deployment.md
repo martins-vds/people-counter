@@ -1716,6 +1716,14 @@ required; this packaging change does not demonstrate live Fabric qualification.
 | Gold | Every 15 minutes | Disabled |
 | Process | On demand | No recurring schedule |
 
+The Dispatcher schedule is the normal trigger for processing. The explicit
+backfill notebook invokes Control to register work as `READY`, then monitors
+it; neither registration nor the notebook's wait loop launches Dispatcher.
+Each Dispatcher run claims a bounded batch and processes it. Variable-library
+job references and the Dispatcher-failure Activator rule do not trigger these
+runs. Without an enabled schedule or an approved manual Dispatcher run, work
+remains `READY`.
+
 9. Open each recurring SJD's **Schedule** settings. Use UTC, the reviewed
    cadence and date range, and keep it disabled. Reopen/read back exactly
    one schedule per recurring role and none for Process. An absent
@@ -1737,10 +1745,15 @@ required; this packaging change does not demonstrate live Fabric qualification.
       manual-artifact prefix.
     - Gold: manual-artifact prefix followed by its required mode, `run`.
     - Refresh: the workspace and **both new model IDs**, as shown above.
-    - Dispatcher: manual-artifact prefix plus all four required
-      `--release-manifest-path`, `--release-manifest-sha256`,
-      `--release-receipt-path`, and `--release-receipt-sha256` arguments,
-      using the verified immutable artifacts. Do not save invented digests.
+    - Dispatcher: the `--artifacts <workspace-id> <lakehouse-id>
+      <environment-id>` prefix (`--manual-artifacts` remains an alias), plus
+      `--files-root` when the deployment uses a non-default state root.
+      No release-manifest/receipt paths or hashes are required. Optional
+      bounds are `--max-items 64 --maximum-active-batches 1
+      --lease-seconds 14400 --minimum-speed-x 1 --safety-factor 1.25
+      --margin-seconds 60`; these are also the current defaults.
+      Verify the scheduled execution uses the same target, state root,
+      published SDK Environment, and arguments as a direct job run.
 11. Start a fresh qualified session and verify two observed executors and
     the complete runtime/package/model contract before any processing.
     A saved Environment request is not allocation evidence. The separately
@@ -1750,10 +1763,25 @@ required; this packaging change does not demonstrate live Fabric qualification.
     cannot claim a Terraform drift result. Keep schedules and external
     actions disabled until an explicitly accepted operational handover.
     Stop the administrative notebook's Spark session when finished.
+13. After runtime, model, target, and operational acceptance, return to each
+    recurring role's **Schedule** settings and turn on its reviewed schedule.
+    For Dispatcher, verify **Active**, every 5 minutes, UTC, and a date range
+    that includes now and the intended operating period. Reopen the settings
+    to confirm they persisted. Do not leave an unintended one-day expiry.
+    Verify a Dispatcher job instance appears at the next scheduled time and
+    monitor the registered work progressing from `READY` to committed
+    processing. A schedule being active does not prove a run succeeded.
+    An explicitly approved manual Dispatcher run can process a batch once;
+    it does not replace the recurring schedule. Do not resubmit the backfill
+    merely because its work is waiting for Dispatcher.
 
-### Captured configuration checkpoint
+### Captured configuration checkpoint (historical)
 
-The completed walkthrough contains **30 items**. Compared with the script's
+The historical walkthrough captured **30 items**. It predates removal of the
+SDK's detached release-evidence requirement and is not the required final
+configuration for a current deployment. Preserve the captured results as
+evidence; use the current scheduling instructions above for new deployments.
+Compared with the script's
 26-item reference inventory, the four extras are the three retained classic
 monitoring artifacts and the administrative notebook. The managed monitoring
 supporting items are service-generated, not extra application Eventstreams.
@@ -1771,14 +1799,15 @@ intake-duration alert.
 | Reconciliation schedule | Every 15 minutes, disabled; ID `178b6bdf-723d-4b1d-9ebe-d728cf73134a` |
 | Gold schedule | Every 15 minutes, disabled; ID `1b377c38-88a0-4c96-be45-61adfee60bf0` |
 | Refresh schedule | Every 15 minutes, disabled, both current model IDs; ID `7262ab4d-4a78-486c-ac49-cbec48a25915` |
-| Dispatcher schedule | **Absent**, not “disabled”: valid manifest/receipt arguments are unavailable |
+| Dispatcher schedule | Historically absent under the former release-evidence gate; current deployments must create it disabled and enable it after acceptance |
 | Process schedule | Absent, on demand; the historical capture also included the retired role |
-| SDK admission / inference | **Blocked / not accepted**; no production handover |
+| SDK admission / inference | Historically blocked / not accepted; this capture does not establish current inference or operational acceptance |
 
 The four configured schedules and their arguments were read back, including
-the retained Lakehouse/Environment bindings. Do not create the Dispatcher
-schedule with incomplete release arguments simply to make the item count or
-schedule count match the reference.
+the retained Lakehouse/Environment bindings. That historical omission is not
+guidance to leave Dispatcher unscheduled. Current Dispatcher configuration
+requires no detached manifest or publication receipt; retain the target,
+compute, SDK-version, and model checks before activation.
 
 A non-overwriting, content-addressed configuration snapshot was written to
 the manual Lakehouse and read back byte-for-byte:
@@ -1794,14 +1823,16 @@ To inspect it through the UI, open `pc_dev_lakehouse` > **Files** >
 **deployment-evidence**, locate the exact content-addressed filename, and
 open/download it. Use the finished administrative notebook's read-only cell
 to verify its hash. This is a captured configuration record, not live drift
-validation, an SDK detached manifest, or a postpublish admission receipt.
-Do not pass it to the Dispatcher's release-manifest/receipt arguments.
+validation or proof of current runtime qualification. Do not use its hash as
+an SDK compatibility digest. Current Dispatcher jobs derive SDK compatibility
+from installed package metadata and need no release-manifest/receipt arguments.
 
 ![Run the read-only hash/schema check and inspect the captured admission hold.](images/manual-deployment/76-configuration-evidence-audit.png)
 
 The audit check was executed successfully against the saved OneLake file:
 30 captured resources, `configuration-verified-admission-blocked`, and SDK
-admission `blocked`. The administrative Spark session was then stopped;
+admission `blocked` under the former evidence gate. These retained historical
+labels do not impose that gate on the current SDK. The administrative Spark session was then stopped;
 the browser confirmed **Session stopped successfully**. This does not pause
 the F2 capacity.
 

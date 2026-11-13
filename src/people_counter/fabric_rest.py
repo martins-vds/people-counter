@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 FABRIC_API_ROOT = "https://api.fabric.microsoft.com/v1"
 FABRIC_RESOURCE = "https://api.fabric.microsoft.com"
@@ -83,6 +84,11 @@ class HTTPTransport(Protocol):
     ) -> HTTPResponse: ...
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise FabricRestError("Fabric HTTP redirects are not permitted")
+
+
 class UrllibTransport:
     def request(
         self,
@@ -100,7 +106,8 @@ class UrllibTransport:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            opener = urllib.request.build_opener(_NoRedirect())
+            with opener.open(request, timeout=timeout) as response:
                 return HTTPResponse(
                     response.status,
                     dict(response.headers.items()),
@@ -161,8 +168,10 @@ class FabricRESTController:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        if not api_root.startswith("https://"):
-            raise ValueError("Fabric API root must use HTTPS")
+        root = urlsplit(api_root)
+        if root.scheme != "https" or not root.hostname or root.username or root.password or root.query or root.fragment:
+            raise ValueError("Fabric API root must use HTTPS without credentials, query, or fragment")
+        self._api_origin = (root.scheme, root.hostname, root.port or 443)
         if not isinstance(workspace_id, str):
             raise ValueError("Fabric workspace_id must be a canonical UUID")
         try:
@@ -181,9 +190,15 @@ class FabricRESTController:
         self.monotonic = monotonic
 
     def _url(self, path_or_url: str) -> str:
-        if path_or_url.startswith("https://"):
-            return path_or_url
-        return f"{self.api_root}/{path_or_url.lstrip('/')}"
+        target = urlsplit(path_or_url)
+        if not target.scheme and not target.netloc:
+            return f"{self.api_root}/{path_or_url.lstrip('/')}"
+        if (
+            (target.scheme, target.hostname, target.port or 443) != self._api_origin
+            or target.username or target.password or target.fragment
+        ):
+            raise FabricRestError("Fabric request URL must use the configured API origin")
+        return path_or_url
 
     def _request(
         self,
@@ -194,6 +209,7 @@ class FabricRESTController:
         expected: Sequence[int] = (200,),
         content_type: str = "application/json",
     ) -> tuple[Mapping[str, str], bytes]:
+        url = self._url(path)
         token = self.token_provider.get_token()
         headers = {
             "Accept": "application/json",
@@ -205,7 +221,7 @@ class FabricRESTController:
             body = value if isinstance(value, bytes) else _canonical_bytes(value)
         response = self.transport.request(
             method,
-            self._url(path),
+            url,
             headers=headers,
             body=body,
             timeout=self.timeout,

@@ -66,6 +66,35 @@ def test_root_and_health_need_no_cloud_access(app):
     assert b"Cloud storage" in response.data
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.0.2.1", "public.example"])
+def test_portal_cli_rejects_network_exposure_before_creating_state(monkeypatch, host):
+    monkeypatch.setattr("sys.argv", ["pc-admin", "--host", host])
+    monkeypatch.setattr(portal_web, "PortalService", lambda *args, **kwargs: pytest.fail("Must reject before state creation"))
+    with pytest.raises(SystemExit) as error:
+        portal_web.main()
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("arguments,host", [
+    ([], "127.0.0.1"),
+    (["--host", "127.0.0.1"], "127.0.0.1"),
+    (["--host", "localhost"], "localhost"),
+    (["--host", "::1"], "::1"),
+    (["--container-loopback-publish"], "0.0.0.0"),
+])
+def test_portal_cli_preserves_local_and_explicit_container_startup(service, monkeypatch, arguments, host):
+    monkeypatch.setattr("sys.argv", ["pc-admin", *arguments])
+    monkeypatch.setattr(portal_web, "PortalService", lambda *args, **kwargs: service)
+    previous_umask = os.umask(0o077)
+    try:
+        with patch("waitress.serve") as serve:
+            portal_web.main()
+        assert serve.call_args.args[0].extensions["portal_service"] is service
+        assert serve.call_args.kwargs == {"host": host, "port": 8088, "threads": 4}
+    finally:
+        os.umask(previous_umask)
+
+
 def test_post_requires_csrf_and_same_origin(app):
     client = app.test_client()
     assert client.post("/packages", data={"folder": "lobby"}).status_code == 403

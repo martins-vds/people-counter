@@ -39,6 +39,8 @@ from people_counter.manifest_publisher import (
     ManifestPackagePublishConfig,
     PublisherConfig,
     PublishSummary,
+    RejectionRecord,
+    GeneratedInventoryRecord,
     build_prepare_parser,
     build_parser,
     build_publish_parser,
@@ -50,6 +52,8 @@ from people_counter.manifest_publisher import (
     publish_main,
     run_publisher,
     validate_manifest_package,
+    write_rejection_report,
+    write_generated_inventory_report,
 )
 
 
@@ -73,6 +77,41 @@ CATALOG_FIELDS = (
 )
 VIDEO_BYTES = b"video"
 VIDEO_SHA256 = hashlib.sha256(VIDEO_BYTES).hexdigest()
+
+
+@pytest.mark.parametrize("value", [
+    "=1+1", "+1+1", "-1+1", "@SUM(1)", "\t=1+1", "\r=1+1", "\n=1+1", "  =1+1",
+    "\ttext", "\rtext", "\ntext",
+])
+def test_rejection_reports_neutralize_spreadsheet_cells(tmp_path, value):
+    path = tmp_path / "rejections.csv"
+    rejection = RejectionRecord(
+        value, "INVALID", "camera_id", value, value, "Review", False, value, "videos/",
+    )
+    write_rejection_report(path, [rejection])
+    with path.open(newline="") as handle:
+        row = next(csv.DictReader(handle))
+    for field in ("video_relative_path", "observed_value", "explanation", "camera_id"):
+        assert row[field] == "'" + value
+    assert row["reason_code"] == "INVALID" and row["retryable"] == "False"
+
+
+def test_inventory_keeps_machine_values_and_emits_safe_spreadsheet_report(tmp_path):
+    path = tmp_path / "inventory.csv"
+    record = GeneratedInventoryRecord(
+        "=clip.mp4", "+camera", "location", "UTC", "2026-01-01T00:00:00Z",
+        "inventory", "asset", "version", 5, "a" * 64, 1920, 1080, 30, "prepared.json",
+    )
+    write_generated_inventory_report(path, [record], set(), {"=clip.mp4"}, None)
+    write_generated_inventory_report(path, [], set(), {"=clip.mp4"}, None)
+    with path.open(newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["video_relative_path"] == "=clip.mp4"
+    assert row["camera_id"] == "+camera"
+    with path.with_suffix(".spreadsheet.csv").open(newline="") as handle:
+        safe = next(csv.DictReader(handle))
+    assert safe["video_relative_path"] == "'=clip.mp4" and safe["camera_id"] == "'+camera"
+    assert safe["size_bytes"] == "5"
 
 
 class FakeStorage:

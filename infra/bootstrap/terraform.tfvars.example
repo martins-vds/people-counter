@@ -18,6 +18,10 @@ fabric_capacity_sku_by_environment = {
 
 fabric_admin_members = []
 
+# First bootstrap: leave empty. After creating each workspace identity, copy its
+# verified service_principal_id here and reapply bootstrap before full deployment.
+adls_workspace_identity_principal_ids = {}
+
 adls_storage_by_environment = {
   dev = {
     mode                 = "create"

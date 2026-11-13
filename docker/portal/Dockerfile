@@ -37,4 +37,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && chown -R 10001:10001 /var/lib/people-counter
 USER 10001:10001
 EXPOSE 8088
-CMD ["pc-admin", "--host", "0.0.0.0", "--port", "8088"]
+CMD ["pc-admin", "--container-loopback-publish", "--port", "8088"]

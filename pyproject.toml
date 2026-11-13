@@ -17,6 +17,7 @@ dependencies = [
     "opencv-python>=4.11.0.86",        # Apache 2.0
     "numpy>=1.24.0,<2.5",              # BSD; Fabric Runtime 2.0 pool uses 2.4.x
     "scipy>=1.10.0",
+    "regex>=2026.9.10",               # Apache 2.0; bounded custom capture-time matching
 ]
 
 [dependency-groups]

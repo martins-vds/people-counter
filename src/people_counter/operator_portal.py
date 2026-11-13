@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import re
 import secrets
@@ -18,10 +19,11 @@ from flask import (
 )
 
 from people_counter import backfill_operator as backfill
+from people_counter.csv_reports import spreadsheet_csv
 from people_counter.inference_profiles import PRESETS
 from people_counter.manifest import CONTENT_TYPES, ManifestPublisherError
 from people_counter.portal_service import (
-    LINE_FIELDS, METADATA_FIELDS, PORTAL_CATALOG_FIELDS, REPORT_TYPES, PortalService, csv_text, report_type,
+    LINE_FIELDS, METADATA_FIELDS, PORTAL_CATALOG_FIELDS, REPORT_TYPES, PortalService, report_type,
 )
 
 
@@ -365,7 +367,7 @@ def create_app(service: PortalService) -> Flask:
 
     @app.get("/cameras.csv")
     def camera_csv():
-        content = csv_text(
+        content = spreadsheet_csv(
             PORTAL_CATALOG_FIELDS, service.camera_catalog(),
         )
         return app.response_class(
@@ -515,6 +517,15 @@ def create_app(service: PortalService) -> Flask:
             path = service.report(identity, name)
         except ValueError:
             abort(404)
+        if path.suffix == ".csv":
+            def export():
+                with path.open(newline="", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle)
+                    yield from spreadsheet_csv(reader.fieldnames or (), reader)
+            return app.response_class(
+                export(), mimetype="text/csv",
+                headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
+            )
         return send_file(path, as_attachment=True)
 
     @app.get("/jobs/<identity>/reports/<name>")
@@ -560,7 +571,12 @@ def main() -> None:
     parser.add_argument("--models-root", type=Path, default=Path(os.environ.get("PC_PORTAL_MODELS_ROOT", "offline-models")))
     parser.add_argument("--state-dir", type=Path, default=Path(os.environ.get("PC_PORTAL_STATE_DIR", ".people-counter-portal")))
     parser.add_argument("--output-root", type=Path, default=Path(os.environ["PC_PORTAL_OUTPUT_ROOT"]) if os.environ.get("PC_PORTAL_OUTPUT_ROOT") else None)
-    parser.add_argument("--host", default="127.0.0.1")
+    binding = parser.add_mutually_exclusive_group()
+    binding.add_argument("--host", choices=("127.0.0.1", "::1", "localhost"), default="127.0.0.1")
+    binding.add_argument(
+        "--container-loopback-publish", dest="host", action="store_const", const="0.0.0.0",
+        help="Bind inside a container only; publish its port on host loopback, never a public interface.",
+    )
     parser.add_argument("--port", type=int, default=8088)
     parser.add_argument("--allow-cloud", action="store_true", default=os.environ.get("PC_PORTAL_ALLOW_CLOUD") == "1")
     args = parser.parse_args()

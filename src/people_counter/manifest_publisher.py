@@ -21,6 +21,7 @@ from people_counter.adls import (
     PublicationStorage,
     RemoteObject,
 )
+from people_counter.csv_reports import spreadsheet_csv, spreadsheet_row
 from people_counter.manifest import (
     CONTENT_TYPES,
     CameraCatalogEntry,
@@ -607,7 +608,7 @@ def write_rejection_report(
             fieldnames=tuple(RejectionRecord.__dataclass_fields__),
         )
         writer.writeheader()
-        writer.writerows(asdict(rejection) for rejection in rejections)
+        writer.writerows(spreadsheet_row(asdict(rejection)) for rejection in rejections)
     temporary.replace(path)
 
 
@@ -657,6 +658,15 @@ def write_generated_inventory_report(
         writer.writeheader()
         writer.writerows(rows[key] for key in sorted(rows))
     temporary.replace(path)
+
+    spreadsheet_path = path.with_suffix(".spreadsheet.csv")
+    spreadsheet_temporary = spreadsheet_path.with_suffix(".csv.tmp")
+    with spreadsheet_temporary.open("w", newline="", encoding="utf-8") as handle:
+        handle.writelines(spreadsheet_csv(
+            tuple(GeneratedInventoryRecord.__dataclass_fields__),
+            (rows[key] for key in sorted(rows)),
+        ))
+    spreadsheet_temporary.replace(spreadsheet_path)
 
 
 def _generated_inventory_paths(path: Path) -> set[str]:
