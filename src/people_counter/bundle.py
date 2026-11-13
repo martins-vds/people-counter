@@ -23,7 +23,7 @@ Variant = Literal["cpu", "gpu", "fabric-onnx"]
 PYPI_INDEX = "https://pypi.org/simple"
 PYTORCH_INDEXES: dict[Variant, str] = {
     "cpu": "https://download.pytorch.org/whl/cpu",
-    "gpu": "https://download.pytorch.org/whl/cu128",
+    "gpu": "https://download.pytorch.org/whl/cu130",
     "fabric-onnx": "https://download.pytorch.org/whl/cpu",
 }
 

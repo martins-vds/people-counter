@@ -27,6 +27,14 @@ it safely.
 - shell regression tests for SDK version preparation and rollback, release
   version validation, tag conflicts, draft recovery, and idempotent publication.
 
+`package.json` overrides vulnerable transitive dependencies whose parent
+packages still require older versions. The `deepmerge` override uses the
+API-compatible `@shivammathur/deepmerge` fork because upstream has no patched
+release for GHSA-gcqx-w48m-w2h4. Regression tests cover prototype poisoning and
+merge compatibility. Remove an override only after the parent resolves a safe
+version; validate with `npm audit`, `npm run test:portal`, and
+`npm run test:portal:mutation`.
+
 Commit tutorial notebooks with cleared outputs and execution counts. The
 backfill notebook tests reject saved execution state; clear it before pushing:
 

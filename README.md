@@ -110,6 +110,9 @@ deploy or schedule production jobs.
 
 ## Python SDK
 
+Requires Python 3.11.5 or newer. Python 3.10 is no longer supported because
+the patched dependency versions require Python 3.11.
+
 Install the package with exactly one hardware variant, then import only from
 the stable top-level API:
 
@@ -410,7 +413,7 @@ dependency wheel, and creates a ZIP with a checksum manifest:
 # CPU-only PyTorch bundle
 uv run python scripts/build_sdk_bundle.py cpu
 
-# CUDA 12.8 PyTorch bundle
+# CUDA 13.0 PyTorch bundle
 uv run python scripts/build_sdk_bundle.py gpu
 ```
 
@@ -534,7 +537,8 @@ uv run --extra cpu people-counter rtdetr-osnet samples/three_people_walking.mp4 
 
 ## NVIDIA GPU
 
-The GPU variant uses the official PyTorch CUDA 12.8 wheels:
+The GPU variant uses the official PyTorch CUDA 13.0 wheels and requires a
+CUDA 13.0-compatible NVIDIA driver:
 
 ```bash
 uv run --extra gpu people-counter rtdetr-osnet samples/three_people_walking.mp4 --device gpu
