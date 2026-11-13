@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+import warnings
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -2456,15 +2457,18 @@ def _fake_candidate_executors(
     )
 
 
+@pytest.mark.parametrize("allocation", ["true", "false"])
 def test_fabric_process_profile_enforces_runtime_and_computes_reserve(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, allocation,
 ) -> None:
     class Conf:
         values = {
-            "spark.dynamicAllocation.enabled": "false",
+            "spark.dynamicAllocation.enabled": allocation,
+            "spark.dynamicAllocation.minExecutors": "3",
             "spark.speculation": "false",
             "spark.executor.cores": "8",
             "spark.executor.memory": "16g",
+            "spark.executor.instances": "5",
         }
 
         def get(self, name: str, default: object = None) -> object:
@@ -2488,6 +2492,7 @@ def test_fabric_process_profile_enforces_runtime_and_computes_reserve(
     monkeypatch.setattr(sys, "version_info", (3, 13))
 
     def discover(session, minimum):
+        assert minimum == (3 if allocation == "true" else 5)
         return _fake_candidate_executors(5)
 
     from people_counter.fabric_capability_probe import (
@@ -2518,7 +2523,6 @@ def test_fabric_process_profile_enforces_runtime_and_computes_reserve(
     assert profile.planned_task_count == 40
     assert profile.rss_headroom_fraction == 0.20
     for key, bad_value, message in (
-        ("spark.dynamicAllocation.enabled", "true", "fixed"),
         ("spark.speculation", "true", "speculation"),
         ("spark.executor.cores", "0", "executor core"),
         ("spark.executor.memory", "16x", "memory"),
@@ -2534,6 +2538,92 @@ def test_fabric_process_profile_enforces_runtime_and_computes_reserve(
                 )
         finally:
             Conf.values[key] = original
+
+
+@pytest.mark.parametrize("enabled,dynamic,fixed,expected,elapsed", [
+    ("true", "3", "8", 3, 0),
+    ("false", "9", "2", 2, 0),
+    ("false", "9", "1", 1, 0),
+    ("true", None, "2", 2, 30),
+    (None, None, "2", 2, 30),
+    ("false", "9", None, 1, 30),
+    (None, None, None, 1, 60),
+    ("true", "0", "2", 1, 0),
+])
+def test_runtime_allocation_preference_and_bounded_fallback(
+    monkeypatch, enabled, dynamic, fixed, expected, elapsed,
+):
+    import people_counter.fabric_sjd_runtime as runtime
+
+    clock = [0.0]
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+
+    def sleep(seconds):
+        assert 0 < seconds <= 1
+        assert clock[0] < 60
+        clock[0] += seconds
+
+    monkeypatch.setattr(runtime.time, "sleep", sleep)
+    values = {
+        "spark.dynamicAllocation.enabled": enabled,
+        "spark.dynamicAllocation.minExecutors": dynamic,
+        "spark.executor.instances": fixed,
+    }
+    spark = SimpleNamespace(conf=SimpleNamespace(get=lambda key, default=None: values.get(key, default)))
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        assert runtime._minimum_executor_count(spark) == expected
+    assert clock[0] == elapsed
+    assert all(item.category is RuntimeWarning for item in captured)
+    if elapsed == 0:
+        assert not captured
+    if fixed is None and enabled != "true":
+        assert any("using minimum 1" in str(item.message) for item in captured)
+    if elapsed and fixed is not None:
+        assert any("fixed allocation" in str(item.message) for item in captured)
+
+
+@pytest.mark.parametrize("mode", ["dynamic", "fixed"])
+def test_runtime_allocation_waits_for_late_configuration(monkeypatch, mode):
+    import people_counter.fabric_sjd_runtime as runtime
+
+    clock = [0.0]
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+
+    def sleep(seconds):
+        assert 0 < seconds <= 1
+        assert clock[0] < 30
+        clock[0] += seconds
+
+    monkeypatch.setattr(runtime.time, "sleep", sleep)
+
+    def get(key, default=None):
+        if key == "spark.dynamicAllocation.enabled":
+            return "true" if mode == "dynamic" else "false"
+        selected = "spark.dynamicAllocation.minExecutors" if mode == "dynamic" else "spark.executor.instances"
+        return "4" if key == selected and clock[0] >= 2 else default
+
+    assert runtime._minimum_executor_count(SimpleNamespace(conf=SimpleNamespace(get=get))) == 4
+    assert clock[0] == 2
+
+
+@pytest.mark.parametrize("enabled,key,value", [
+    ("true", "spark.dynamicAllocation.minExecutors", "-1"),
+    ("false", "spark.executor.instances", "0"),
+    ("false", "spark.executor.instances", "not-a-count"),
+])
+def test_runtime_allocation_rejects_invalid_counts_without_waiting(
+    monkeypatch, enabled, key, value,
+):
+    import people_counter.fabric_sjd_runtime as runtime
+
+    values = {"spark.dynamicAllocation.enabled": enabled, key: value}
+    spark = SimpleNamespace(conf=SimpleNamespace(get=lambda name, default=None: values.get(name, default)))
+    sleep = MagicMock(side_effect=AssertionError("Invalid configuration must not wait"))
+    monkeypatch.setattr(runtime.time, "sleep", sleep)
+    with pytest.raises(ValueError, match="invalid executor count|invalid literal"):
+        runtime._minimum_executor_count(spark)
+    sleep.assert_not_called()
 
 
 def test_executor_warm_works_covers_mixed_variants_and_deduplicates() -> None:
@@ -2605,6 +2695,7 @@ def test_fabric_process_profile_uses_the_measured_executor_rss(
     class Conf:
         values = {
             "spark.dynamicAllocation.enabled": "false",
+            "spark.executor.instances": "5",
             "spark.speculation": "false",
             "spark.executor.cores": "8",
             "spark.executor.memory": "16g",

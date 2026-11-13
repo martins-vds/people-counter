@@ -357,6 +357,35 @@ def _executor_warm_works(
     return tuple(works)
 
 
+def _minimum_executor_count(spark: Any) -> int:
+    for mode, property_name in (
+        ("dynamic", "spark.dynamicAllocation.minExecutors"),
+        ("fixed", "spark.executor.instances"),
+    ):
+        deadline = time.monotonic() + 30
+        while True:
+            enabled = str(spark.conf.get("spark.dynamicAllocation.enabled", "")).lower()
+            if mode == "dynamic" and enabled == "false":
+                break
+            value = spark.conf.get(property_name, None)
+            if value is not None and (mode == "fixed" or enabled == "true"):
+                count = int(value)
+                if count < (0 if mode == "dynamic" else 1):
+                    raise ValueError(f"{property_name} has invalid executor count {count}")
+                return max(1, count)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                warnings.warn(
+                    f"{mode} allocation configuration unavailable after 30 seconds; "
+                    + ("checking fixed allocation" if mode == "dynamic" else "using minimum 1 executor"),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                break
+            time.sleep(min(1, remaining))
+    return 1
+
+
 def _validate_fabric_runtime(spark: Any) -> tuple[int, int, int, int]:
     from people_counter.sjd_process import GIB
 
@@ -367,8 +396,6 @@ def _validate_fabric_runtime(spark: Any) -> tuple[int, int, int, int]:
     java = str(spark.sparkContext._jvm.java.lang.System.getProperty("java.version"))
     if not java.startswith("21"):
         raise RuntimeError(f"Fabric SJD requires Java 21, got {java}")
-    if str(spark.conf.get("spark.dynamicAllocation.enabled", "")).lower() != "false":
-        raise RuntimeError("Fabric SJD requires the reviewed fixed live pool")
     if str(spark.conf.get("spark.speculation", "false")).lower() != "false":
         raise RuntimeError("Fabric SJD requires Spark speculation disabled")
     cores = int(spark.conf.get("spark.executor.cores"))
@@ -382,7 +409,7 @@ def _validate_fabric_runtime(spark: Any) -> tuple[int, int, int, int]:
     return (
         cores, int(match.group(1)) * scale,
         int(spark.conf.get("spark.task.cpus", "1")),
-        max(1, int(spark.conf.get("spark.dynamicAllocation.minExecutors", "1"))),
+        _minimum_executor_count(spark),
     )
 
 

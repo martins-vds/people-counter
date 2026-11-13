@@ -82,8 +82,17 @@ change. Never update an existing work item's immutable release digest in place.
 The published Environment must also match `reviewed_compute_settings()`:
 Runtime 2.0, fixed allocation, two 8-core/56-GB executors, speculation disabled.
 The deployment verifier checks published compute before binding/enabling jobs.
-Dispatcher checks the live Python/Spark/Java and fixed-allocation contract before
-claiming, rather than discovering an incompatible pool after taking a lease.
+Dispatcher checks the live Python/Spark/Java, executor resources, and speculation
+settings before claiming. Runtime validation supports both dynamic and fixed
+executor allocation. It waits up to 30 seconds for enabled dynamic allocation
+and `spark.dynamicAllocation.minExecutors`, then up to 30 seconds for
+`spark.executor.instances`. Explicitly disabled dynamic allocation skips the
+first wait and ignores stale dynamic minimums. If neither configuration becomes
+available, a warning records the fallback to a minimum of one executor (not
+job exit status 1). Invalid executor counts fail explicitly.
+This only selects the discovery minimum: actual executor inventory, warm-up,
+and measured memory checks still determine safe processing concurrency.
+The deployment template above remains the reviewed fixed-allocation default.
 
 ### Recover an investigated failed claim
 
