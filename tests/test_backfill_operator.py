@@ -912,7 +912,11 @@ def test_onelake_partition_never_overwrites_existing_content(existing):
     else:
         with pytest.raises(ValueError, match="conflicts"):
             files.write_partition("Files/people-counter/dev/v1/intake/backfill/run/partition.json", b"partition")
-    file.upload_data.assert_called_once_with(b"partition", overwrite=False)
+    from azure.core import MatchConditions
+
+    file.upload_data.assert_called_once_with(
+        b"partition", overwrite=True, match_condition=MatchConditions.IfMissing,
+    )
 
 
 def test_partition_readback_failure_is_explicit():

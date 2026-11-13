@@ -4,6 +4,7 @@ import shlex
 from unittest.mock import Mock, call, patch
 
 import pytest
+from azure.core import MatchConditions
 
 from people_counter import backfill_operator as operator
 from tests.test_backfill_operator import (
@@ -137,7 +138,9 @@ def test_partition_creation_uses_the_exact_remote_path_and_ignores_only_existing
         for directory in ("Files/chosen", "Files/chosen/intake")
     ]
     files._file.assert_called_once_with(path)
-    file.upload_data.assert_called_once_with(b"partition", overwrite=False)
+    file.upload_data.assert_called_once_with(
+        b"partition", overwrite=True, match_condition=MatchConditions.IfMissing,
+    )
     assert files.read_bytes.call_args_list == [call(path)] * (2 if existing else 1)
 
 
@@ -162,7 +165,9 @@ def test_partition_creation_never_recreates_fabric_managed_files_root():
     assert files._filesystem.create_directory.call_args_list == [
         call("lakehouse/Files/chosen"), call("lakehouse/Files/chosen/intake"),
     ]
-    file.upload_data.assert_called_once_with(b"partition", overwrite=False)
+    file.upload_data.assert_called_once_with(
+        b"partition", overwrite=True, match_condition=MatchConditions.IfMissing,
+    )
 
 
 @pytest.mark.parametrize("stage", ["directory", "upload", "readback"])
@@ -229,6 +234,73 @@ def test_partition_cloud_errors_identify_exact_operation_and_resource(stage, fai
         file.upload_data.assert_not_called()
     if stage != "readback":
         file.download_file.assert_not_called()
+
+
+@pytest.mark.parametrize("existing", [None, b"partition", b"conflicting partition"])
+@pytest.mark.parametrize("conflict_code", ["exists", "condition-not-met"])
+def test_partition_upload_uses_real_sdk_create_append_flush_without_overwriting(
+    existing, conflict_code,
+):
+    from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
+    from azure.storage.filedatalake import DataLakeFileClient
+
+    files = object.__new__(operator.OneLakeFiles)
+    files._workspace = "workspace"
+    files._lakehouse = "lakehouse"
+    files._exists_error = ResourceExistsError
+    files._filesystem = Mock()
+    path = "Files/chosen/intake/partition.json"
+    sdk_file = DataLakeFileClient(
+        "https://onelake.dfs.fabric.microsoft.com", "workspace", f"lakehouse/{path}",
+        credential=None,
+    )
+    operations = Mock()
+    sdk_file._client.path = operations
+    state = {"content": existing, "pending": None}
+    etag = '"created-file-etag"'
+    order = []
+
+    def create(**options):
+        order.append("create")
+        if options["modified_access_conditions"].if_none_match == "*" and state["content"] is not None:
+            error_type = ResourceExistsError if conflict_code == "exists" else ResourceModifiedError
+            raise error_type("File already exists")
+        state["content"] = b""
+        return {"etag": etag}
+
+    def append_data(**options):
+        order.append("append")
+        if state["content"] is None:
+            raise ResourceNotFoundError("PathNotFound: append requires an existing file")
+        body = options["body"]
+        state["pending"] = body.read() if hasattr(body, "read") else body
+        return {"etag": etag}
+
+    def flush_data(**options):
+        order.append("flush")
+        assert options["modified_access_conditions"].if_match == etag
+        assert options["position"] == len(b"partition")
+        state["content"] = state["pending"]
+        return {"etag": etag}
+
+    operations.create.side_effect = create
+    operations.append_data.side_effect = append_data
+    operations.flush_data.side_effect = flush_data
+    files._file = Mock(return_value=sdk_file)
+    files.read_bytes = Mock(side_effect=lambda relative: state["content"])
+    if existing == b"conflicting partition":
+        with pytest.raises(ValueError, match="immutable registration partition conflicts"):
+            files.write_partition(path, b"partition")
+        assert state["content"] == existing
+        assert order == ["create"]
+    else:
+        files.write_partition(path, b"partition")
+        assert state["content"] == b"partition"
+        assert order == (["create", "append", "flush"] if existing is None else ["create"])
+    operations.create.assert_called_once()
+    if existing is not None:
+        operations.append_data.assert_not_called()
+        operations.flush_data.assert_not_called()
 
 
 def test_a_completed_registration_is_reused_without_any_cloud_calls(setup, tmp_path):

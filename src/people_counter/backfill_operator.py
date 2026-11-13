@@ -420,6 +420,9 @@ class OneLakeFiles:
             raise ValueError(f"OneLake video size or SHA-256 mismatch: {path}")
 
     def write_partition(self, path: str, content: bytes) -> None:
+        from azure.core import MatchConditions
+        from azure.core.exceptions import ResourceModifiedError
+
         for directory in reversed(PurePosixPath(path).parents):
             if str(directory) in {".", "Files"}:
                 continue
@@ -430,10 +433,13 @@ class OneLakeFiles:
                     pass
         with self._operation_context(path, "upload registration partition"):
             try:
-                self._file(path).upload_data(content, overwrite=False)
-            except self._exists_error:
+                # The SDK needs overwrite=True to create; IfMissing forbids replacement.
+                self._file(path).upload_data(
+                    content, overwrite=True, match_condition=MatchConditions.IfMissing,
+                )
+            except (self._exists_error, ResourceModifiedError) as error:
                 if self.read_bytes(path) != content:
-                    raise ValueError(f"immutable registration partition conflicts: {path}")
+                    raise ValueError(f"immutable registration partition conflicts: {path}") from error
         if self.read_bytes(path) != content:
             raise ValueError(f"registration partition readback mismatch: {path}")
 

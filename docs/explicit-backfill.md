@@ -257,6 +257,13 @@ and its intake path before writing it. A failure at this stage is an intake
 directory/upload/readback failure, not a missing model or failed ADLS publication.
 The SDK creates only user directories below `Files/`; it must not attempt to
 create the Fabric-managed Lakehouse or `Files` root through the storage API.
+Partition upload must also create the file itself before appending data.
+The Azure Data Lake SDK skips file creation with `upload_data(overwrite=False)`,
+which can return `PathNotFound` even when the parent directory exists.
+The publisher uses `overwrite=True` with `MatchConditions.IfMissing`: the
+conditional create cannot replace an existing file, and upload/flush use the
+new file's ETag. An existing partition is accepted only after exact byte
+comparison; different contents remain an immutable conflict.
 See [OneLake managed folders](https://learn.microsoft.com/en-us/fabric/onelake/onelake-api-parity#managed-onelake-folders).
 For a 404, inspect the reported Lakehouse and exact parent/partition path.
 For 401/403, check the execution identity's OneLake write permissions.
