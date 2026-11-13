@@ -1706,9 +1706,11 @@ any gate below is unresolved.
 
 ### Manual SDK upgrade workflow
 
-The SDK uses standard wheel metadata for version compatibility. It has no
-custom embedded identity and requires no detached manifest, postpublish
-receipt, or versioned release directory in OneLake.
+The SDK uses standard wheel metadata for audit provenance. Work eligibility
+depends on supported work/payload schemas, inference settings, and model
+requirements, not equality with the submitting SDK version or release digest.
+It has no custom embedded identity and requires no detached manifest,
+postpublish receipt, or versioned release directory in OneLake.
 
 #### Build the wheel
 
@@ -1730,16 +1732,45 @@ not the wheel. Do not publish different builds under the same package version.
 
 1. Upload the wheel to the Fabric Environment's custom libraries and publish
    the Environment. Uploading the wheel to Lakehouse Files alone does not install it.
-2. Attach the notebook and SJDs to Environments with the same SDK version.
-   Start fresh sessions so they load that version.
+2. Attach each notebook and SJD to its intended Environment. Keep the live
+   driver and executors on the same SDK version; a submitting notebook may use
+   a different version when its work contract is supported. Stop old writers
+   and start fresh sessions before migrating existing control state.
 3. Keep the existing target configuration, models, shortcuts, and processing
    state. No release-evidence upload or digest entry is needed.
 
-Registration, claims, and workers derive a compatibility digest automatically
-from the installed SDK version. This is not a hash of the wheel or proof of an
-Environment publication. Model and source hashes remain independently verified.
-Drain old registered work with the old SDK or explicitly quarantine/re-register
-it before switching; do not rewrite immutable work digests or delete retry state.
+Registration retains the submitting SDK version and release digest for audit.
+This digest is not a hash of the wheel or proof of an Environment publication,
+and is not an eligibility rule. Model and source hashes remain independently
+verified. Older work can run when its contract is supported, including legacy
+work without contract versions, which is evaluated as v1. Unknown historical
+submitting versions remain unknown.
+
+Dispatcher checks READY items individually before selecting a batch.
+Supported items can proceed while unsupported items become
+`BLOCKED_INCOMPATIBLE`, recording the reason, required contract, evaluating SDK
+version, and timestamp. Blocking creates no attempt, lease, or execution fence.
+Unsupported pipeline/model requirements are compatibility failures; missing
+files, access errors, and corrupt model bytes remain operational/integrity
+failures.
+
+After upgrading, run the Control SJD with selected IDs and operator attribution:
+
+```text
+status --work-id <work-id>
+recheck-compatibility --work-id <work-id> --operator <operator> --reason "SDK upgrade"
+```
+
+Repeat `--work-id` to select multiple items. Only blocked items are eligible
+for recheck. Supported items return to READY without consuming an attempt;
+unsupported items stay blocked with refreshed diagnostics. An upgrade,
+recovery, reconciliation, replay, or repeated submission does not unblock them.
+
+Bootstrap migrates the new control-state fields idempotently. Preserve the
+existing tables, immutable work digests, and retry state. Saved submission
+plans retain the original work IDs, partitions, and submitting SDK provenance
+when resumed after an upgrade; changed inputs still fail validation. Compatible
+older work needs neither quarantine nor re-registration.
 See [SDK upgrades](explicit-backfill.md#sdk-upgrades) for migration details.
 
 #### Optional API-assisted provisioning
@@ -1902,9 +1933,11 @@ clear their stored status. An old expired batch can block new work even when
 all the newly registered items are `READY`.
 
 Verify the old owning job has terminated and review its staging/publication
-evidence before an approved recovery run. Review any old work returned to
-`READY` for SDK-version compatibility; quarantine incompatible old work through
-the supported operator command rather than editing immutable work digests.
+evidence before an approved recovery run. Work returned to `READY` is evaluated
+individually on the next claim; an older submitting SDK version or digest alone
+does not make it incompatible. Unsupported contracts become
+`BLOCKED_INCOMPATIBLE`. Previously blocked work stays blocked through recovery
+and requires explicit compatibility recheck after an upgrade.
 Keep the current registration state and published files. Do not delete table
 rows, clear locks blindly, increase the active-batch limit to bypass stale
 state, or resubmit the backfill. Verify recovery output and batch state before
@@ -1959,8 +1992,9 @@ To inspect it through the UI, open `pc_dev_lakehouse` > **Files** >
 open/download it. Use the finished administrative notebook's read-only cell
 to verify its hash. This is a captured configuration record, not live drift
 validation or proof of current runtime qualification. Do not use its hash as
-an SDK compatibility digest. Current Dispatcher jobs derive SDK compatibility
-from installed package metadata and need no release-manifest/receipt arguments.
+an SDK compatibility digest. Current Dispatcher jobs evaluate supported work
+contracts, not submitting SDK version equality, and need no
+release-manifest/receipt arguments.
 
 ![Run the read-only hash/schema check and inspect the captured admission hold.](images/manual-deployment/76-configuration-evidence-audit.png)
 
@@ -1971,7 +2005,7 @@ labels do not impose that gate on the current SDK. The administrative Spark sess
 the browser confirmed **Session stopped successfully**. This does not pause
 the F2 capacity.
 
-Remaining acceptance work is explicit: target-bound SDK release evidence,
+At this historical checkpoint, remaining acceptance work included target-bound SDK release evidence,
 Fabric x86_64 runtime and two-executor qualification, post-upload model
 hash/loading checks, representative inference/Gold data, controlled
 role-specific alert-event verification, the intended intake producers, and separately approved notification
@@ -2019,9 +2053,12 @@ Before calling this a working application, independently verify:
   not run the inference pipeline as a substitute.
 - All six roles have the correct source file, Environment, and default
   Lakehouse in this workspace.
-- Deployment references and release provenance contain the **new** workspace,
+- Deployment references and runtime configuration contain the **new** workspace,
   Lakehouse, Environment, and job IDs, not copied IDs from another environment.
-- Notebook and job Environments use the same SDK version. See
+  SDK package/submission provenance does not embed deployment identities.
+- Live drivers and executors use the same SDK version. Work from a different
+  submitting version is eligible when its contract is supported. Blocked work
+  requires explicit operator-attributed compatibility recheck. See
   [canonical job SDK compatibility](../fabric/spark-job-definitions/README.md#sdk-compatibility).
 - Both analytics and operational semantic models/reports are bound to the
   new Gold tables; refresh and readback succeed.

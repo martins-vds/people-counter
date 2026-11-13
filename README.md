@@ -501,9 +501,19 @@ branch ruleset to prevent merging a failing release PR.
 To upgrade Fabric, upload the wheel to the Environment, publish it, and start
 a fresh session with that Environment. Merely storing a wheel in Lakehouse
 Files does not install it. No versioned OneLake release directory, detached
-manifest, or publication receipt is required. Notebook and SJD Environments
-must use the same SDK version; work compatibility is derived automatically
-from the installed package version, not from deployment evidence.
+manifest, or publication receipt is required. Keep the live driver and
+executors on the same SDK version; the submitting notebook's version may
+differ. Submission version and release digest are audit provenance, not
+eligibility rules. Work compatibility depends on supported work/payload
+schemas, inference settings, and model requirements.
+
+Dispatcher claims compatible work while unsupported items become
+`BLOCKED_INCOMPATIBLE` without consuming an execution attempt. Upgrading the
+SDK or running recovery does not unblock them: an operator must explicitly
+request compatibility recheck. Retain saved submission plans so retries reuse
+their original work IDs and provenance. See
+[SDK upgrades](docs/explicit-backfill.md#sdk-upgrades) for migration and recheck
+instructions.
 
 Merging a release PR creates the matching tag at the exact merged commit and
 builds that commit. Closing without merging, merging an ordinary branch, or

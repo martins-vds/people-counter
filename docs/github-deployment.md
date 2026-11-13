@@ -863,13 +863,27 @@ conflicts with those outputs is an error, not a value to silently retain.
 Postconfiguration uses the resolved target and Files root for bootstrap and
 every scheduled role.
 
-Publish the SDK wheel in the Fabric Environment and use the same SDK version
-for notebooks and jobs. Runtime compatibility comes from standard package
-metadata; no embedded identity, detached manifest, postpublish receipt, or
-OneLake release directory is required. Do not set
+Publish the SDK wheel in the Fabric Environment and start fresh sessions.
+Keep the live driver and executors on the same SDK version; a submitting
+notebook may use a different version when its work contract is supported.
+Standard package metadata records SDK provenance. Work eligibility depends
+on supported work/payload schemas, inference settings, and model requirements,
+not the submitting version or release digest. No embedded identity, detached
+manifest, postpublish receipt, or OneLake release directory is required. Do not set
 `FABRIC_RELEASE_MANIFEST_SHA256` or `FABRIC_RELEASE_RECEIPT_SHA256` for new
 deployments. Resolved reporting IDs, target checks, model/source integrity,
 and compute qualification remain required.
+
+Dispatcher classifies READY work individually, claiming supported items and
+persisting unsupported items as `BLOCKED_INCOMPATIBLE` without execution
+attempts. Blocked work requires an explicit operator-attributed compatibility
+recheck after an upgrade; recovery, reconciliation, and replay do not unblock it.
+Stop old writers and restart SDK sessions before bootstrapping existing control
+state. Bootstrap migrates the new state fields idempotently without recreating
+tables or rewriting immutable work. Retain saved backfill plans, IDs, and
+submission provenance across retries. See
+[SDK compatibility](../fabric/spark-job-definitions/README.md#sdk-compatibility)
+for status and recheck commands.
 
 Cutover code and the Terraform role were removed. Review the infrastructure
 plan for removal of a previously deployed Cutover SJD. This removal does not
