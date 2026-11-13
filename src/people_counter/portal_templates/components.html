@@ -51,6 +51,15 @@
 {% else %}{{ value }}{% endif %}
 {% endmacro %}
 
+{% macro resolution_comparison(width, height, camera_values, exception, draft=false) %}
+{% set reference = exception if exception.get('frame_width') else camera_values %}
+{% set label = ('Video line reference in this preview' if draft else 'Saved video line reference') if exception.get('frame_width') else 'Camera calibration reference' %}
+<dl class="grid gap-3 sm:grid-cols-2">
+  <div><dt class="text-sm font-medium">This video</dt><dd>{{ width }} &times; {{ height }} px</dd></div>
+  {% if reference.get('frame_width') %}<div><dt class="text-sm font-medium">{{ label }}</dt><dd>{{ reference.frame_width }} &times; {{ reference.frame_height }} px</dd></div>{% endif %}
+</dl>
+{% endmacro %}
+
 {% macro frame_editor(video, width, height, values, seconds, config_id='') %}
 <div class="space-y-4">
   <form method="get" id="preview-form" class="flex flex-wrap items-end gap-3">

@@ -59,6 +59,38 @@ def report_type(name: str) -> tuple[str, str, str]:
         if spec[0] == name:
             return spec
     raise ValueError("Unknown report")
+
+
+def _draft_exception(
+    saved: Mapping[str, Any], draft: Mapping[str, str],
+    metadata: VideoMetadata | None, camera_changed: bool,
+) -> dict[str, Any]:
+    row = dict(saved)
+    if camera_changed and row.get("frame_width"):
+        action = draft.get("geometry_action", "")
+        if action not in {"keep", "clear"}:
+            raise VideoValidationError(
+                "Choose whether to keep or clear the video line before reassignment.",
+                reason_code="ASSOCIATION_GEOMETRY_CHOICE_REQUIRED",
+                suggested_action="Select a video-line choice in Camera association.",
+            )
+        if action == "clear":
+            for name in ("frame_width", "frame_height", *LINE_FIELDS):
+                row.pop(name, None)
+    if "captured_at_utc" in draft:
+        row["captured_at_utc"] = draft["captured_at_utc"]
+    if draft.get("line_override") == "yes":
+        if metadata is None:
+            raise VideoValidationError("Repair the media before checking its line.", reason_code="VIDEO_LINE_INVALID")
+        try:
+            line = {name: str(int(draft.get(name, ""))) for name in LINE_FIELDS}
+        except ValueError as error:
+            raise VideoValidationError(
+                "Enter all four video-line coordinates as whole numbers.",
+                reason_code="VIDEO_LINE_INVALID", suggested_action="Complete the manual line coordinates.",
+            ) from error
+        row.update(frame_width=str(metadata.width), frame_height=str(metadata.height), **line)
+    return row
 PORTAL_CATALOG_FIELDS = (*sorted(CATALOG_COLUMNS), "video_relative_path")
 METADATA_FIELDS = (
     "camera_timezone", "capture_time_source", "capture_time_regex", "capture_time_format",
@@ -527,12 +559,19 @@ class PortalService:
             raise ValueError("The camera's location is missing; correct its location before preparation")
         return camera
 
-    def footage_readiness(self, video: str) -> dict[str, Any]:
-        self.source.resolve(video)
+    def footage_readiness(self, video: str, *, draft: Mapping[str, str] | None = None) -> dict[str, Any]:
+        path = self.source.resolve(video)
+        relative = path.relative_to(self.source.video_root).as_posix()
+        assignments = self.footage_assignments()
+        saved_camera = assignments.get(video, "")
+        if draft is not None:
+            assignments = {**assignments, video: draft.get("camera_id", saved_camera)}
+        inventory_rows = self.store.entries("exception")
         result: dict[str, Any] = {
             "media_ok": False, "metadata": None, "issues": [], "config_id": "",
             "camera_values": {}, "captured_at_utc": "", "capture_time_source": "",
-            "camera_id": self.footage_assignments().get(video, ""),
+            "camera_id": assignments.get(video, ""),
+            "exception": next((row for row in inventory_rows if row["id"] == relative), {"video_relative_path": relative}),
         }
         try:
             result["metadata"] = self.media_metadata(video)
@@ -559,15 +598,21 @@ class PortalService:
                 )
             if len(configs) == 1:
                 result.update(camera_values=configs[0]["catalog"], config_id=configs[0]["id"])
+            if draft is not None:
+                result["exception"] = _draft_exception(
+                    result["exception"], draft, result["metadata"], result["camera_id"] != saved_camera,
+                )
+                inventory_rows = [row for row in inventory_rows if row["id"] != relative]
+                if result["exception"].get("captured_at_utc") or result["exception"].get("frame_width"):
+                    inventory_rows.append(result["exception"])
             with TemporaryDirectory(dir=self.state) as directory:
                 catalog = Path(directory) / "camera.csv"
                 inventory = Path(directory) / "inventory.csv"
-                catalog.write_text(csv_text(PORTAL_CATALOG_FIELDS, self.camera_catalog()), encoding="utf-8")
-                inventory.write_text(csv_text(EXCEPTION_FIELDS, self.store.entries("exception")), encoding="utf-8")
+                catalog.write_text(csv_text(PORTAL_CATALOG_FIELDS, self.camera_catalog(assignments=assignments)), encoding="utf-8")
+                inventory.write_text(csv_text(EXCEPTION_FIELDS, inventory_rows), encoding="utf-8")
                 entries = load_camera_catalog(catalog)
                 exceptions = load_video_inventory(inventory)
             if result["media_ok"]:
-                relative = self.source.resolve(video).relative_to(self.source.video_root).as_posix()
                 entry, captured_at, source = resolve_video_metadata(relative, entries, exceptions, result["metadata"])
                 result.update(captured_at_utc=captured_at.isoformat().replace("+00:00", "Z"), capture_time_source=source)
                 applicable = [
@@ -656,9 +701,9 @@ class PortalService:
             data = {"catalog": row, "folder": found["folder"] if found else "", "video": video}
             db.execute("INSERT OR REPLACE INTO entries VALUES ('camera',?,?)", (config_id, json.dumps(data)))
 
-    def camera_catalog(self) -> list[dict[str, Any]]:
+    def camera_catalog(self, *, assignments: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
         cameras = self.store.entries("camera")
-        assignments = self.footage_assignments()
+        assignments = self.footage_assignments() if assignments is None else assignments
         rows = []
         for item in cameras:
             row = item["catalog"]

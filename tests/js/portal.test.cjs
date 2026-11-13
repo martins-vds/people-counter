@@ -290,7 +290,7 @@ test("makes only the selected calibration scope visible and submittable", async 
   expect(Object.fromEntries(new FormData(scope.form))).toEqual({ scope: "camera", camera_id: "north-2" });
 });
 
-function canvasPage({ complete = true, naturalWidth = 320, width = 320 } = {}) {
+function canvasPage({ complete = true, naturalWidth = 320, width = 320, extra = "" } = {}) {
   const user = userEvent.setup();
   document.body.innerHTML = `
     <img id="preview-image" src="http://localhost/preview?video=clip.mp4" alt="Source video frame">
@@ -303,7 +303,7 @@ function canvasPage({ complete = true, naturalWidth = 320, width = 320 } = {}) {
       <label for="seconds">Preview time in seconds</label><input id="seconds" name="seconds" value="2.5">
       <button>Show frame</button>
     </form>
-    <button id="redraw-line">Redraw line</button>`;
+    <button id="redraw-line">Redraw line</button>${extra}`;
   const canvas = document.querySelector("canvas");
   const image = document.querySelector("img");
   Object.defineProperties(image, {
@@ -316,7 +316,7 @@ function canvasPage({ complete = true, naturalWidth = 320, width = 320 } = {}) {
   jest.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context);
   jest.spyOn(canvas, "getBoundingClientRect").mockReturnValue({ left: 10, top: 20, width: 640, height: 360 });
   loadPortal();
-  return { user, canvas, image, context, instructions: screen.getByRole("status") };
+  return { user, canvas, image, context, instructions: document.querySelector("#line-instructions") };
 }
 
 test("renders the saved directed line and arrow through the canvas API", () => {
@@ -459,4 +459,201 @@ test("allows processing waits only for explicit backfill submission and clears s
   expect(wait).toBeDisabled();
   expect(wait).not.toBeChecked();
   expect(wait).not.toBeVisible();
+});
+
+function readinessMarkup({ withLines = true, withGeometry = true, capture = "" } = {}) {
+  return `<section id="review-readiness" data-readiness-url="/footage/readiness" data-video="lobby/clip.mp4">
+    <p id="readiness-update-status" role="status">Saved properties</p>
+    <button id="retry-readiness" hidden>Retry draft check</button>
+    <div id="readiness-results"><p>Local checks passed</p></div>
+  </section><input type="hidden" name="csrf" value="test-token">
+  <label for="review-camera">Assign footage to camera</label>
+  <select id="review-camera"><option value="north-1" selected>North 1</option><option value="north-2">North 2</option></select>
+  <label for="capture-override">Capture time override</label><input id="capture-override" type="datetime-local" value="${capture}">
+  ${withGeometry ? '<label for="geometry-action">Video line on reassignment</label><select id="geometry-action"><option value="">Choose</option><option value="keep">Keep</option><option value="clear">Clear</option></select>' : ""}
+  ${withLines ? ["X1", "Y1", "X2", "Y2"].map((label, index) => {
+    const name = ["counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2"][index];
+    return `<label for="${name}">${label}</label><input id="${name}" value="${[10, 20, 100, 120][index]}">`;
+  }).join("") : ""}`;
+}
+
+function readinessPage(options) {
+  document.body.innerHTML = readinessMarkup(options);
+  loadPortal();
+  return userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+}
+
+const draftResponse = (text = "Draft checks passed (not saved)") => ({
+  ok: true, text: async () => `<p>${text}</p>`,
+});
+
+describe("live readiness previews", () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    fetch.mockResolvedValue(draftResponse());
+  });
+  afterEach(() => jest.useRealTimers());
+
+  test.each(["X1", "Y1", "X2", "Y2"])("checks edits to %s without saving or replacing inputs", async (label) => {
+    const user = readinessPage();
+    const field = screen.getByLabelText(label);
+    await user.clear(field);
+    await user.type(field, "40");
+    expect(screen.getByText("Local checks passed")).not.toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("Checking unsaved values");
+    expect(document.querySelector("#review-readiness")).toHaveAttribute("aria-busy", "true");
+    expect(document.querySelector("#readiness-results")).toHaveAttribute("aria-hidden", "true");
+    expect(screen.queryByRole("button", { name: "Retry draft check" })).not.toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(349);
+    expect(fetch).not.toHaveBeenCalled();
+    await jest.advanceTimersByTimeAsync(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, options] = fetch.mock.calls[0];
+    expect(url).toBe("/footage/readiness");
+    expect(options.method).toBe("POST");
+    const body = Object.fromEntries(options.body);
+    expect(body).toMatchObject({ csrf: "test-token", video: "lobby/clip.mp4", camera_id: "north-1", line_override: "yes" });
+    expect(body[field.id]).toBe("40");
+    expect(body).not.toHaveProperty("captured_at_utc");
+    expect(field).toHaveValue("40");
+    expect(screen.getByText("Draft checks passed (not saved)")).toBeVisible();
+    expect(document.querySelector("#readiness-results")).toHaveAttribute("aria-hidden", "false");
+    expect(screen.getByRole("status")).toHaveTextContent("Readiness updated for unsaved values");
+    expect(document.querySelector("#review-readiness")).toHaveAttribute("aria-busy", "false");
+  });
+
+  test("checks camera and geometry choices and clearing a capture time without fabricating a line edit", async () => {
+    const user = readinessPage({ withLines: false, capture: "2026-01-01T12:00" });
+    await user.selectOptions(screen.getByLabelText("Assign footage to camera"), "north-2");
+    await user.selectOptions(screen.getByLabelText("Video line on reassignment"), "clear");
+    fireEvent.input(screen.getByLabelText("Capture time override"), { target: { value: "" } });
+    await jest.advanceTimersByTimeAsync(350);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(Object.fromEntries(fetch.mock.calls[0][1].body)).toEqual({
+      csrf: "test-token", video: "lobby/clip.mp4", camera_id: "north-2",
+      geometry_action: "clear", captured_at_utc: "",
+    });
+  });
+
+  test.each([
+    ["Assign footage to camera", "north-2", "camera_id"],
+    ["Video line on reassignment", "keep", "geometry_action"],
+  ])("checks an independent change to %s", async (label, value, key) => {
+    const user = readinessPage();
+    await user.selectOptions(screen.getByLabelText(label), value);
+    await jest.advanceTimersByTimeAsync(350);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const body = Object.fromEntries(fetch.mock.calls[0][1].body);
+    expect(body[key]).toBe(value);
+    expect(body).not.toHaveProperty("line_override");
+  });
+
+  test("does not treat preview-only controls as footage metadata changes", async () => {
+    readinessPage();
+    document.body.insertAdjacentHTML("beforeend", '<label for="preview-only">Preview time</label><input id="preview-only">');
+    fireEvent.input(screen.getByLabelText("Preview time"), { target: { value: "2" } });
+    await jest.advanceTimersByTimeAsync(350);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(screen.getByText("Local checks passed")).toBeVisible();
+  });
+
+  test("checks capture-time edits without an optional geometry choice", async () => {
+    readinessPage({ withGeometry: false });
+    fireEvent.input(screen.getByLabelText("Capture time override"), { target: { value: "2029-01-01T12:00" } });
+    await jest.advanceTimersByTimeAsync(350);
+    const body = Object.fromEntries(fetch.mock.calls[0][1].body);
+    expect(body.captured_at_utc).toBe("2029-01-01T12:00");
+    expect(body).not.toHaveProperty("line_override");
+    expect(body).not.toHaveProperty("geometry_action");
+  });
+
+  test("checks calendar controls that emit only a change event", async () => {
+    readinessPage();
+    fireEvent.change(screen.getByLabelText("Capture time override"), { target: { value: "2028-01-01T12:00" } });
+    await jest.advanceTimersByTimeAsync(350);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(Object.fromEntries(fetch.mock.calls[0][1].body).captured_at_utc).toBe("2028-01-01T12:00");
+  });
+
+  test("stops probing after the current draft has been checked", async () => {
+    const user = readinessPage();
+    await user.selectOptions(screen.getByLabelText("Assign footage to camera"), "north-2");
+    await jest.advanceTimersByTimeAsync(350);
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Draft checks passed (not saved)")).toBeVisible();
+  });
+
+  test("keeps the readiness footprint stable while operators edit or draw", async () => {
+    const user = readinessPage();
+    const results = document.querySelector("#readiness-results");
+    const status = document.querySelector("#readiness-update-status");
+    const measure = jest.spyOn(results, "getBoundingClientRect").mockReturnValue({ height: 180 });
+    jest.spyOn(status, "getBoundingClientRect").mockReturnValue({ height: 40 });
+    await user.selectOptions(screen.getByLabelText("Assign footage to camera"), "north-2");
+    expect(results.style.height).toBe("180px");
+    await jest.advanceTimersByTimeAsync(350);
+    expect(results.style.height).toBe("180px");
+    expect(results.style.overflowY).toBe("auto");
+    expect(status.style.minHeight).toBe("40px");
+    await user.selectOptions(screen.getByLabelText("Assign footage to camera"), "north-1");
+    await jest.advanceTimersByTimeAsync(350);
+    expect(measure).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    { failure: false, queuedTimerRan: false },
+    { failure: true, queuedTimerRan: true },
+  ])("coalesces in-flight edits and ignores stale results or errors (%j)", async ({ failure, queuedTimerRan }) => {
+    let complete;
+    fetch.mockImplementationOnce(() => new Promise((resolve, reject) => { complete = failure ? reject : resolve; }))
+      .mockResolvedValueOnce(draftResponse("Newest draft result"));
+    const user = readinessPage();
+    const field = screen.getByLabelText("X1");
+    await user.clear(field);
+    await user.type(field, "40");
+    await jest.advanceTimersByTimeAsync(350);
+    await user.clear(field);
+    await user.type(field, "50");
+    if (queuedTimerRan) await jest.advanceTimersByTimeAsync(350);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    complete(failure ? new Error("Stale failure") : draftResponse("Stale result"));
+    await jest.advanceTimersByTimeAsync(0);
+    expect(screen.queryByText("Stale result")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Stale failure/)).not.toBeInTheDocument();
+    await jest.advanceTimersByTimeAsync(350);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(Object.fromEntries(fetch.mock.calls[1][1].body).counting_line_x1).toBe("50");
+    expect(screen.getByText("Newest draft result")).toBeVisible();
+    expect(field).toHaveValue("50");
+  });
+
+  test("keeps edits on failure and retries the current draft", async () => {
+    fetch.mockResolvedValueOnce({ ok: false, status: 503 }).mockResolvedValueOnce(draftResponse());
+    const user = readinessPage();
+    await user.clear(screen.getByLabelText("X1"));
+    await user.type(screen.getByLabelText("X1"), "40");
+    await jest.advanceTimersByTimeAsync(350);
+    expect(screen.getByRole("alert")).toHaveTextContent("HTTP 503");
+    expect(screen.getByLabelText("X1")).toHaveValue("40");
+    await user.click(screen.getByRole("button", { name: "Retry draft check" }));
+    await jest.advanceTimersByTimeAsync(350);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Draft checks passed (not saved)")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry draft check" })).not.toBeInTheDocument();
+  });
+
+  test("checks drawn endpoints as an unsaved video-line edit", async () => {
+    const { canvas } = canvasPage({ extra: readinessMarkup({ withLines: false }) });
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+    await user.pointer({ target: canvas, keys: "[MouseLeft]", coords: { clientX: 74, clientY: 200 } });
+    await jest.advanceTimersByTimeAsync(350);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const body = Object.fromEntries(fetch.mock.calls[0][1].body);
+    expect(body.line_override).toBe("yes");
+    expect(body.counting_line_x1).toBe("32");
+    expect(body.counting_line_y1).toBe("90");
+  });
 });

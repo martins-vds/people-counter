@@ -390,6 +390,22 @@ calibration or recording metadata blocks local package readiness, but corrective
 assignment remains available. Camera association is an independent save, not a
 counting-line option.
 
+Editing camera association, video-line choices, manual coordinates, drawn
+endpoints, or capture time triggers a read-only draft check after a short pause.
+The page hides outdated results while checking and labels preview results as
+unsaved. Requests are sequential and coalesced; superseded responses cannot
+overwrite the latest values. Checks update only the readiness panel, not the
+forms or stored metadata. During editing, the results area keeps its existing
+height and scrolls internally so validation messages do not move the line editor.
+
+Draft checks combine the proposed association, its geometry choice, and any
+explicitly edited video line or recording time. **Draft checks passed (not
+saved)** does not mean the saved package inputs are ready. Each Save action
+still applies only its own section and reruns checks against saved values.
+**Retry draft check** preserves edits after a request failure. **Recheck** reloads
+saved values and discards unsaved edits. Preview time is display-only, not a
+footage metadata change.
+
 Checks reuse the manifest resolver for timestamps, effective-date coverage,
 dimensions, and video overrides. Media probing and a preview-frame check do not
 hash the complete video. Invalid media still has a review page with diagnostics,

@@ -1,0 +1,19 @@
+{% from "components.html" import badge, resolution_comparison %}
+<div class="card-body">
+  {% if draft %}<p class="help">Preview of unsaved values for camera <code>{{ readiness.camera_id or 'Unassigned' }}</code>. Nothing has been saved.</p>{% endif %}
+  {% if readiness.issues %}<ul class="space-y-4">{% for issue in readiness.issues %}<li class="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4">
+    <p class="font-semibold">{{ 'Blocks assignment and preparation' if issue.scope == 'assignment' else 'Blocks package preparation; corrective assignment is allowed' }}</p>
+    {% if issue.code == 'VIDEO_DIMENSION_MISMATCH' %}
+    <p>This video's resolution differs from the frame size saved with its counting line.</p>
+    {{ resolution_comparison(width, height, camera_values, exception, draft) }}
+    <p>The line can look right in the preview, but visual fit does not update its saved reference dimensions.</p>
+    <p>Check Camera association first. If this is the correct camera, confirm the line below or adjust it, then choose <strong>Save video line exception</strong>. This saves this video's frame size with the line and leaves the camera calibration unchanged.</p>
+    <a class="btn btn-secondary" href="#video-line-editor">Review and confirm this video's line</a>
+    <p class="help">Use the separate camera-calibration action only if you intend to change the camera default for all applicable recordings.</p>
+    <details class="technical-details"><summary>Validation details</summary><p class="p-4">{{ issue.message }}</p></details>
+    <p><code>{{ issue.code }}</code></p>
+    {% else %}<p>{{ issue.message }}</p><p class="help">{{ issue.action }} <code>{{ issue.code }}</code></p>{% endif %}
+  </li>{% endfor %}</ul>
+  {% else %}<p>{{ badge('Draft checks passed (not saved)' if draft else 'Local checks passed', 'success') }}</p>{% endif %}
+  <p class="help">Local media, recording-time, calibration, and catalog checks only. Full file hashing, remote permissions, and cloud availability are revalidated during preparation/publication, not guaranteed here.</p>
+</div>

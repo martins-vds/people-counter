@@ -158,12 +158,12 @@ if (scope) {
   updateScope();
 }
 
+const lineFieldNames = ["counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2"];
 const canvas = document.querySelector("#line-canvas");
 if (canvas) {
   const image = document.querySelector("#preview-image");
   const context = canvas.getContext("2d");
-  const fields = ["counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2"]
-    .map((name) => document.getElementById(name));
+  const fields = lineFieldNames.map((name) => document.getElementById(name));
   const instructions = document.querySelector("#line-instructions");
   let endpoint = 0;
   const draw = () => {
@@ -214,8 +214,100 @@ if (canvas) {
     endpoint = 1 - endpoint;
     instructions.textContent = endpoint ? "Now click the second endpoint." : "Line selected. Review and save the calibration.";
     draw();
+    canvas.dispatchEvent(new Event("counting-line-change", { bubbles: true }));
   });
   draw();
+}
+
+const readinessPanel = document.querySelector("#review-readiness");
+if (readinessPanel) {
+  const camera = document.querySelector("#review-camera");
+  const captureTime = document.querySelector("#capture-override");
+  const geometry = document.querySelector("#geometry-action");
+  const coordinates = lineFieldNames.map((name) => document.getElementById(name)).filter(Boolean);
+  const watched = [camera, captureTime, geometry, ...coordinates].filter(Boolean);
+  const initialCaptureTime = captureTime.value;
+  const status = document.querySelector("#readiness-update-status");
+  const results = document.querySelector("#readiness-results");
+  const retry = document.querySelector("#retry-readiness");
+  let lineEdited = false;
+  let generation = 0;
+  let running = false;
+  let timer;
+  let layoutFrozen = false;
+  const freezeLayout = () => {
+    if (layoutFrozen) return;
+    // Keep readiness updates from moving the canvas during endpoint placement.
+    results.style.height = `${results.getBoundingClientRect().height}px`;
+    results.style.overflowY = "auto";
+    status.style.minHeight = `${status.getBoundingClientRect().height}px`;
+    layoutFrozen = true;
+  };
+  const draftBody = () => {
+    const body = new FormData();
+    body.set("csrf", document.querySelector("input[name=csrf]").value);
+    body.set("video", readinessPanel.dataset.video);
+    body.set("camera_id", camera.value);
+    if (geometry) body.set("geometry_action", geometry.value);
+    if (captureTime.value !== initialCaptureTime) body.set("captured_at_utc", captureTime.value);
+    if (lineEdited) {
+      body.set("line_override", "yes");
+      coordinates.forEach((field) => body.set(field.id, field.value));
+    }
+    return body;
+  };
+  const checkReadiness = async () => {
+    if (running) return;
+    const sent = generation;
+    running = true;
+    try {
+      const response = await fetch(readinessPanel.dataset.readinessUrl, { method: "POST", body: draftBody() });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const markup = await response.text();
+      if (sent === generation) {
+        results.innerHTML = markup;
+        results.style.visibility = "visible";
+        results.setAttribute("aria-hidden", "false");
+        readinessPanel.setAttribute("aria-busy", "false");
+        status.textContent = "Readiness updated for unsaved values. Save each section to apply changes.";
+      }
+    } catch (error) {
+      if (sent === generation) {
+        status.setAttribute("role", "alert");
+        status.textContent = `Readiness could not be checked: ${error.message}. Retry without losing unsaved changes.`;
+        retry.hidden = false;
+        readinessPanel.setAttribute("aria-busy", "false");
+      }
+    } finally {
+      running = false;
+      if (sent !== generation) {
+        clearTimeout(timer);
+        timer = setTimeout(checkReadiness, 350);
+      }
+    }
+  };
+  const scheduleCheck = () => {
+    generation += 1;
+    clearTimeout(timer);
+    freezeLayout();
+    results.style.visibility = "hidden";
+    results.setAttribute("aria-hidden", "true");
+    readinessPanel.setAttribute("aria-busy", "true");
+    status.setAttribute("role", "status");
+    status.textContent = "Checking unsaved values...";
+    retry.hidden = true;
+    timer = setTimeout(checkReadiness, 350);
+  };
+  const changed = (event) => {
+    const drawn = event.type === "counting-line-change";
+    if (!drawn && !watched.includes(event.target)) return;
+    if (drawn || coordinates.includes(event.target)) lineEdited = true;
+    scheduleCheck();
+  };
+  document.addEventListener("input", changed);
+  document.addEventListener("change", changed);
+  document.addEventListener("counting-line-change", changed);
+  retry.addEventListener("click", scheduleCheck);
 }
 
 const cloudAction = document.querySelector("#cloud-action");

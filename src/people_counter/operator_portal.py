@@ -223,6 +223,21 @@ def create_app(service: PortalService) -> Flask:
             config_id=request.args.get("config_id", ""),
         ))
 
+    @app.post("/footage/readiness")
+    def draft_readiness():
+        video = request.form.get("video", "")
+        fields = ("camera_id", "geometry_action", "line_override", "captured_at_utc", *LINE_FIELDS)
+        draft = {name: request.form[name] for name in fields if name in request.form}
+        if "captured_at_utc" in draft:
+            draft["captured_at_utc"] = _calendar_capture_time(draft["captured_at_utc"])
+        readiness = service.footage_readiness(video, draft=draft)
+        metadata = readiness["metadata"]
+        return render_template(
+            "footage_readiness.html", readiness=readiness, draft=True,
+            exception=readiness["exception"], camera_values=readiness["camera_values"],
+            width=metadata.width if metadata else 0, height=metadata.height if metadata else 0,
+        )
+
     @app.route("/cameras/<camera_id>/calibrate", methods=["GET", "POST"])
     def camera_calibration(camera_id):
         camera = service.registered_camera(camera_id)

@@ -147,6 +147,96 @@ def test_dimension_mismatch_explains_reference_and_links_to_video_confirmation(s
         assert saved["captured_at_utc"] == "2026-01-01T12:00:00Z"
 
 
+def test_draft_readiness_uses_unsaved_line_and_capture_time_without_persisting(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    config = service.store.entries("camera")[0]
+    service.update_camera_metadata(form["camera_id"], config["id"], {**config["catalog"], "capture_time_source": "auto"})
+    monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(3840, 2160, 30))
+    monkeypatch.setattr(service.source, "frame", lambda *args: (b"jpeg", 3840, 2160))
+    client = create_app(service).test_client()
+    token = csrf(client)
+    before = {kind: service.store.entries(kind) for kind in ("camera", "footage", "exception")}
+    assert client.post("/footage/readiness", data={"video": form["video"]}).status_code == 403
+    draft = client.post("/footage/readiness", data={
+        "csrf": token, "video": form["video"], "camera_id": form["camera_id"],
+        "line_override": "yes",
+        **{name: form[name] for name in ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")},
+    })
+    assert draft.status_code == 200 and b"Draft checks passed (not saved)" in draft.data
+    assert b"VIDEO_DIMENSION_MISMATCH" in client.get("/review", query_string={"video": form["video"]}).data
+    invalid_time = client.post("/footage/readiness", data={
+        "csrf": token, "video": form["video"], "captured_at_utc": "2029-01-01T12:00",
+    })
+    assert b"CAMERA_EFFECTIVE_RANGE_MISMATCH" in invalid_time.data
+    invalid_line = client.post("/footage/readiness", data={
+        "csrf": token, "video": form["video"], "line_override": "yes", "counting_line_x1": "",
+    })
+    assert b"VIDEO_LINE_INVALID" in invalid_line.data
+    assert {kind: service.store.entries(kind) for kind in before} == before
+    assert service.store.jobs() == []
+    saved = client.post("/footage/line", data={**form, "scope": "video", "csrf": token}, follow_redirects=True)
+    assert b"Local checks passed" in saved.data and b"Draft checks passed" not in saved.data
+
+
+def test_draft_clearing_capture_time_uses_normal_resolution_without_deleting_saved_exception(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    config = service.store.entries("camera")[0]
+    service.update_camera_metadata(form["camera_id"], config["id"], {**config["catalog"], "capture_time_source": "auto"})
+    service.update_video_exception(form["video"], {"captured_at_utc": "2029-01-01T12:00:00Z"})
+    client = create_app(service).test_client()
+    response = client.post("/footage/readiness", data={
+        "csrf": csrf(client), "video": form["video"], "captured_at_utc": "",
+    })
+    assert response.status_code == 200 and b"Draft checks passed (not saved)" in response.data
+    assert service.store.entries("exception")[0]["captured_at_utc"] == "2029-01-01T12:00:00Z"
+
+
+def test_draft_and_saved_readiness_preserve_duplicate_inventory_errors(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    relative = "videos/" + form["video"]
+    for identity in ("legacy-one", "legacy-two"):
+        service.store.put("exception", identity, {
+            "video_relative_path": relative, "captured_at_utc": "2026-01-01T12:00:00Z",
+        })
+    client = create_app(service).test_client()
+    saved = client.get("/review", query_string={"video": form["video"]})
+    draft = client.post("/footage/readiness", data={
+        "csrf": csrf(client), "video": form["video"], "captured_at_utc": "2026-01-02T12:00",
+    })
+    for response in (saved, draft):
+        assert response.status_code == 200
+        assert b"CATALOG_INVALID" in response.data
+        assert b"checks passed" not in response.data
+    assert len(service.store.entries("exception")) == 2
+
+
+@pytest.mark.parametrize("geometry_action,expected", [
+    ("", "ASSOCIATION_GEOMETRY_CHOICE_REQUIRED"), ("keep", "VIDEO_DIMENSION_MISMATCH"), ("clear", "Draft checks passed (not saved)"),
+])
+def test_draft_association_uses_proposed_camera_and_geometry_choice(service, monkeypatch, geometry_action, expected):
+    form = save_camera(service, monkeypatch)
+    other = service.store.add_camera("Other", form["location_id"])
+    (service.source.root / "lobby/other.mp4").write_bytes(b"video")
+    monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(640, 360, 30))
+    monkeypatch.setattr(service.source, "frame", lambda *args: (b"jpeg", 640, 360))
+    service.assign_footage(other, ["lobby/other.mp4"])
+    service.save_calibration({
+        **form, "camera_id": other, "video": "lobby/other.mp4",
+        "counting_line_x1": "32", "counting_line_y1": "90", "counting_line_x2": "600", "counting_line_y2": "90",
+    })
+    service.update_video_exception(form["video"], {
+        "captured_at_utc": "2026-01-01T12:00:00Z", "frame_width": "1280", "frame_height": "720",
+        "counting_line_x1": "20", "counting_line_y1": "30", "counting_line_x2": "1000", "counting_line_y2": "30",
+    })
+    before = {kind: service.store.entries(kind) for kind in ("camera", "footage", "exception")}
+    client = create_app(service).test_client()
+    response = client.post("/footage/readiness", data={
+        "csrf": csrf(client), "video": form["video"], "camera_id": other, "geometry_action": geometry_action,
+    })
+    assert response.status_code == 200 and expected.encode() in response.data
+    assert {kind: service.store.entries(kind) for kind in before} == before
+
+
 def test_invalid_media_remains_reviewable_but_assignment_is_blocked(service, monkeypatch):
     form = save_camera(service, monkeypatch)
     other = service.store.add_camera("Other", form["location_id"])

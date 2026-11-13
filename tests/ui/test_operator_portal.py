@@ -317,6 +317,76 @@ def test_dimension_mismatch_guides_video_confirmation_without_changing_camera(pa
     assert [exception[name] for name in ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")] == ["32", "90", "288", "90"]
 
 
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 375, "height": 844}])
+def test_readiness_previews_every_property_without_saving_and_rechecks_after_saves(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    calibrate_camera(page, portal)
+    camera = "north-entrance-camera-17"
+    config = portal.service.store.entries("camera")[0]
+    portal.service.update_camera_metadata(camera, config["id"], {
+        **config["catalog"], "effective_to_utc": "2027-01-01T00:00:00Z",
+    })
+    other = portal.service.store.add_camera("Other", "north-entrance")
+    portal.make_video("other/clip.mp4", width=640, height=360)
+    portal.service.assign_footage(other, ["other/clip.mp4"])
+    portal.service.save_camera_line(other, {
+        "video": "other/clip.mp4", "counting_line_x1": "40", "counting_line_y1": "90",
+        "counting_line_x2": "600", "counting_line_y2": "90",
+    })
+    portal.service.update_video_exception("lobby/clip.mp4", {
+        "captured_at_utc": "2026-01-01T12:00:00Z", "frame_width": "320", "frame_height": "180",
+        "counting_line_x1": "20", "counting_line_y1": "90", "counting_line_x2": "280", "counting_line_y2": "90",
+    })
+    before = {kind: portal.service.store.entries(kind) for kind in ("camera", "footage", "exception")}
+    page.goto(portal.url + "/review?video=lobby/clip.mp4")
+    readiness = page.get_by_role("region", name="Readiness", exact=True)
+    expect(readiness.get_by_role("button", name="Retry draft check", exact=True)).to_be_hidden()
+    page.get_by_label("Assign footage to camera", exact=True).select_option(other)
+    expect(readiness).to_contain_text("ASSOCIATION_GEOMETRY_CHOICE_REQUIRED")
+    page.get_by_label("Video line on reassignment", exact=True).select_option("keep")
+    expect(readiness.get_by_text("Draft checks passed (not saved)", exact=True)).to_be_visible()
+    expect(readiness.get_by_role("button", name="Retry draft check", exact=True)).to_be_hidden()
+    page.get_by_label("Video line on reassignment", exact=True).select_option("clear")
+    expect(readiness).to_contain_text("VIDEO_DIMENSION_MISMATCH")
+    page.get_by_label("Assign footage to camera", exact=True).select_option(camera)
+    expect(readiness.get_by_text("Draft checks passed (not saved)", exact=True)).to_be_visible()
+    capture = page.get_by_label("Capture time override (UTC, optional)", exact=True)
+    capture.fill("2029-01-01T12:00")
+    expect(readiness).to_contain_text("CAMERA_EFFECTIVE_RANGE_MISMATCH")
+    capture.fill("2026-01-02T12:00")
+    expect(readiness.get_by_text("Draft checks passed (not saved)", exact=True)).to_be_visible()
+    assert {kind: portal.service.store.entries(kind) for kind in before} == before
+    page.get_by_role("button", name="Save recording details", exact=True).click()
+    expect(readiness.get_by_text("Local checks passed", exact=True)).to_be_visible()
+    expect(readiness.get_by_text("Draft checks passed (not saved)", exact=True)).to_have_count(0)
+    results_height = page.locator("#readiness-results").bounding_box()["height"]
+    page.get_by_text("Manual line coordinates", exact=True).click()
+    with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/footage/readiness")):
+        page.get_by_label("X1", exact=True).fill("30")
+    expect(readiness.get_by_text("Draft checks passed (not saved)", exact=True)).to_be_visible()
+    assert abs(page.locator("#readiness-results").bounding_box()["height"] - results_height) < 1
+    editor = page.get_by_label("Counting line editor", exact=True)
+    editor.scroll_into_view_if_needed()
+    bounds = editor.bounding_box()
+    with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/footage/readiness")):
+        page.mouse.click(bounds["x"] + bounds["width"] * .3, bounds["y"] + bounds["height"] * .5)
+        page.mouse.click(bounds["x"] + bounds["width"] * .9, bounds["y"] + bounds["height"] * .5)
+    expect(page.get_by_label("X1", exact=True)).to_have_value("96")
+    expect(page.get_by_label("X2", exact=True)).to_have_value("288")
+    assert portal.service.store.entries("exception")[0]["counting_line_x1"] == "20"
+    page.get_by_role("button", name="Save video line exception", exact=True).click()
+    expect(readiness.get_by_text("Local checks passed", exact=True)).to_be_visible()
+    page.get_by_label("Assign footage to camera", exact=True).select_option(other)
+    page.get_by_label("Video line on reassignment", exact=True).select_option("keep")
+    expect(readiness.get_by_text("Draft checks passed (not saved)", exact=True)).to_be_visible()
+    assert portal.service.footage_assignments()["lobby/clip.mp4"] == camera
+    page.get_by_role("button", name="Save camera association", exact=True).click()
+    expect(readiness.get_by_text("Local checks passed", exact=True)).to_be_visible()
+    assert portal.service.footage_assignments()["lobby/clip.mp4"] == other
+    assert portal.service.store.entries("camera") == before["camera"]
+    assert portal.service.store.jobs() == []
+
+
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
 def test_camera_owns_multiple_recordings_and_reports_open_inline(page, portal, viewport):
     page.set_viewport_size(viewport)
