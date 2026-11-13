@@ -27,6 +27,15 @@ it safely.
 - shell regression tests for SDK version preparation and rollback, release
   version validation, tag conflicts, draft recovery, and idempotent publication.
 
+The separate [CodeQL Advanced workflow](../.github/workflows/codeql.yml) analyzes
+GitHub Actions, portal JavaScript, and Python on pushes and pull requests to
+`main`, plus Saturdays at 11:37 UTC. All three languages use build mode `none`;
+no SDK dependencies, model downloads, or Fabric credentials are required.
+Actions are pinned to immutable commits, checkout credentials do not persist,
+and results appear in GitHub code scanning. If CodeQL default setup is enabled,
+disable it in the repository's code scanning settings before using this advanced
+workflow.
+
 `package.json` overrides vulnerable transitive dependencies whose parent
 packages still require older versions. The `deepmerge` override uses the
 API-compatible `@shivammathur/deepmerge` fork because upstream has no patched
