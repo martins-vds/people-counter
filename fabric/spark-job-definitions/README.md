@@ -44,25 +44,49 @@ Removal does not delete existing Lakehouse tables or migrate old work.
 ## SDK compatibility
 
 Upload the SDK wheel to the Fabric Environment, publish it, and start fresh
-sessions. Use the same SDK version in the notebook and jobs. No embedded
+sessions. Keep the live driver and executors on the same SDK version; the
+submitting SDK version may differ. No embedded
 identity, detached manifest, postpublish receipt, or versioned release directory
 is required. Target IDs come only from configuration and runtime context.
 
-Stable production registration derives a compatibility digest from standard
-installed package metadata before creating `READY` work. A supplied work digest
-must match that SDK version. Bulk registration validates the whole partition
-before writing any rows.
+Registration records the submitting SDK version and release digest as audit
+provenance. Eligibility depends on supported work/payload schemas, inference
+settings, and model requirements, not equality with that historical version
+or digest. Bulk registration still validates malformed inputs and immutable
+identities before writing rows.
 
-Stable claims verify the Dispatcher binding and reject incompatible eligible
-work before creating attempts, envelopes, or leases. Dispatcher and Process
-need no release-file arguments. Legacy flags are deprecated and ignored with
-a warning. Local and
-benchmark stores retain their existing behavior unless an expected release
-digest is supplied explicitly.
+Claims classify each eligible READY item before runtime grouping and batch
+admission. Supported work can proceed while unsupported work becomes
+`BLOCKED_INCOMPATIBLE`, with reason, required contract, evaluating SDK version,
+and timestamp recorded. Blocking does not consume attempts or create leases,
+envelopes, or fences. Process also verifies contract support for existing claims.
+Legacy work without contract versions is interpreted as v1 without rewriting
+its immutable content. Missing model files, service errors, and corrupt model
+bytes are operational/integrity failures, not SDK incompatibility.
+
+Dispatcher and Process need no release-file arguments. Legacy release-file
+flags and the SDK `expected_release_digest` claim argument are deprecated;
+they do not impose work-version equality. SQLite and Delta use the shared
+contract evaluator, with the production Fabric RT-DETR/OSNet model support
+restriction retained.
+
+After upgrading, run Control `status --work-id <id>` to inspect the structured
+diagnostics, then `recheck-compatibility --work-id <id> --operator <operator>
+--reason "SDK upgrade"`. Repeat `--work-id` for multiple selected items.
+Only blocked work is eligible: supported items return to READY, unsupported
+items remain blocked with refreshed diagnostics. Recheck preserves attempts,
+fences, retry budgets, immutable inputs, and original submission provenance.
+Recovery, reconciliation, replay, and ordinary dispatcher runs do not unblock
+items. SDK callers can use `get_work` and `recheck_compatibility`; the local
+CLI uses the same commands with `--database <path>`.
+
+Stop old writers and restart sessions before upgrading existing state.
+Bootstrap performs an idempotent SQLite/Delta migration for the new status and
+diagnostic/provenance fields; do not recreate tables or delete work to upgrade.
 
 For the optional legacy event-intake deployment, `scripts/deploy_sjd_operations.py`
 accepts `--intake-pipeline-id` and `--registration-notebook-id` together.
-It updates the registration notebook to derive compatibility from its installed
+It updates the registration notebook to derive provenance from its installed
 SDK version, without reading release evidence. No pipeline release digest needs
 to be configured.
 
@@ -76,8 +100,9 @@ The later configuration pass requires resolved reporting IDs, not release
 hashes. All schedule arguments use that same target; enablement occurs
 only after every disabled schedule's readback matches.
 
-Drain or explicitly quarantine/re-register incompatible work during a release
-change. Never update an existing work item's immutable release digest in place.
+Older compatible work needs neither quarantine nor re-registration after an
+SDK upgrade. Retained backfill submission plans resume with their original
+IDs and provenance. Never update an existing work item's immutable digest.
 
 The published Environment must also match `reviewed_compute_settings()`:
 Runtime 2.0, fixed allocation, two 8-core/56-GB executors, speculation disabled.
@@ -104,4 +129,5 @@ staged or published output and changed ownership/fences. It invalidates the
 old work fences, releases only that batch, and records the recovery evidence
 in `last_error`; immutable work fields and input files remain unchanged.
 Do not use it as automatic cleanup for a running or uncertain worker.
-Use `quarantine` separately when the released work's SDK release is obsolete.
+Use `quarantine` only for a deliberate operator decision to terminalize READY
+work. It is not the SDK upgrade or compatibility recheck mechanism.

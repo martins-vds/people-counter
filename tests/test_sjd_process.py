@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import sqlite3
@@ -426,7 +427,7 @@ class SjdProcessTests(unittest.TestCase):
             ):
                 list(execute_sjd_bucket_partition_delta(iter(containers)))
 
-    def test_executor_checks_detached_release_before_loading_runtime(self):
+    def test_executor_checks_live_sdk_consistency_and_work_contract(self):
         row = {
             "physical_partition": 0,
             "executor_cores": 1,
@@ -439,7 +440,10 @@ class SjdProcessTests(unittest.TestCase):
             list(execute_sjd_partition([row]))
         row["_expected_release_package_version"] = _package_version()
         row["release_digest"] = "b" * 64
-        with self.assertRaisesRegex(ProcessValidationError, "work release digest differs"):
+        with self.assertRaisesRegex(ProcessValidationError, "planned_concurrency"):
+            list(execute_sjd_partition([row]))
+        row["payload_schema_version"] = 2
+        with self.assertRaisesRegex(ProcessValidationError, "cannot process work contract"):
             list(execute_sjd_partition([row]))
 
     def test_heartbeat_failure_prevents_staging_and_publication(self):
@@ -924,8 +928,15 @@ class SjdProcessTests(unittest.TestCase):
             safety_factor=1,
             margin_seconds=1,
         )
+        self.assertIsNone(invalid)
+        self.assertEqual(self.store.get_work("invalid-batch").status, "BLOCKED_INCOMPATIBLE")
+        original = self.store.load_claim_envelope(batch.batch_id)
+        original["items"][0]["payload"]["batch_size"] = 3
+        original["items"][0]["payload_sha256"] = hashlib.sha256(
+            json.dumps(original["items"][0]["payload"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         with self.assertRaisesRegex(ProcessValidationError, "batch_size"):
-            self.verified(invalid)
+            verify_envelope(original, batch_id=batch.batch_id, envelope_sha256=batch.envelope_sha256)
 
     def test_sparse_line_records_keep_crossings_and_final_cumulative(self):
         rows = [
@@ -2533,34 +2544,31 @@ class SjdProcessTests(unittest.TestCase):
             expected_version="release-version",
         )
 
-    def test_committed_preflight_rejects_release_digest_mismatch(self):
+    def test_committed_preflight_accepts_supported_work_from_an_older_release(self):
         batch = self.claim((10,))
         evidence = SimpleNamespace(
             package_version="release-version",
             digest="different-release",
         )
 
-        with (
-            patch(
-                "people_counter.fabric_release_provenance."
-                "validate_installed_package_version"
-            ),
-            self.assertRaisesRegex(
-                ProcessValidationError,
-                "^claim release digest differs from installed SDK "
-                "for \\['work-0'\\]$",
-            ),
+        with patch(
+            "people_counter.fabric_release_provenance."
+            "validate_installed_package_version"
         ):
-            resume_committed_process_batch(
+            result = resume_committed_process_batch(
                 self.store,
                 batch.batch_id,
                 self.attempts,
                 release_evidence=evidence,
             )
+        self.assertIsNone(result)
 
     def test_sdk_mode_uses_the_same_process_protocol(self):
+        from people_counter.fabric_release_provenance import installed_release
+
         batch = self.claim((10,))
         harness = SyntheticHarness()
+        release = installed_release()
         result = run_process_batch(
             self.store,
             batch.batch_id,
@@ -2568,10 +2576,16 @@ class SjdProcessTests(unittest.TestCase):
             "sdk",
             harness,
             self.attempts,
+            release_evidence=release,
         )
         self.assertEqual(result.record_count, 1)
         self.assertEqual(result.driver_package_version, _package_version())
         self.assertEqual(harness.calls, 1)
+        resumed = resume_committed_process_batch(
+            self.store, batch.batch_id, self.attempts, release_evidence=release,
+        )
+        self.assertTrue(resumed.resumed)
+        self.assertEqual(resumed.publication_sequences, result.publication_sequences)
         with self.assertRaisesRegex(ProcessValidationError, "unsupported"):
             run_process_batch(
                 self.store,

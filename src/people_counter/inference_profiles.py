@@ -21,6 +21,7 @@ from people_counter.model_artifacts import (
 )
 
 PROFILE_SCHEMA = "people-counter-inference-profile-v1"
+PROFILE_OVERRIDE_FIELDS = frozenset({"batch_size", "sample_fps", "detection_threshold"})
 PRESETS = {
     f"rtdetr-{detector}-{model_format}-cpu": {
         "pipeline": "rtdetr-osnet",
@@ -72,7 +73,7 @@ def _overrides(values: Mapping[str, Any] | None) -> dict[str, Any]:
     if values is not None and not isinstance(values, Mapping):
         raise ValueError("profile overrides must be an object")
     overrides = dict(values or {})
-    if overrides.keys() - {"batch_size", "sample_fps", "detection_threshold"}:
+    if overrides.keys() - PROFILE_OVERRIDE_FIELDS:
         raise ValueError("profile overrides support only batch_size, sample_fps, and detection_threshold")
     if "detection_threshold" in overrides:
         threshold = overrides["detection_threshold"]

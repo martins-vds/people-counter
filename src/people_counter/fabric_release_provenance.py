@@ -1,4 +1,4 @@
-"""Portable SDK version compatibility, derived from wheel metadata only."""
+"""Portable SDK audit provenance, derived from wheel metadata only."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ PACKAGE_DISTRIBUTION = "people-counter"
 
 
 class ReleaseProvenanceError(RuntimeError):
-    """The installed SDK version is unavailable or incompatible with work."""
+    """The installed SDK version is unavailable or differs from its runtime peer."""
 
 
 def resolve_installed_package_version(
@@ -36,7 +36,7 @@ class InstalledRelease:
 
 
 def installed_release() -> InstalledRelease:
-    """Keep work from different SDK versions separate, without deployment IO."""
+    """Identify the submitting SDK for audit, without deployment IO."""
     version = resolve_installed_package_version()
     digest = hashlib.sha256(f"{PACKAGE_DISTRIBUTION}=={version}".encode("utf-8")).hexdigest()
     return InstalledRelease(version, digest)

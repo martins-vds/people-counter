@@ -495,7 +495,7 @@ def test_submission_failures_keep_the_correct_operator_recovery_instruction(setu
     elif stage == "state":
         state.mkdir()
         (state / "registration-plan.json").write_text("{}")
-        message = "state directory belongs to a different package, target, profile, or release"
+        message = "saved registration plan must contain an items array"
     elif stage == "publication":
         message = "publication incomplete; inspect publication-rejections.csv before retrying"
     else:

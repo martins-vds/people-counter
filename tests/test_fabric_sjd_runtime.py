@@ -865,7 +865,7 @@ def test_control_registration_is_idempotent_and_rejects_immutable_conflicts() ->
     assert len(store.data["work"]) == 1
 
 
-def test_stable_registration_rejects_old_release_before_creating_ready_work(monkeypatch) -> None:
+def test_stable_registration_preserves_old_provenance_without_version_admission(monkeypatch) -> None:
     from people_counter.fabric_sjd import FabricSjdConfig
     import people_counter.fabric_release_provenance as provenance
 
@@ -875,12 +875,12 @@ def test_stable_registration_rejects_old_release_before_creating_ready_work(monk
         provenance, "installed_release",
         lambda: SimpleNamespace(digest="b" * 64),
     )
-    with pytest.raises(ImmutableConflictError, match="release"):
-        store.register(
-            "old-work", {}, runtime_key="profile", duration_seconds=10,
-            config_sha256="config", release_digest="a" * 64,
-        )
-    assert store.data["work"] == []
+    registered = store.register(
+        "old-work", {}, runtime_key="profile", duration_seconds=10,
+        config_sha256="config", release_digest="a" * 64,
+    )
+    assert registered.status == "READY"
+    assert store.data["work"][0]["release_digest"] == "a" * 64
     assert store.data["attempts"] == []
     assert store.data["batches"] == []
     registered = store.register(
@@ -890,34 +890,26 @@ def test_stable_registration_rejects_old_release_before_creating_ready_work(monk
     assert registered.status == "READY"
 
 
-def test_fabric_claim_rejects_old_release_before_any_lease_or_envelope() -> None:
+def test_fabric_claim_accepts_supported_work_from_an_older_release() -> None:
     files = MemoryFiles()
     store = MemoryControlStore(files)
     store.register(
         "old-work", {}, runtime_key="profile", duration_seconds=10,
         config_sha256="config", release_digest="a" * 64,
     )
-    with pytest.raises(ImmutableConflictError, match="old-work"):
-        store.claim(
+    with pytest.warns(FutureWarning):
+        claimed = store.claim(
             "new-dispatcher", max_items=1, lease_seconds=100,
             expected_release_digest="b" * 64,
             minimum_speed_x=1, safety_factor=1, margin_seconds=1,
         )
-    assert store.data["work"][0]["status"] == "READY"
-    assert store.data["work"][0]["attempt_count"] == 0
-    assert store.data["attempts"] == []
-    assert store.data["batches"] == []
-    assert files.content == {}
-    claimed = store.claim(
-        "compatible-dispatcher", max_items=1, lease_seconds=100,
-        expected_release_digest="a" * 64,
-        minimum_speed_x=1, safety_factor=1, margin_seconds=1,
-    )
+    assert store.data["work"][0]["status"] == "LEASED"
+    assert store.data["work"][0]["attempt_count"] == 1
     assert claimed is not None
     assert len(claimed.items) == 1
 
 
-def test_stable_claim_validates_dispatcher_binding_before_claim(monkeypatch) -> None:
+def test_stable_claim_deprecates_release_binding_without_requiring_equality(monkeypatch) -> None:
     from people_counter.fabric_sjd import FabricSjdConfig
     import people_counter.fabric_release_provenance as provenance
 
@@ -927,7 +919,7 @@ def test_stable_claim_validates_dispatcher_binding_before_claim(monkeypatch) -> 
         provenance, "installed_release",
         lambda: SimpleNamespace(digest="b" * 64),
     )
-    with pytest.raises(ImmutableConflictError, match="release"):
+    with pytest.warns(FutureWarning):
         store.claim(
             "dispatcher", max_items=1, lease_seconds=100,
             expected_release_digest="a" * 64,
@@ -3991,7 +3983,9 @@ def test_control_bulk_register_accepts_limits_and_hashes_ordered_work_ids(
         "--partition-sha256", backfill_partition.digest,
         "--max-items", str(maximum),
     ], config=control_driver.config) == 0
-    control_driver.store.register_many.assert_called_once_with(backfill_partition.requests)
+    control_driver.store.register_many.assert_called_once_with([
+        {**request, "submitted_sdk_version": None} for request in backfill_partition.requests
+    ])
     assert control_driver.files.read_calls == 1
     control_driver.diagnostic.assert_not_called()
     assert json.loads(capsys.readouterr().out) == {
@@ -4120,6 +4114,7 @@ def test_control_main_dispatches_all_safe_commands(
                     "duration_seconds": 1,
                     "config_sha256": "c" * 64,
                     "release_digest": "d" * 64,
+                    "submitted_sdk_version": None,
                     "max_attempts": 3,
                     "available_at": None,
                 }
@@ -4220,7 +4215,7 @@ def test_control_main_dispatches_all_safe_commands(
     gold_state.assert_called_once_with(store.spark, config=shared_config)
     store.register.assert_called_once_with(
         "work-1", {"asset": "safe"}, runtime_key="cpu", duration_seconds=1.0,
-        config_sha256="c" * 64, release_digest="release", max_attempts=3,
+        config_sha256="c" * 64, release_digest="release", submitted_sdk_version=None, max_attempts=3,
     )
     store.claim.assert_called_once_with(
         "owner", max_items=1, lease_seconds=60.0, minimum_speed_x=1.0,
@@ -4244,6 +4239,7 @@ def test_control_main_dispatches_all_safe_commands(
             "duration_seconds": 1.0,
             "config_sha256": "c" * 64,
             "release_digest": "d" * 64,
+            "submitted_sdk_version": None,
             "max_attempts": 3,
             "available_at": None,
         }
@@ -4720,6 +4716,7 @@ def test_fabric_control_bootstrap_creates_tables_and_rejects_bad_lock() -> None:
     store.tables = {name: f"table_{name}" for name in _SCHEMAS}
     spark = MagicMock()
     spark.catalog.tableExists.return_value = False
+    spark.table.return_value.columns = ["submitted_sdk_version", "compatibility_json"]
     frame = MagicMock()
     spark.createDataFrame.return_value = frame
     frame.write.format.return_value.mode.return_value.saveAsTable.return_value = None

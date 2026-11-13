@@ -494,19 +494,19 @@ class SJDControlTests(unittest.TestCase):
                 release_digest="release-a",
             )
 
-    def test_release_mismatch_cannot_create_a_lease(self):
+    def test_release_difference_does_not_prevent_a_supported_claim(self):
         self.register("old-release-work")
-        with self.assertRaisesRegex(ImmutableConflictError, "old-release-work"):
-            self.claim(expected_release_digest="release-b")
+        with self.assertWarns(FutureWarning):
+            batch = self.claim(expected_release_digest="release-b")
+        self.assertEqual([item.work_id for item in batch.items], ["old-release-work"])
         with self.store._connect() as connection:
             row = connection.execute(
                 "SELECT status,attempt_count FROM work WHERE work_id = ?",
                 ("old-release-work",),
             ).fetchone()
-            self.assertEqual(tuple(row), ("READY", 0))
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 0)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM batches").fetchone()[0], 0)
-        self.assertIsNotNone(self.claim(expected_release_digest="release-a"))
+            self.assertEqual(tuple(row), ("LEASED", 1))
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM batches").fetchone()[0], 1)
 
     def test_register_many_is_atomic_idempotent_and_rejects_partition_conflicts(self):
         def request(work_id, source):

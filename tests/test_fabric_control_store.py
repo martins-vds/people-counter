@@ -311,6 +311,46 @@ def delta_control(gold_spark, tmp_path):
         gold_spark.sql(f"DROP DATABASE {database} CASCADE")
 
 
+def test_delta_compatibility_migrates_existing_work_and_processes_a_mixed_queue(delta_control):
+    from people_counter.fabric_control_store import _SCHEMAS
+
+    store = delta_control
+    for work_id, payload in (("blocked", {"work_schema_version": 2}), ("supported", {})):
+        store.register(
+            work_id, payload, runtime_key="cpu", duration_seconds=1,
+            config_sha256="config", release_digest="old-release",
+        )
+    legacy_schema = _SCHEMAS["work"].replace(
+        "submitted_sdk_version string, compatibility_json string, ", "",
+    )
+    old_rows = [
+        {key: value for key, value in row.items() if key not in ("submitted_sdk_version", "compatibility_json")}
+        for row in store._rows("work")
+    ]
+    store.spark.createDataFrame(old_rows, schema=legacy_schema).write.format("delta").mode(
+        "overwrite",
+    ).option("overwriteSchema", "true").saveAsTable(store.tables["work"])
+    store.bootstrap()
+    store.bootstrap()
+    assert {"submitted_sdk_version", "compatibility_json"} <= set(store.spark.table(store.tables["work"]).columns)
+    assert [
+        {key: value for key, value in row.items() if key not in ("submitted_sdk_version", "compatibility_json")}
+        for row in store._rows("work")
+    ] == old_rows
+    batch = store.claim(
+        "driver", max_items=2, lease_seconds=60,
+        minimum_speed_x=1, safety_factor=1, margin_seconds=1,
+    )
+    assert [item.work_id for item in batch.items] == ["supported"]
+    assert store.get_work("blocked").status == "BLOCKED_INCOMPATIBLE"
+    assert store.get_work("blocked").attempt_count == 0
+    assert store.recheck_compatibility(
+        ["blocked"], operator="ops", reason="new SDK",
+    )[0].status == "BLOCKED_INCOMPATIBLE"
+    assert store.spark.table(store.tables["attempts"]).count() == 1
+    assert store.spark.table(store.tables["locks"]).first().owner_id is None
+
+
 def test_delta_exact_recovery_and_replacement_fail_closed(delta_control, monkeypatch):
     store = delta_control
     registration = {

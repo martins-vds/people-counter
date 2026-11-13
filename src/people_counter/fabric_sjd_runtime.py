@@ -809,18 +809,19 @@ def _model_artifact_paths(
     payload: Mapping[str, Any], *, validation_error: type[Exception]
 ) -> tuple[str, ...]:
     """Build the four fixed RT-DETR/OSNet artifact paths for one item."""
-    from people_counter.inference_profiles import artifact_paths, validate_profile
+    from people_counter.inference_profiles import artifact_paths
+    from people_counter.work_compatibility import evaluate_compatibility
 
     try:
-        managed_profile = validate_profile(payload)
+        decision = evaluate_compatibility(payload, fabric=True)
     except ValueError as error:
         raise validation_error(str(error)) from error
-    if managed_profile is not None:
-        return artifact_paths(managed_profile["profile_id"])
-    if payload.get("pipeline", "rtdetr-osnet") != "rtdetr-osnet":
-        raise validation_error(
-            "Fabric SJD v1 localizer supports RT-DETR/OSNet only"
-        )
+    if not decision.supported:
+        if decision.reason_code == "UNSUPPORTED_PIPELINE":
+            raise validation_error("Fabric SJD v1 localizer supports RT-DETR/OSNet only")
+        raise validation_error(decision.reason)
+    if "profile_schema" in payload:
+        return artifact_paths(payload["profile_id"])
     detector = str(payload.get("detector_model", "r18"))
     model_format = str(payload.get("model_format", "pytorch"))
     detector_dir = "rtdetr_v2_r18vd" if detector == "r18" else "rtdetr_v2_r50vd"
@@ -1106,6 +1107,7 @@ def _control_parser() -> argparse.ArgumentParser:
     register.add_argument("--duration-seconds", required=True, type=float)
     register.add_argument("--config-sha256", required=True)
     register.add_argument("--release-digest")
+    register.add_argument("--submitted-sdk-version")
     register.add_argument("--max-attempts", type=int, default=3)
     bulk_register = commands.add_parser("bulk-register")
     bulk_register.add_argument("--partition-path", required=True)
@@ -1125,6 +1127,10 @@ def _control_parser() -> argparse.ArgumentParser:
     replay.add_argument("--operator", required=True)
     replay.add_argument("--reason", required=True)
     replay.add_argument("--additional-attempts", type=int, default=1)
+    recheck = commands.add_parser("recheck-compatibility")
+    recheck.add_argument("--work-id", action="append", required=True)
+    recheck.add_argument("--operator", required=True)
+    recheck.add_argument("--reason", required=True)
     quarantine = commands.add_parser("quarantine")
     quarantine.add_argument("--work-evidence", action="append", required=True)
     quarantine.add_argument("--operator", required=True)
@@ -1136,6 +1142,8 @@ def _control_parser() -> argparse.ArgumentParser:
         abandon.add_argument("--" + argument, required=True)
     clear_lock = commands.add_parser("clear-stale-lock")
     clear_lock.add_argument("--expected-owner-id", required=True)
+    status = commands.add_parser("status")
+    status.add_argument("--work-id", action="append", required=True)
     commands.add_parser("reconcile")
     return parser
 
@@ -1349,6 +1357,12 @@ def _control_dispatch(
                     installed_release().digest
                     if arguments.release_digest is None else arguments.release_digest
                 ),
+                submitted_sdk_version=(
+                    arguments.submitted_sdk_version
+                    if arguments.submitted_sdk_version is not None
+                    else installed_release().package_version
+                    if arguments.release_digest is None else None
+                ),
                 max_attempts=arguments.max_attempts,
             )
         )
@@ -1380,6 +1394,14 @@ def _control_dispatch(
                 additional_attempts=arguments.additional_attempts,
             )
         )
+    elif arguments.command == "status":
+        result = [asdict(store.get_work(identity)) for identity in arguments.work_id]
+    elif arguments.command == "recheck-compatibility":
+        result = [
+            asdict(work) for work in store.recheck_compatibility(
+                arguments.work_id, operator=arguments.operator, reason=arguments.reason,
+            )
+        ]
     elif arguments.command == "quarantine":
         evidence: dict[str, str] = {}
         for value in arguments.work_evidence:
@@ -1466,7 +1488,7 @@ def dispatcher_main(
     owner = arguments.owner or f"pc-production-dispatcher-{uuid.uuid4().hex}"
     store = FabricControlStore(_spark(), config=selected)
     try:
-        release = _runtime_release(arguments)
+        _runtime_release(arguments)
         if getattr(selected, "stable_production", False):
             _validate_fabric_runtime(store.spark)
         claimed = store.claim(
@@ -1478,7 +1500,6 @@ def dispatcher_main(
             safety_factor=arguments.safety_factor,
             margin_seconds=arguments.margin_seconds,
             minimum_items=arguments.minimum_items,
-            expected_release_digest=release.digest,
         )
         if claimed is None:
             print(
@@ -1757,7 +1778,8 @@ def _runtime_release(arguments: argparse.Namespace) -> InstalledRelease:
     )):
         warnings.warn(
             "Release manifest/receipt arguments are obsolete and ignored; "
-            "SDK compatibility comes from the installed package version.",
+            "SDK provenance comes from the installed package version; "
+            "work eligibility uses supported contracts.",
             FutureWarning,
             stacklevel=2,
         )

@@ -987,7 +987,7 @@ def test_pending_job_timeout_preserves_location_for_retry(setup):
     assert json.loads(state.read_text())["location"] == "/jobs/job"
 
 
-def test_state_directory_cannot_change_release_or_target(setup):
+def test_state_directory_resumes_original_provenance_after_sdk_upgrade(setup):
     storage, files, release = cloud_mocks(setup)
     fabric = Mock()
     fabric.request_response.return_value = (202, {"Location": "/jobs/job"}, b"")
@@ -999,10 +999,50 @@ def test_state_directory_cannot_change_release_or_target(setup):
         operator, "installed_release", return_value=release
     ), patch.object(operator, "FabricAutomationClient", return_value=fabric):
         assert operator.main(setup.args + ["--submit"]) == 0
+        original = json.loads((setup.root / "state/registration-plan.json").read_text())
+        assert all(record["submitted_sdk_version"] == release.package_version for record in original["items"])
+        plan = (setup.root / "state/registration-plan.json").read_bytes()
         release.digest = "e" * 64
+        release.package_version = "0.10.2"
+        assert operator.main(setup.args + ["--submit"]) == 0
+        assert (setup.root / "state/registration-plan.json").read_bytes() == plan
+        setup.config_path.write_text(json.dumps({
+            **setup.config, "lakehouse_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        }))
         with pytest.raises(ValueError, match="different package"):
             operator.main(setup.args + ["--submit"])
     assert fabric.request_response.call_count == 1
+
+
+def test_submission_resume_preserves_a_legacy_plan_without_schema_or_version_annotations(setup):
+    config = operator.load_config(setup.config_path)
+    publication = operator.publication_config(setup.package, setup.root, setup.root / "state", config)
+    package = operator.validate_manifest_package(publication)
+    records = operator.registration_records(package, config, "d" * 64, include_contract=False)
+    for record in records:
+        del record["submitted_sdk_version"]
+    actual = operator._submission_records(
+        package, config, operator.InstalledRelease("0.10.2", "e" * 64), {"items": records},
+    )
+    assert actual == records
+    assert all("work_schema_version" not in record["payload"] for record in actual)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("submitted_sdk_version", "0.9.0"), ("release_digest", "e" * 64),
+])
+def test_submission_resume_rejects_independently_mixed_provenance(setup, field, value):
+    config = operator.load_config(setup.config_path)
+    publication = operator.publication_config(setup.package, setup.root, setup.root / "state", config)
+    package = operator.validate_manifest_package(publication)
+    records = operator.registration_records(
+        package, config, "d" * 64, submitted_sdk_version="0.10.1",
+    )
+    original = [*records, {**records[0], "work_id": "other", field: value}]
+    with pytest.raises(ValueError, match="inconsistent submission provenance"):
+        operator._submission_records(
+            package, config, operator.InstalledRelease("0.10.2", "e" * 64), {"items": original},
+        )
 
 
 def test_registration_in_progress_is_polled_once_then_persisted_as_completed(setup, tmp_path):
@@ -1181,6 +1221,19 @@ def test_wait_stops_on_dead_work_with_saved_diagnostics(setup):
     report = json.loads((state / "processing-summary.json").read_text())
     assert report["status"] == "failed"
     assert report["failures"][0]["last_error"] == "model unavailable"
+
+
+def test_wait_stops_on_incompatible_work_with_actionable_diagnostics(setup):
+    config = operator.load_config(setup.config_path)
+    state = processing_state(setup, ("blocked",))
+    with patch.object(operator, "read_demo_delta", return_value=[{
+        "work_id": "blocked", "status": "BLOCKED_INCOMPATIBLE",
+        "committed_attempt_id": None,
+        "last_error": json.dumps({"reason": "Unsupported payload schema: 2"}),
+    }]), patch.object(operator.time, "sleep", side_effect=AssertionError("blocked work must stop polling")) as sleep:
+        with pytest.raises(RuntimeError, match="blocked.*BLOCKED_INCOMPATIBLE.*payload schema"):
+            operator.wait_for_processing(Mock(), config, state)
+    sleep.assert_not_called()
 
 
 def test_wait_read_failure_is_not_replaced_with_success(setup):

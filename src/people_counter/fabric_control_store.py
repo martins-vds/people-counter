@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from people_counter.fabric_namespace import FabricNamespaceConfig
 from people_counter.fabric_control import ControlWriter
+from people_counter.fabric_release_provenance import resolve_installed_package_version
 from people_counter.sjd_control import (
     CLAIM_ENVELOPE_VERSION,
     BatchValidationError,
@@ -53,7 +54,8 @@ _SCHEMAS = {
         "available_at double, lease_owner string, lease_attempt_id string, "
         "lease_expires_at double, committed_attempt_id string, "
         "publication_sequence long, replay_generation long, "
-        "last_replay_id string, last_error string, created_at double, "
+        "last_replay_id string, last_error string, submitted_sdk_version string, "
+        "compatibility_json string, created_at double, "
         "updated_at double"
     ),
     "batches": (
@@ -251,6 +253,21 @@ class FabricControlStoreImpl:
             self.bootstrap()
         self.writer = ControlWriter(self.spark, self.tables["locks"])
 
+    def _migrate_compatibility(self) -> None:
+        name = self.tables["work"]
+        columns = set(self.spark.table(name).columns)
+        missing = [
+            field for field in ("submitted_sdk_version", "compatibility_json")
+            if field not in columns
+        ]
+        if missing:
+            self.spark.sql(
+                f"ALTER TABLE {name} ADD COLUMNS ({', '.join(field + ' STRING' for field in missing)})"
+            )
+            self.spark.catalog.refreshTable(name)
+            if not set(missing) <= set(self.spark.table(name).columns):
+                raise ControlError("compatibility schema migration readback differs")
+
     def bootstrap(self) -> None:
         """Create every Delta table with an explicit schema and seed one lock."""
         for suffix, schema in _SCHEMAS.items():
@@ -275,6 +292,9 @@ class FabricControlStoreImpl:
             raise RuntimeError(
                 "Fabric SJD lock ownership and timestamp are inconsistent"
             )
+        columns = set(self.spark.table(self.tables["work"]).columns)
+        if not {"submitted_sdk_version", "compatibility_json"} <= columns:
+            ControlWriter(self.spark, self.tables["locks"]).run(self._migrate_compatibility)
 
     def now(self) -> float:
         return _finite(self._clock(), "clock")
@@ -288,6 +308,7 @@ class FabricControlStoreImpl:
         duration_seconds: float,
         config_sha256: str,
         release_digest: str,
+        submitted_sdk_version: str | None = None,
         max_attempts: int = 3,
         available_at: float | None = None,
     ) -> RegisteredWork:
@@ -300,6 +321,10 @@ class FabricControlStoreImpl:
                     "duration_seconds": duration_seconds,
                     "config_sha256": config_sha256,
                     "release_digest": release_digest,
+                    "submitted_sdk_version": (
+                        resolve_installed_package_version()
+                        if submitted_sdk_version is None else submitted_sdk_version
+                    ),
                     "max_attempts": max_attempts,
                     "available_at": available_at,
                 }
@@ -312,7 +337,6 @@ class FabricControlStoreImpl:
     ) -> tuple[RegisteredWork, ...]:
         """Atomically register one bounded partition under the global writer."""
         normalized = normalize_registration_requests(requests)
-        require_release_compatibility(normalized, self._release_digest(None))
         prepared: list[tuple[dict[str, Any], str, str]] = []
         seen: dict[str, tuple[object, ...]] = {}
         for request in normalized:
@@ -395,6 +419,8 @@ class FabricControlStoreImpl:
                     "replay_generation": 0,
                     "last_replay_id": None,
                     "last_error": None,
+                    "submitted_sdk_version": request["submitted_sdk_version"],
+                    "compatibility_json": None,
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -479,17 +505,10 @@ class FabricControlStoreImpl:
             if allowed_work_ids is None
             else {_text(item, "allowed_work_id") for item in allowed_work_ids}
         )
-        expected_release_digest = self._release_digest(expected_release_digest)
+        require_release_compatibility([], expected_release_digest)
 
         def operation() -> ClaimedBatch | None:
             now = self.now()
-            if maximum_active_batches is not None:
-                active = sum(
-                    row["status"] in {"LEASED", "SEALED"}
-                    for row in self._rows("batches")
-                )
-                if active >= maximum_active_batches:
-                    return None
             work = self._rows("work")
             eligible = [
                 row
@@ -498,7 +517,26 @@ class FabricControlStoreImpl:
                 and float(row["available_at"]) <= now
                 and (scope is None or row["work_id"] in scope)
             ]
-            require_release_compatibility(eligible, expected_release_digest)
+            blocked = False
+            compatible = []
+            for row in eligible:
+                evaluation = SQLiteControlStore._work_evaluation(row, now, fabric=True)
+                if evaluation["supported"]:
+                    compatible.append(row)
+                else:
+                    encoded = _canonical(evaluation)
+                    row.update(status="BLOCKED_INCOMPATIBLE", compatibility_json=encoded, last_error=encoded, updated_at=now)
+                    blocked = True
+            if blocked:
+                self._replace("work", work)
+            eligible = compatible
+            if maximum_active_batches is not None:
+                active = sum(
+                    row["status"] in {"LEASED", "SEALED"}
+                    for row in self._rows("batches")
+                )
+                if active >= maximum_active_batches:
+                    return None
             if not eligible:
                 return None
             first_by_runtime: dict[str, float] = {}
@@ -568,6 +606,7 @@ class FabricControlStoreImpl:
                         "payload": json.loads(row["payload_json"]),
                         "config_sha256": row["config_sha256"],
                         "release_digest": row["release_digest"],
+                        "submitted_sdk_version": row.get("submitted_sdk_version"),
                         "duration_seconds": row["duration_seconds"],
                         "runtime_key": runtime,
                     }
@@ -651,17 +690,42 @@ class FabricControlStoreImpl:
 
         return self.writer.run(operation)
 
-    def _release_digest(self, expected: str | None) -> str | None:
-        if not getattr(self.config, "stable_production", False):
-            return expected
-        from people_counter.fabric_release_provenance import installed_release
+    def get_work(self, work_id: str) -> RegisteredWork:
+        return _registered(_require_one(self._rows("work"), "work_id", _text(work_id, "work_id")))
 
-        published = installed_release().digest
-        if expected is not None and expected != published:
-            raise ImmutableConflictError(
-                f"dispatcher release binding {expected} differs from installed release {published}"
-            )
-        return published
+    def recheck_compatibility(
+        self, work_ids: Collection[str], *, operator: str, reason: str,
+    ) -> tuple[RegisteredWork, ...]:
+        from people_counter.sjd_control import _allowed_work_scope
+
+        scope = _allowed_work_scope(work_ids)
+        if not scope:
+            raise ValueError("recheck requires selected work IDs")
+        actor = _text(operator, "operator")
+        explanation = _text(reason, "reason")
+
+        def operation() -> tuple[RegisteredWork, ...]:
+            now = self.now()
+            work = self._rows("work")
+            selected = [_require_one(work, "work_id", identity) for identity in scope]
+            for row in selected:
+                if row["status"] != "BLOCKED_INCOMPATIBLE":
+                    raise ControlError(f"work {row['work_id']} is not recheck-eligible; status={row['status']}")
+            for row in selected:
+                evaluation = SQLiteControlStore._work_evaluation(
+                    row, now, fabric=True, operator=actor, reason=explanation,
+                )
+                encoded = _canonical(evaluation)
+                row.update(
+                    status="READY" if evaluation["supported"] else "BLOCKED_INCOMPATIBLE",
+                    compatibility_json=encoded,
+                    last_error=None if evaluation["supported"] else encoded,
+                    updated_at=now,
+                )
+            self._replace("work", work)
+            return tuple(_registered(row) for row in selected)
+
+        return self.writer.run(operation)
 
     def load_claim_envelope_with_digest(
         self, batch_id: str
@@ -1261,6 +1325,8 @@ class FabricControlStoreImpl:
             now = self.now()
             work = self._rows("work")
             row = _require_one(work, "work_id", work_id)
+            if row["status"] == "BLOCKED_INCOMPATIBLE":
+                raise ControlError("blocked work requires explicit compatibility recheck")
             if row["status"] == "LEASED":
                 raise LeaseLostError("leased work cannot be replayed")
             replay_id = self._id_factory()
@@ -1584,6 +1650,8 @@ def _registered(row: Mapping[str, Any]) -> RegisteredWork:
         if row.get("publication_sequence") is None
         else int(row["publication_sequence"]),
         None if row.get("last_replay_id") is None else str(row["last_replay_id"]),
+        row.get("submitted_sdk_version"),
+        None if row.get("compatibility_json") is None else json.loads(row["compatibility_json"]),
     )
 
 

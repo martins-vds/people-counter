@@ -14,6 +14,7 @@ import json
 import math
 import sqlite3
 import time
+import warnings
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -23,9 +24,11 @@ from uuid import uuid4
 
 from people_counter.local_storage import ContentAddressedStore
 from people_counter.inference_profiles import validate_registration_profile
+from people_counter.work_compatibility import compatibility_evaluation
+from people_counter.fabric_release_provenance import installed_release, resolve_installed_package_version
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CLAIM_ENVELOPE_VERSION = 1
 _ACTIVE_ATTEMPTS = frozenset({"LEASED", "SEALED"})
 _SHA256_LENGTH = 64
@@ -60,16 +63,12 @@ def require_release_compatibility(
 ) -> None:
     if expected_release_digest is None:
         return
-    expected = _required_text(expected_release_digest, "expected_release_digest")
-    mismatched = sorted(
-        str(row["work_id"]) for row in requests
-        if row["release_digest"] != expected
+    _required_text(expected_release_digest, "expected_release_digest")
+    warnings.warn(
+        "expected_release_digest is obsolete; SDK versions are provenance, "
+        "and work eligibility uses supported contracts",
+        FutureWarning, stacklevel=2,
     )
-    if mismatched:
-        raise ImmutableConflictError(
-            f"release compatibility mismatch: expected {expected}; "
-            f"incompatible work {mismatched!r}; no work was registered or claimed"
-        )
 
 
 @dataclass(frozen=True)
@@ -85,6 +84,8 @@ class RegisteredWork:
     committed_attempt_id: str | None
     publication_sequence: int | None
     last_replay_id: str | None
+    submitted_sdk_version: str | None = None
+    compatibility: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,7 @@ class ControlStore(Protocol):
         duration_seconds: float,
         config_sha256: str,
         release_digest: str,
+        submitted_sdk_version: str | None = None,
         max_attempts: int = 3,
         available_at: float | None = None,
     ) -> RegisteredWork: ...
@@ -186,6 +188,10 @@ class ControlStore(Protocol):
     ) -> ClaimedBatch | None: ...
 
     def recover(self, *, now: float | None = None) -> RecoveryReport: ...
+
+    def recheck_compatibility(
+        self, work_ids: Collection[str], *, operator: str, reason: str,
+    ) -> tuple[RegisteredWork, ...]: ...
 
     def reconcile(self, *, now: float | None = None) -> list[ReconciliationFinding]: ...
 
@@ -295,7 +301,7 @@ class SQLiteControlStore:
         """Create or validate the versioned local control schema."""
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if current not in (0, SCHEMA_VERSION):
+            if current not in (0, 1, SCHEMA_VERSION):
                 raise ControlError(
                     f"unsupported control schema version {current}; "
                     f"expected {SCHEMA_VERSION}"
@@ -316,7 +322,8 @@ class SQLiteControlStore:
                     config_sha256 TEXT NOT NULL,
                     release_digest TEXT NOT NULL,
                     status TEXT NOT NULL CHECK (
-                        status IN ('READY', 'LEASED', 'SUCCEEDED', 'DEAD')
+                        status IN ('READY', 'LEASED', 'SUCCEEDED', 'DEAD',
+                            'BLOCKED_INCOMPATIBLE')
                     ),
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
@@ -332,6 +339,8 @@ class SQLiteControlStore:
                     replay_generation INTEGER NOT NULL DEFAULT 0,
                     last_replay_id TEXT,
                     last_error TEXT,
+                    submitted_sdk_version TEXT,
+                    compatibility_json TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     CHECK (
@@ -466,6 +475,7 @@ class SQLiteControlStore:
                     WHERE original_max_attempts IS NULL
                     """
                 )
+            self._migrate_compatibility(connection)
             duplicate_output = connection.execute(
                 """
                 SELECT 1 FROM output_records
@@ -499,6 +509,63 @@ class SQLiteControlStore:
                 raise ControlError("control metadata conflicts with this schema")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
+    @staticmethod
+    def _migrate_compatibility(connection: sqlite3.Connection) -> None:
+        metadata = connection.execute(
+            "SELECT schema_version FROM control_metadata WHERE singleton = 1"
+        ).fetchone()
+        if metadata is not None and int(metadata[0]) not in (1, SCHEMA_VERSION):
+            raise ControlError("control metadata conflicts with this schema")
+        columns = [row["name"] for row in connection.execute("PRAGMA table_info(work)")]
+        if {"compatibility_json", "submitted_sdk_version"} <= set(columns):
+            if metadata is not None and int(metadata[0]) == 1:
+                connection.execute("UPDATE control_metadata SET schema_version=?", (SCHEMA_VERSION,))
+            return
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            columns = [row["name"] for row in connection.execute("PRAGMA table_info(work)")]
+            if {"compatibility_json", "submitted_sdk_version"} <= set(columns):
+                connection.commit()
+                return
+            sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='work'"
+            ).fetchone()[0]
+            indexes = [
+                row[0] for row in connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='work' AND sql IS NOT NULL"
+                )
+            ]
+            definition = sql.partition("(")[2].replace(
+                "'DEAD'", "'DEAD', 'BLOCKED_INCOMPATIBLE'"
+            )
+            connection.execute("CREATE TABLE work_compatibility_upgrade (" + definition)
+            for field in ("submitted_sdk_version", "compatibility_json"):
+                if field not in columns:
+                    connection.execute(f"ALTER TABLE work_compatibility_upgrade ADD COLUMN {field} TEXT")
+            names = ",".join(f'"{name}"' for name in columns)
+            connection.execute(
+                f"INSERT INTO work_compatibility_upgrade ({names}) SELECT {names} FROM work"
+            )
+            connection.execute("DROP TABLE work")
+            connection.execute("ALTER TABLE work_compatibility_upgrade RENAME TO work")
+            for index in indexes:
+                connection.execute(index)
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ControlError("compatibility migration violates foreign keys")
+            connection.execute(
+                "UPDATE control_metadata SET schema_version = ? WHERE singleton = 1",
+                (SCHEMA_VERSION,),
+            )
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
+
     def register(
         self,
         work_id: str,
@@ -508,6 +575,7 @@ class SQLiteControlStore:
         duration_seconds: float,
         config_sha256: str,
         release_digest: str,
+        submitted_sdk_version: str | None = None,
         max_attempts: int = 3,
         available_at: float | None = None,
     ) -> RegisteredWork:
@@ -515,6 +583,10 @@ class SQLiteControlStore:
         runtime = _required_text(runtime_key, "runtime_key")
         config = _required_text(config_sha256, "config_sha256")
         release = _required_text(release_digest, "release_digest")
+        submitted_version = (
+            resolve_installed_package_version() if submitted_sdk_version is None
+            else _required_text(submitted_sdk_version, "submitted_sdk_version")
+        )
         duration = _positive_finite(duration_seconds, "duration_seconds")
         if type(max_attempts) is not int or not 1 <= max_attempts <= 100:
             raise ValueError("max_attempts must be between 1 and 100")
@@ -556,8 +628,8 @@ class SQLiteControlStore:
                     work_id, payload_json, payload_sha256, runtime_key,
                     duration_seconds, config_sha256, release_digest, status,
                     max_attempts, original_max_attempts, available_at,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?)
+                    created_at, updated_at, submitted_sdk_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     identity,
@@ -572,6 +644,7 @@ class SQLiteControlStore:
                     ready_at,
                     now,
                     now,
+                    submitted_version,
                 ),
             )
             row = connection.execute(
@@ -643,8 +716,8 @@ class SQLiteControlStore:
                         work_id, payload_json, payload_sha256, runtime_key,
                         duration_seconds, config_sha256, release_digest, status,
                         max_attempts, original_max_attempts, available_at,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?)
+                        created_at, updated_at, submitted_sdk_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'READY', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identity,
@@ -659,6 +732,7 @@ class SQLiteControlStore:
                         ready_at,
                         now,
                         now,
+                        request["submitted_sdk_version"],
                     ),
                 )
                 row = connection.execute(
@@ -680,6 +754,79 @@ class SQLiteControlStore:
         if row is None:
             raise KeyError(work_id)
         return self._registered(row)
+
+    def _classify_ready(self, scope: tuple[str, ...] | None, now: float) -> tuple[str, ...]:
+        compatible = []
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM work WHERE status='READY' AND available_at <= ?",
+                (now,),
+            ).fetchall()
+            for row in rows:
+                if scope is not None and row["work_id"] not in scope:
+                    continue
+                evaluation = self._work_evaluation(row, now)
+                if not evaluation["supported"]:
+                    encoded = _canonical_json(evaluation)
+                    connection.execute(
+                        "UPDATE work SET status='BLOCKED_INCOMPATIBLE', "
+                        "compatibility_json=?,last_error=?,updated_at=? "
+                        "WHERE work_id=? AND status='READY'",
+                        (encoded, encoded, now, row["work_id"]),
+                    )
+                else:
+                    compatible.append(str(row["work_id"]))
+        return tuple(compatible)
+
+    @staticmethod
+    def _work_evaluation(
+        row: sqlite3.Row | Mapping[str, Any], now: float, *, fabric: bool = False,
+        operator: str | None = None, reason: str | None = None,
+    ) -> dict[str, Any]:
+        payload_json = row["payload_json"]
+        if _sha256_text(payload_json) != row["payload_sha256"]:
+            raise ImmutableConflictError("registered payload digest differs")
+        payload = json.loads(payload_json)
+        evaluation = compatibility_evaluation(
+            payload, fabric=fabric, now=now, operator=operator, reason=reason,
+        )
+        if evaluation["supported"]:
+            validate_registration_profile(payload, row["runtime_key"], row["config_sha256"])
+        return evaluation
+
+    def recheck_compatibility(
+        self, work_ids: Collection[str], *, operator: str, reason: str,
+    ) -> tuple[RegisteredWork, ...]:
+        scope = _allowed_work_scope(work_ids)
+        if not scope:
+            raise ValueError("recheck requires selected work IDs")
+        actor = _required_text(operator, "operator")
+        explanation = _required_text(reason, "reason")
+        now = self._now()
+        with self._transaction() as connection:
+            rows = []
+            for identity in scope:
+                row = connection.execute("SELECT * FROM work WHERE work_id=?", (identity,)).fetchone()
+                if row is None:
+                    raise KeyError(identity)
+                if row["status"] != "BLOCKED_INCOMPATIBLE":
+                    raise ControlError(f"work {identity} is not recheck-eligible; status={row['status']}")
+                rows.append(row)
+            for row in rows:
+                evaluation = self._work_evaluation(row, now, operator=actor, reason=explanation)
+                encoded = _canonical_json(evaluation)
+                connection.execute(
+                    "UPDATE work SET status=?,compatibility_json=?,last_error=?,updated_at=? "
+                    "WHERE work_id=? AND status='BLOCKED_INCOMPATIBLE'",
+                    (
+                        "READY" if evaluation["supported"] else "BLOCKED_INCOMPATIBLE",
+                        encoded, None if evaluation["supported"] else encoded, now, row["work_id"],
+                    ),
+                )
+            return tuple(
+                self._registered(connection.execute("SELECT * FROM work WHERE work_id=?", (identity,)).fetchone())
+                for identity in scope
+            )
 
     def claim(
         self,
@@ -730,6 +877,8 @@ class SQLiteControlStore:
             raise ValueError("safety_factor must be at least 1")
         scope = _allowed_work_scope(allowed_work_ids)
         now = self._now()
+        require_release_compatibility([], expected_release_digest)
+        scope = self._classify_ready(scope, now)
         with self._transaction() as connection:
             if maximum_active_batches is not None:
                 active = connection.execute(
@@ -752,15 +901,6 @@ class SQLiteControlStore:
                     ((work_id,) for work_id in scope),
                 )
                 scope_join = "JOIN claim_scope s ON s.work_id = w.work_id"
-            if expected_release_digest is not None:
-                eligible = connection.execute(
-                    f"SELECT w.work_id,w.release_digest FROM work w {scope_join} "
-                    "WHERE w.status = 'READY' AND w.available_at <= ?",
-                    (now,),
-                ).fetchall()
-                require_release_compatibility(
-                    [dict(row) for row in eligible], expected_release_digest,
-                )
             runtime_row = connection.execute(
                 f"""
                 SELECT w.runtime_key, MIN(w.created_at) AS first_created
@@ -839,6 +979,7 @@ class SQLiteControlStore:
                         "payload": json.loads(rows[ordinal]["payload_json"]),
                         "config_sha256": rows[ordinal]["config_sha256"],
                         "release_digest": rows[ordinal]["release_digest"],
+                        "submitted_sdk_version": rows[ordinal]["submitted_sdk_version"],
                         "duration_seconds": rows[ordinal]["duration_seconds"],
                     }
                     for ordinal, item in enumerate(claimed)
@@ -2121,6 +2262,8 @@ class SQLiteControlStore:
             row["committed_attempt_id"],
             row["publication_sequence"],
             row["last_replay_id"],
+            row["submitted_sdk_version"],
+            None if row["compatibility_json"] is None else json.loads(row["compatibility_json"]),
         )
 
     def _new_id(self) -> str:
@@ -2471,6 +2614,10 @@ def normalize_registration_requests(
                 "release_digest": _required_text(
                     raw.get("release_digest"), "release_digest"
                 ),
+                "submitted_sdk_version": (
+                    None if raw.get("submitted_sdk_version") is None
+                    else _required_text(raw["submitted_sdk_version"], "submitted_sdk_version")
+                ),
                 "max_attempts": max_attempts,
                 "available_at": (
                     None
@@ -2507,6 +2654,7 @@ def _parser() -> argparse.ArgumentParser:
     register.add_argument("--duration-seconds", type=float)
     register.add_argument("--config-sha256")
     register.add_argument("--release-digest")
+    register.add_argument("--submitted-sdk-version")
     register.add_argument("--max-attempts", type=int, default=3)
 
     claim = commands.add_parser("claim")
@@ -2526,7 +2674,12 @@ def _parser() -> argparse.ArgumentParser:
     replay.add_argument("--operator", required=True)
     replay.add_argument("--reason", required=True)
     replay.add_argument("--additional-attempts", type=int, default=1)
-    commands.add_parser("status")
+    recheck = commands.add_parser("recheck-compatibility")
+    recheck.add_argument("--work-id", action="append", required=True)
+    recheck.add_argument("--operator", required=True)
+    recheck.add_argument("--reason", required=True)
+    status = commands.add_parser("status")
+    status.add_argument("--work-id", action="append")
     return parser
 
 
@@ -2545,6 +2698,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.duration_seconds,
                 arguments.config_sha256,
                 arguments.release_digest,
+                arguments.submitted_sdk_version,
             )
             if any(value is not None for value in supplied):
                 raise ValueError(
@@ -2560,7 +2714,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--runtime-key": arguments.runtime_key,
                 "--duration-seconds": arguments.duration_seconds,
                 "--config-sha256": arguments.config_sha256,
-                "--release-digest": arguments.release_digest,
             }
             missing = [name for name, value in required.items() if value is None]
             if missing:
@@ -2574,7 +2727,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runtime_key=arguments.runtime_key,
                 duration_seconds=arguments.duration_seconds,
                 config_sha256=arguments.config_sha256,
-                release_digest=arguments.release_digest,
+                release_digest=arguments.release_digest or installed_release().digest,
+                submitted_sdk_version=arguments.submitted_sdk_version,
                 max_attempts=arguments.max_attempts,
             )
             _json_print(asdict(work))
@@ -2609,8 +2763,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             additional_attempts=arguments.additional_attempts,
         )
         _json_print(asdict(request))
+    elif arguments.command == "recheck-compatibility":
+        _json_print([
+            asdict(work) for work in store.recheck_compatibility(
+                arguments.work_id, operator=arguments.operator, reason=arguments.reason,
+            )
+        ])
     elif arguments.command == "status":
-        _json_print(store.status())
+        _json_print(
+            [asdict(store.get_work(identity)) for identity in arguments.work_id]
+            if arguments.work_id else store.status()
+        )
     return 0
 
 

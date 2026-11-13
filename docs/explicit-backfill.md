@@ -224,9 +224,10 @@ With `--wait`, the Azure CLI identity also needs read access to the production
 `people_counter_sjd_work` Delta table in OneLake.
 
 No manually copied release digest or OneLake release evidence is required.
-Submission and Control derive work compatibility from the installed SDK's
-standard package version. Target IDs come from configuration and runtime
-context; no deployment identity is embedded in the wheel.
+The submitting SDK version and release digest are audit provenance, not
+eligibility rules. Compatibility depends on supported work/payload schemas,
+inference settings, and model requirements. Target IDs come from configuration
+and runtime context; no deployment identity is embedded in the wheel.
 
 Before any ADLS publication or registration-plan write, submission reads the
 target Lakehouse's shortcut definitions through the Fabric REST API. The exact
@@ -270,9 +271,11 @@ For 401/403, check the execution identity's OneLake write permissions.
 Keep `registration-plan.json`, publication evidence, and any job-state files.
 Repair the cause and retry with unchanged inputs and the same state directory.
 Do not delete successful ADLS publications or manually create dummy partitions.
-If the repair requires a newer SDK version, follow the SDK-upgrade guidance
-below: retain the old run's state and coordinate a deliberate new run rather
-than bypassing the release-compatibility check by deleting its registration plan.
+If the repair requires a newer SDK version, retain the old run's state.
+Submission verifies and reuses the original registration plan, work IDs,
+partitions, and submitting SDK provenance when the inputs still match.
+Changed packages, targets, inference settings, or model requirements remain
+immutable-plan conflicts; do not delete state to bypass validation.
 
 See the [SJD deployment guide](../fabric/spark-job-definitions/README.md)
 and [manual deployment guide](manual-portal-deployment.md) for deployment details.
@@ -280,7 +283,8 @@ and [manual deployment guide](manual-portal-deployment.md) for deployment detail
 ### SDK upgrades
 
 Upload the new wheel to the Fabric Environment, publish it, and start a fresh
-notebook/SJD session. Use the same SDK version in the notebook and jobs.
+notebook/SJD session. Keep the live driver and executors on the same SDK.
+An older submitting SDK version does not by itself prevent processing.
 No release directory, detached manifest, postpublish receipt, or custom
 embedded identity is needed. The SDK does not read those files.
 
@@ -292,14 +296,49 @@ but are not used; newly generated schedules omit them.
 Model files, source shortcuts, and the normal job state/intake directories
 are still required. They are processing inputs and state, not SDK packaging.
 Do not delete retry state to force an upgrade. Work registered by an older
-SDK, including work bound to the old detached-manifest digest, remains
-immutable and is rejected as incompatible. Drain it with the old SDK or
-explicitly quarantine/re-register it before switching versions.
+SDK, including work with an old detached-manifest digest, remains immutable
+and can run if its contract is supported. Legacy work without explicit contract
+versions is evaluated as v1; an unknown historical submitting version is not
+invented from its digest.
 
-Compatibility identifies the SDK version, not the exact wheel bytes or a
-published Environment revision. Do not publish different builds under the same
-version. Keep artifact checksums in release/distribution tooling, not runtime
-admission.
+Dispatcher classifies READY work individually before selecting a batch:
+
+```text
+READY -> supported contract -> LEASED -> processing
+READY -> unsupported contract -> BLOCKED_INCOMPATIBLE
+```
+
+One unsupported item does not prevent compatible items from running.
+Blocked work records the reason code, required contract, evaluating SDK version,
+and evaluation time in `compatibility_json` and `last_error`. No execution
+attempt, lease, or fence is allocated for blocking. Unsupported model formats
+or pipeline requirements are compatibility failures; missing files, denied
+access, and corrupt model bytes remain operational/integrity errors.
+
+After installing an SDK that supports the required contract, explicitly invoke
+the Control SJD with selected IDs and operator attribution:
+
+```text
+status --work-id <work-id>
+recheck-compatibility --work-id <work-id> --operator <operator> --reason "SDK upgrade"
+```
+
+Repeat `--work-id` to select multiple items. Only blocked items are eligible for
+recheck; missing, leased, or otherwise ineligible IDs are refused. Supported
+items return to READY, unsupported items remain blocked with refreshed
+diagnostics. Recheck preserves submission provenance, payload/configuration
+identities, attempts, fences, and retry budgets. Recovery, reconciliation,
+ordinary replay, repeated submission, and dispatcher runs do not unblock work.
+
+The SDK equivalents are `store.get_work(work_id)` and
+`store.recheck_compatibility(work_ids, operator=..., reason=...)`.
+For SQLite use `pc-control-sjd --database <path> status --work-id <work-id>`
+or the same prefix followed by `recheck-compatibility`.
+Disable old writers and restart SDK sessions before migrating existing control
+state; SQLite and Delta bootstrap migrate the new state fields idempotently.
+
+Do not publish different builds under the same version. Keep artifact checksums
+in release/distribution tooling, not runtime admission.
 
 ### Use assigned IDs, not reference-deployment defaults
 
@@ -444,8 +483,10 @@ Completion requires every exact work ID in the retained registration plan to
 have `status == SUCCEEDED` and a nonempty `committed_attempt_id`. A completed
 Spark job, unrelated successful work, or a success row without a committed
 attempt does not satisfy this check. Missing work remains visibly pending.
-Dead, failed, quarantined, or cancelled work stops the wait with an error and
-its work ID/status/last error. Access and query errors also stop the command.
+Dead, failed, quarantined, cancelled, or `BLOCKED_INCOMPATIBLE` work stops the
+wait with an error and its work ID/status/last error. Blocked work requires
+explicit compatibility recheck, not a retry-budget increase.
+Access and query errors also stop the command.
 
 The last observed counts and committed attempt IDs are saved in
 `processing-summary.json`. Successful waiting returns `status: processed` and

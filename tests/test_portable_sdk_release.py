@@ -145,7 +145,7 @@ def test_dispatcher_needs_no_release_files_or_hash_arguments(monkeypatch):
     monkeypatch.setattr(runtime, "_spark", lambda: object())
     monkeypatch.setattr(runtime, "_validate_fabric_runtime", lambda spark: None)
     assert runtime.dispatcher_main([], config=FabricSjdConfig(**TARGET_IDS)) == 0
-    assert store.claim.call_args.kwargs["expected_release_digest"] == provenance.installed_release().digest
+    assert "expected_release_digest" not in store.claim.call_args.kwargs
 
 
 def test_control_registration_derives_release_digest_without_manual_input():

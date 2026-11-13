@@ -28,7 +28,7 @@ from people_counter.fabric_automation import (
     AzureCliResourceTokenProvider,
     FabricAutomationClient,
 )
-from people_counter.fabric_release_provenance import installed_release
+from people_counter.fabric_release_provenance import InstalledRelease, installed_release
 from people_counter.fabric_sjd import FILES_ROOT, FabricSjdConfig
 from people_counter.fabric_target import validate_artifact_id
 from people_counter.fabric_rest import UrllibTransport
@@ -307,6 +307,7 @@ def publication_config(
 
 def registration_records(
     package: ValidatedManifestPackage, config: BackfillConfig, release_digest: str,
+    *, submitted_sdk_version: str | None = None, include_contract: bool = True,
 ) -> list[dict[str, Any]]:
     records = []
     for plan in sorted(package.plans, key=lambda value: value.relative_path):
@@ -322,6 +323,8 @@ def registration_records(
             "captured_at_utc": plan.captured_at_utc.isoformat().replace("+00:00", "Z"),
             "camera_timezone": plan.catalog.camera_timezone,
         }
+        if include_contract:
+            payload.update(work_schema_version=1, payload_schema_version=1)
         record = {
             "payload": payload,
             "runtime_key": config.profile["runtime_key"],
@@ -330,6 +333,8 @@ def registration_records(
             "release_digest": release_digest,
             "max_attempts": 3,
         }
+        if submitted_sdk_version is not None:
+            record["submitted_sdk_version"] = submitted_sdk_version
         identity = {
             "workspace_id": config.workspace_id,
             "lakehouse_id": config.lakehouse_id,
@@ -535,7 +540,7 @@ def processing_progress(
             else:
                 status = "WAITING_COMMIT"
         counts[status] += 1
-        if status in {"DEAD", "DEAD_LETTER", "FAILED", "QUARANTINED", "CANCELLED"}:
+        if status in {"DEAD", "DEAD_LETTER", "FAILED", "QUARANTINED", "CANCELLED", "BLOCKED_INCOMPATIBLE"}:
             failures.append({
                 "work_id": work_id, "status": status, "last_error": row.get("last_error"),
             })
@@ -688,6 +693,33 @@ def verify_publication_shortcut(
         )
 
 
+def _submission_records(
+    package: ValidatedManifestPackage, config: BackfillConfig,
+    release: InstalledRelease, previous_plan: object,
+) -> list[dict[str, Any]]:
+    if previous_plan is None:
+        return registration_records(
+            package, config, release.digest,
+            submitted_sdk_version=release.package_version,
+        )
+    if not isinstance(previous_plan, Mapping) or not isinstance(previous_plan.get("items"), list):
+        raise ValueError("saved registration plan must contain an items array")
+    original = previous_plan["items"]
+    normalized = normalize_registration_requests(original)
+    digests = {item["release_digest"] for item in normalized}
+    versions = {item["submitted_sdk_version"] for item in normalized}
+    if len(digests) != 1 or len(versions) != 1:
+        raise ValueError("saved registration plan has inconsistent submission provenance")
+    records = registration_records(
+        package, config, digests.pop(), submitted_sdk_version=versions.pop(),
+        include_contract="work_schema_version" in normalized[0]["payload"],
+    )
+    for record, saved in zip(records, original):
+        if "submitted_sdk_version" not in saved:
+            record.pop("submitted_sdk_version")
+    return records
+
+
 def submit(
     package: ValidatedManifestPackage,
     publication: ManifestPackagePublishConfig,
@@ -714,7 +746,9 @@ def submit(
     )
     _progress(f"Verifying publication shortcut target: {config.shortcut_path}")
     verify_publication_shortcut(client, config)
-    records = registration_records(package, config, release.digest)
+    plan_path = state_dir / "registration-plan.json"
+    previous_plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else None
+    records = _submission_records(package, config, release, previous_plan)
     plan = {
         "target": {
             "workspace_id": config.workspace_id,
@@ -731,7 +765,6 @@ def submit(
         plan["target"]["files_root"] = config.files_root
     plan_bytes = _json_bytes(plan)
     state_dir.mkdir(parents=True, exist_ok=True)
-    plan_path = state_dir / "registration-plan.json"
     if plan_path.exists() and plan_path.read_bytes() != plan_bytes:
         raise ValueError("state directory belongs to a different package, target, profile, or release")
     _save(plan_path, plan)

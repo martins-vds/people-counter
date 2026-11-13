@@ -32,6 +32,7 @@ from people_counter.fabric_executor_partition import (
 from people_counter.fabric_executor_production import select_production_line_counts
 from people_counter.local_spark import ProbeRuntimeProcessor, _config_from_work
 from people_counter.inference_profiles import validate_registration_profile
+from people_counter.work_compatibility import evaluate_compatibility
 from people_counter.sjd_control import (
     BatchValidationError,
     ImmutableConflictError,
@@ -290,6 +291,7 @@ class EnvelopeItem:
     release_digest: str
     duration_seconds: float
     runtime_key: str
+    submitted_sdk_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -352,15 +354,18 @@ def verify_envelope(
         item_runtime = str(raw.get("runtime_key", runtime_key))
         if item_runtime != runtime_key:
             raise BatchValidationError("claim contains mixed runtime affinity")
-        validate_registration_profile(
-            payload_dict, item_runtime, raw.get("config_sha256"),
-        )
         batch_size = payload_dict.get("batch_size", 1)
         if type(batch_size) is not int or batch_size not in DETECTOR_BATCH_SIZES:
             raise ProcessValidationError(
                 f"detector batch_size for {work_id!r} must be one of "
                 f"{sorted(DETECTOR_BATCH_SIZES)!r}"
             )
+        decision = evaluate_compatibility(payload_dict)
+        if not decision.supported:
+            raise ProcessValidationError(f"unsupported work contract for {work_id!r}: {decision.reason}")
+        validate_registration_profile(
+            payload_dict, item_runtime, raw.get("config_sha256"),
+        )
         items.append(
             EnvelopeItem(
                 ordinal=ordinal,
@@ -375,6 +380,10 @@ def verify_envelope(
                     raw.get("duration_seconds"), "duration_seconds"
                 ),
                 runtime_key=item_runtime,
+                submitted_sdk_version=(
+                    None if raw.get("submitted_sdk_version") is None
+                    else _text(raw["submitted_sdk_version"], "submitted_sdk_version")
+                ),
             )
         )
     calculated_membership = _sha256(
@@ -725,21 +734,15 @@ def execute_sjd_partition(
     expected_package_version = materialized[0].get(
         "_expected_release_package_version"
     )
-    expected_manifest_sha256 = materialized[0].get(
-        "_expected_release_manifest_sha256"
-    )
     if expected_package_version is not None:
         if observed_package_version != expected_package_version:
             raise ProcessValidationError(
-                "executor installed package version differs from detached "
-                "release evidence"
+                "executor installed package version differs from the driver SDK"
             )
         for row in materialized:
-            if row.get("release_digest") != expected_manifest_sha256:
-                raise ProcessValidationError(
-                    "executor work release digest differs from detached "
-                    "release manifest"
-                )
+            decision = evaluate_compatibility(row, fabric=True)
+            if not decision.supported:
+                raise ProcessValidationError(f"executor cannot process work contract: {decision.reason}")
     planned_concurrency = _positive_int(
         materialized[0].get("planned_concurrency"), "planned_concurrency"
     )
@@ -2429,16 +2432,12 @@ def _load_process_context(
         validate_installed_package_version(
             expected_version=release_evidence.package_version
         )
-        mismatched = sorted(
-            item.work_id
-            for item in envelope.items
-            if item.release_digest != release_evidence.digest
-        )
-        if mismatched:
-            raise ProcessValidationError(
-                "claim release digest differs from installed SDK for "
-                f"{mismatched!r}"
-            )
+        for item in envelope.items:
+            decision = evaluate_compatibility(item.payload, fabric=True)
+            if not decision.supported:
+                raise ProcessValidationError(
+                    f"unsupported work contract for {item.work_id!r}: {decision.reason}"
+                )
     return envelope, ProcessControl(store).live_batch(envelope)
 
 
