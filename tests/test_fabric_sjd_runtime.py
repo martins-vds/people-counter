@@ -2645,7 +2645,7 @@ def test_fabric_process_profile_enforces_runtime_and_computes_reserve(
     monkeypatch.setattr(sys, "version_info", (3, 13))
 
     def discover(session, minimum):
-        assert minimum == (3 if allocation == "true" else 5)
+        assert minimum == 1
         return _fake_candidate_executors(5)
 
     from people_counter.fabric_capability_probe import (
@@ -2723,17 +2723,52 @@ def test_runtime_allocation_preference_and_bounded_fallback(
         "spark.executor.instances": fixed,
     }
     spark = SimpleNamespace(conf=SimpleNamespace(get=lambda key, default=None: values.get(key, default)))
+    emit_warning = MagicMock(wraps=warnings.warn)
+    monkeypatch.setattr(warnings, "warn", emit_warning)
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
-        assert runtime._minimum_executor_count(spark) == expected
+        assert runtime._configured_executor_count(spark) == expected
     assert clock[0] == elapsed
     assert all(item.category is RuntimeWarning for item in captured)
     if elapsed == 0:
         assert not captured
     if fixed is None and enabled != "true":
-        assert any("using minimum 1" in str(item.message) for item in captured)
+        assert any("using configured-count hint 1" in str(item.message) for item in captured)
     if elapsed and fixed is not None:
         assert any("fixed allocation" in str(item.message) for item in captured)
+    expected_messages = []
+    if elapsed and enabled != "false":
+        expected_messages.append(
+            "dynamic allocation configuration unavailable after 30 seconds; checking fixed allocation"
+        )
+    if elapsed and fixed is None:
+        expected_messages.append(
+            "fixed allocation configuration unavailable after 30 seconds; using configured-count hint 1"
+        )
+    assert [str(item.message) for item in captured] == expected_messages
+    assert all(call.kwargs["stacklevel"] == 2 for call in emit_warning.call_args_list)
+
+
+def test_configuration_hint_handles_missing_spark_properties_with_explicit_defaults(monkeypatch):
+    from people_counter import fabric_sjd_runtime as runtime
+    from pyspark.sql.conf import RuntimeConfig
+
+    clock = [0.0]
+    monkeypatch.setattr(runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(runtime.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def missing_property(*arguments):
+        if len(arguments) == 1:
+            raise KeyError(arguments[0])
+        return arguments[1]
+
+    jconf = MagicMock()
+    jconf.get.side_effect = missing_property
+    spark = SimpleNamespace(conf=RuntimeConfig(jconf))
+    with pytest.warns(RuntimeWarning) as captured:
+        assert runtime._configured_executor_count(spark) == 1
+    assert clock[0] == 60
+    assert len(captured) == 2
 
 
 @pytest.mark.parametrize("mode", ["dynamic", "fixed"])
@@ -2756,7 +2791,7 @@ def test_runtime_allocation_waits_for_late_configuration(monkeypatch, mode):
         selected = "spark.dynamicAllocation.minExecutors" if mode == "dynamic" else "spark.executor.instances"
         return "4" if key == selected and clock[0] >= 2 else default
 
-    assert runtime._minimum_executor_count(SimpleNamespace(conf=SimpleNamespace(get=get))) == 4
+    assert runtime._configured_executor_count(SimpleNamespace(conf=SimpleNamespace(get=get))) == 4
     assert clock[0] == 2
 
 
@@ -2775,7 +2810,7 @@ def test_runtime_allocation_rejects_invalid_counts_without_waiting(
     sleep = MagicMock(side_effect=AssertionError("Invalid configuration must not wait"))
     monkeypatch.setattr(runtime.time, "sleep", sleep)
     with pytest.raises(ValueError, match="invalid executor count|invalid literal"):
-        runtime._minimum_executor_count(spark)
+        runtime._configured_executor_count(spark)
     sleep.assert_not_called()
 
 
@@ -2830,6 +2865,171 @@ def test_executor_warm_works_covers_mixed_variants_and_deduplicates() -> None:
             task_cpus=1,
             package_version="9.8.7",
             manifest_sha256="a" * 64,
+        )
+
+
+@pytest.mark.parametrize("requested,available", [(9, 3), (2, 3), (9, 1), (3, 3)])
+def test_fabric_process_profile_uses_stable_live_count_not_requested_count(
+    monkeypatch, requested, available,
+):
+    from people_counter import fabric_sjd_runtime as runtime
+    from people_counter.fabric_capability_probe import CapabilityProbeResult
+    from people_counter.fabric_executor_inventory import discover_active_executors
+
+    spark = object()
+    monkeypatch.setattr(
+        runtime, "_validate_fabric_runtime",
+        lambda _: (8, 16 * 1024**3, 2, requested),
+    )
+    clock = [0.0]
+    inventory = _fake_candidate_executors(available)
+    summaries = [
+        SimpleNamespace(id=e.executor_id, host=e.host, totalCores=e.total_cores, maxMemory=e.max_memory_bytes)
+        for e in inventory
+    ]
+
+    def discover(session, minimum):
+        assert session is spark
+        return discover_active_executors(
+            session, minimum_executors=minimum,
+            poll_interval_seconds=0.1, deadline_seconds=1,
+            sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            now=lambda: clock[0], executor_summaries=lambda _: summaries,
+        )
+
+    def measured_rss(session, executors):
+        assert session is spark
+        assert tuple(executors) == inventory
+        return CapabilityProbeResult(
+            capability="executor_peak_rss_bytes", status=CapabilityStatus.AVAILABLE,
+            evidence="all live executors warmed", value=2 * 1024**3,
+        )
+
+    emit_warning = MagicMock(wraps=warnings.warn)
+    monkeypatch.setattr(warnings, "warn", emit_warning)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        profile = _fabric_process_profile(
+            spark, discover_executors=discover, probe_peak_rss_bytes=measured_rss,
+        )
+    assert profile.executor_instances == available
+    assert profile.planned_task_count == available * 4
+    assert profile.peak_rss_bytes == 2 * 1024**3
+    assert profile.fixed_allocation is False
+    assert clock[0] < 1
+    if available < requested:
+        assert len(captured) == 1
+        assert str(captured[0].message) == (
+            f"Fabric configured {requested} executors but observed {available} "
+            "stable executors; planning from validated live resources"
+        )
+        assert captured[0].category is RuntimeWarning
+        emit_warning.assert_called_once_with(
+            str(captured[0].message), RuntimeWarning, stacklevel=2,
+        )
+    else:
+        assert not captured
+
+
+@pytest.mark.parametrize("memory_gib,reserve_gib", [(8, 2), (16, 4), (56, 4)])
+def test_adaptive_profile_default_discovery_and_warmup_use_live_resources(
+    monkeypatch, memory_gib, reserve_gib,
+):
+    from dataclasses import asdict
+    from people_counter import fabric_capability_probe, fabric_executor_inventory, fabric_sjd_runtime
+    from people_counter.fabric_capability_probe import CapabilityProbeResult
+
+    spark = object()
+    warmup = MagicMock()
+    memory_bytes = memory_gib * 1024**3
+    executors = _fake_candidate_executors(3, memory_bytes=memory_bytes)
+    monkeypatch.setattr(fabric_sjd_runtime, "_validate_fabric_runtime", lambda _: (8, memory_bytes, 2, 9))
+
+    def discover(session, *, minimum_executors):
+        assert session is spark
+        assert minimum_executors == 1
+        return executors
+
+    def probe(session, observed, *, warm_up):
+        assert session is spark
+        assert tuple(observed) == executors
+        assert warm_up is warmup
+        return CapabilityProbeResult(
+            capability="executor_peak_rss_bytes", status=CapabilityStatus.AVAILABLE,
+            evidence="all three executors warmed", value=256 * 1024**2,
+        )
+
+    monkeypatch.setattr(fabric_executor_inventory, "discover_active_executors", discover)
+    monkeypatch.setattr(fabric_capability_probe, "probe_executor_peak_rss_bytes", probe)
+    with pytest.warns(RuntimeWarning, match="configured 9 executors but observed 3"):
+        profile = _fabric_process_profile(spark, warm_up=warmup)
+    assert asdict(profile) == {
+        "name": "sjd-fabric-runtime2-v1",
+        "executor_instances": 3,
+        "executor_cores": 8,
+        "executor_memory_bytes": memory_bytes,
+        "task_cpus": 2,
+        "fixed_allocation": False,
+        "speculation": False,
+        "memory_reserve_bytes": reserve_gib * 1024**3,
+        "heartbeat_seconds": 10.0,
+        "minimum_speed_x": 0.05,
+        "lease_safety_factor": 1.25,
+        "lease_margin_seconds": 60.0,
+        "planned_task_count": 12,
+        "peak_rss_bytes": 256 * 1024**2,
+        "rss_headroom_fraction": 0.20,
+    }
+    assert type(profile.memory_reserve_bytes) is int
+
+
+@pytest.mark.parametrize("inventory_state", ["empty", "changing", "rss-unavailable"])
+def test_adaptive_profile_still_requires_stable_inventory_and_complete_rss(
+    monkeypatch, inventory_state,
+):
+    from people_counter import fabric_sjd_runtime as runtime
+    from people_counter.fabric_capability_probe import CapabilityProbeResult
+    from people_counter.fabric_executor_inventory import ExecutorInventoryError, discover_active_executors
+
+    spark = object()
+    monkeypatch.setattr(runtime, "_validate_fabric_runtime", lambda _: (8, 16 * 1024**3, 2, 9))
+    clock = [0.0]
+    samples = [0]
+
+    def summaries(_):
+        samples[0] += 1
+        return [] if inventory_state == "empty" else [
+            SimpleNamespace(
+                id=str(samples[0]) if inventory_state == "changing" else "worker",
+                host="host", totalCores=8, maxMemory=16 * 1024**3,
+            )
+        ]
+
+    def discover(session, minimum):
+        return discover_active_executors(
+            session, minimum_executors=minimum, poll_interval_seconds=0.1,
+            deadline_seconds=1, sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+            now=lambda: clock[0], executor_summaries=summaries,
+        )
+
+    rss = MagicMock(return_value=CapabilityProbeResult(
+        capability="executor_peak_rss_bytes", status=CapabilityStatus.FABRIC_PLATFORM_BLOCKED,
+        evidence="missing worker measurement",
+    ))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        with pytest.raises(
+            RuntimeError if inventory_state == "rss-unavailable" else ExecutorInventoryError,
+            match="RSS evidence|did not reach",
+        ) as error:
+            _fabric_process_profile(spark, discover_executors=discover, probe_peak_rss_bytes=rss)
+    if inventory_state != "rss-unavailable":
+        rss.assert_not_called()
+    else:
+        rss.assert_called_once()
+        assert str(error.value) == (
+            "Fabric SJD profile promotion requires complete warmed executor "
+            "RSS evidence: missing worker measurement"
         )
 
 

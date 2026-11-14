@@ -357,7 +357,8 @@ def _executor_warm_works(
     return tuple(works)
 
 
-def _minimum_executor_count(spark: Any) -> int:
+def _configured_executor_count(spark: Any) -> int:
+    """Resolve an allocation hint, not a required live-inventory size."""
     for mode, property_name in (
         ("dynamic", "spark.dynamicAllocation.minExecutors"),
         ("fixed", "spark.executor.instances"),
@@ -377,7 +378,7 @@ def _minimum_executor_count(spark: Any) -> int:
             if remaining <= 0:
                 warnings.warn(
                     f"{mode} allocation configuration unavailable after 30 seconds; "
-                    + ("checking fixed allocation" if mode == "dynamic" else "using minimum 1 executor"),
+                    + ("checking fixed allocation" if mode == "dynamic" else "using configured-count hint 1"),
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -409,7 +410,7 @@ def _validate_fabric_runtime(spark: Any) -> tuple[int, int, int, int]:
     return (
         cores, int(match.group(1)) * scale,
         int(spark.conf.get("spark.task.cpus", "1")),
-        _minimum_executor_count(spark),
+        _configured_executor_count(spark),
     )
 
 
@@ -422,9 +423,9 @@ def _fabric_process_profile(
 ) -> Any:
     """Derive the reviewed Runtime 2.0 live-pool profile from real executors.
 
-    Executor count is proven from the live Spark status store (mirroring
-    the benchmark's ``_benchmark_execution_profile``) rather than assumed
-    to be exactly one; the physical task count is the sum of each
+    Executor count is proven from a stable, nonempty live Spark inventory,
+    not required to reach the best-effort configured allocation hint.
+    The physical task count is the sum of each
     discovered executor's own placement-safe slot count, not the bare
     executor count. Before admitting any concurrency above one task per
     executor, this attempts a real warm-executor RSS measurement
@@ -442,14 +443,21 @@ def _fabric_process_profile(
     from people_counter.fabric_executor_inventory import discover_active_executors
     from people_counter.sjd_process import GIB, build_profile_from_inventory
 
-    expected_executor_cores, memory_bytes, task_cpus, minimum_executors = _validate_fabric_runtime(spark)
+    expected_executor_cores, memory_bytes, task_cpus, configured_executors = _validate_fabric_runtime(spark)
 
     discover = discover_executors or (
         lambda session, minimum: discover_active_executors(
             session, minimum_executors=minimum
         )
     )
-    executors = tuple(discover(spark, minimum_executors))
+    executors = tuple(discover(spark, 1))
+    if len(executors) < configured_executors:
+        warnings.warn(
+            f"Fabric configured {configured_executors} executors but observed "
+            f"{len(executors)} stable executors; planning from validated live resources",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     if probe_peak_rss_bytes is None:
         rss_result = probe_executor_peak_rss_bytes(

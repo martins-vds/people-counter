@@ -647,7 +647,7 @@ the others:
 | Workspace Spark pool | Sets the available node sizes and scaling limits. Check **Workspace settings > Data Engineering/Science > Spark settings** and the pool selected for the Environment. Its limits must accommodate the reviewed session. |
 | Driver cores / memory | Resources for coordinating the Spark application. The driver is not an inference executor. The reviewed request is 8 cores / 56 GB. |
 | Executor cores / memory | Resources per worker executor, not the total for the job. The reviewed request is 8 cores / 56 GB per executor. |
-| `spark.executor.instances=N` | Requests the calculated and approved fixed executor count for one session. The reviewed example uses `N=2`. It does not mean two job executions and does not prove that two were allocated. |
+| `spark.executor.instances=N` | Requests the calculated and approved fixed executor count for one session. The reviewed example uses `N=2`. It does not mean two job executions or prove that two were allocated. Adaptive production processing uses the stable, validated actual count, even when the platform provides fewer or more executors. |
 | Dynamic executor allocation | Off uses the fixed count. On uses an approved minimum/maximum range within the same capacity budget. Runtime validation supports both modes; pool node autoscaling and Spark executor allocation are separate controls. |
 | `spark.task.cpus=1` | Reserves one executor core per Spark task. Two 8-core executors give a nominal ceiling of 16 simultaneous task slots, not a guarantee of 16 safe inference workers. Memory, model/thread budgets, partitions, and runtime admission can lower it. |
 | `spark.speculation=false` | Disables speculative duplicate task execution. This is a correctness setting, not a capacity-tuning knob. |
@@ -739,10 +739,16 @@ three-video batch and can increase cost without increasing useful parallelism.
   run details > Spark UI > Executors**, exclude the driver and record actual
   executor count, cores, and memory. Compare those observations with the
   requested allocation and check for queueing/throttling. Dynamic counts can
-  change while the session runs; the runtime's discovery minimum is not a
-  promise of a fixed executor count.
+  change while the session runs. Requested counts are best effort: adaptive
+  production discovery requires a nonempty stable inventory, not fulfillment
+  of the requested count. For example, a request for nine with three validated
+  live executors produces a three-executor processing profile, with a warning
+  about the shortfall. Do not increase pool limits just to satisfy that hint.
 - Keep model warm-up, measured-memory, and task-placement checks. A core-budget
   fit does not prove that each executor has enough memory for concurrent models.
+  Missing/unstable executors, invalid resource readings, incomplete RSS evidence,
+  and unsafe placement still block execution. Reduced capacity may also fail the
+  existing lease-budget check instead of starting work that cannot finish safely.
 
 The deployment helper still validates its default fixed two-executor profile.
 A calculated count or dynamic range does **not** silently update that contract.

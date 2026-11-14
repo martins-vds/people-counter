@@ -109,15 +109,25 @@ Runtime 2.0, fixed allocation, two 8-core/56-GB executors, speculation disabled.
 The deployment verifier checks published compute before binding/enabling jobs.
 Dispatcher checks the live Python/Spark/Java, executor resources, and speculation
 settings before claiming. Runtime validation supports both dynamic and fixed
-executor allocation. It waits up to 30 seconds for enabled dynamic allocation
+executor allocation. Requested executor counts are best-effort allocation hints,
+not minimum inventory sizes for adaptive production processing.
+It waits up to 30 seconds for enabled dynamic allocation
 and `spark.dynamicAllocation.minExecutors`, then up to 30 seconds for
 `spark.executor.instances`. Explicitly disabled dynamic allocation skips the
 first wait and ignores stale dynamic minimums. If neither configuration becomes
-available, a warning records the fallback to a minimum of one executor (not
-job exit status 1). Invalid executor counts fail explicitly.
-This only selects the discovery minimum: actual executor inventory, warm-up,
-and measured memory checks still determine safe processing concurrency.
-The deployment template above remains the reviewed fixed-allocation default.
+available, a warning records a configured-count hint of one. Invalid configured
+counts fail explicitly. Discovery independently waits for a nonempty, stable,
+validated live inventory; it does not wait for the requested count to arrive.
+If nine were requested and three are stable and valid, production processing
+uses those three and warns about the shortfall.
+
+Actual per-executor core/memory evidence, complete model warm-up/RSS measurements,
+and task-placement checks determine safe concurrency. Empty or unstable inventory,
+invalid resources, missing RSS evidence, or insufficient safe memory still block
+processing. A smaller count can reduce throughput or fail the existing lease
+budget checks; it does not itself make work ineligible.
+The deployment template above remains the reviewed fixed-allocation default;
+fixed benchmark qualification is unchanged by production count adaptation.
 
 ### Recover an investigated failed claim
 
