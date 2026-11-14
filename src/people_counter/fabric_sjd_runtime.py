@@ -1260,8 +1260,11 @@ def control_main(
 
     selected = config or FabricNamespaceConfig.current()
     selected.require_write_enabled()
-    store = FabricControlStore(_spark(), config=selected)
     try:
+        store = (
+            None if arguments.command == "clear-stale-lock"
+            else FabricControlStore(_spark(), config=selected)
+        )
         return _control_dispatch(arguments, store, selected)
     except Exception as error:
         _write_control_diagnostic(selected, arguments.command, error)

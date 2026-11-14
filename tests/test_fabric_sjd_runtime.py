@@ -4058,6 +4058,36 @@ def test_control_rejects_nonfinite_results_and_records_diagnostic(control_driver
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize("failure", [None, RuntimeError("owner changed before clear")])
+def test_clear_stale_lock_command_bypasses_store_bootstrap_and_preserves_diagnostics(
+    control_driver, monkeypatch, capsys, failure,
+):
+    from people_counter import fabric_sjd_runtime as runtime
+    from people_counter.fabric_sjd import ManualFabricSjdConfig
+
+    selected = ManualFabricSjdConfig(**TARGET_IDS)
+    spark = object()
+    monkeypatch.setattr(runtime, "_spark", lambda: spark)
+    store_factory = MagicMock(side_effect=TimeoutError("schema migration cannot acquire retained lock"))
+    monkeypatch.setattr("people_counter.sjd_control.FabricControlStore", store_factory)
+    cleared = {"cleared_owner_id": "retained-owner", "acquired_at": "2026-11-13"}
+    clear = MagicMock(return_value=cleared, side_effect=failure)
+    monkeypatch.setattr(runtime, "_clear_stale_lock", clear)
+    arguments = ["clear-stale-lock", "--expected-owner-id", "retained-owner"]
+    if failure is None:
+        assert control_main(arguments, config=selected) == 0
+        assert json.loads(capsys.readouterr().out) == cleared
+        control_driver.diagnostic.assert_not_called()
+    else:
+        with pytest.raises(RuntimeError) as error:
+            control_main(arguments, config=selected)
+        assert error.value is failure
+        control_driver.diagnostic.assert_called_once_with(selected, "clear-stale-lock", failure)
+        assert capsys.readouterr().out == ""
+    store_factory.assert_not_called()
+    clear.assert_called_once_with(spark, "retained-owner", config=selected)
+
+
 def test_control_main_dispatches_all_safe_commands(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -4245,9 +4275,8 @@ def test_control_main_dispatches_all_safe_commands(
         }
     ]
 
-    # Every dispatch call must build the control store from the exact
-    # resource/config pair control_main resolved, not a mutated/default one.
-    assert len(store_calls) == len(commands)
+    # Lock clearing must not construct a store that first acquires that lock.
+    assert len(store_calls) == len(commands) - 1
     for args, kwargs in store_calls:
         assert args == (spark_sentinel,)
         assert kwargs == {"config": shared_config}

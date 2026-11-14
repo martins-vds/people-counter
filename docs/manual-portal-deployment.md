@@ -1943,6 +1943,22 @@ rows, clear locks blindly, increase the active-batch limit to bypass stale
 state, or resubmit the backfill. Verify recovery output and batch state before
 expecting the next Dispatcher run to claim work.
 
+If the failure instead reports `Timed out acquiring ..._locks`, the global
+writer lock is retained; changing Control from `recover` to `bootstrap` cannot
+bypass it. Identify the earlier writer using the **observed** owner token
+(not the attempted token) and its run logs. Pause writer schedules and confirm
+all owning writers are terminal and cannot still commit before any clear.
+
+With the updated SDK installed in a fresh session, run Control once with its
+existing target binding plus
+`clear-stale-lock --expected-owner-id <observed-owner-token>`.
+This command bypasses automatic schema migration, checks the exact owner,
+clears by compare-and-set, and verifies the result. It is not automatic recovery
+and must never be scheduled. Then run Control `recover` to perform any pending
+schema migration and normal recovery, restore its recurring `recover` parameter,
+and resume the approved schedules. See
+[retained writer lock recovery](../fabric/spark-job-definitions/README.md#recover-an-investigated-retained-writer-lock).
+
 ### Captured configuration checkpoint (historical)
 
 The historical walkthrough captured **30 items**. It predates removal of the

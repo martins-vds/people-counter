@@ -42,7 +42,7 @@ spark-warehouse/
 None/
 
 .mypy_cache/
-.pytest_cache/
+.pytest*/
 .ruff_cache/
 .test-artifacts/
 test-results/

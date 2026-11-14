@@ -131,3 +131,34 @@ in `last_error`; immutable work fields and input files remain unchanged.
 Do not use it as automatic cleanup for a running or uncertain worker.
 Use `quarantine` only for a deliberate operator decision to terminalize READY
 work. It is not the SDK upgrade or compatibility recheck mechanism.
+
+### Recover an investigated retained writer lock
+
+If startup reports `Timed out acquiring ..._locks`, use the **observed**
+owner token from that error to identify the earlier writer in its job logs.
+The attempted token belongs to the waiting job, not the retained owner.
+An old SDK failure can leave a lock retained and prevent the new SDK's
+automatic schema migration before `recover`, `bootstrap`, or claim runs.
+
+Before clearing, pause recurring writer schedules and independently confirm
+the owning job and all other writers have terminated and cannot still commit.
+Lock age alone is not sufficient. Then invoke Control once with the normal
+target arguments and:
+
+```text
+clear-stale-lock --expected-owner-id <observed-owner-token>
+```
+
+This operator-only command bypasses control-store construction and automatic
+schema migration. It reads the existing lock directly, requires the exact
+owner, clears by compare-and-set, and verifies the readback. It does not
+migrate tables, recover claims, or unblock incompatible work. A missing lock
+table or changed owner fails explicitly; it never creates or takes over a lock.
+Older wheels may still bootstrap before this command; install the updated
+SDK and start a fresh session first.
+
+After a successful clear, run Control `recover` with its normal target arguments.
+That run automatically adds missing compatibility columns before recovery.
+Restore the recurring Control command to `recover`, then resume the approved
+schedules and check the next Dispatcher result. Do not schedule lock clearing
+or delete work, batches, or lock rows as a substitute.
