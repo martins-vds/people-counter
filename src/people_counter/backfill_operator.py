@@ -17,12 +17,14 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
     from azure.core.credentials import AccessToken, TokenCredential
+    from azure.core.pipeline.policies import SansIOHTTPPolicy
+    from people_counter.video_input import VideoInput
 
-from people_counter.adls import AzureDataLakeStorage
+from people_counter.adls import AzureDataLakeStorage, IdentityPolicyOptions
 from people_counter.customer_demo import read_demo_delta
 from people_counter.fabric_automation import (
     AzureCliResourceTokenProvider,
@@ -53,6 +55,14 @@ from people_counter.inference_profiles import (
 PARTITION_SIZE = 1000
 CATALOG_SCHEMA = "people-counter-backfill-catalog-v1"
 DEFAULT_CATALOG = Path("config/backfill-catalog.json")
+
+
+class _FabricRuntimeOptions(TypedDict, total=False):
+    fabric: bool
+
+
+class _StorageCredentials(TypedDict, total=False):
+    credential: TokenCredential
 
 
 def _json_bytes(value: object) -> bytes:
@@ -351,6 +361,7 @@ class OneLakeFiles:
 
     def __init__(
         self, config: BackfillConfig, *, credential: TokenCredential | None = None,
+        identity_policy: SansIOHTTPPolicy | None = None,
     ) -> None:
         from azure.core.exceptions import ResourceExistsError
         from azure.identity import DefaultAzureCredential
@@ -359,9 +370,13 @@ class OneLakeFiles:
         self._exists_error = ResourceExistsError
         self._workspace = config.workspace_id
         self._lakehouse = config.lakehouse_id
+        policy_options: IdentityPolicyOptions = (
+            {"_additional_pipeline_policies": [identity_policy]} if identity_policy is not None else {}
+        )
         service = DataLakeServiceClient(
             "https://onelake.dfs.fabric.microsoft.com",
             credential=credential if credential is not None else DefaultAzureCredential(),
+            **policy_options,
         )
         self._filesystem = service.get_file_system_client(config.workspace_id)
 
@@ -465,8 +480,35 @@ def _table_prefix(config: BackfillConfig) -> str:
 _WORK_COLUMNS = ["work_id", "status", "committed_attempt_id", "last_error"]
 
 
+class _CredentialProcessingReader:
+    def __init__(self, connection: Any, credential: TokenCredential) -> None:
+        self.connection = connection
+        self.credential = credential
+
+    def execute(self, query: str, parameters: Any = None) -> Any:
+        import duckdb
+
+        token = self.credential.get_token("https://storage.azure.com/.default").token
+        if not token:
+            raise RuntimeError("Azure CLI returned an empty processing-monitor token")
+        escaped = token.replace("'", "''")
+        try:
+            self.connection.execute(
+                "CREATE OR REPLACE SECRET onelake (TYPE azure, PROVIDER access_token, "
+                f"ACCESS_TOKEN '{escaped}', ACCOUNT_NAME 'onelake', "
+                "ENDPOINT 'https://onelake.blob.fabric.microsoft.com')"
+            )
+        except duckdb.Error:
+            raise RuntimeError("Cannot configure the CLI processing-monitor token") from None
+        if parameters is None:
+            return self.connection.execute(query)
+        return self.connection.execute(query, parameters)
+
+
 @contextmanager
-def processing_reader(config: BackfillConfig, *, fabric: bool = False) -> Iterator[Any]:
+def processing_reader(
+    config: BackfillConfig, *, fabric: bool = False, credential: TokenCredential | None = None,
+) -> Iterator[Any]:
     if fabric:
         from pyspark.sql import SparkSession
 
@@ -494,16 +536,20 @@ def processing_reader(config: BackfillConfig, *, fabric: bool = False) -> Iterat
             "INSTALL azure; LOAD azure; INSTALL delta; LOAD delta; "
             "SET azure_transport_option_type='curl';"
         )
-        connection.execute(
-            "CREATE SECRET onelake (TYPE azure, PROVIDER credential_chain, "
-            "CHAIN 'cli', ACCOUNT_NAME 'onelake', "
-            "ENDPOINT 'https://onelake.blob.fabric.microsoft.com')"
-        )
+        reader = connection
+        if credential is None:
+            connection.execute(
+                "CREATE SECRET onelake (TYPE azure, PROVIDER credential_chain, "
+                "CHAIN 'cli', ACCOUNT_NAME 'onelake', "
+                "ENDPOINT 'https://onelake.blob.fabric.microsoft.com')"
+            )
+        else:
+            reader = _CredentialProcessingReader(connection, credential)
         read_demo_delta(
-            connection, _table_prefix(config), "work", _WORK_COLUMNS,
+            reader, _table_prefix(config), "work", _WORK_COLUMNS,
             [("work_id", "in", ["backfill-monitor-preflight"])],
         )
-        yield connection
+        yield reader
     finally:
         connection.close()
 
@@ -727,21 +773,29 @@ def submit(
     state_dir: Path,
     *,
     fabric: bool = False,
+    credential: TokenCredential | None = None,
+    input_source: VideoInput | None = None,
+    identity_policy: SansIOHTTPPolicy | None = None,
 ) -> dict[str, Any]:
-    credentials = {}
+    credentials: _StorageCredentials = {"credential": credential} if credential is not None else {}
     if fabric:
+        if credential is not None or input_source is not None or identity_policy is not None:
+            raise ValueError("Explicit local source/credentials cannot be combined with Fabric notebook identity")
         _validate_notebook_target(config)
         credentials["credential"] = NotebookStorageCredential()
     release = installed_release()
     _progress(f"Using SDK {release.package_version}")
-    files = OneLakeFiles(config, **credentials)
+    files = (
+        OneLakeFiles(config, **credentials, identity_policy=identity_policy)
+        if identity_policy is not None else OneLakeFiles(config, **credentials)
+    )
     _progress("Verifying deployed model artifacts...")
     for name, digest in config.profile["model_artifact_sha256"].items():
         _progress(f"Verifying model: Files/models/{name}")
         files.verify_video(f"Files/models/{name}", None, digest)
     client = FabricAutomationClient(
         NotebookFabricTokenProvider() if fabric
-        else AzureCliResourceTokenProvider("https://api.fabric.microsoft.com"),
+        else AzureCliResourceTokenProvider("https://api.fabric.microsoft.com", credential=credential),
         transport=UrllibTransport(),
     )
     _progress(f"Verifying publication shortcut target: {config.shortcut_path}")
@@ -768,17 +822,25 @@ def submit(
     if plan_path.exists() and plan_path.read_bytes() != plan_bytes:
         raise ValueError("state directory belongs to a different package, target, profile, or release")
     _save(plan_path, plan)
-    storage = AzureDataLakeStorage(
-        config.storage_account, config.filesystem, chunk_size=publication.chunk_size,
-        **credentials,
-    )
+    if identity_policy is None:
+        storage = AzureDataLakeStorage(
+            config.storage_account, config.filesystem, chunk_size=publication.chunk_size, **credentials,
+        )
+    else:
+        storage = AzureDataLakeStorage(
+            config.storage_account, config.filesystem, chunk_size=publication.chunk_size,
+            **credentials, identity_policy=identity_policy,
+        )
     _progress(f"Publishing {len(records)} videos and manifests (or verifying existing publications)...")
     with (TemporaryDirectory(prefix="pc-backfill-") if fabric else nullcontext()) as directory:
         active_publication = (
             replace(publication, checkpoint_path=Path(directory) / "publication.sqlite3")
             if directory is not None else publication
         )
-        summary = publish_manifest_package(active_publication, storage, validated_package=package)
+        if input_source is None:
+            summary = publish_manifest_package(active_publication, storage, validated_package=package)
+        else:
+            summary = publish_manifest_package(active_publication, storage, validated_package=package, input_source=input_source)
     if summary.rejected or summary.published + summary.already_published != len(records):
         raise RuntimeError("publication incomplete; inspect publication-rejections.csv before retrying")
     _progress(
@@ -914,7 +976,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not count:
         raise ValueError("backfill package must contain at least one video")
     if args.submit:
-        runtime = {"fabric": True} if args.fabric else {}
+        runtime: _FabricRuntimeOptions = {"fabric": True} if args.fabric else {}
         try:
             if args.wait:
                 with processing_reader(config, **runtime) as connection:

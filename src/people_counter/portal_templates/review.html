@@ -12,6 +12,9 @@
 <a class="btn btn-secondary" href="{{ url_for('footage', folder=return_folder, q=query, kind=kind) }}">&larr; Back to footage</a>
 {% endcall %}
 <div class="workflow-note"><p>Camera defaults apply unless this video has an exception. Each section saves independently. Prepare a new package after changes.</p></div>
+{% if remote_source %}
+<details class="card"><summary class="px-5 py-4">ADLS preview limits and full-download fallback</summary><div class="card-body"><p>Normal preview/probe reads are limited to 64 MiB transferred, 16 MiB cached in memory, and 30 seconds. Some video layouts cannot be decoded within these limits. No complete file is silently downloaded.</p><a class="btn btn-secondary" href="{{ url_for('full_preview',video=video) }}">Review and approve a full preview download</a></div></details>
+{% endif %}
 <section class="card" id="review-readiness" aria-labelledby="readiness-title" aria-busy="false" data-readiness-url="{{ url_for('draft_readiness') }}" data-video="{{ video }}">
   <div class="card-header"><h2 id="readiness-title">Readiness</h2><div class="flex flex-wrap gap-2"><a class="btn btn-secondary" href="{{ url_for('review', video=video, folder=return_folder, q=query, kind=kind) }}">Recheck</a><button class="btn-secondary" type="button" id="retry-readiness" hidden>Retry draft check</button></div></div>
   <p class="help px-5 pt-4" id="readiness-update-status" role="status">Checks reflect saved properties. Editing previews unsaved values; Recheck reloads saved values.</p>
@@ -38,7 +41,7 @@
       {% if readiness.media_ok %}
       {{ resolution_comparison(width, height, camera_values, exception) }}
       <p class="help">The overlay uses saved pixel coordinates. It is not automatically rescaled to this video's resolution. Confirm placement before saving.</p>
-      {{ frame_editor(video, width, height, values, seconds) }}
+      {{ frame_editor(video, width, height, values, seconds, draft_id=draft_id, source_id=source_id) }}
       <form method="post" action="{{ url_for('save_line') }}" id="calibration-form" class="space-y-5">
         {{ context() }}<input type="hidden" name="scope" value="video">
         <p class="help">Saving creates a video-only geometry exception. It cannot change the camera's calibration.</p>

@@ -2,14 +2,21 @@
 {% from "components.html" import icon, heading, badge, dialog_button, form_dialog %}
 {% block title %}Manifest packages{% endblock %}
 {% block content %}
-{% call heading('Manifest packages', 'Prepare destination-independent metadata with validated geometry, recording times, and content hashes. No cloud access is used.', 'Offline preparation') %}
+{% call heading('Manifest packages', 'Choose a footage source, associate recordings with existing cameras, then generate and explicitly publish a package.', 'Operator portal') %}
+{{ dialog_button('new-package-dialog', 'New package', 'package') }}
 {{ dialog_button('package-dialog', 'Generate manifest package', 'package', enabled=cameras|length > 0) }}
 <a class="btn btn-secondary" href="{{ url_for('jobs') }}">{{ icon('jobs', 'size-4') }}View package jobs</a>
 {% endcall %}
+{% call form_dialog('new-package-dialog', 'New package', 'Locations and cameras exist independently of your footage source.') %}
+<form method="post" action="{{ url_for('new_package') }}"><div class="card-body"><input type="hidden" name="csrf" value="{{ session.csrf }}"><div class="field"><label for="new-package-name">Package name</label><input id="new-package-name" name="package_name" required><p class="help">Reuse a name to generate its next immutable revision.</p></div></div><div class="card-footer"><button type="button" class="btn-secondary" data-dialog-close>Cancel</button><button>Choose source</button></div></form>
+{% endcall %}
+{% if drafts %}
+<section class="card"><div class="card-header"><h2>Package drafts</h2></div><div class="table-wrap"><table><thead><tr><th>Draft</th><th>Source</th><th>Selected recordings</th><th>Action</th></tr></thead><tbody>{% for draft in drafts %}<tr><td>{{ draft.name }}</td><td>{{ 'ADLS Gen2' if draft.source.kind == 'adls' else 'Local folder' }}</td><td>{{ draft.videos|length }}</td><td><a href="{{ url_for('package_workspace', identity=draft.id, draft=draft.id) }}">Continue draft</a></td></tr>{% endfor %}</tbody></table></div></section>
+{% endif %}
 {% if not cameras %}<div class="alert alert-warning">{{ icon('info', 'size-5 shrink-0') }}<p><a href="{{ url_for('cameras', create='1') }}">Register a camera</a> if needed, then <a href="{{ url_for('footage') }}">calibrate its footage</a> before generating a package.</p></div>{% endif %}
 <section class="card">
-  <div class="card-header"><div><h2>Offline preparation</h2><p class="card-description">Choose Generate manifest package when you are ready.</p></div>{{ badge(cameras|length ~ ' calibrations') }}</div>
-  <div class="card-body"><p>Packages contain metadata only. Source videos remain unchanged and are not copied.</p><p class="text-sm text-slate-500">Safety bound: 10,000 videos per package. Camera metadata is snapshotted when the job starts.</p></div>
+  <div class="card-header"><div><h2>Preparation and publication are separate</h2><p class="card-description">Choose New package to begin with a local or ADLS source.</p></div>{{ badge(cameras|length ~ ' calibrations') }}</div>
+  <div class="card-body"><p>Packages contain metadata only. ADLS content is streamed for complete hashing; source videos remain unchanged. Generation does not publish or start processing.</p><p class="text-sm text-slate-500">Safety bound: 10,000 videos per package. Camera metadata and selected inputs are snapshotted before queuing.</p></div>
 </section>
 {% call form_dialog('package-dialog', 'Generate a package', 'Metadata is snapshotted when you start the job.', auto_open=(request.args.get('create') == '1' or 'folder' in request.args) and cameras) %}
   <form method="post">

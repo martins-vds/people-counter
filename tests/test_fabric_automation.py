@@ -1046,3 +1046,15 @@ def test_deployment_evidence_to_json_handles_missing_resource() -> None:
 
     assert evidence.to_dict()["resource"] is None
     assert '"resource": null' in evidence.to_json()
+def test_resource_token_provider_uses_explicit_guarded_credential():
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+    from people_counter.fabric_automation import AzureCliResourceTokenProvider
+
+    credential = Mock()
+    credential.get_token.return_value = SimpleNamespace(token="guarded-token")
+    with patch("subprocess.run", side_effect=AssertionError("Must not bypass the guarded credential")):
+        provider = AzureCliResourceTokenProvider("https://api.fabric.microsoft.com", credential=credential)
+        assert provider.get_token() == "guarded-token"
+    credential.get_token.assert_called_once_with("https://api.fabric.microsoft.com/.default")
+    assert "guarded-token" not in repr(provider)

@@ -1,10 +1,12 @@
 {% extends "base.html" %}
-{% from "components.html" import icon, heading, badge, folder_nodes %}
+{% from "components.html" import icon, heading, badge, folder_nodes, source_context %}
 {% block title %}Footage library{% endblock %}
 {% block content %}
 {% call heading('Footage library', 'Browse recordings, assign them to cameras, or prepare the current folder. Source files remain read-only.', 'Operator portal') %}
 {{ badge('Read-only source', 'success') }}
-<a class="btn" href="{{ url_for('packages', folder=folder) }}">{{ icon('package', 'size-4') }}Generate manifest package</a>
+{% if draft_id %}<a class="btn" href="{{ url_for('package_workspace',identity=draft_id,step='generate') }}">{{ icon('package', 'size-4') }}Review package generation</a>
+{% elif remote_source %}<a class="btn" href="{{ url_for('packages') }}">{{ icon('package', 'size-4') }}New package</a>
+{% else %}<a class="btn" href="{{ url_for('packages', folder=folder) }}">{{ icon('package', 'size-4') }}Generate manifest package</a>{% endif %}
 {% endcall %}
 <p class="workflow-note">Next: assign footage to a camera, then choose Review footage to edit its line or recording details independently.</p>
 <section class="card">
@@ -29,6 +31,7 @@
     </aside>
     <div class="min-w-0">
       <form method="get" class="footage-filters">
+        {{ source_context(draft_id, source_id) }}
         <input type="hidden" name="folder" value="{{ folder }}">
         <div class="field min-w-0 flex-1"><label for="file-query">Filter files by name</label><input id="file-query" name="q" value="{{ query }}" placeholder="Filter names in this folder"></div>
         <div class="field"><label for="file-kind">File type</label><select id="file-kind" name="kind">{% for value, label in [('all','All types'),('videos','Videos'),('folders','Folders')] %}<option value="{{ value }}" {% if kind == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
@@ -70,10 +73,11 @@
 <details class="technical-details"><summary>Source configuration</summary>
   <div class="card-body">
     <div class="form-grid">
-      <div class="field"><label for="source-type">Source implementation</label><select id="source-type" disabled><option>Local disk</option><option disabled>Cloud storage (future adapter)</option></select><p class="help">Cloud-source adapters are not implemented yet.</p></div>
+      <div class="field"><p class="text-sm font-medium">Footage source</p><p>This library uses its current source. Choose <a href="{{ url_for('packages') }}">New package</a> to select Local folder or ADLS Gen2.</p></div>
       <div class="field"><p class="text-sm font-medium">Allowed source root</p><code>{{ root }}</code><p class="help"><a href="{{ url_for('locations') }}">Manage locations</a> separately from footage folders.</p></div>
     </div>
     <form method="get" class="flex flex-col items-start gap-3 sm:flex-row sm:items-end">
+      {{ source_context(draft_id, source_id) }}
       <input type="hidden" name="q" value="{{ query }}"><input type="hidden" name="kind" value="{{ kind }}">
       <div class="field w-full"><label for="browse-folder">Folder within source root</label><input id="browse-folder" name="folder" value="{{ folder }}" placeholder="For example: lobby/camera-17"></div>
       <button class="btn-secondary shrink-0">Browse folder</button>

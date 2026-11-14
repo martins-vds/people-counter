@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% from "components.html" import heading, icon %}
+{% block title %}New package - {{ draft.name }}{% endblock %}
+{% block content %}
+{% call heading(draft.name, 'Select footage, associate existing cameras, and generate an immutable package revision.', 'Package draft') %}<a class="btn btn-secondary" href="{{ url_for('packages') }}">Package history</a>{% endcall %}
+<nav aria-label="Package steps" class="flex flex-wrap gap-3">
+{% for value, label in [('source','Source'),('footage','Footage'),('cameras','Cameras and readiness'),('generate','Generate')] %}
+<a class="btn {{ 'btn-secondary' if step != value else '' }}" href="{{ url_for('package_workspace', identity=draft.id, step=value) }}" {% if step == value %}aria-current="step"{% endif %}>{{ loop.index }}. {{ label }}</a>
+{% endfor %}
+</nav>
+<p class="workflow-note">{% if draft.source.kind == 'adls' %}ADLS / {{ draft.source.account }} / {{ draft.source.filesystem }}{% else %}Local folder / {{ local_root }}{% endif %}. {{ draft.videos|length }} selected recordings, {{ selected_bytes|filesizeformat(true) }}. Draft changes are saved locally.</p>
+{% if step == 'source' %}
+<section class="card"><div class="card-header"><h2>Choose footage source</h2></div><div class="card-body">
+{% if source_error %}<p class="alert alert-warning" role="status">{{ source_error }} Local source selection remains available.</p>{% endif %}
+<form method="get">
+  <input type="hidden" name="draft" value="{{ draft.id }}"><input type="hidden" name="step" value="source">
+  <div class="field"><label for="source-kind">Footage source</label><select id="source-kind" name="kind"><option value="local" {% if kind == 'local' %}selected{% endif %}>Local folder</option><option value="adls" {% if kind == 'adls' %}selected{% endif %}>ADLS Gen2</option></select></div>
+  {% if kind == 'adls' %}
+  <div class="field"><label for="source-subscription">Subscription</label><select id="source-subscription" name="subscription"><option value="">Choose subscription</option>{% for item in subscriptions %}<option value="{{ item.id }}" {% if item.id == subscription %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
+  <div class="field"><label for="source-account">Storage account</label><select id="source-account" name="account"><option value="">Choose account</option>{% for item in accounts %}<option value="{{ item.name }}" {% if item.name == account %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
+  {% endif %}
+  <button class="btn-secondary">Browse source options</button>
+</form>
+<form method="post">
+  <input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="source"><input type="hidden" name="kind" value="{{ kind }}">
+  {% if kind == 'adls' %}
+  <input type="hidden" name="subscription" value="{{ subscription }}"><input type="hidden" name="account" value="{{ account }}">
+  <div class="field"><label for="source-filesystem">Filesystem / container</label><select id="source-filesystem" name="filesystem" required><option value="">Choose filesystem</option>{% for item in filesystems %}<option value="{{ item.name }}" {% if item.name == draft.source.get('filesystem') %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
+  <div class="field"><label for="source-root">Folder within filesystem (optional)</label><input id="source-root" name="root" value="{{ draft.source.get('root','') if draft.source.kind == 'adls' else '' }}"><p class="help">Leave blank to browse the filesystem. Source access is read-only.</p></div>
+  {% else %}<p>Allowed local root: {{ local_root }}. The portal cannot browse arbitrary host folders.</p>{% endif %}
+  {% if draft.videos %}<label class="check"><input type="checkbox" name="confirm_source" value="yes">I approve clearing selected footage if the source changes.</label>{% endif %}
+  <button>Save source and choose footage</button>
+</form>
+</div></section>
+{% elif step == 'footage' %}
+<section class="card"><div class="card-header"><h2>Select recordings</h2></div><div class="card-body">
+<p>Current folder: {{ folder or 'Source root' }}. Selecting a folder recursively freezes its current recordings; it does not include later additions.</p>
+{% if folder %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder.rsplit('/',1)[0] if '/' in folder else '') }}">Parent folder</a>{% endif %}
+<form method="post">
+<input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="selection"><input type="hidden" name="folder" value="{{ folder }}">
+<fieldset><legend>Selection mode</legend><label class="check"><input type="radio" name="mode" value="individual" {% if draft.mode == 'individual' %}checked{% endif %}>Select individual videos across folders</label><label class="check"><input type="radio" name="mode" value="recursive" {% if draft.mode == 'recursive' %}checked{% endif %}>Include all supported videos in this folder recursively</label></fieldset>
+<div class="table-wrap"><table aria-label="Source recordings"><thead><tr><th>Select</th><th>Name</th><th>Size</th><th>Modified (UTC)</th></tr></thead><tbody>
+{% for entry in entries %}<tr><td>{% if entry.video and not entry.blocked and not entry.error %}<input type="hidden" name="visible" value="{{ entry.path }}"><input type="checkbox" name="videos" value="{{ entry.path }}" aria-label="Select {{ entry.name }}" {% if entry.path in draft.videos %}checked{% endif %}>{% endif %}</td><td>{% if entry.directory %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=entry.path) }}">{{ entry.name }}/</a>{% else %}{{ entry.name }}{% endif %}{% if entry.error %}<p role="alert">{{ entry.error }}</p>{% endif %}</td><td>{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else 'Not available' }}</td><td>{{ entry.modified_utc or 'Not available' }}</td></tr>{% else %}<tr><td colspan="4">This folder is empty. Choose another folder.</td></tr>{% endfor %}
+</tbody></table></div>
+<div class="flex flex-wrap gap-2"><button class="btn-secondary" name="next_step" value="footage">Save selection</button><button name="next_step" value="cameras">Save selection and assign cameras</button></div>
+</form>
+{% if next_token %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder, continuation=next_token) }}">Next source page</a>{% endif %}
+{% if has_more %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder, page=page+1) }}">Next source page</a>{% endif %}
+{% if page > 1 %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder, page=page-1) }}">Previous source page</a>{% endif %}
+<p class="help">Save checkbox changes before navigating folders or pages. The package includes only saved selection. Limit: 10,000 recordings.</p>
+</div></section>
+{% elif step == 'cameras' %}
+<section class="card"><div class="card-header"><h2>Associate existing cameras</h2></div><div class="card-body">
+<p>Camera selection determines location. Assignment and calibration changes are saved independently of the package. Review each recording to check media, counting line, and recording time.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="assign">
+<div class="field"><label for="package-camera">Assign selected recordings to camera</label><select id="package-camera" name="camera_id" required><option value="">Choose existing camera</option>{% for camera in cameras %}<option value="{{ camera.id }}">{{ camera.location_id }} / {{ camera.display_name }}</option>{% endfor %}</select></div>
+<div class="field"><label for="package-geometry">Existing video lines on reassignment</label><select id="package-geometry" name="geometry_action"><option value="">Choose when a video has its own line</option><option value="keep">Keep video lines</option><option value="clear">Clear video lines and use camera defaults</option></select></div>
+<div class="table-wrap"><table aria-label="Selected recordings"><thead><tr><th>Select</th><th>Recording</th><th>Camera / readiness</th><th>Action</th></tr></thead><tbody>
+{% for video in selected %}<tr><td><input type="checkbox" name="videos" value="{{ video }}" aria-label="Assign {{ video }}"></td><td>{{ video }}</td><td>{{ assignments.get(video,'Unassigned') }}<p class="help">Full media and recording checks run in Review footage and generation.</p></td><td><a href="{{ url_for('review', video=video) }}">Review footage</a></td></tr>{% else %}<tr><td colspan="4">Select recordings first. <a href="{{ url_for('package_workspace', identity=draft.id, step='footage') }}">Choose footage</a></td></tr>{% endfor %}
+</tbody></table></div><button>Save camera assignments</button></form>
+{% if not cameras %}<p><a href="{{ url_for('locations') }}">Manage locations</a> and <a href="{{ url_for('cameras',create='1') }}">register a camera</a>, then return to this draft.</p>{% endif %}
+{% if page > 1 %}<a href="{{ url_for('package_workspace',identity=draft.id,step='cameras',page=page-1) }}">Previous selected page</a>{% endif %}
+{% if page*100 < draft.videos|length %}<a href="{{ url_for('package_workspace',identity=draft.id,step='cameras',page=page+1) }}">Next selected page</a>{% endif %}
+<a class="btn" href="{{ url_for('package_workspace',identity=draft.id,step='generate') }}">Review generation</a>
+</div></section>
+{% else %}
+<section class="card"><div class="card-header"><h2>Generate package revision</h2></div><div class="card-body">
+<p>{{ draft.videos|length }} recordings, {{ selected_bytes|filesizeformat(true) }}. Saved ownership, camera rules, and recording exceptions will be frozen before queuing.</p>
+{% if draft.source.kind == 'adls' %}<div class="alert alert-info"><p>Generation streams every original byte for SHA-256. Videos are not normally retained locally. Publication re-reads ADLS and requires unchanged source bytes, access, and network availability. Reading may incur transfer costs.</p></div>{% endif %}
+<form method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="destination"><div class="field"><label for="draft-destination">Destination within output root (optional)</label><input id="draft-destination" name="destination" value="{{ draft.destination }}"><p class="help">Output root: {{ output_root }}. Source footage is never an output destination.</p></div><button class="btn-secondary">Save output destination</button></form>
+<p>Saved destination: {{ draft.destination or 'Output root' }}. Failed revisions keep their numbers; generated packages contain metadata only.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="generate"><button {% if not draft.videos %}disabled{% endif %}>Generate manifest package</button></form>
+<p>Generation does not publish footage or run inference. After checks pass, select the completed revision for the existing cloud review and approval flow.</p>
+</div></section>
+{% endif %}
+{% endblock %}

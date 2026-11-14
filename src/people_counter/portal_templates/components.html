@@ -60,9 +60,15 @@
 </dl>
 {% endmacro %}
 
-{% macro frame_editor(video, width, height, values, seconds, config_id='') %}
+{% macro source_context(draft_id=none, source_id=none) -%}
+{% if draft_id %}<input type="hidden" name="draft" value="{{ draft_id }}">{% endif %}
+{% if source_id %}<input type="hidden" name="source_id" value="{{ source_id }}">{% endif %}
+{%- endmacro %}
+
+{% macro frame_editor(video, width, height, values, seconds, config_id='', draft_id=none, source_id=none) %}
 <div class="space-y-4">
   <form method="get" id="preview-form" class="flex flex-wrap items-end gap-3">
+    {{ source_context(draft_id, source_id) }}
     <input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="config_id" value="{{ config_id }}">
     <div class="field"><label for="preview-seconds">Preview time in seconds</label><input id="preview-seconds" name="seconds" type="number" min="0" step="0.1" value="{{ seconds }}"></div><button class="btn-secondary">Show frame</button>
   </form>

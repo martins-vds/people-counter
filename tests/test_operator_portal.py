@@ -24,12 +24,62 @@ from people_counter import backfill_operator as backfill_module
 from people_counter.backfill_operator import progress_reporter, _progress
 
 
+def form_inputs(content):
+    from html.parser import HTMLParser
+
+    class Forms(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.forms = []
+            self.current = None
+        def handle_starttag(self, tag, attributes):
+            values = dict(attributes)
+            if tag == "form":
+                self.current = {"method": values.get("method", "get"), "fields": {}}
+                self.forms.append(self.current)
+            elif tag == "input" and self.current is not None and values.get("name"):
+                self.current["fields"][values["name"]] = values.get("value", "")
+        def handle_endtag(self, tag):
+            if tag == "form":
+                self.current = None
+    parser = Forms()
+    parser.feed(content.decode())
+    return parser.forms
+
+
+class FakePortalAzure:
+    def status(self):
+        return {"signed_in": True, "name": "Test Operator", "initials": "TO", "account": "operator@example.test", "tenant_id": "test-tenant", "error": ""}
+
+    def require_identity(self):
+        return {"account": "operator@example.test", "tenant_id": "test-tenant"}
+
+    def cached_status(self):
+        return self.status()
+
+    def credential(self, snapshot=None, subscription=None):
+        return SimpleNamespace(get_token=lambda *args, **kwargs: SimpleNamespace(token="test-token", expires_on=9999999999))
+
+    def refresh(self):
+        return None
+
+    def check_identity(self, snapshot):
+        if snapshot != self.require_identity():
+            raise ValueError("Azure CLI identity changed")
+
+    def policy(self, snapshot=None):
+        from azure.core.pipeline.policies import SansIOHTTPPolicy
+        return SansIOHTTPPolicy()
+
+
 @pytest.fixture(autouse=True)
 def forbid_live_cloud(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("Portal tests must not construct live cloud clients")
     monkeypatch.setattr(backfill_module.OneLakeFiles, "__init__", forbidden)
     monkeypatch.setattr(portal_module.AzureDataLakeStorage, "__init__", forbidden)
+    from people_counter import portal_azure
+    monkeypatch.setattr(portal_azure, "PortalAzureSession", FakePortalAzure)
 
 
 @pytest.fixture
@@ -40,7 +90,9 @@ def service(tmp_path, monkeypatch):
     models = tmp_path / "models"
     models.mkdir()
     monkeypatch.setattr(portal_module, "probe_video", lambda path: VideoMetadata(1920, 1080, 30))
-    return PortalService(source, models, tmp_path / "state")
+    result = PortalService(source, models, tmp_path / "state")
+    result._azure = FakePortalAzure()
+    return result
 
 
 @pytest.fixture
@@ -62,8 +114,367 @@ def test_root_and_health_need_no_cloud_access(app):
     response = client.get("/")
     assert response.status_code == 200
     assert b"Operator portal" in response.data
-    assert b"Local disk" in response.data
-    assert b"Cloud storage" in response.data
+    assert b"New package" in response.data
+    assert b"Manifest packages" in response.data
+
+
+def test_local_pages_do_not_wait_for_identity_lookup(app, service):
+    cached = FakePortalAzure().status()
+    service._azure = SimpleNamespace(
+        cached_status=lambda: cached,
+        status=lambda: pytest.fail("Page rendering must not perform identity lookup"),
+    )
+    client = app.test_client()
+    for path in ("/", "/packages", "/locations", "/cameras"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert b"Test Operator" in response.data
+
+
+def test_identity_refresh_preserves_safe_return_context_and_supports_json(app, service):
+    client = app.test_client()
+    token = csrf(client)
+    destination = "/packages/drafts/example?step=source&kind=adls&account=lake"
+    response = client.post("/identity/refresh", data={"csrf": token, "return_to": destination})
+    assert response.status_code == 302
+    assert response.location == destination
+    response = client.post("/identity/refresh", data={"csrf": token, "return_to": destination}, headers={"Accept": "application/json"})
+    assert response.status_code == 200
+    assert response.json["name"] == "Test Operator"
+    assert client.get("/identity/status").json["name"] == "Test Operator"
+
+
+@pytest.mark.parametrize("destination", ["https://evil.example/", "//evil.example/", "/\\evil.example/", "/\n/evil.example/"])
+def test_identity_refresh_rejects_external_or_ambiguous_return_urls(app, destination):
+    client = app.test_client()
+    response = client.post("/identity/refresh", data={"csrf": csrf(client), "return_to": destination})
+    assert response.status_code == 400
+
+
+def test_package_draft_survives_restart_and_selects_only_explicit_files(service):
+    (service.source.root / "lobby" / "selected.mp4").write_bytes(b"selected")
+    (service.source.root / "lobby" / "other.mp4").write_bytes(b"other")
+    draft = service.new_draft("Morning")
+    service.update_draft(draft["id"], {
+        "source": {"kind": "local"}, "mode": "individual", "videos": ["lobby/selected.mp4"],
+    })
+    reopened = PortalService(service.source.root, service.models_root, service.state)
+    saved = reopened.draft(draft["id"])
+    assert saved["videos"] == ["lobby/selected.mp4"]
+    assert reopened.draft_input(saved).paths() == ["videos/lobby/selected.mp4"]
+    assert sorted(path.name for path in (service.source.root / "lobby").iterdir()) == [
+        "other.mp4", "selected.mp4",
+    ]
+
+
+def test_recursive_selection_is_frozen_before_generation(service):
+    (service.source.root / "lobby" / "first.mp4").write_bytes(b"first")
+    draft = service.new_draft("Recursive")
+    service.update_draft(draft["id"], {
+        "source": {"kind": "local"}, "mode": "recursive", "folder": "lobby",
+    })
+    (service.source.root / "lobby" / "later.mp4").write_bytes(b"later")
+    assert service.draft(draft["id"])["videos"] == ["lobby/first.mp4"]
+    assert service.draft_input(service.draft(draft["id"])).paths() == ["videos/lobby/first.mp4"]
+
+
+def test_separate_drafts_do_not_change_active_local_source(service):
+    first = service.new_draft("First")
+    second = service.new_draft("Second")
+    service.update_draft(first["id"], {"source": {"kind": "local"}, "videos": []})
+    assert service.draft(second["id"])["videos"] == []
+    assert service.source.root.name == "videos"
+
+
+def test_new_package_flow_requires_csrf_and_persists_selected_draft(app, service):
+    client = app.test_client()
+    assert client.post("/packages/new", data={"package_name": "Morning"}).status_code == 403
+    token = csrf(client)
+    response = client.post("/packages/new", data={"csrf": token, "package_name": "Morning"})
+    assert response.status_code == 302
+    draft = service.store.entries("draft")[0]
+    page = client.get(response.location)
+    assert page.status_code == 200
+    assert b"Choose footage source" in page.data
+    assert b"Save source and choose footage" in page.data
+    result = client.post(response.location, data={"csrf": token, "action": "source", "kind": "local"})
+    assert result.status_code == 302
+    assert b"Select recordings" in client.get(result.location).data
+    assert service.draft(draft["id"])["source"] == {"kind": "local", "root": str(service.local_source.root)}
+
+
+def test_source_change_does_not_silently_discard_selected_videos(app, service):
+    draft = service.new_draft("Morning")
+    service.store.put("draft", draft["id"], {**draft, "videos": ["lobby/clip.mp4"]})
+    client = app.test_client()
+    response = client.post(f"/packages/drafts/{draft['id']}?draft={draft['id']}", data={
+        "csrf": csrf(client), "action": "source", "kind": "unsupported",
+    })
+    assert response.status_code == 400
+    assert service.draft(draft["id"])["videos"] == ["lobby/clip.mp4"]
+
+
+def test_approved_full_preview_retains_only_jpeg_and_metadata(service, monkeypatch):
+    from people_counter.portal_sources import AdlsFootageSource, SelectedFootageInput
+
+    source = AdlsFootageSource.__new__(AdlsFootageSource)
+    source.identity = "adls-test"
+    source.logical_prefix = "adls-test/"
+    source.assignment_prefix = "adls-test:"
+    source.properties = lambda video: {"size": 8, "etag": '"original"'}
+    service.source = source
+    monkeypatch.setattr(SelectedFootageInput, "chunks", lambda self, path: iter([b"original"]))
+    monkeypatch.setattr(portal_module.LocalFootageSource, "frame", lambda *args: (b"jpeg", 1920, 1080))
+    result = service.full_preview("clip.mp4", 0, observations={"size": 8, "etag": '"original"'})
+    assert result["metadata"]["width"] == 1920
+    assert result["observations"] == {"size": 8, "etag": '"original"'}
+    assert not list(service.state.rglob("*.mp4"))
+    assert (service.state / "previews" / (result["id"] + ".jpg")).read_bytes() == b"jpeg"
+
+
+def test_full_preview_requires_remote_source_and_sufficient_disk(service, monkeypatch):
+    with pytest.raises(ValueError, match="ADLS"):
+        service.full_preview("clip.mp4", 0, observations={})
+    from people_counter.portal_sources import AdlsFootageSource
+    source = AdlsFootageSource.__new__(AdlsFootageSource)
+    source.properties = lambda video: {"size": 100, "etag": '"original"'}
+    service.source = source
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=0))
+    with pytest.raises(ValueError, match="disk"):
+        service.full_preview("clip.mp4", 0, observations={"size": 100, "etag": '"original"'})
+
+
+def test_camera_footage_lists_remote_ownership_without_opening_azure(app, service):
+    location = service.store.add_location("North")
+    camera = service.store.add_camera("Entrance", location)
+    service.store.put("source", "adls-test", {
+        "kind": "adls", "account": "sourceaccount", "filesystem": "recordings", "root": "",
+    })
+    service.store.assign_footage(camera, ["\0adls-test:day/clip.mp4"])
+    page = app.test_client().get(f"/cameras/{camera}/footage")
+    assert page.status_code == 200
+    assert b"day/clip.mp4" in page.data
+    assert b"source_id=adls-test" in page.data
+    assert b"sourceaccount / recordings" in page.data
+
+
+def test_source_qualified_ownership_cannot_hide_local_colon_names(service):
+    import copy
+    from people_counter.portal_sources import AdlsFootageSource
+
+    location = service.store.add_location("North")
+    first = service.store.add_camera("First", location)
+    second = service.store.add_camera("Second", location)
+    service.store.assign_footage(first, ["clip:part.mp4"])
+    service.store.assign_footage(second, ["\0adls-test:clip:part.mp4"])
+    scoped = copy.copy(service)
+    scoped.source = AdlsFootageSource.__new__(AdlsFootageSource)
+    scoped.source.assignment_prefix = "\0adls-test:"
+    assert service.footage_assignments() == {"clip:part.mp4": first}
+    assert scoped.footage_assignments() == {"clip:part.mp4": second}
+
+
+def test_draft_generation_freezes_exact_selection_and_camera_metadata(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    (service.local_source.root / "lobby/unselected.mp4").write_bytes(b"video")
+    monkeypatch.setattr("people_counter.portal_sources.inspect_video", inspection)
+    draft = service.new_draft("Selected morning")
+    service.update_draft(draft["id"], {"videos": [form["video"]]})
+    identity = service.generate_draft(draft["id"])
+    config = service.store.entries("camera")[0]
+    service.update_camera_metadata(form["camera_id"], config["id"], {
+        **config["catalog"], "camera_timezone": "UTC",
+    })
+    assert service.run_next_job()
+    assert service.store.job(identity)["status"] == "SUCCEEDED"
+    package = service.package_dir(identity)
+    index = json.loads((package / "manifest-package.json").read_text())
+    assert index["prepared"] == 1
+    prepared = json.loads((package / index["entries"][0]["prepared_manifest_path"]).read_text())
+    assert prepared["camera_timezone"] == "America/Denver"
+    assert index["entries"][0]["video_relative_path"] == "videos/" + form["video"]
+    provenance = json.loads((package / "source-provenance.json").read_text())
+    assert provenance["selected_videos"] == [form["video"]]
+    assert not list(package.rglob("*.mp4"))
+
+
+def test_draft_generation_rejects_source_changes_without_adopting_new_bytes(service, monkeypatch):
+    form = save_camera(service, monkeypatch)
+    monkeypatch.setattr("people_counter.portal_sources.inspect_video", inspection)
+    draft = service.new_draft("Changed footage")
+    service.update_draft(draft["id"], {"videos": [form["video"]]})
+    observed = service.draft(draft["id"])["observations"]
+    service.update_draft(draft["id"], {"destination": "north"})
+    (service.local_source.root / form["video"]).write_bytes(b"changed")
+    identity = service.generate_draft(draft["id"])
+    assert service.run_next_job()
+    job = service.store.job(identity)
+    assert job["status"] == "FAILED"
+    assert "changed after selection" in job["error"]
+    assert service.draft(draft["id"])["observations"] == observed
+
+
+def test_publication_cannot_rename_selected_adls_source_files(service):
+    from people_counter.portal_sources import AdlsFootageSource
+
+    source = AdlsFootageSource.__new__(AdlsFootageSource)
+    source.account = "sourceaccount"
+    source.filesystem = "recordings"
+    source.remote_root = "staging"
+    config = SimpleNamespace(storage_account="sourceaccount", filesystem="recordings")
+    package = SimpleNamespace(plans=[SimpleNamespace(staging_video_path="staging/asset/clip.mp4")])
+    with pytest.raises(ValueError, match="source footage"):
+        service.protect_source_files(source, ["asset/clip.mp4"], config, package)
+    config.storage_account = "otheraccount"
+    service.protect_source_files(source, ["asset/clip.mp4"], config, package)
+
+
+def test_adls_camera_periods_do_not_depend_on_legacy_local_folder_names(service, monkeypatch):
+    import copy
+    from people_counter.portal_sources import AdlsFootageSource
+
+    form = save_camera(service, monkeypatch)
+    previous = service.store.entries("camera")[0]
+    service.store.put("camera", "next-period", {
+        **previous, "folder": "other", "catalog": {
+            **previous["catalog"], "source_path_prefix": "videos/other/",
+            "effective_from_utc": "2027-01-01T00:00:00Z", "effective_to_utc": "2029-01-01T00:00:00Z",
+        },
+    })
+    scoped = copy.copy(service)
+    scoped.source = AdlsFootageSource.__new__(AdlsFootageSource)
+    scoped.source.logical_prefix = "adls-test/"
+    scoped.source.assignment_prefix = "\0adls-test:"
+    video = "lobby/20280101T120000Z.mp4"
+    rows = scoped.camera_catalog(assignments={video: form["camera_id"]})
+    periods = [
+        row["effective_from_utc"] for row in rows
+        if row.get("video_relative_path") == "adls-test/" + video
+    ]
+    assert periods == ["2025-01-01T00:00:00Z", "2027-01-01T00:00:00Z"]
+
+
+def test_source_switch_clears_recursive_selection_without_scanning_new_root(service, monkeypatch):
+    draft = service.new_draft("Switch")
+    old = {
+        **draft, "source": {"kind": "adls", "account": "old", "filesystem": "clips"},
+        "mode": "recursive", "folder": "old", "videos": ["old/clip.mp4"],
+        "observations": {"old/clip.mp4": {"size": 8, "etag": '"old"'}},
+    }
+    service.store.put("draft", draft["id"], old)
+    monkeypatch.setattr(service.local_source, "videos", lambda *args: pytest.fail("Source changes must not enumerate footage"))
+    service.update_draft(draft["id"], {"source": {"kind": "local"}})
+    saved = service.draft(draft["id"])
+    assert saved["mode"] == "individual"
+    assert saved["folder"] == ""
+    assert saved["videos"] == []
+    assert saved["observations"] == {}
+
+
+def test_signed_out_adls_draft_can_be_opened_and_switched_to_local(app, service, monkeypatch):
+    from people_counter.portal_azure import PortalAzureError
+    monkeypatch.setattr(service.azure, "status", lambda: {"signed_in": False, "error": "Azure CLI is signed out"})
+
+    draft = service.new_draft("Offline")
+    service.store.put("draft", draft["id"], {
+        **draft, "source": {"kind": "adls", "account": "old", "filesystem": "clips"},
+        "mode": "recursive", "videos": ["clip.mp4"],
+    })
+    monkeypatch.setattr(service, "for_source", lambda source: (
+        (_ for _ in ()).throw(PortalAzureError("signed_out")) if source["kind"] == "adls"
+        else service
+    ))
+    client = app.test_client()
+    url = f"/packages/drafts/{draft['id']}?draft={draft['id']}&step=source"
+    page = client.get(url)
+    assert page.status_code == 200
+    assert b"Choose footage source" in page.data
+    token = csrf(client)
+    changed = client.post(url, data={"csrf": token, "action": "source", "kind": "local", "confirm_source": "yes"})
+    assert changed.status_code == 302
+    assert service.draft(draft["id"])["source"]["kind"] == "local"
+    assert service.draft(draft["id"])["videos"] == []
+
+
+def test_selection_changes_preserve_old_observations_and_probe_only_new_files(service, monkeypatch):
+    for name in ("first.mp4", "second.mp4"):
+        (service.local_source.root / name).write_bytes(b"video")
+    draft = service.new_draft("Paged")
+    service.update_draft(draft["id"], {"videos": ["first.mp4"]})
+    original = service.draft(draft["id"])["observations"]["first.mp4"]
+    real_properties = service.local_source.properties
+    checked = []
+    def properties(video):
+        checked.append(video)
+        return real_properties(video)
+    monkeypatch.setattr(service.local_source, "properties", properties)
+    (service.local_source.root / "first.mp4").write_bytes(b"changed")
+    service.update_draft(draft["id"], {"videos": ["first.mp4", "second.mp4"]})
+    assert checked == ["second.mp4"]
+    assert service.draft(draft["id"])["observations"]["first.mp4"] == original
+    service.update_draft(draft["id"], {"videos": ["second.mp4"]})
+    assert "first.mp4" not in service.draft(draft["id"])["observations"]
+
+
+def test_full_preview_approval_rejects_replacement_before_downloading(app, service, monkeypatch):
+    from people_counter.portal_sources import AdlsFootageSource
+    import copy
+    from unittest.mock import Mock
+
+    descriptor = {"kind": "adls", "account": "lake", "filesystem": "clips", "root": ""}
+    draft = service.new_draft("Preview")
+    service.store.put("draft", draft["id"], {**draft, "source": descriptor})
+    source = AdlsFootageSource.__new__(AdlsFootageSource)
+    source.descriptor = descriptor
+    properties = {"size": 1024, "etag": '"reviewed"'}
+    source.properties = lambda video: dict(properties)
+    scoped = copy.copy(service)
+    scoped.source = source
+    download = Mock()
+    scoped.full_preview = download
+    monkeypatch.setattr(service, "for_source", lambda value: scoped)
+    client = app.test_client()
+    token = csrf(client)
+    url = f"/footage/full-preview?draft={draft['id']}&video=clip.mp4"
+    page = client.get(url)
+    assert page.status_code == 200
+    fields = next(form["fields"] for form in form_inputs(page.data) if "video" in form["fields"])
+    properties.update(size=1024 * 1024 * 1024, etag='"replacement"')
+    response = client.post(url, data={**fields, "csrf": token, "confirm": "yes"})
+    assert response.status_code == 400
+    download.assert_not_called()
+
+
+def test_full_preview_service_rechecks_approved_version_before_transfer(service, monkeypatch):
+    from people_counter.portal_sources import AdlsFootageSource, SelectedFootageInput
+
+    source = AdlsFootageSource.__new__(AdlsFootageSource)
+    source.properties = lambda video: {"size": 9, "etag": '"replacement"'}
+    service.source = source
+    monkeypatch.setattr(SelectedFootageInput, "chunks", lambda *args: pytest.fail("Unapproved bytes must not be read"))
+    with pytest.raises(ValueError, match="changed after approval"):
+        service.full_preview("clip.mp4", 0, observations={"size": 8, "etag": '"approved"'})
+
+
+@pytest.mark.parametrize("screen", ["footage", "review", "calibration"])
+def test_contextual_get_forms_preserve_draft_and_source_identifiers(app, service, monkeypatch, screen):
+    form = save_camera(service, monkeypatch)
+    draft = service.new_draft("Context")
+    path = {
+        "footage": "/footage",
+        "review": "/review",
+        "calibration": f"/cameras/{form['camera_id']}/calibrate",
+    }[screen]
+    client = app.test_client()
+    response = client.get(path, query_string={
+        "draft": draft["id"], "source_id": "local", "video": form["video"], "folder": "lobby",
+    })
+    assert response.status_code == 200
+    forms = [form for form in form_inputs(response.data) if form["method"] == "get"]
+    assert forms
+    for value in forms:
+        assert value["fields"].get("draft") == draft["id"]
+        assert value["fields"].get("source_id") == "local"
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.0.2.1", "public.example"])
@@ -247,7 +658,7 @@ def test_explorer_filters_current_folder_without_filtering_navigation(app, servi
     (service.source.root / "lobby/clips").mkdir()
     (service.source.root / "lobby/clip.MP4").write_bytes(b"video")
     (service.source.root / "lobby/readme.txt").write_text("notes")
-    response = app.test_client().get("/", query_string={"folder": "lobby", "q": query, "kind": kind})
+    response = app.test_client().get("/footage", query_string={"folder": "lobby", "q": query, "kind": kind})
     assert response.status_code == 200
     for path in ["lobby/clips", "lobby/clip.MP4", "lobby/readme.txt"]:
         assert (f'data-entry-path="{path}"'.encode() in response.data) == (path in expected)
@@ -937,7 +1348,7 @@ def test_compose_live_assets_reload_templates_without_restarting_jobs(service, t
     assert app.config["TEMPLATES_AUTO_RELOAD"] is True
     client = app.test_client()
     assert client.get("/").status_code == 200
-    page = templates / "footage.html"
+    page = templates / "packages.html"
     page.write_text(page.read_text().replace("Operator portal", "Live template marker"))
     assert b"Live template marker" in client.get("/").data
 

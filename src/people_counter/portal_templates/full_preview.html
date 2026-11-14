@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Approve full preview{% endblock %}
+{% block content %}
+<section class="card"><div class="card-header"><h1>Approve a full footage download</h1></div><div class="card-body">
+<p>{{ video }}: {{ size|filesizeformat(true) }}.</p>
+<p>Bounded preview reads may not decode this recording. This fallback downloads the complete original file into private temporary storage. It may incur Azure transfer costs. The video is deleted after preview extraction or failure; only JPEG and source-version-bound metadata are retained.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="approval" value="{{ approval }}"><label class="check"><input type="checkbox" name="confirm" value="yes" required>I approve downloading this complete recording for preview.</label><button>Download and extract preview</button><a class="btn btn-secondary" href="{{ url_for('review',video=video) }}">Cancel</a></form>
+</div></section>
+{% endblock %}

@@ -42,6 +42,8 @@ def portal(tmp_path, monkeypatch, request):
         path.write_bytes(relative.encode())
     cloud = request.node.get_closest_marker("portal_cloud") is not None
     service = PortalService(source, models, tmp_path / "state", allow_cloud=cloud)
+    from tests.test_operator_portal import FakePortalAzure
+    service._azure = FakePortalAzure()
     calls = []
 
     def forbidden(*args, **kwargs):
@@ -56,7 +58,7 @@ def portal(tmp_path, monkeypatch, request):
         shortcut = {}
 
         class Files:
-            def __init__(self, config):
+            def __init__(self, config, *, credential=None, identity_policy=None):
                 assert config.workspace_id == "11111111-1111-1111-1111-111111111111"
                 parent, name = config.shortcut_path.rsplit("/", 1)
                 shortcut.update({
@@ -105,7 +107,7 @@ def portal(tmp_path, monkeypatch, request):
                 return {"id": "fake-control-job", "status": "Completed"}
 
         @contextmanager
-        def reader(config):
+        def reader(config, *, credential=None):
             yield None
 
         def rows(connection, prefix, suffix, columns, filters):

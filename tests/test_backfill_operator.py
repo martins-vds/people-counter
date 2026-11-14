@@ -1818,3 +1818,62 @@ def test_named_target_submit_uses_derived_config_and_runtime_identities(setup, c
     assert record["payload"]["sample_fps"] == 2.0
     assert record["config_sha256"] == configuration_sha256(record["payload"])
     assert record["runtime_key"] == record["payload"]["runtime_key"]
+def test_portal_processing_reader_refreshes_only_explicit_cli_credentials():
+    from unittest.mock import Mock
+    from types import SimpleNamespace
+
+    connection = Mock()
+    credential = Mock()
+    credential.get_token.side_effect = [SimpleNamespace(token="first-token"), SimpleNamespace(token="next-token")]
+    reader = operator._CredentialProcessingReader(connection, credential)
+    reader.execute("SELECT 1", [])
+    reader.execute("SELECT 2", [])
+    secrets = [call.args[0] for call in connection.execute.call_args_list if "CREATE OR REPLACE SECRET" in call.args[0]]
+    assert len(secrets) == 2
+    assert "PROVIDER access_token" in secrets[0]
+    assert "first-token" in secrets[0] and "next-token" in secrets[1]
+    assert all("credential_chain" not in sql for sql in secrets)
+    assert credential.get_token.call_args_list[0].args == ("https://storage.azure.com/.default",)
+
+
+def test_portal_processing_reader_does_not_query_when_cli_guard_fails():
+    from unittest.mock import Mock
+
+    connection = Mock()
+    credential = Mock()
+    credential.get_token.side_effect = ValueError("Azure CLI identity changed")
+    reader = operator._CredentialProcessingReader(connection, credential)
+    with pytest.raises(ValueError, match="identity changed"):
+        reader.execute("SELECT 1")
+    connection.execute.assert_not_called()
+
+
+def test_portal_processing_reader_preserves_query_parameters_and_hides_token_errors():
+    import duckdb
+    from unittest.mock import Mock
+    from types import SimpleNamespace
+
+    connection = Mock()
+    credential = Mock()
+    credential.get_token.return_value = SimpleNamespace(token="private-test-token")
+    reader = operator._CredentialProcessingReader(connection, credential)
+    reader.execute("SELECT ?", ["work-id"])
+    connection.execute.assert_called_with("SELECT ?", ["work-id"])
+    connection.reset_mock()
+    connection.execute.side_effect = duckdb.Error("private-test-token")
+    with pytest.raises(RuntimeError, match="Cannot configure") as failure:
+        reader.execute("SELECT 1")
+    assert "private-test-token" not in str(failure.value)
+    assert connection.execute.call_count == 1
+
+
+def test_portal_processing_reader_rejects_empty_tokens_without_queries():
+    from unittest.mock import Mock
+    from types import SimpleNamespace
+
+    connection = Mock()
+    credential = Mock()
+    credential.get_token.return_value = SimpleNamespace(token="")
+    with pytest.raises(RuntimeError, match="empty"):
+        operator._CredentialProcessingReader(connection, credential).execute("SELECT 1")
+    connection.execute.assert_not_called()

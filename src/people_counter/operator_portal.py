@@ -13,18 +13,22 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import available_timezones
 from werkzeug.exceptions import SecurityError
+from werkzeug.local import LocalProxy
 
 from flask import (
-    Flask, abort, flash, redirect, render_template, request, send_file, session, url_for,
+    Flask, abort, flash, g, redirect, render_template, request, send_file, session, url_for,
 )
+from itsdangerous import BadSignature, URLSafeSerializer
 
 from people_counter import backfill_operator as backfill
 from people_counter.csv_reports import spreadsheet_csv
 from people_counter.inference_profiles import PRESETS
-from people_counter.manifest import CONTENT_TYPES, ManifestPublisherError
+from people_counter.manifest import ManifestPublisherError
 from people_counter.portal_service import (
     LINE_FIELDS, METADATA_FIELDS, PORTAL_CATALOG_FIELDS, REPORT_TYPES, PortalService, report_type,
 )
+from people_counter.portal_sources import AdlsFootageSource
+from people_counter.portal_azure import PortalAzureError
 
 
 def _codespaces_origin() -> str | None:
@@ -56,7 +60,7 @@ def _inference_overrides(form: Mapping[str, str]) -> dict[str, int | float]:
     }
 
 
-def create_app(service: PortalService) -> Flask:
+def create_app(root_service: PortalService) -> Flask:
     public_origin = _codespaces_origin()
     public_address = urlsplit(public_origin) if public_origin else None
     trusted_hosts = ["localhost", "127.0.0.1", "[::1]"]
@@ -68,18 +72,50 @@ def create_app(service: PortalService) -> Flask:
         static_folder=os.environ.get("PC_PORTAL_STATIC_DIR", "portal_static"),
         static_url_path="/static",
     )
-    saved = service.store.entries("secret")
+    saved = root_service.store.entries("secret")
     if not saved:
-        service.store.put("secret", "session", {"value": secrets.token_hex(32)})
-        saved = service.store.entries("secret")
+        root_service.store.put("secret", "session", {"value": secrets.token_hex(32)})
+        saved = root_service.store.entries("secret")
     app.config.update(
-        SECRET_KEY=saved[0]["value"], MAX_CONTENT_LENGTH=64 * 1024,
+        SECRET_KEY=saved[0]["value"], MAX_CONTENT_LENGTH=2 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict",
         SESSION_COOKIE_SECURE=public_origin is not None,
         TRUSTED_HOSTS=trusted_hosts,
         TEMPLATES_AUTO_RELOAD=os.environ.get("PC_PORTAL_LIVE_TEMPLATES") == "1",
     )
-    app.extensions["portal_service"] = service
+    app.extensions["portal_service"] = root_service
+    preview_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="full-preview-approval")
+    service = LocalProxy(lambda: getattr(g, "portal_service", root_service))
+
+    @app.before_request
+    def select_draft_source():
+        if request.endpoint in {"health", "static", "jobs", "job", "report", "report_view", "package_zip", "identity_refresh", "identity_status"}:
+            return
+        identity = request.args.get("draft") or request.form.get("draft")
+        g.draft_id = identity
+        g.source_id = request.args.get("source_id") or request.form.get("source_id")
+        if request.endpoint in {"locations", "cameras", "camera_footage", "camera_metadata", "camera_csv"}:
+            return
+        if request.endpoint == "package_workspace":
+            return
+        if g.source_id:
+            g.portal_service = root_service.for_source(root_service.source_descriptor(g.source_id))
+        elif identity:
+            draft = root_service.draft(identity)
+            g.portal_service = root_service.for_source(draft["source"])
+
+    @app.url_defaults
+    def retain_draft(endpoint, values):
+        contextual = {
+            "footage", "review", "folders", "frame", "assign_footage", "draft_readiness",
+            "calibrate", "camera_calibration", "save_calibration", "save_recording", "save_line",
+            "camera_footage", "camera_metadata", "package_workspace", "full_preview",
+            "locations", "cameras",
+        }
+        if getattr(g, "draft_id", None) and endpoint in contextual:
+            values.setdefault("draft", g.draft_id)
+        elif getattr(g, "source_id", None) and endpoint in contextual:
+            values.setdefault("source_id", g.source_id)
 
     @app.before_request
     def protect_forms():
@@ -115,7 +151,13 @@ def create_app(service: PortalService) -> Flask:
         return {
             "cloud_enabled": service.allow_cloud, "line_fields": LINE_FIELDS,
             "worker_error": service.worker_error,
+            "azure_identity": root_service.azure.cached_status(), "draft_id": getattr(g, "draft_id", None),
+            "source_id": getattr(g, "source_id", None),
         }
+
+    @app.errorhandler(PortalAzureError)
+    def azure_error(error):
+        return render_template("error.html", message=str(error)), 403
 
     @app.errorhandler(ValueError)
     @app.errorhandler(ManifestPublisherError)
@@ -138,9 +180,34 @@ def create_app(service: PortalService) -> Flask:
         return {"status": "ok"}
 
     @app.get("/")
+    def home():
+        if any(key in request.args for key in ("folder", "q", "kind")):
+            return footage()
+        return packages()
+
+    @app.post("/identity/refresh")
+    def identity_refresh():
+        destination = request.form.get("return_to", url_for("packages"))
+        address = urlsplit(destination)
+        if (
+            not destination.startswith("/") or destination.startswith("//")
+            or address.scheme or address.netloc or "\\" in destination
+            or any(character in destination for character in "\r\n\t")
+        ):
+            abort(400, "Identity refresh must return to a local portal page")
+        root_service.azure.refresh()
+        if request.accept_mimetypes.best == "application/json":
+            return root_service.azure.status()
+        return redirect(destination)
+
+    @app.get("/identity/status")
+    def identity_status():
+        return root_service.azure.status()
+
+    @app.get("/footage")
     def footage():
         folder = request.args.get("folder", "")
-        canonical = service.source.resolve(folder).relative_to(service.source.root).as_posix()
+        canonical = service.source.canonical(folder, directory=True)
         folder = "" if canonical == "." else canonical
         query = request.args.get("q", "")
         kind = request.args.get("kind", "videos")
@@ -158,7 +225,7 @@ def create_app(service: PortalService) -> Flask:
         ]
         return render_template(
             "footage.html", folder=folder, entries=visible, total=len(entries),
-            root=service.source.root, query=query, kind=kind,
+            root=service.source.label, query=query, kind=kind,
             folder_tree=service.source.folder_tree(folder),
             breadcrumbs=[
                 {"name": name, "path": Path(*Path(folder).parts[:index + 1]).as_posix()}
@@ -166,6 +233,7 @@ def create_app(service: PortalService) -> Flask:
             ],
             parent=Path(folder).parent.as_posix() if folder else "",
             camera_registry=directory,
+            remote_source=isinstance(service.source, AdlsFootageSource),
             camera_names={
                 item["id"]: item["display_name"] for item in directory
             },
@@ -198,23 +266,46 @@ def create_app(service: PortalService) -> Flask:
         video = request.args.get("video", "")
         readiness = service.footage_readiness(video)
         metadata = readiness["metadata"]
-        path = service.source.resolve(video)
-        exception = service.video_exception(video) if path.is_file() and path.suffix.lower() in CONTENT_TYPES else {}
+        exception = service.video_exception(video)
         values = {**readiness["camera_values"], **{key: exception[key] for key in LINE_FIELDS if key in exception}}
         return render_template(
             "review.html", video=video, readiness=readiness, exception=exception, values=values,
             camera_values=readiness["camera_values"], config_id=readiness["config_id"],
             width=metadata.width if metadata else 0, height=metadata.height if metadata else 0,
             seconds=request.args.get("seconds", "0"),
-            folder=request.args.get("folder", path.parent.relative_to(service.source.root).as_posix()),
+            folder=request.args.get("folder", str(Path(video).parent)),
             return_folder=request.args.get("folder", ""), query=request.args.get("q", ""),
             kind=request.args.get("kind", "videos"), camera_registry=service.store.entries("camera_identity"),
+            remote_source=isinstance(service.source, AdlsFootageSource),
         )
+
+    @app.route("/footage/full-preview", methods=["GET", "POST"])
+    def full_preview():
+        if not isinstance(service.source, AdlsFootageSource):
+            raise ValueError("Full-download fallback applies only to ADLS footage")
+        video = request.values.get("video", "")
+        if request.method == "POST":
+            if request.form.get("confirm") != "yes":
+                abort(403, "Approve the full download explicitly")
+            try:
+                reviewed = preview_signer.loads(request.form.get("approval", ""))
+            except BadSignature:
+                abort(400, "Review and approve this recording before downloading")
+            if reviewed["source"] != service.source.descriptor or reviewed["video"] != video:
+                abort(400, "The approved source or recording changed. Review the preview again.")
+            if reviewed["observations"] != service.source.properties(video):
+                abort(400, "Footage changed after approval. Review and approve the full preview again.")
+            service.full_preview(video, 0, observations=reviewed["observations"])
+            flash("Approved full preview completed. Temporary video deleted; only JPEG and verified metadata retained.")
+            return redirect(url_for("review", video=video))
+        properties = service.source.properties(video)
+        approval = preview_signer.dumps({"source": service.source.descriptor, "video": video, "observations": properties})
+        return render_template("full_preview.html", video=video, size=properties["size"], approval=approval)
 
     @app.get("/calibrate")
     def calibrate():
         video = request.args.get("video", "")
-        service.source.resolve(video)
+        service.source.properties(video)
         owner = service.footage_assignments().get(video)
         if request.args.get("scope") == "video" or not owner:
             return redirect(url_for("review", video=video, folder=request.args.get("folder", "")))
@@ -315,7 +406,7 @@ def create_app(service: PortalService) -> Flask:
             locations=locations, selected_location=request.args.get("location_id", ""),
             camera_names={row["id"]: row["display_name"] for row in directory},
             location_names={row["id"]: row["display_name"] for row in locations},
-            assignments=service.footage_assignments(),
+            assignments={row["id"]: row["camera_id"] for row in root_service.store.entries("footage")},
         )
 
     @app.get("/cameras/<camera_id>/footage")
@@ -325,15 +416,20 @@ def create_app(service: PortalService) -> Flask:
         ), None)
         if camera is None:
             abort(404)
+        videos = sorted(
+            row["id"] for row in root_service.store.entries("footage") if row["camera_id"] == camera_id
+        )
+        contexts = {video: root_service.reference_context(video) for video in videos}
+        configs = [
+            item for item in service.store.entries("camera")
+            if item["catalog"]["camera_id"] == camera_id
+        ]
+        for config in configs:
+            contexts.setdefault(config["video"], root_service.reference_context(config["video"]))
         return render_template(
             "camera_footage.html", camera=camera,
-            videos=sorted(
-                video for video, owner in service.footage_assignments().items() if owner == camera_id
-            ),
-            configs=[
-                item for item in service.store.entries("camera")
-                if item["catalog"]["camera_id"] == camera_id
-            ],
+            videos=videos, configs=configs, video_contexts=contexts,
+            calibration_context=contexts[videos[0]] if videos else {"source_id": ""},
         )
 
     @app.route("/cameras/<camera_id>/metadata/<config_id>", methods=["GET", "POST"])
@@ -378,6 +474,8 @@ def create_app(service: PortalService) -> Flask:
     @app.route("/packages", methods=["GET", "POST"])
     def packages():
         if request.method == "POST":
+            if isinstance(service.source, AdlsFootageSource):
+                raise ValueError("Use the package draft workflow to freeze ADLS selection")
             identity = service.enqueue_preparation(
                 request.form.get("folder", ""), name=request.form.get("package_name", ""),
                 destination=request.form.get("destination", ""),
@@ -387,7 +485,123 @@ def create_app(service: PortalService) -> Flask:
             "packages.html", folder=request.args.get("folder", ""),
             cameras=service.store.entries("camera"), packages=service.packages(),
             output_root=service.output_root,
+            drafts=service.store.entries("draft"),
         )
+
+    @app.post("/packages/new")
+    def new_package():
+        draft = root_service.new_draft(request.form.get("package_name", ""))
+        return redirect(url_for("package_workspace", identity=draft["id"], step="source", draft=draft["id"]))
+
+    @app.route("/packages/drafts/<identity>", methods=["GET", "POST"])
+    def package_workspace(identity):
+        draft = root_service.draft(identity)
+        g.draft_id = identity
+        step = request.args.get("step", "source")
+        if step not in {"source", "footage", "cameras", "generate"}:
+            raise ValueError("Select an existing package step")
+        selecting_source = (
+            request.method == "GET" and step == "source"
+            or request.method == "POST" and request.form.get("action") == "source"
+        )
+        scoped = root_service if selecting_source else root_service.for_source(draft["source"])
+        if request.method == "POST":
+            step = save_package_step(identity, draft, scoped)
+            if not isinstance(step, str):
+                return step
+            return redirect(url_for("package_workspace", identity=identity, step=step, draft=identity))
+        folder = request.args.get("folder", draft["folder"])
+        page = int(request.args.get("page", "1"))
+        if page < 1:
+            raise ValueError("Page must be positive")
+        rows, next_token = [], None
+        has_more = False
+        if step == "footage":
+            if isinstance(scoped.source, AdlsFootageSource):
+                rows, next_token = scoped.source.page(folder, request.args.get("continuation"))
+            else:
+                entries = scoped.source.entries(folder)
+                rows = entries[(page - 1) * 100:page * 100]
+                has_more = len(entries) > page * 100
+        subscriptions, accounts, filesystems = [], [], []
+        kind = request.args.get("kind", draft["source"]["kind"])
+        subscription = request.args.get("subscription", draft["source"].get("subscription", ""))
+        account = request.args.get("account", draft["source"].get("account", ""))
+        source_error = ""
+        if step == "source" and kind == "adls":
+            identity_status = (
+                root_service.azure.status() if "kind" in request.args
+                else root_service.azure.cached_status()
+            )
+            if not identity_status["signed_in"]:
+                source_error = identity_status["error"]
+            elif "kind" in request.args:
+                try:
+                    subscriptions = root_service.azure.subscriptions()
+                    if subscription:
+                        accounts = root_service.azure.accounts(subscription)
+                    if account and subscription:
+                        filesystems = root_service.azure.filesystems(account, subscription)
+                except PortalAzureError as error:
+                    source_error = str(error)
+        selected = draft["videos"][(page - 1) * 100:page * 100]
+        return render_template(
+            "package_workspace.html", draft=draft, step=step, source=scoped.source,
+            entries=rows, next_token=next_token, folder=folder,
+            has_more=has_more,
+            selected=selected, assignments=scoped.footage_assignments(),
+            cameras=service.store.entries("camera_identity"), locations=service.store.locations(),
+            subscriptions=subscriptions, accounts=accounts, filesystems=filesystems,
+            kind=kind, subscription=subscription, account=account, page=page,
+            source_error=source_error,
+            selected_bytes=sum(value["size"] for value in draft["observations"].values()),
+            output_root=service.output_root,
+            local_root=root_service.local_source.root,
+        )
+
+    def save_package_step(identity, draft, scoped):
+        action = request.form.get("action", "")
+        if action == "source":
+            descriptor = {"kind": request.form.get("kind", "")}
+            if descriptor["kind"] == "local":
+                descriptor["root"] = str(root_service.local_source.root)
+            if descriptor["kind"] == "adls":
+                descriptor.update({key: request.form.get(key, "") for key in ("subscription", "account", "filesystem", "root")})
+                if not any(row["name"] == descriptor["account"] for row in root_service.azure.accounts(descriptor["subscription"])):
+                    raise ValueError("Select an HNS-enabled account in the current tenant and subscription")
+                if not any(row["name"] == descriptor["filesystem"] for row in root_service.azure.filesystems(descriptor["account"], descriptor["subscription"])):
+                    raise ValueError("Select an accessible filesystem")
+            if draft["videos"] and descriptor != draft["source"] and request.form.get("confirm_source") != "yes":
+                raise ValueError("Confirm changing the source and clearing selected footage")
+            root_service.update_draft(identity, {"source": descriptor})
+            return "footage"
+        if action == "selection":
+            mode = request.form.get("mode")
+            if mode == "individual":
+                visible = set(request.form.getlist("visible"))
+                videos = sorted((set(draft["videos"]) - visible) | set(request.form.getlist("videos")))
+                changes = {"mode": mode, "videos": videos}
+            else:
+                changes = {"mode": mode, "folder": request.form.get("folder", "")}
+            root_service.update_draft(identity, changes)
+            return request.form.get("next_step", "footage")
+        if action == "assign":
+            videos = request.form.getlist("videos")
+            if not set(videos).issubset(draft["videos"]):
+                raise ValueError("Assign only footage selected for this package")
+            scoped.assign_footage(
+                request.form.get("camera_id", ""), videos,
+                geometry_action=request.form.get("geometry_action", ""),
+            )
+            flash("Camera assignment saved. Package draft retained.")
+            return "cameras"
+        if action == "destination":
+            root_service.update_draft(identity, {"destination": request.form.get("destination", "")})
+            return "generate"
+        if action == "generate":
+            job = root_service.generate_draft(identity)
+            return redirect(url_for("job", identity=job))
+        raise ValueError("Select an existing package action")
 
     @app.post("/packages/<identity>/delete")
     def delete_package(identity):
@@ -506,6 +720,8 @@ def create_app(service: PortalService) -> Flask:
             abort(404)
         if found["kind"] in {"publish", "submit"}:
             cloud_confirmation()
+        if found["payload"].get("execution_identity"):
+            root_service.azure.credential(found["payload"]["execution_identity"]).get_token("https://storage.azure.com/.default")
         service.store.retry(identity)
         return redirect(url_for("job", identity=identity))
 

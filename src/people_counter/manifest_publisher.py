@@ -9,11 +9,12 @@ import json
 import math
 import re
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
+from typing import TypeVar
 
 from people_counter.adls import (
     AzureDataLakeStorage,
@@ -37,6 +38,7 @@ from people_counter.manifest import (
     parse_utc_timestamp,
     prepared_manifest_bytes,
 )
+from people_counter.video_input import InputStat, LocalVideoInput, VideoInput
 
 STORAGE_ACCOUNT_NAME = re.compile(r"^[a-z0-9]{3,24}$")
 FILESYSTEM_NAME = re.compile(
@@ -44,6 +46,7 @@ FILESYSTEM_NAME = re.compile(
 )
 PLANNING_CONTRACT_VERSION = "2"
 MANIFEST_PACKAGE_VERSION = 1
+PreparedValue = TypeVar("PreparedValue")
 
 
 @dataclass(frozen=True)
@@ -139,12 +142,13 @@ class GeneratedInventoryRecord:
 class CompletedCheckpoint:
     input_signature: str
     local_size: int
-    local_mtime_ns: int
+    local_mtime_ns: int | None
     incoming_video_path: str
     incoming_manifest_path: str
     video_etag: str
     manifest_sha256: str
     duration_seconds: float
+    input_version: str | None = None
 
 
 class CheckpointStore:
@@ -186,6 +190,7 @@ class CheckpointStore:
             )
         }
         for column, sql_type in (
+            ("input_version", "TEXT"),
             ("reason_code", "TEXT"),
             ("error_field", "TEXT"),
             ("observed_value", "TEXT"),
@@ -212,6 +217,7 @@ class CheckpointStore:
         input_signature: str | None = None,
         local_size: int | None = None,
         local_mtime_ns: int | None = None,
+        input_version: str | None = None,
         video_etag: str | None = None,
         manifest_sha256: str | None = None,
         rejection: RejectionRecord | None = None,
@@ -316,6 +322,12 @@ class CheckpointStore:
                 now,
             ),
         )
+        if input_version is not None:
+            self._connection.execute(
+                "UPDATE publications SET input_version = ?, local_mtime_ns = ? "
+                "WHERE relative_path = ?",
+                (input_version, local_mtime_ns, relative_path),
+            )
         self._connection.commit()
 
     def completed(self, relative_path: str) -> CompletedCheckpoint | None:
@@ -324,23 +336,28 @@ class CheckpointStore:
             SELECT
                 input_signature, local_size, local_mtime_ns,
                 incoming_video_path, incoming_manifest_path, video_etag,
-                manifest_sha256, duration_seconds
+                manifest_sha256, duration_seconds, input_version
             FROM publications
             WHERE relative_path = ? AND state = 'MANIFEST_PUBLISHED'
             """,
             (relative_path,),
         ).fetchone()
-        if row is None or any(value is None for value in row):
+        if (
+            row is None
+            or any(row[index] is None for index in (0, 1, 3, 4, 5, 6, 7))
+            or (row[2] is None and row[8] is None)
+        ):
             return None
         return CompletedCheckpoint(
             input_signature=str(row[0]),
             local_size=int(row[1]),
-            local_mtime_ns=int(row[2]),
+            local_mtime_ns=int(row[2]) if row[2] is not None else None,
             incoming_video_path=str(row[3]),
             incoming_manifest_path=str(row[4]),
             video_etag=str(row[5]),
             manifest_sha256=str(row[6]),
             duration_seconds=float(row[7]),
+            input_version=str(row[8]) if row[8] is not None else None,
         )
 
 
@@ -385,37 +402,8 @@ def discover_videos(
     partition_prefix: str | None,
     max_files: int,
 ) -> list[Path]:
-    if not video_root.is_dir():
-        raise ManifestPublisherError(
-            f"Video root does not exist or is not a directory: {video_root}"
-        )
-    search_root = video_root
-    if partition_prefix is not None:
-        normalized = normalize_relative_path(partition_prefix, directory=True)
-        search_root = video_root.joinpath(*_path_parts(normalized))
-        if not search_root.is_dir():
-            raise ManifestPublisherError(
-                f"Partition prefix '{partition_prefix}' does not exist "
-                f"in video root: {video_root}"
-            )
-    paths = sorted(
-        path
-        for path in search_root.rglob("*")
-        if path.is_file() and path.suffix.lower() in CONTENT_TYPES
-    )
-    symlinks = [path for path in paths if path.is_symlink()]
-    if symlinks:
-        raise ManifestPublisherError(
-            f"Symbolic links are not supported: {symlinks[0]}"
-        )
-    if not paths:
-        raise ManifestPublisherError("No supported video files were discovered")
-    if len(paths) > max_files:
-        raise ManifestPublisherError(
-            f"Discovered {len(paths)} videos, exceeding --max-files={max_files}; "
-            "use a narrower --partition-prefix"
-        )
-    return paths
+    source = LocalVideoInput(video_root, partition_prefix, max_files=max_files)
+    return [source.local_path(relative) for relative in source.paths()]
 
 
 def _path_parts(path: str) -> tuple[str, ...]:
@@ -459,7 +447,7 @@ def _input_signature(
     configuration_digest: str,
     relative_path: str,
     local_size: int,
-    local_mtime_ns: int,
+    local_mtime_ns: int | str,
 ) -> str:
     value = (
         f"{configuration_digest}\n{relative_path}\n"
@@ -527,7 +515,14 @@ def publish_plan(
     checkpoint: CheckpointStore,
     config: PublisherConfig,
     plan: ManifestPlan,
+    *,
+    input_source: VideoInput | None = None,
 ) -> bool:
+    original_stat = None
+    if plan.local_path is None:
+        if input_source is None:
+            raise ManifestPublisherError("Remote video publication requires an input source")
+        original_stat = _verify_package_video(plan, input_source=input_source)
     manifest_uri = _manifest_uri(config, plan)
     verified = _verify_published(storage, config, plan)
     if verified is not None:
@@ -544,13 +539,45 @@ def publish_plan(
 
     published_video = storage.stat(plan.incoming_video_path)
     if published_video is None:
-        storage.upload_file(
-            plan.local_path,
-            plan.staging_video_path,
-            plan.content_type,
-            plan.inspection.size_bytes,
-            plan.inspection.sha256,
-        )
+        if plan.local_path is None:
+            assert input_source is not None and original_stat is not None
+            upload_stream = getattr(storage, "upload_stream", None)
+            if upload_stream is None:
+                raise ManifestPublisherError("Publication storage does not support streaming")
+
+            def chunks() -> Iterator[bytes]:
+                assert input_source is not None
+                if input_source.stat(plan.relative_path) != original_stat:
+                    raise PublicationConflictError("Source video version changed before upload")
+                digest = hashlib.sha256()
+                size = 0
+                for chunk in input_source.chunks(plan.relative_path):
+                    digest.update(chunk)
+                    size += len(chunk)
+                    yield chunk
+                if (
+                    size != plan.inspection.size_bytes
+                    or digest.hexdigest() != plan.inspection.sha256
+                    or input_source.stat(plan.relative_path) != original_stat
+                ):
+                    raise PublicationConflictError("Source video changed during upload")
+
+            upload_stream(
+                chunks, plan.staging_video_path, plan.content_type,
+                plan.inspection.size_bytes, plan.inspection.sha256,
+            )
+            if input_source.stat(plan.relative_path) != original_stat:
+                raise PublicationConflictError("Source video version changed during upload")
+            if storage.sha256(plan.staging_video_path) != plan.inspection.sha256:
+                raise PublicationConflictError("Staged video checksum conflicts")
+        else:
+            storage.upload_file(
+                plan.local_path,
+                plan.staging_video_path,
+                plan.content_type,
+                plan.inspection.size_bytes,
+                plan.inspection.sha256,
+            )
         storage.rename(plan.staging_video_path, plan.incoming_video_path)
         published_video = storage.stat(plan.incoming_video_path)
     elif storage.sha256(plan.incoming_video_path) != plan.inspection.sha256:
@@ -564,6 +591,9 @@ def publish_plan(
         raise PublicationConflictError(
             f"Published video size conflicts: {plan.incoming_video_path}"
         )
+    if input_source is not None and original_stat is not None:
+        if input_source.stat(plan.relative_path) != original_stat:
+            raise PublicationConflictError("Source video version changed before manifest publication")
     checkpoint.record(
         plan.relative_path,
         "VIDEO_PUBLISHED",
@@ -772,8 +802,8 @@ def write_manifest_package(
 def _prepared_value(
     payload: dict[str, object],
     name: str,
-    expected_type: type | tuple[type, ...],
-) -> object:
+    expected_type: type[PreparedValue] | tuple[type[PreparedValue], ...],
+) -> PreparedValue:
     value = payload.get(name)
     if not isinstance(value, expected_type) or isinstance(value, bool):
         raise ManifestPublisherError(
@@ -793,6 +823,7 @@ def _load_prepared_plan(
     video_root: Path,
     staging_prefix: str,
     incoming_prefix: str,
+    input_source: VideoInput | None = None,
 ) -> ManifestPlan:
     payload = _decode_prepared_payload(content)
     relative_path, asset_id, asset_version, expected_sha256 = (
@@ -810,8 +841,19 @@ def _load_prepared_plan(
         capture_time_source,
         content_type,
     ) = _prepared_descriptive_metadata(payload, relative_path)
-    local_path = video_root.joinpath(*_path_parts(relative_path))
-    if not local_path.is_file() or local_path.is_symlink():
+    selected = input_source is None or relative_path in input_source.paths()
+    local_path = None
+    if selected:
+        local_path = (
+            video_root.joinpath(*_path_parts(relative_path))
+            if input_source is None
+            else input_source.local_path(relative_path)
+        )
+    missing = not selected or (
+        input_source is None
+        and (local_path is None or not local_path.is_file() or local_path.is_symlink())
+    )
+    if missing:
         raise ManifestPublisherError(
             f"Package video is missing or is a symbolic link: {relative_path}",
             reason_code="MANIFEST_PACKAGE_VIDEO_MISSING",
@@ -968,7 +1010,10 @@ def _prepared_media(
             observed_value=repr(line_value),
             suggested_action="Regenerate the manifest package.",
         )
-    counting_line = tuple(int(value) for value in line_value)
+    counting_line = (
+        int(line_value[0]), int(line_value[1]),
+        int(line_value[2]), int(line_value[3]),
+    )
     return expected_size, width, height, duration, counting_line
 
 
@@ -1026,12 +1071,16 @@ def _prepared_descriptive_metadata(
 
 def load_manifest_package_plans(
     config: ManifestPackagePublishConfig,
+    *,
+    input_source: VideoInput | None = None,
 ) -> list[ManifestPlan]:
-    return list(validate_manifest_package(config).plans)
+    return list(validate_manifest_package(config, input_source=input_source).plans)
 
 
 def validate_manifest_package(
     config: ManifestPackagePublishConfig,
+    *,
+    input_source: VideoInput | None = None,
 ) -> ValidatedManifestPackage:
     index_path = config.manifest_package_dir / "manifest-package.json"
     manifest_package, index_bytes = _load_manifest_package_index(index_path)
@@ -1039,7 +1088,7 @@ def validate_manifest_package(
     assert isinstance(entries, list)
 
     plans = [
-        _load_manifest_package_entry(config, entry)
+        _load_manifest_package_entry(config, entry, input_source=input_source)
         for entry in entries
     ]
     relative_paths = {plan.relative_path for plan in plans}
@@ -1146,6 +1195,8 @@ def _validate_manifest_package_header(
 def _load_manifest_package_entry(
     config: ManifestPackagePublishConfig,
     entry: object,
+    *,
+    input_source: VideoInput | None = None,
 ) -> ManifestPlan:
     if not isinstance(entry, dict):
         raise ManifestPublisherError(
@@ -1194,6 +1245,7 @@ def _load_manifest_package_entry(
         config.video_root,
         config.staging_prefix,
         config.incoming_prefix,
+        input_source,
     )
     if (
         entry.get("video_relative_path") != plan.relative_path
@@ -1205,27 +1257,55 @@ def _load_manifest_package_entry(
             reason_code="MANIFEST_PACKAGE_CHECKSUM_MISMATCH",
             suggested_action="Regenerate the manifest package directory.",
         )
-    _verify_package_video(plan)
+    _verify_package_video(plan, input_source=input_source)
     return plan
 
 
-def _verify_package_video(plan: ManifestPlan) -> None:
-    if plan.local_path.stat().st_size != plan.inspection.size_bytes:
+def _plan_input_stat(plan: ManifestPlan, input_source: VideoInput | None) -> InputStat:
+    if input_source is not None:
+        return input_source.stat(plan.relative_path)
+    if plan.local_path is None:
+        raise ManifestPublisherError("Remote video verification requires an input source")
+    properties = plan.local_path.stat()
+    return InputStat(properties.st_size, str(properties.st_mtime_ns))
+
+
+def _local_video_chunks(path: Path) -> Iterator[bytes]:
+    with path.open("rb") as source:
+        while chunk := source.read(8 * 1024 * 1024):
+            yield chunk
+
+
+def _verify_package_video(
+    plan: ManifestPlan, *, input_source: VideoInput | None = None,
+) -> InputStat:
+    original = _plan_input_stat(plan, input_source)
+    if original.size != plan.inspection.size_bytes:
         raise ManifestPublisherError(
             f"Source video size changed: {plan.relative_path}",
             reason_code="MANIFEST_PACKAGE_VIDEO_MISMATCH",
             field="expected_size_bytes",
-            observed_value=str(plan.local_path.stat().st_size),
+            observed_value=str(original.size),
             suggested_action=(
                 "Restore the exact prepared video bytes or regenerate the "
                 "manifest package from the current video tree."
             ),
         )
     digest = hashlib.sha256()
-    with plan.local_path.open("rb") as source:
-        while chunk := source.read(8 * 1024 * 1024):
-            digest.update(chunk)
-    if digest.hexdigest() != plan.inspection.sha256:
+    if input_source is not None:
+        chunks = input_source.chunks(plan.relative_path)
+    else:
+        assert plan.local_path is not None
+        chunks = _local_video_chunks(plan.local_path)
+    size = 0
+    for chunk in chunks:
+        digest.update(chunk)
+        size += len(chunk)
+    if (
+        size != plan.inspection.size_bytes
+        or digest.hexdigest() != plan.inspection.sha256
+        or _plan_input_stat(plan, input_source) != original
+    ):
         raise ManifestPublisherError(
             f"Source video checksum changed: {plan.relative_path}",
             reason_code="MANIFEST_PACKAGE_VIDEO_MISMATCH",
@@ -1236,6 +1316,7 @@ def _verify_package_video(plan: ManifestPlan) -> None:
                 "manifest package from the current video tree."
             ),
         )
+    return original
 
 
 def _rejection_record(
@@ -1288,24 +1369,15 @@ def _path_catalog_context(
     )
 
 
-def run_publisher(
+def _publisher_input_selection(
     config: PublisherConfig,
-    *,
-    storage: PublicationStorage | None,
-    inspector: Callable[[Path], VideoInspection] = inspect_video,
-) -> PublishSummary:
-    _invalidate_output_index(config.output_dir)
-    catalog = load_camera_catalog(config.catalog_path)
-    inventory = load_video_inventory(config.inventory_path)
-    videos = discover_videos(
-        config.video_root,
-        config.partition_prefix,
-        config.max_files,
-    )
-    discovered_paths = {
-        video.relative_to(config.video_root).as_posix()
-        for video in videos
-    }
+    source: VideoInput,
+    inventory_paths: Iterable[str],
+) -> tuple[list[str], set[str], str | None]:
+    videos = list(source.paths())
+    discovered_paths = set(videos)
+    if not videos or len(videos) != len(discovered_paths) or len(videos) > config.max_files:
+        raise ManifestPublisherError("Input selection is empty, duplicated, or exceeds --max-files")
     partition_prefix = (
         normalize_relative_path(config.partition_prefix, directory=True)
         if config.partition_prefix is not None
@@ -1313,7 +1385,7 @@ def run_publisher(
     )
     relevant_inventory = {
         path
-        for path in inventory
+        for path in inventory_paths
         if partition_prefix is None or path.startswith(partition_prefix)
     }
     inventory_without_files = sorted(relevant_inventory - discovered_paths)
@@ -1322,6 +1394,26 @@ def run_publisher(
             "Video inventory references a file outside the discovered "
             f"partition: {inventory_without_files[0]}"
         )
+    return videos, discovered_paths, partition_prefix
+
+
+def run_publisher(
+    config: PublisherConfig,
+    *,
+    storage: PublicationStorage | None,
+    inspector: Callable[[Path], VideoInspection] = inspect_video,
+    input_source: VideoInput | None = None,
+) -> PublishSummary:
+    _invalidate_output_index(config.output_dir)
+    catalog = load_camera_catalog(config.catalog_path)
+    inventory = load_video_inventory(config.inventory_path)
+    source = input_source if input_source is not None else LocalVideoInput(
+        config.video_root, config.partition_prefix,
+        max_files=config.max_files, inspector=inspector,
+    )
+    videos, discovered_paths, partition_prefix = _publisher_input_selection(
+        config, source, inventory,
+    )
     checkpoint = CheckpointStore(config.checkpoint_path)
     summary = PublishSummary(
         generator_version=version("people-counter"),
@@ -1338,18 +1430,20 @@ def run_publisher(
     configuration_digest = _configuration_digest(config)
     traversal_complete = False
     try:
-        for video in videos:
-            relative_path = video.relative_to(config.video_root).as_posix()
-            local_stat = video.stat()
+        for relative_path in videos:
+            video = source.local_path(relative_path)
+            source_stat = source.stat(relative_path)
+            local_mtime_ns = int(source_stat.version) if isinstance(source, LocalVideoInput) else None
             input_signature = _input_signature(
                 configuration_digest,
                 relative_path,
-                local_stat.st_size,
-                local_stat.st_mtime_ns,
+                source_stat.size,
+                source_stat.version,
             )
             completed = checkpoint.completed(relative_path)
             if (
                 not config.dry_run
+                and input_source is None
                 and not config.rehash
                 and storage is not None
                 and completed is not None
@@ -1374,11 +1468,13 @@ def run_publisher(
                 relative_path,
                 "DISCOVERED",
                 input_signature=input_signature,
-                local_size=local_stat.st_size,
-                local_mtime_ns=local_stat.st_mtime_ns,
+                local_size=source_stat.size,
+                local_mtime_ns=local_mtime_ns,
+                input_version=source_stat.version,
             )
             plan: ManifestPlan | None = None
             try:
+                normalize_relative_path(relative_path)
                 plan = build_manifest_plan(
                     video,
                     config.video_root,
@@ -1386,8 +1482,14 @@ def run_publisher(
                     inventory,
                     staging_prefix=config.staging_prefix,
                     incoming_prefix=config.incoming_prefix,
-                    inspector=inspector,
+                    relative_path=relative_path,
+                    inspection=source.inspect(relative_path),
                 )
+                if (
+                    source.stat(relative_path) != source_stat
+                    or plan.inspection.size_bytes != source_stat.size
+                ):
+                    raise PublicationConflictError("Source video identity changed during inspection")
                 checkpoint.record(relative_path, "HASHED", plan=plan)
                 prepared_plans.append(plan)
                 generated_inventory.append(
@@ -1401,7 +1503,9 @@ def run_publisher(
                     continue
                 if storage is None:
                     raise RuntimeError("Publication storage is required")
-                if publish_plan(storage, checkpoint, config, plan):
+                if publish_plan(
+                    storage, checkpoint, config, plan, input_source=input_source,
+                ):
                     summary.published += 1
                 else:
                     summary.already_published += 1
@@ -1423,8 +1527,9 @@ def run_publisher(
                     "REJECTED",
                     plan=plan,
                     input_signature=input_signature,
-                    local_size=local_stat.st_size,
-                    local_mtime_ns=local_stat.st_mtime_ns,
+                    local_size=source_stat.size,
+                    local_mtime_ns=local_mtime_ns,
+                    input_version=source_stat.version,
                     error=str(error),
                     rejection=rejection,
                 )
@@ -1502,19 +1607,28 @@ def publish_manifest_package(
     storage: PublicationStorage,
     *,
     validated_package: ValidatedManifestPackage | None = None,
+    input_source: VideoInput | None = None,
 ) -> PublishSummary:
     validated = (
-        validate_manifest_package(config)
+        validate_manifest_package(config, input_source=input_source)
         if validated_package is None
         else validated_package
     )
     plans = list(validated.plans)
     package_bytes = validated.index_bytes
     manifest_package = validated.index
+    inventory_sha256 = manifest_package.get("inventory_sha256")
+    if inventory_sha256 is not None and not isinstance(inventory_sha256, str):
+        raise ManifestPublisherError(
+            "Manifest package inventory_sha256 must be a string or null",
+            reason_code="MANIFEST_PACKAGE_INVALID",
+            field="inventory_sha256",
+            observed_value=repr(inventory_sha256),
+        )
     summary = PublishSummary(
         generator_version=str(manifest_package["generator_version"]),
         catalog_sha256=str(manifest_package["catalog_sha256"]),
-        inventory_sha256=manifest_package.get("inventory_sha256"),
+        inventory_sha256=inventory_sha256,
         discovered=len(plans),
         planned=len(plans),
         total_video_duration_seconds=sum(
@@ -1546,7 +1660,10 @@ def publish_manifest_package(
     )
     try:
         for plan in plans:
-            local_stat = plan.local_path.stat()
+            source_stat = _plan_input_stat(plan, input_source)
+            local_mtime_ns = (
+                int(source_stat.version) if input_source is None else None
+            )
             input_signature = _input_signature(
                 (
                     f"{PLANNING_CONTRACT_VERSION}:{package_digest}:"
@@ -1554,13 +1671,14 @@ def publish_manifest_package(
                     f"{config.staging_prefix}:{config.incoming_prefix}"
                 ),
                 plan.relative_path,
-                local_stat.st_size,
-                local_stat.st_mtime_ns,
+                source_stat.size,
+                source_stat.version,
             )
             completed = checkpoint.completed(plan.relative_path)
             try:
                 if (
-                    completed is not None
+                    input_source is None
+                    and completed is not None
                     and _checkpoint_is_published(
                         completed,
                         input_signature,
@@ -1574,14 +1692,16 @@ def publish_manifest_package(
                     "DISCOVERED",
                     plan=plan,
                     input_signature=input_signature,
-                    local_size=local_stat.st_size,
-                    local_mtime_ns=local_stat.st_mtime_ns,
+                    local_size=source_stat.size,
+                    local_mtime_ns=local_mtime_ns,
+                    input_version=source_stat.version,
                 )
                 if publish_plan(
                     storage,
                     checkpoint,
                     publish_config,
                     plan,
+                    input_source=input_source,
                 ):
                     summary.published += 1
                 else:
@@ -1597,8 +1717,9 @@ def publish_manifest_package(
                     "REJECTED",
                     plan=plan,
                     input_signature=input_signature,
-                    local_size=local_stat.st_size,
-                    local_mtime_ns=local_stat.st_mtime_ns,
+                    local_size=source_stat.size,
+                    local_mtime_ns=local_mtime_ns,
+                    input_version=source_stat.version,
                     error=str(error),
                     rejection=rejection,
                 )

@@ -24,6 +24,132 @@ test("loads on pages without optional portal controls", () => {
   expect(fetch).not.toHaveBeenCalled();
 });
 
+const identityStatus = {
+  signed_in: true, name: "Alice Example", initials: "AE",
+  account: "alice@example.com", tenant_id: "tenant", error: "",
+};
+
+function identityPage() {
+  document.body.innerHTML = `
+    <details data-azure-identity data-status-url="/identity/status" aria-label="Azure CLI identity">
+      <summary><span data-identity-initials>?</span><span data-identity-name>Checking identity</span></summary>
+      <div><p data-identity-account></p><p data-identity-tenant></p><p data-identity-error role="status"></p>
+        <form data-identity-refresh action="/identity/refresh" method="post">
+          <input name="csrf" type="hidden" value="csrf"><input name="return_to" type="hidden" value="/packages?draft=current">
+          <button>Refresh Azure CLI identity</button>
+        </form>
+      </div>
+    </details>
+    <a href="/footage">Footage</a><input aria-label="Unsaved account" value="pending">`;
+  loadPortal();
+  return { user: userEvent.setup(), details: document.querySelector("details") };
+}
+
+test("loads identity separately and escapes returned account text", async () => {
+  fetch.mockResolvedValue({ ok: true, json: async () => ({ ...identityStatus, account: "<img src=x>" }) });
+  identityPage();
+  expect(await screen.findByText("Alice Example")).toBeVisible();
+  expect(screen.getByText("<img src=x>")).not.toBeVisible();
+  expect(document.querySelector("img")).not.toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledWith("/identity/status");
+  expect(document.querySelector("[data-identity-initials]")).toHaveTextContent("AE");
+  expect(document.querySelector("[data-identity-tenant]")).toHaveTextContent("tenant");
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(document.querySelector("[data-azure-identity]")).toHaveAttribute("aria-busy", "false");
+});
+
+test("dismisses identity disclosure on Escape and when keyboard focus leaves", async () => {
+  fetch.mockResolvedValue({ ok: true, json: async () => identityStatus });
+  const { user, details } = identityPage();
+  await screen.findByText("Alice Example");
+  const summary = details.querySelector("summary");
+  await user.click(summary);
+  expect(details).toHaveAttribute("open");
+  const key = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  fireEvent(summary, key);
+  expect(key.defaultPrevented).toBe(true);
+  expect(details).not.toHaveAttribute("open");
+  await user.click(summary);
+  await user.keyboard("{Escape}");
+  expect(details).not.toHaveAttribute("open");
+  expect(summary).toHaveFocus();
+  await user.click(summary);
+  screen.getByRole("button", { name: "Refresh Azure CLI identity" }).focus();
+  expect(details).toHaveAttribute("open");
+  await user.tab();
+  expect(screen.getByRole("link", { name: "Footage" })).toHaveFocus();
+  expect(details).not.toHaveAttribute("open");
+});
+
+test("refreshes identity without navigating or discarding unsaved form values", async () => {
+  fetch.mockResolvedValueOnce({ ok: true, json: async () => identityStatus });
+  fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ ...identityStatus, name: "Bob Example" }) });
+  const { user, details } = identityPage();
+  await screen.findByText("Alice Example");
+  await user.type(screen.getByRole("textbox", { name: "Unsaved account" }), "-new");
+  await user.click(details.querySelector("summary"));
+  await user.click(screen.getByRole("button", { name: "Refresh Azure CLI identity" }));
+  expect(await screen.findByText("Bob Example")).toBeVisible();
+  expect(screen.getByRole("textbox", { name: "Unsaved account" })).toHaveValue("pending-new");
+  const [url, options] = fetch.mock.calls[1];
+  expect(url).toContain("/identity/refresh");
+  expect(options.method).toBe("POST");
+  expect(options.headers.Accept).toBe("application/json");
+  expect(options.body.get("csrf")).toBe("csrf");
+  expect(options.body.get("return_to")).toBe("/packages?draft=current");
+});
+
+test("an older identity lookup cannot overwrite an explicitly refreshed result", async () => {
+  let complete;
+  const oldJson = jest.fn(async () => identityStatus);
+  fetch.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ ...identityStatus, name: "Bob Example" }) });
+  const { user, details } = identityPage();
+  await user.click(details.querySelector("summary"));
+  await user.click(screen.getByRole("button", { name: "Refresh Azure CLI identity" }));
+  await screen.findByText("Bob Example");
+  complete({ ok: true, json: oldJson });
+  await waitFor(() => expect(oldJson).toHaveBeenCalled());
+  expect(screen.getByText("Bob Example")).toBeVisible();
+  expect(screen.queryByText("Alice Example")).not.toBeInTheDocument();
+});
+
+test.each([
+  [{ ok: false, status: 503 }, "HTTP 503"],
+  [{ ok: true, json: async () => ({ name: "unexpected" }) }, "Unexpected identity response"],
+  [{ ok: true, json: async () => ({ ...identityStatus, signed_in: "true" }) }, "Unexpected identity response"],
+  [{ ok: true, json: async () => ({ ...identityStatus, account: 42 }) }, "Unexpected identity response"],
+])("identity failures remain visible rather than looking signed in", async (response, reason) => {
+  fetch.mockResolvedValue(response);
+  identityPage();
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Unable to refresh Azure CLI identity"));
+  expect(screen.getByRole("status")).toHaveTextContent(reason);
+  expect(document.querySelector("[data-azure-identity]")).toHaveAttribute("aria-busy", "false");
+  expect(screen.getByText("Checking identity")).toBeVisible();
+});
+
+test("pending identity lookup exposes busy state without hiding the page", () => {
+  fetch.mockReturnValue(new Promise(() => {}));
+  identityPage();
+  expect(document.querySelector("[data-azure-identity]")).toHaveAttribute("aria-busy", "true");
+  expect(screen.getByRole("status")).toHaveTextContent("Checking Azure CLI identity...");
+  expect(screen.getByRole("textbox", { name: "Unsaved account" })).toBeVisible();
+});
+
+test("a superseded lookup failure cannot overwrite a refreshed identity", async () => {
+  let complete;
+  fetch.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+  fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ ...identityStatus, name: "Bob Example" }) });
+  const { user, details } = identityPage();
+  await user.click(details.querySelector("summary"));
+  await user.click(screen.getByRole("button", { name: "Refresh Azure CLI identity" }));
+  await screen.findByText("Bob Example");
+  complete({ ok: false, status: 503 });
+  await Promise.resolve();
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(details).toHaveAttribute("aria-busy", "false");
+});
+
 test("opens all enclosing disclosures for invalid controls", () => {
   document.body.innerHTML = '<details><summary>Settings</summary><details><summary>Coordinates</summary><input aria-label="X1" required></details></details><input aria-label="Outside">';
   loadPortal();

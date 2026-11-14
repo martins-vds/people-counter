@@ -13,19 +13,33 @@
 <a href="#main" class="skip-link">Skip to main content</a>
 <header class="shell-header">
   <div class="header-inner">
-    <a class="brand" href="{{ url_for('footage') }}" aria-label="People Counter">
+    <a class="brand" href="{{ url_for('home') }}" aria-label="People Counter">
       <span class="brand-mark">{{ icon('camera', 'size-6') }}</span>
       <span><span class="brand-title">People Counter</span><span class="brand-subtitle">Operator console</span></span>
     </a>
     <div class="header-status">
       {{ badge('Local operator mode', 'dark') }}
-      <span class="badge badge-dark">{{ icon('cloud' if cloud_enabled else 'lock', 'size-3.5') }} Cloud {{ 'enabled' if cloud_enabled else 'locked' }}</span>
+      <span class="badge badge-dark">{{ icon('cloud' if cloud_enabled else 'lock', 'size-3.5') }} Publishing {{ 'enabled' if cloud_enabled else 'locked' }}</span>
     </div>
+    <details class="relative min-w-0" aria-label="Azure CLI identity" data-azure-identity data-status-url="{{ url_for('identity_status') }}">
+      <summary class="flex min-h-11 items-center gap-2 text-white">
+        <span class="flex size-10 items-center justify-center rounded-full bg-brand-700" data-identity-initials aria-hidden="true">{{ azure_identity.initials or '?' }}</span>
+        <span class="min-w-0 max-w-40 break-words" data-identity-name>{{ azure_identity.name or 'Azure CLI signed out' }}</span>
+      </summary>
+      <div class="absolute right-0 z-40 w-72 max-w-[calc(100vw-2rem)] break-words rounded-lg bg-white p-4 text-slate-800 shadow-sm">
+        <p>Azure CLI execution identity</p>
+        <p data-identity-account>{{ azure_identity.account or 'No signed-in user' }}</p>
+        <p>Tenant: <span data-identity-tenant>{{ azure_identity.tenant_id or 'Not available' }}</span></p>
+        <p role="status" data-identity-error>{{ azure_identity.error }}</p>
+        <p>Run <code>az login</code> in the terminal, then refresh. This does not sign in browser visitors.</p>
+        <form method="post" action="{{ url_for('identity_refresh') }}" data-identity-refresh><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="return_to" value="{{ request.full_path }}"><button class="btn-secondary">Refresh Azure CLI identity</button></form>
+      </div>
+    </details>
   </div>
   <div class="nav-scroller">
     <nav class="main-nav" aria-label="Main navigation">
-      {% set navigation = [('locations','Locations','location'),('cameras','Cameras','camera'),('footage','Footage','folder'),('packages','Packages','package'),('profiles','Profiles','settings'),('cloud','Cloud work','cloud'),('jobs','Jobs','jobs')] %}
-      {% set active = 'footage' if request.endpoint == 'review' else 'cameras' if request.endpoint in ['calibrate','camera_calibration','camera_footage','camera_metadata'] else 'jobs' if request.endpoint in ['job','report_view'] else request.endpoint %}
+      {% set navigation = [('packages','Packages','package'),('footage','Footage','folder'),('locations','Locations','location'),('cameras','Cameras','camera'),('profiles','Profiles','settings'),('cloud','Cloud work','cloud'),('jobs','Jobs','jobs')] %}
+      {% set active = 'packages' if request.endpoint in ['home','package_workspace'] else 'footage' if request.endpoint == 'review' else 'cameras' if request.endpoint in ['calibrate','camera_calibration','camera_footage','camera_metadata'] else 'jobs' if request.endpoint in ['job','report_view'] else request.endpoint %}
       {% for endpoint, label, glyph in navigation %}
       <a class="nav-link" href="{{ url_for(endpoint) }}" {% if active == endpoint %}aria-current="page"{% endif %}>{{ icon(glyph, 'size-4') }}{{ label }}</a>
       {% endfor %}
@@ -36,11 +50,12 @@
   {% if worker_error %}<div class="alert alert-danger" role="alert">{{ icon('info') }}<p>{{ worker_error }} Restart the portal after correcting the problem.</p></div>{% endif %}
   {% for message in get_flashed_messages() %}<div class="alert alert-success" role="status">{{ icon('check') }}<p>{{ message }}</p></div>{% endfor %}
   {% block content %}{% endblock %}
+  {% if draft_id %}<p class="workflow-note"><a href="{{ url_for('package_workspace', identity=draft_id, step='cameras') }}">Return to package draft</a>. Saved camera changes do not modify generated revisions.</p>{% endif %}
 </main>
 <footer class="border-t border-slate-200 bg-white">
   <div class="footer-inner">
     <span>Read-only source footage. Closing this page does not cancel jobs.</span>
-    <span>People Counter &middot; Cloud actions {{ 'require confirmation' if cloud_enabled else 'disabled by default' }}</span>
+    <span>People Counter &middot; Publication and processing {{ 'require confirmation' if cloud_enabled else 'disabled by default' }}</span>
   </div>
 </footer>
 </body>

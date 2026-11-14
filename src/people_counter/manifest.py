@@ -142,7 +142,7 @@ class VideoInspection:
 
 @dataclass(frozen=True)
 class ManifestPlan:
-    local_path: Path
+    local_path: Path | None
     relative_path: str
     catalog: CameraCatalogEntry
     captured_at_utc: datetime
@@ -875,19 +875,41 @@ def _parse_embedded_capture_time(
 
 
 def build_manifest_plan(
-    local_path: Path,
-    video_root: Path,
+    local_path: Path | None,
+    video_root: Path | None,
     catalog: list[CameraCatalogEntry],
     inventory: dict[str, InventoryEntry],
     *,
     staging_prefix: str,
     incoming_prefix: str,
     inspector: Callable[[Path], VideoInspection] = inspect_video,
+    relative_path: str | None = None,
+    inspection: VideoInspection | None = None,
 ) -> ManifestPlan:
-    relative_path = normalize_relative_path(
-        local_path.relative_to(video_root).as_posix()
-    )
-    inspection = inspector(local_path)
+    if relative_path is None:
+        if local_path is None or video_root is None:
+            raise ValueError("A logical relative path is required for remote video input")
+        relative_path = local_path.relative_to(video_root).as_posix()
+    relative_path = normalize_relative_path(relative_path)
+    if inspection is None:
+        if local_path is None:
+            raise ValueError("A video inspection is required for remote video input")
+        inspection = inspector(local_path)
+    if inspection.size_bytes <= 0:
+        raise VideoValidationError(
+            f"Video is empty: {relative_path}", reason_code="VIDEO_EMPTY",
+            field="expected_size_bytes", observed_value=str(inspection.size_bytes),
+        )
+    if (
+        inspection.width <= 0 or inspection.height <= 0
+        or not math.isfinite(inspection.duration_seconds)
+        or inspection.duration_seconds <= 0
+        or re.fullmatch(r"[0-9a-f]{64}", inspection.sha256) is None
+    ):
+        raise VideoValidationError(
+            f"Invalid video inspection: {relative_path}",
+            reason_code="VIDEO_METADATA_MISSING",
+        )
     entry, captured_at, capture_time_source = resolve_video_metadata(
         relative_path, catalog, inventory, inspection,
     )
@@ -903,7 +925,7 @@ def build_manifest_plan(
     incoming_base = (
         f"{incoming_root}{date_path}/{asset_id}/{asset_version}"
     )
-    suffix = local_path.suffix.lower()
+    suffix = PurePosixPath(relative_path).suffix.lower()
     if suffix not in CONTENT_TYPES:
         raise VideoValidationError(f"Unsupported video extension: {relative_path}")
 

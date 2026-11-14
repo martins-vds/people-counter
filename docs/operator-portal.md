@@ -4,7 +4,47 @@ The portal is a server-rendered Python application, not a SPA. It reuses the
 camera catalog, manifest package, profile, publisher, and explicit-backfill
 implementations. It does not run inference locally or start Spark.
 
-## Start the app
+## Start with the current Azure CLI user
+
+For ADLS sources and current-user Azure authentication, run the portal on the
+same host and under the same OS user as Azure CLI. Install `uv`, Azure CLI,
+FFmpeg/ffprobe, and the OpenCV system libraries, then:
+
+```bash
+uv sync --extra portal --extra publisher --extra demo
+az login
+uv run pc-admin --source-root /absolute/path/to/footage --port 8088
+```
+
+Add `--allow-cloud` only when publication/submission should be enabled.
+ADLS read access requires sign-in independently of this cloud-write gate.
+Local preparation remains available when Azure CLI is missing or signed out.
+ADLS bounded native decoding currently requires a fork-capable host; unsupported
+hosts report that limitation explicitly. Linux is the supported host path.
+
+The header shows the Azure CLI execution user, initials, and tenant on every
+page, including local-source pages. Graph display-name failures are explicit;
+the verified CLI account is still identified. Run `az login` externally and use
+**Refresh Azure CLI identity** afterward. The portal does not run login/logout
+or change the global CLI subscription. A service-principal session is not
+accepted for this user-only workflow. Environment secrets and managed identities
+cannot override the portal's explicit CLI credentials.
+Local pages render cached identity immediately and update the header in the
+background, so CLI/Graph latency does not delay local navigation. Refresh stays
+on the current page and preserves unsaved form values. The identity popup closes
+on Escape or when keyboard focus leaves it; long account names wrap on mobile.
+Approval, execution, resume, and token acquisition verify the CLI identity
+freshly. Individual Storage requests reuse that verified identity only while
+the CLI profile/token-cache file state and token lifetime remain unchanged.
+Sign-in, sign-out, subscription changes, and Refresh invalidate those checks.
+If CLI state cannot be monitored, requests fall back to fresh CLI verification
+rather than trusting a cached identity.
+
+Keep the HTTP listener on loopback or private Codespaces forwarding. The user
+badge identifies Azure execution credentials, not the browser visitor; this
+is still a single-operator tool without portal login authentication.
+
+## Existing Docker startup
 
 Install Docker with Compose v2.20+ and run from the repository root:
 
@@ -65,9 +105,13 @@ escape, and existing revision destinations are rejected. Each queued preparation
 retains its original destination even if the configured default changes.
 Existing job-local packages stay where they are and remain accessible.
 
-The local source boundary is isolated in `LocalFootageSource`. Cloud **source**
-adapters are not implemented yet; the disabled source selector says so.
-Cloud publication of local footage is a separate, supported operation below.
+`./scripts/start-portal.sh` retains its existing Compose behavior. Docker has an
+isolated Azure CLI configuration in `portal-azure`; it does **not** reuse the
+launching host user's session. Use the host-run path above for current-user
+identity reuse. Credentials are not copied or host-mounted into Docker.
+
+The package-first workflow supports a local source and a read-only ADLS Gen2
+source. The legacy local Footage library remains available separately.
 
 Stop without deleting state:
 
@@ -245,7 +289,41 @@ under **Source configuration**. There are no upload, rename, or delete actions.
 
 ## Operator workflow
 
-Start on **Locations** and choose **Add location** to add a display name
+Start on **Packages** and choose **New package**. Give the draft a name, then:
+
+1. **Source:** choose Local folder or ADLS Gen2. ADLS requires a valid Azure CLI
+   user session. Browse subscriptions in the current tenant, HNS-enabled storage
+   accounts, and filesystems; optionally restrict the source root folder.
+   Subscription choices target individual requests without changing CLI defaults.
+2. **Footage:** explicitly select individual recordings across folders, or choose
+   the current folder recursively. Save checkbox changes before navigating.
+   Recursive selection freezes the current file list; later additions are not
+   included without explicitly refreshing selection. Both modes enforce 10,000
+   videos without truncation. ADLS browsing is shallow and paged.
+3. **Cameras and readiness:** associate selected recordings with existing cameras.
+   Camera selection determines location. Known ownership is pre-filled.
+   Assignments are persistent and require an explicit save; reassignment retains
+   capture timestamps and requires a keep/clear decision for video-specific lines.
+   **Review footage** and camera calibration return to the saved package draft.
+4. **Generate:** review the selected count/bytes and output destination.
+   Generation freezes source observations, camera rules, ownership, and exceptions
+   before queuing. It probes/validates footage and computes a complete SHA-256.
+   Failed checks produce job errors/rejection reports, never a successful package.
+5. **Publish:** use the existing completed-revision cloud review, target/profile
+   selection, and explicit approval. Generation itself never uploads, submits
+   Fabric work, or runs inference.
+
+Drafts survive navigation and portal restarts. Source selection remains editable
+when an ADLS session expires, so the operator can switch back to local footage
+without reopening the old remote source. Changing a source requires
+confirmation and resets the folder, selection, and mode to individual selection;
+it never scans the new root automatically. Other drafts, source-qualified
+ownership, and generated revisions are unaffected. The local root is bound to
+portal state: restore that root or choose a separate state directory rather than
+silently reinterpreting historical local paths.
+
+Locations/cameras are independent of source folders. Use **Locations** and
+**Add location** to add a display name
 independently of footage and cameras.
 The portal previews and generates its ID: `North Store` becomes
 `north-store`. Names are trimmed, accented Latin characters are normalized,
@@ -437,6 +515,45 @@ If its camera association and line placement are correct, keep the coordinates a
 exception**; otherwise adjust them first. This saves the current video's frame
 dimensions without changing camera defaults. No automatic scaling is performed.
 Use camera recalibration only for an intentional camera-wide correction.
+
+### ADLS media and integrity
+
+ADLS source browsing/probing never writes to source storage. The CLI user needs
+management-plane subscription/account read access for discovery and data-plane
+Storage Blob Data Reader permissions (or applicable ADLS ACL traversal/read
+permissions) for folders and files. Publication requires the existing target
+write permissions. Network/firewall/private-endpoint restrictions still apply.
+Account discovery permission is not proof of data access.
+
+Normal remote previews use seekable byte-range reads, including container metadata
+near the end of a video when needed. Each preview/probe is limited to **64 MiB
+actually transferred**, **16 MiB in-memory cache**, and **30 seconds**. Unsupported
+layouts, expensive seeks, and limit exhaustion are reported explicitly. A separate
+full-download fallback shows the complete size and requires approval bound to
+that source, recording, size, and ETag. Replacement after review requires a new
+approval before any download starts. It checks
+private disk space, extracts a preview and source-version-bound metadata, and
+deletes the temporary video; it retains only the JPEG and metadata.
+
+Generation reads **every original byte**, sequentially in bounded chunks, to
+calculate the same SHA-256 as hashing a complete downloaded file. Preview bytes
+are not sufficient, and an ETag is a concurrency guard, not a content hash.
+ETag/size changes and truncated reads fail instead of producing a complete package.
+No normal full-video disk cache or transcoded substitute is used.
+
+Publication revalidates source bytes against the generated revision and streams
+them into the existing target staging path, checking integrity before promotion
+and final manifests. Preparation, validation, upload, and retries can each read
+the full video, with associated transfer costs. Source access and unchanged bytes
+must remain available for later publication. A metadata ZIP is not a video backup.
+Publication rejects staging paths that would rename or overwrite selected ADLS
+source footage. Unchanged requests do not repeatedly spawn Azure CLI.
+Individual selection saves inspect only newly selected recordings and retain
+existing source-version observations. To adopt a changed recording, explicitly
+remove and reselect it, or refresh a recursive folder selection.
+Real Azure transfer performance depends on the host and network.
+CLI principal/tenant changes block authenticated queued/resumed work until the
+reviewed identity is restored or a freshly reviewed action is created.
 
 ### Progressive disclosure
 

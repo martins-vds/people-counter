@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 if TYPE_CHECKING:
     from azure.core.credentials import TokenCredential
+    from azure.core.pipeline.policies import SansIOHTTPPolicy
 
 from people_counter.manifest import ManifestPublisherError
 
@@ -23,6 +25,10 @@ class PublicationConflictError(ManifestPublisherError):
         "before retrying."
     )
     retryable = True
+
+
+class IdentityPolicyOptions(TypedDict, total=False):
+    _additional_pipeline_policies: list[SansIOHTTPPolicy]
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,17 @@ class PublicationStorage(Protocol):
     def rename(self, source_path: str, destination_path: str) -> None: ...
 
 
+class StreamingPublicationStorage(PublicationStorage, Protocol):
+    def upload_stream(
+        self,
+        chunks: Callable[[], Iterator[bytes]],
+        remote_path: str,
+        content_type: str,
+        expected_size: int,
+        expected_sha256: str,
+    ) -> None: ...
+
+
 class AzureDataLakeStorage:
     """Synchronous ADLS Gen2 client with chunk-level upload checkpoints."""
 
@@ -66,6 +83,7 @@ class AzureDataLakeStorage:
         *,
         chunk_size: int,
         credential: TokenCredential | None = None,
+        identity_policy: SansIOHTTPPolicy | None = None,
     ) -> None:
         try:
             from azure.identity import DefaultAzureCredential
@@ -77,11 +95,15 @@ class AzureDataLakeStorage:
             ) from error
 
         credential = credential if credential is not None else DefaultAzureCredential()
+        policy_options: IdentityPolicyOptions = (
+            {"_additional_pipeline_policies": [identity_policy]} if identity_policy is not None else {}
+        )
         service = DataLakeServiceClient(
             account_url=(
                 f"https://{storage_account}.dfs.core.windows.net"
             ),
             credential=credential,
+            **policy_options,
         )
         self._filesystem = filesystem
         self._client = service.get_file_system_client(filesystem)
@@ -144,13 +166,32 @@ class AzureDataLakeStorage:
         expected_size: int,
         expected_sha256: str,
     ) -> None:
-        from azure.storage.filedatalake import ContentSettings
-
-        self._ensure_parent(remote_path)
         if local_path.stat().st_size != expected_size:
             raise PublicationConflictError(
                 f"Source video size changed after inspection: {local_path}"
             )
+
+        def chunks() -> Iterator[bytes]:
+            with local_path.open("rb") as source:
+                while chunk := source.read(self._chunk_size):
+                    yield chunk
+
+        self.upload_stream(
+            chunks, remote_path, content_type, expected_size, expected_sha256,
+        )
+
+    def upload_stream(
+        self,
+        chunks: Callable[[], Iterator[bytes]],
+        remote_path: str,
+        content_type: str,
+        expected_size: int,
+        expected_sha256: str,
+    ) -> None:
+        from azure.storage.filedatalake import ContentSettings
+
+        if self._chunk_size <= 0:
+            raise ValueError("Upload chunk size must be positive")
         existing = self.stat(remote_path)
         offset = existing.size if existing is not None else 0
         if offset > expected_size:
@@ -158,61 +199,52 @@ class AzureDataLakeStorage:
                 f"Staged object is larger than the source: {remote_path}"
             )
         client = self._file_client(remote_path)
-        if existing is None:
-            client.create_file(
-                content_settings=ContentSettings(content_type=content_type)
-            )
-        elif offset:
-            local_prefix = hashlib.sha256()
-            with local_path.open("rb") as prefix_source:
-                remaining = offset
-                while remaining:
-                    chunk = prefix_source.read(
-                        min(self._chunk_size, remaining)
-                    )
-                    if not chunk:
-                        break
-                    local_prefix.update(chunk)
-                    remaining -= len(chunk)
-            if (
-                remaining
-                or local_prefix.hexdigest() != self.sha256(remote_path)
-            ):
+        settings = ContentSettings(content_type=content_type)
+        if offset:
+            prefix = hashlib.sha256()
+            remaining = offset
+            for chunk in chunks():
+                prefix.update(memoryview(chunk)[:remaining])
+                remaining -= min(len(chunk), remaining)
+                if not remaining:
+                    break
+            if remaining or prefix.hexdigest() != self.sha256(remote_path):
                 client.delete_file()
-                client.create_file(
-                    content_settings=ContentSettings(
-                        content_type=content_type
-                    )
-                )
+                existing = None
                 offset = 0
+        self._ensure_parent(remote_path)
+        if existing is None:
+            client.create_file(content_settings=settings)
+
         digest = hashlib.sha256()
-        local_offset = 0
-        with local_path.open("rb") as source:
-            while chunk := source.read(self._chunk_size):
-                digest.update(chunk)
-                chunk_end = local_offset + len(chunk)
-                if chunk_end <= offset:
-                    local_offset = chunk_end
-                    continue
-                upload_start = max(0, offset - local_offset)
-                upload = chunk[upload_start:]
-                client.append_data(upload, offset=offset, length=len(upload))
-                offset += len(upload)
-                local_offset = chunk_end
-                client.flush_data(
-                    offset,
-                    content_settings=ContentSettings(
-                        content_type=content_type
-                    ),
-                )
-        if local_offset != expected_size or digest.hexdigest() != expected_sha256:
+        source_offset = 0
+        for chunk in chunks():
+            for start in range(0, len(chunk), self._chunk_size):
+                block = memoryview(chunk)[start:start + self._chunk_size]
+                digest.update(block)
+                end = source_offset + len(block)
+                if end > expected_size:
+                    raise PublicationConflictError(
+                        f"Source video changed during upload: {remote_path}"
+                    )
+                if end > offset:
+                    upload = bytes(block[max(0, offset - source_offset):])
+                    client.append_data(upload, offset=offset, length=len(upload))
+                    offset += len(upload)
+                    client.flush_data(offset, content_settings=settings)
+                source_offset = end
+        if source_offset != expected_size or digest.hexdigest() != expected_sha256:
             raise PublicationConflictError(
-                f"Source video changed during upload: {local_path}"
+                f"Source video changed during upload: {remote_path}"
             )
         uploaded = self.stat(remote_path)
-        if uploaded is None or uploaded.size != expected_size:
+        if (
+            uploaded is None
+            or uploaded.size != expected_size
+            or self.sha256(remote_path) != expected_sha256
+        ):
             raise PublicationConflictError(
-                f"Staged object size does not match source: {remote_path}"
+                f"Staged object does not match source: {remote_path}"
             )
 
     def upload_bytes(

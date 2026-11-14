@@ -13,6 +13,152 @@ from playwright.sync_api import expect
 pytestmark = pytest.mark.ui
 
 
+@pytest.mark.parametrize("width", [320, 390])
+def test_identity_popup_wraps_and_keeps_keyboard_focus_visible_on_mobile(page, portal, monkeypatch, width):
+    page.set_viewport_size({"width": width, "height": 844})
+    original = portal.service.azure.status
+    monkeypatch.setattr(portal.service.azure, "status", lambda: {
+        **original(), "account": "firstname.lastname@companytenant.onmicrosoft.com",
+        "name": "firstname.lastname@companytenant.onmicrosoft.com (display name unavailable)",
+    })
+    page.goto(portal.url + "/packages")
+    popup = page.get_by_label("Azure CLI identity", exact=True)
+    expect(popup.locator("[data-identity-name]")).to_contain_text("display name unavailable")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    popup.locator("summary").click()
+    expect(popup.get_by_text("firstname.lastname@companytenant.onmicrosoft.com", exact=True)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    refresh = popup.get_by_role("button", name="Refresh Azure CLI identity")
+    refresh.focus()
+    page.keyboard.press("Tab")
+    expect(popup).not_to_have_attribute("open", "")
+    focused = page.locator(":focus")
+    assert focused.evaluate("node => { const r=node.getBoundingClientRect(); return node.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)); }")
+    popup.locator("summary").click()
+    page.keyboard.press("Escape")
+    expect(popup).not_to_have_attribute("open", "")
+    expect(popup.locator("summary")).to_be_focused()
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
+def test_package_first_flow_selects_exact_footage_and_displays_cli_identity(page, portal, viewport):
+    page.set_viewport_size(viewport)
+    portal.make_video("lobby/not-selected.mp4")
+    location = portal.service.store.add_location("North")
+    camera = portal.service.store.add_camera("Entrance", location)
+    portal.service.assign_footage(camera, ["lobby/clip.mp4"])
+    portal.service.save_camera_line(camera, {
+        "video": "lobby/clip.mp4", "counting_line_x1": "32", "counting_line_y1": "90",
+        "counting_line_x2": "288", "counting_line_y2": "90",
+    })
+    page.goto(portal.url + "/")
+    expect(page.get_by_role("heading", name="Manifest packages", exact=True)).to_be_visible()
+    expect(page.get_by_text("Test Operator", exact=True)).to_be_visible()
+    page.get_by_role("button", name="New package", exact=True).click()
+    dialog = page.get_by_role("dialog", name="New package", exact=True)
+    dialog.get_by_label("Package name", exact=True).fill("Selected morning")
+    dialog.get_by_role("button", name="Choose source", exact=True).click()
+    page.get_by_role("button", name="Save source and choose footage", exact=True).click()
+    page.get_by_role("link", name="lobby/", exact=True).click()
+    page.get_by_label("Select clip.mp4", exact=True).check()
+    page.get_by_role("button", name="Save selection and assign cameras", exact=True).click()
+    expect(page.get_by_role("table", name="Selected recordings")).to_contain_text(camera)
+    page.get_by_role("link", name="Review generation", exact=True).click()
+    page.get_by_role("button", name="Generate manifest package", exact=True).click()
+    expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
+    identity = page.url.rsplit("/", 1)[-1]
+    index = json.loads((portal.service.package_dir(identity) / "manifest-package.json").read_text())
+    assert index["prepared"] == 1
+    assert index["entries"][0]["video_relative_path"] == "videos/lobby/clip.mp4"
+    assert not list(portal.service.state.rglob("not-selected.mp4"))
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+def test_adls_package_flow_streams_original_bytes_without_local_video_copies(page, portal, monkeypatch):
+    import hashlib
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from tests.test_portal_remote_media import RangedClient
+
+    content = (portal.source / "lobby/clip.mp4").read_bytes()
+    downloads = []
+    ranged = RangedClient(content, etag='"source-version"')
+    def download(**kwargs):
+        downloads.append(kwargs)
+        return ranged.download_file(**kwargs)
+    file = Mock()
+    file.download_file.side_effect = download
+    file.get_file_properties.return_value = SimpleNamespace(size=len(content), etag='"source-version"')
+    class Pages:
+        continuation_token = None
+        def __iter__(self):
+            return self
+        def __next__(self):
+            return iter([SimpleNamespace(
+                name="clip.mp4", is_directory=False, content_length=len(content),
+                last_modified=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )])
+    paths = Mock()
+    paths.by_page.return_value = Pages()
+    filesystem = Mock()
+    filesystem.get_file_client.return_value = file
+    filesystem.get_paths.return_value = paths
+    client = Mock()
+    client.get_file_system_client.return_value = filesystem
+    monkeypatch.setattr("azure.storage.filedatalake.DataLakeServiceClient", lambda *args, **kwargs: client)
+    azure = portal.service.azure
+    azure.subscriptions = lambda: [{"id": "test-subscription", "name": "Test subscription"}]
+    azure.accounts = lambda subscription: [{"name": "sourceaccount"}]
+    azure.filesystems = lambda account, subscription: [{"name": "recordings"}]
+    location = portal.service.store.add_location("North")
+    camera = portal.service.store.add_camera("Entrance", location)
+    portal.service.assign_footage(camera, ["lobby/clip.mp4"])
+    portal.service.save_camera_line(camera, {
+        "video": "lobby/clip.mp4", "counting_line_x1": "32", "counting_line_y1": "90",
+        "counting_line_x2": "288", "counting_line_y2": "90",
+    })
+    page.goto(portal.url + "/")
+    page.get_by_role("button", name="New package", exact=True).click()
+    dialog = page.get_by_role("dialog", name="New package", exact=True)
+    dialog.get_by_label("Package name", exact=True).fill("ADLS morning")
+    dialog.get_by_role("button", name="Choose source", exact=True).click()
+    page.get_by_label("Footage source", exact=True).select_option("adls")
+    page.get_by_role("button", name="Browse source options", exact=True).click()
+    page.get_by_label("Subscription", exact=True).select_option("test-subscription")
+    page.get_by_role("button", name="Browse source options", exact=True).click()
+    page.get_by_label("Storage account", exact=True).select_option("sourceaccount")
+    page.get_by_role("button", name="Browse source options", exact=True).click()
+    page.get_by_label("Filesystem / container", exact=True).select_option("recordings")
+    page.get_by_role("button", name="Save source and choose footage", exact=True).click()
+    assert downloads == []
+    page.get_by_label("Select clip.mp4", exact=True).check()
+    page.get_by_role("button", name="Save selection and assign cameras", exact=True).click()
+    assert downloads == []
+    page.get_by_label("Assign clip.mp4", exact=True).check()
+    page.get_by_label("Assign selected recordings to camera", exact=True).select_option(camera)
+    page.get_by_role("button", name="Save camera assignments", exact=True).click()
+    text = page.locator("main").inner_text()
+    assert "Camera assignment saved" in text, text
+    page.get_by_role("link", name="Review footage", exact=True).click()
+    page.get_by_role("link", name="Recalibrate camera separately", exact=True).click()
+    page.get_by_role("button", name="Load reference frame", exact=True).click()
+    expect(page.get_by_label("Reference footage", exact=True)).to_have_value("clip.mp4")
+    expect(page.locator("#preview-image")).to_have_js_property("naturalWidth", 320)
+    assert parse_qs(urlsplit(page.url).query)["draft"]
+    page.get_by_role("link", name="Return to package draft", exact=True).click()
+    page.get_by_role("link", name="Review generation", exact=True).click()
+    page.get_by_role("button", name="Generate manifest package", exact=True).click()
+    expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
+    identity = page.url.rsplit("/", 1)[-1]
+    package = portal.service.package_dir(identity)
+    index = json.loads((package / "manifest-package.json").read_text())
+    assert index["entries"][0]["video_sha256"] == hashlib.sha256(content).hexdigest()
+    assert (package / "source-provenance.json").is_file()
+    assert not list(portal.service.state.rglob("*.mp4"))
+    assert portal.service.footage_assignments()["lobby/clip.mp4"] == camera
+
+
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
 def test_folder_explorer_lazy_navigation_filters_metadata_and_context(page, portal, viewport):
     page.set_viewport_size(viewport)
@@ -22,7 +168,7 @@ def test_folder_explorer_lazy_navigation_filters_metadata_and_context(page, port
     (portal.source / "unopened/deep").mkdir(parents=True)
     requested = []
     page.on("request", lambda request: requested.append(request.url) if urlsplit(request.url).path == "/folders" else None)
-    page.goto(portal.url + "/")
+    page.goto(portal.url + "/footage")
     assert requested == []
     if viewport["width"] < 1024:
         page.get_by_role("button", name="Folders", exact=True).click()
@@ -86,7 +232,7 @@ def test_folder_explorer_reports_lazy_load_failures_and_retries(page, portal, fa
             route.continue_()
 
     page.route("**/folders?folder=unopened", folders_response)
-    page.goto(portal.url + "/")
+    page.goto(portal.url + "/footage")
     folders = page.get_by_role("navigation", name="Folders", exact=True)
     node = folders.locator('details[data-folder="unopened"] > summary')
     node.focus()
@@ -129,7 +275,7 @@ def test_footage_assignment_layout_and_camera_only_semantics(page, portal, width
     location = portal.service.store.add_location("Entrance")
     camera = portal.service.store.add_camera("Main Entrance", location)
     portal.service.assign_footage(camera, ["lobby/clip.mp4"])
-    page.goto(portal.url + "/?folder=lobby")
+    page.goto(portal.url + "/footage?folder=lobby")
     expect(page.get_by_role("columnheader", name="Camera", exact=True)).to_be_visible()
     expect(page.get_by_role("columnheader", name="Camera / calibration", exact=True)).to_have_count(0)
     expect(page.get_by_role("link", name="Camera " + camera, exact=True)).to_have_text("Main Entrance")
@@ -171,7 +317,7 @@ def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-ent
         page.get_by_label("Location", exact=True).select_option(location)
         page.get_by_label("Camera name", exact=True).fill(camera_id)
         page.get_by_role("dialog", name="Add a camera", exact=True).get_by_role("button", name="Add camera", exact=True).click()
-    page.goto(portal.url + "/?folder=" + folder)
+    page.goto(portal.url + "/footage?folder=" + folder)
     page.get_by_label("Select clip.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option(registered_id)
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
@@ -208,7 +354,7 @@ def prepare_package(page, portal):
     page.goto(portal.url + "/packages?folder=lobby")
     expect(page.get_by_role("dialog", name="Generate a package", exact=True)).to_be_visible()
     expect(page.get_by_label("Folder within source root", exact=True)).to_have_value("lobby")
-    page.get_by_label("Package name", exact=True).fill("Morning footage")
+    page.get_by_role("dialog", name="Generate a package", exact=True).get_by_label("Package name", exact=True).fill("Morning footage")
     page.get_by_role("dialog", name="Generate a package", exact=True).get_by_role("button", name="Generate manifest package", exact=True).click()
     expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
     return page.url.rsplit("/", 1)[-1]
@@ -219,7 +365,7 @@ def test_review_footage_layout_a_saves_details_independently(page, portal, viewp
     calibrate_camera(page, portal)
     camera_before = portal.service.store.entries("camera")
     page.set_viewport_size(viewport)
-    page.goto(portal.url + "/?folder=lobby")
+    page.goto(portal.url + "/footage?folder=lobby")
     page.get_by_role("link", name="Review footage", exact=True).click()
     expect(page.get_by_role("heading", name="Review footage", exact=True)).to_be_visible()
     field = page.get_by_label("Capture time override (UTC, optional)", exact=True).locator("..").bounding_box()
@@ -393,7 +539,7 @@ def test_camera_owns_multiple_recordings_and_reports_open_inline(page, portal, v
     portal.make_video("lobby/tomorrow.mp4")
     location = portal.service.store.add_location("Entrance")
     camera = portal.service.store.add_camera("Main", location)
-    page.goto(portal.url + "/?folder=lobby")
+    page.goto(portal.url + "/footage?folder=lobby")
     page.get_by_label("Select clip.mp4", exact=True).check()
     page.get_by_label("Select tomorrow.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option(camera)
@@ -444,7 +590,7 @@ def test_draw_camera_line_prepare_and_download_metadata_only_package(page, porta
 def test_per_video_exception_preserves_camera_defaults_and_original_timestamp(page, portal):
     calibrate_camera(page, portal)
     portal.make_video("lobby/wide.mp4", width=640, height=360)
-    page.goto(portal.url + "/?folder=lobby")
+    page.goto(portal.url + "/footage?folder=lobby")
     page.get_by_label("Select wide.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option("north-entrance-camera-17")
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
@@ -477,7 +623,7 @@ def test_calendar_capture_override_reaches_manifest_in_utc(browser, portal, view
     page = context.new_page()
     try:
         calibrate_camera(page, portal)
-        page.goto(portal.url + "/?folder=lobby")
+        page.goto(portal.url + "/footage?folder=lobby")
         open_footage_review(page, "lobby/clip.mp4")
         capture = page.get_by_label("Capture time override (UTC, optional)", exact=True)
         expect(capture).to_have_attribute("type", "datetime-local")
@@ -504,10 +650,10 @@ def test_background_job_continues_after_browser_leaves_and_errors_are_visible(pa
     calibrate_camera(page, portal)
     (portal.source / "lobby/broken.mp4").write_bytes(b"not a video")
     page.goto(portal.url + "/packages?folder=lobby")
-    page.get_by_label("Package name", exact=True).fill("Rejected footage")
+    page.get_by_role("dialog", name="Generate a package", exact=True).get_by_label("Package name", exact=True).fill("Rejected footage")
     page.get_by_role("dialog", name="Generate a package", exact=True).get_by_role("button", name="Generate manifest package", exact=True).click()
     identity = page.url.rsplit("/", 1)[-1]
-    page.goto(portal.url + "/")
+    page.goto(portal.url + "/footage")
     page.goto(portal.url + "/jobs/" + identity)
     expect(page.locator("[data-job-status]")).to_have_text("FAILED", timeout=15000)
     expect(page.get_by_role("alert")).to_contain_text("rejected")
@@ -534,10 +680,10 @@ def test_cloud_gate_csrf_and_source_boundaries_are_enforced_in_browser(page, por
         expect(page.get_by_role("button", name=label, exact=True)).to_be_disabled()
     page.goto(portal.url + "/cloud")
     expect(page.get_by_role("button", name="Start cloud action")).to_be_disabled()
-    token = page.locator("[name=csrf]").input_value()
+    token = page.locator("main [name=csrf]").first.input_value()
     assert page.request.post(portal.url + "/cloud", form={"csrf": token, "confirm": "yes"}).status == 403
     assert page.request.post(portal.url + "/packages", form={"folder": "lobby"}).status == 403
-    response = page.goto(portal.url + "/?folder=../../")
+    response = page.goto(portal.url + "/footage?folder=../../")
     assert response.status == 400
     expect(page.get_by_role("alert")).to_contain_text("source root")
     assert portal.calls == []
@@ -565,7 +711,7 @@ def test_locations_support_zero_many_cameras_and_reject_split_assignments(page, 
     ).first.click()
     expect(page.get_by_label("Location", exact=True)).to_have_count(0)
     response = page.request.post(page.url, form={
-        "csrf": page.locator('[name=csrf]').input_value(), "video": "lobby/clip.mp4",
+        "csrf": page.locator('main [name=csrf]').first.input_value(), "video": "lobby/clip.mp4",
         "location_id": "empty-warehouse", "counting_line_x1": "32",
         "counting_line_y1": "90", "counting_line_x2": "288", "counting_line_y2": "90",
     })
@@ -616,7 +762,7 @@ def test_tailwind_design_covers_every_page_and_accessible_controls(page, portal,
     combo = page.get_by_label("Batch size override", exact=True)
     assert combo.evaluate("(element) => parseFloat(getComputedStyle(element).borderRadius)") >= 8
     expect(page.get_by_role("button", name="Generate profiles", exact=True)).to_be_visible()
-    page.goto(portal.url + "/")
+    page.goto(portal.url + "/footage")
     page.keyboard.press("Tab")
     expect(page.get_by_role("link", name="Skip to main content", exact=True)).to_be_focused()
 
@@ -647,7 +793,7 @@ def test_named_camera_registration_and_location_filtered_calibration(page, porta
         expect(registered).to_contain_text("Main Entrance")
         expect(registered).to_contain_text("Not calibrated")
     assert portal.service.store.entries("camera") == []
-    page.goto(portal.url + "/?folder=lobby")
+    page.goto(portal.url + "/footage?folder=lobby")
     page.get_by_label("Select clip.mp4", exact=True).check()
     page.get_by_label("Assign selected footage to camera", exact=True).select_option("south-store-main-entrance")
     page.get_by_role("button", name="Assign selected footage", exact=True).click()
@@ -671,12 +817,14 @@ def test_named_camera_registration_and_location_filtered_calibration(page, porta
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 1000}, {"width": 390, "height": 844}])
 def test_progressive_disclosure_keeps_primary_tasks_and_safety_visible(page, portal, viewport):
     page.set_viewport_size(viewport)
-    page.goto(portal.url + "/")
+    page.goto(portal.url + "/footage")
     expect(page.get_by_role("navigation", name="Folder path", exact=True)).to_be_visible()
     expect(page.get_by_label("Filter files by name", exact=True)).to_be_visible()
-    expect(page.get_by_label("Source implementation", exact=True)).not_to_be_visible()
+    source_guidance = page.get_by_text("This library uses its current source.", exact=False)
+    expect(source_guidance).not_to_be_visible()
     page.get_by_text("Source configuration", exact=True).click()
-    expect(page.get_by_label("Source implementation", exact=True)).to_be_visible()
+    expect(source_guidance).to_be_visible()
+    expect(source_guidance).to_contain_text("Local folder or ADLS Gen2")
     expect(page.get_by_label("Folder within source root", exact=True)).to_be_visible()
     calibrate_camera(page, portal)
     expect(page.get_by_text("Frame", exact=True)).not_to_be_visible()
@@ -699,7 +847,7 @@ def test_progressive_disclosure_keeps_primary_tasks_and_safety_visible(page, por
     page.get_by_role("link", name="Edit metadata and recording rules", exact=True).click()
     page.get_by_label("Effective from utc", exact=True).fill("2025-01-01T00:00:00Z")
     page.get_by_role("button", name="Save metadata", exact=True).click()
-    page.goto(portal.url + "/?folder=lobby")
+    page.goto(portal.url + "/footage?folder=lobby")
     open_footage_review(page, "lobby/clip.mp4")
     expect(page.get_by_label("Capture time override (UTC, optional)", exact=True)).to_be_visible()
     expect(page.get_by_label("Apply calibration to", exact=True)).to_have_count(0)

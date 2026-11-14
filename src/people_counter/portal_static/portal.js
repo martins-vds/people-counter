@@ -1,5 +1,53 @@
 "use strict";
 
+const identityDisclosure = document.querySelector("[data-azure-identity]");
+if (identityDisclosure) {
+  const message = identityDisclosure.querySelector("[data-identity-error]");
+  let generation = 0;
+  const displayIdentity = identity => {
+    const fields = ["name", "initials", "account", "tenant_id", "error"];
+    if (typeof identity.signed_in !== "boolean" || !fields.every(name => typeof identity[name] === "string")) {
+      throw new Error("Unexpected identity response");
+    }
+    for (const name of fields) {
+      const attribute = name === "tenant_id" ? "tenant" : name;
+      identityDisclosure.querySelector(`[data-identity-${attribute}]`).textContent = identity[name];
+    }
+  };
+  const updateIdentity = async (url, options) => {
+    const current = ++generation;
+    identityDisclosure.setAttribute("aria-busy", "true");
+    message.textContent = "Checking Azure CLI identity...";
+    try {
+      const response = options ? await fetch(url, options) : await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const identity = await response.json();
+      if (current !== generation) return;
+      displayIdentity(identity);
+    } catch (error) {
+      if (current === generation) message.textContent = `Unable to refresh Azure CLI identity: ${error.message}. Retry with Refresh.`;
+    } finally {
+      if (current === generation) identityDisclosure.setAttribute("aria-busy", "false");
+    }
+  };
+  identityDisclosure.addEventListener("focusout", event => {
+    if (!identityDisclosure.contains(event.relatedTarget)) identityDisclosure.open = false;
+  });
+  identityDisclosure.addEventListener("keydown", event => {
+    if (event.key === "Escape" && identityDisclosure.open && !event.defaultPrevented && !event.isComposing) {
+      event.preventDefault();
+      identityDisclosure.open = false;
+      identityDisclosure.querySelector("summary").focus();
+    }
+  });
+  const form = identityDisclosure.querySelector("[data-identity-refresh]");
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    updateIdentity(form.action, { method: "POST", headers: { Accept: "application/json" }, body: new FormData(form) });
+  });
+  updateIdentity(identityDisclosure.dataset.statusUrl);
+}
+
 document.addEventListener("invalid", (event) => {
   for (let section = event.target.closest("details"); section; section = section.parentElement.closest("details")) {
     section.open = true;

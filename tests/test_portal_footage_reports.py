@@ -11,7 +11,7 @@ from people_counter.operator_portal import create_app
 from people_counter.portal_service import PortalService
 from people_counter.manifest import CatalogError, VideoMetadata, VideoValidationError, load_camera_catalog, match_catalog_entry
 from tests.test_manifest_publisher import inspection
-from tests.test_operator_portal import csrf, save_camera
+from tests.test_operator_portal import FakePortalAzure, csrf, save_camera
 import tests.ui.conftest as portal_fixtures
 
 portal = portal_fixtures.portal
@@ -22,6 +22,7 @@ def service(tmp_path, monkeypatch):
     source = tmp_path / "videos"
     (source / "lobby").mkdir(parents=True)
     service = PortalService(source, tmp_path / "models", tmp_path / "state")
+    service._azure = FakePortalAzure()
     monkeypatch.setattr("people_counter.portal_service.probe_video", lambda path: VideoMetadata(1920, 1080, 30))
     monkeypatch.setattr(service.source, "frame", lambda *args: (b"jpeg", 1920, 1080))
     return service
@@ -674,7 +675,7 @@ def test_footage_review_has_independent_geometry_and_recording_forms(service, mo
     form = save_camera(service, monkeypatch)
     client = create_app(service).test_client()
     library = client.get("/?folder=lobby").get_data(as_text=True)
-    assert library.index(">Locations</a>") < library.index(">Cameras</a>") < library.index(">Footage</a>")
+    assert library.index(">Packages</a>") < library.index(">Footage</a>") < library.index(">Locations</a>") < library.index(">Cameras</a>")
     assert "Review footage" in library
     response = client.get("/review", query_string={"video": form["video"], "folder": "lobby"})
     assert response.status_code == 200

@@ -28,9 +28,12 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
+
+if TYPE_CHECKING:
+    from azure.core.credentials import TokenCredential
 
 DEFAULT_API_ROOT = "https://api.fabric.microsoft.com/v1"
 DEFAULT_MAX_RETRIES = 5
@@ -66,6 +69,7 @@ class AzureCliResourceTokenProvider:
     """Acquire a token for one explicit resource without retaining it."""
 
     resource: str
+    credential: TokenCredential | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.resource)
@@ -74,6 +78,11 @@ class AzureCliResourceTokenProvider:
 
     def get_token(self) -> str:
         scope = f"{self.resource.rstrip('/')}/.default"
+        if self.credential is not None:
+            token = self.credential.get_token(scope).token
+            if not token:
+                raise FabricApiError("Azure CLI returned an empty access token")
+            return token
         try:
             process = subprocess.run(
                 [

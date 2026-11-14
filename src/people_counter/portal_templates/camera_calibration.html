@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components.html" import heading, frame_editor %}
+{% from "components.html" import heading, frame_editor, source_context %}
 {% block title %}Calibrate camera{% endblock %}
 {% block content %}
 {% call heading('Recalibrate camera' if configs else 'Calibrate camera', camera.display_name ~ ' (' ~ camera.id ~ ')', 'Camera calibration') %}
@@ -13,11 +13,12 @@
   {% for item in configs %}<p><a href="{{ url_for('camera_calibration', camera_id=camera.id, config_id=item.id, video=video) }}">{{ item.catalog.effective_from_utc }} to {{ item.catalog.effective_to_utc or 'no end date' }}</a></p>{% endfor %}
   {% else %}
   <form method="get" class="space-y-4"><input type="hidden" name="config_id" value="{{ config_id }}">
+    {{ source_context(draft_id, source_id) }}
     <div class="field"><label for="reference-video">Reference footage</label><select id="reference-video" name="video">{% for path in videos %}<option value="{{ path }}" {% if path == video %}selected{% endif %}>{{ path }}</option>{% endfor %}</select><p class="help">Only recordings already associated with this camera are available. Choosing a recording does not reassign it.</p></div>
     <button class="btn-secondary">Load reference frame</button>
   </form>
   {% if readiness.media_ok %}
-  {{ frame_editor(video, width, height, values, seconds, config_id) }}
+  {{ frame_editor(video, width, height, values, seconds, config_id, draft_id, source_id) }}
   <form method="post" id="calibration-form" class="space-y-5">
     <input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="video" value="{{ video }}"><input type="hidden" name="config_id" value="{{ config_id }}">
     <p class="help">Camera recording rules and existing applicability dates stay unchanged. Existing packages retain their snapshots.</p>

@@ -93,7 +93,12 @@ also_copy = [
 on_dependency_change = "rerun"
 
 [project.optional-dependencies]
-portal = ["flask>=3.1,<4", "waitress>=3,<4", "filelock>=4.2.1,<5"]
+portal = [
+    "flask>=3.1,<4",
+    "waitress>=3,<4",
+    "filelock>=4.2.1,<5",
+    "av>=18.1,<19",
+]
 cpu = [
     "libreyolo==1.5.0",
     "rfdetr==1.10.1",

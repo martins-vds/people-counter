@@ -5,16 +5,16 @@
 {% call heading(camera.display_name ~ ' footage', 'One camera can own many recordings. The calibration example is only a reference frame, not the complete footage list.', 'Camera assignments') %}
 <a class="btn btn-secondary" href="{{ url_for('cameras') }}">&larr; Cameras</a>
 <a class="btn" href="{{ url_for('footage') }}">Assign more footage</a>
-<a class="btn btn-secondary" href="{{ url_for('camera_calibration', camera_id=camera.id) }}">{{ 'Recalibrate camera' if configs else 'Calibrate camera' }}</a>
+<a class="btn btn-secondary" href="{{ url_for('camera_calibration', camera_id=camera.id, source_id=calibration_context.source_id) }}">{{ 'Recalibrate camera' if configs else 'Calibrate camera' }}</a>
 {% endcall %}
 {% if not configs %}<div class="alert alert-warning"><p>Not calibrated: save a counting line using an assigned video before preparing a package. Assigning footage alone does not calibrate the camera.</p></div>{% endif %}
 <section class="card">
   <div class="card-header"><h2>Associated video files</h2>{{ badge(videos|length ~ ' recordings') }}</div>
   <div class="table-wrap"><table aria-label="Associated footage"><thead><tr><th>Video</th><th>Calibration</th><th>Action</th></tr></thead><tbody>
   {% for video in videos %}<tr>
-    <td class="break-all">{{ video }}</td>
+    <td class="break-all">{{ video_contexts[video].video }}<p class="help">{{ video_contexts[video].label }}</p></td>
     <td>{% set examples = configs|selectattr('video','equalto',video)|list %}{{ badge('Calibration example' if examples else 'Uses camera line' if configs else 'Not calibrated', 'info' if examples else 'neutral') }}</td>
-    <td><a href="{{ url_for('review', video=video) }}">Review footage</a></td>
+    <td><a href="{{ url_for('review', video=video_contexts[video].video, source_id=video_contexts[video].source_id) }}">Review footage</a></td>
   </tr>{% else %}<tr><td colspan="3"><div class="empty-state"><p>No footage assigned. Select one or more files in the footage library and assign them to this camera.</p></div></td></tr>{% endfor %}
   </tbody></table></div>
 </section>
@@ -22,9 +22,9 @@
   <div class="card-header"><h2>Camera calibration</h2></div>
   <div class="card-body">
     <p>The camera line is the default for its associated recordings. A reference recording supplies a frame, not ownership or video-specific settings. Recalibration replaces the selected camera line for future packages.</p>
-    {% for config in configs %}<div class="space-y-3"><p>Reference recording: <code>{{ config.video }}</code>.</p>
+    {% for config in configs %}<div class="space-y-3"><p>Reference recording: <code>{{ video_contexts[config.video].video }}</code> ({{ video_contexts[config.video].label }}).</p>
     {% if configs|length > 1 %}<p>Existing recording period: {{ config.catalog.effective_from_utc }} to {{ config.catalog.effective_to_utc or 'no end date' }}.</p>{% endif %}
-    <a class="btn btn-secondary" href="{{ url_for('camera_calibration', camera_id=camera.id, config_id=config.id) }}">Recalibrate{% if configs|length > 1 %} this recording period{% endif %}</a>
+    <a class="btn btn-secondary" href="{{ url_for('camera_calibration', camera_id=camera.id, config_id=config.id, source_id=video_contexts[config.video].source_id) }}">Recalibrate{% if configs|length > 1 %} this recording period{% endif %}</a>
     <a href="{{ url_for('camera_metadata', camera_id=camera.id, config_id=config.id) }}">Edit metadata and recording rules</a></div>{% endfor %}
     <p class="help">Existing dated settings are kept for compatibility. Their dates select which camera rules apply; they do not supply a video's capture time. Prepared packages never change.</p>
   </div>

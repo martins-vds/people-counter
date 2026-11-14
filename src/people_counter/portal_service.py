@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import io
 import json
 import logging
@@ -35,8 +36,10 @@ from people_counter.manifest import (
     load_camera_catalog, load_video_inventory, parse_utc_timestamp, probe_video, resolve_video_metadata,
 )
 from people_counter.manifest_publisher import (
-    MANIFEST_PACKAGE_VERSION, PublisherConfig, publish_manifest_package, run_publisher, validate_manifest_package,
+    MANIFEST_PACKAGE_VERSION, PublisherConfig, ValidatedManifestPackage,
+    publish_manifest_package, run_publisher, validate_manifest_package,
 )
+from people_counter.portal_sources import AdlsFootageSource, SelectedFootageInput
 
 LINE_FIELDS = ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")
 EXCEPTION_FIELDS = ("video_relative_path", "captured_at_utc", "frame_width", "frame_height", *LINE_FIELDS)
@@ -189,6 +192,37 @@ class LocalFootageSource:
         if not self.root.is_dir():
             raise ValueError("The configured footage source root must be a directory")
         self.video_root = self.root.parent
+        self.assignment_prefix = ""
+        self.logical_prefix = self.root.name + "/"
+        self.label = f"Local folder / {self.root}"
+
+    def canonical(self, relative: str, *, directory: bool = False) -> str:
+        path = self.resolve(relative)
+        if directory and not path.is_dir():
+            raise ValueError("Select a footage folder")
+        value = path.relative_to(self.root).as_posix()
+        return "" if value == "." else value
+
+    def relative_video(self, video: str) -> str:
+        return self.logical_prefix + self.canonical(video)
+
+    def properties(self, video: str) -> dict[str, Any]:
+        path = self.resolve(video)
+        if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES or path.is_symlink():
+            raise ValueError("Select a supported regular video file")
+        metadata = path.stat()
+        return {"size": metadata.st_size, "mtime_ns": metadata.st_mtime_ns}
+
+    def videos(self, folder: str, limit: int = 10000) -> list[str]:
+        result = []
+        for path in self.resolve(folder).rglob("*"):
+            if path.is_file() and path.suffix.lower() in CONTENT_TYPES:
+                if path.is_symlink() or not path.resolve().is_relative_to(self.root):
+                    raise ValueError("Symbolic links are not supported in package selection")
+                result.append(path.relative_to(self.root).as_posix())
+                if len(result) > limit:
+                    raise ValueError(f"Selection exceeds the {limit:,}-video package limit")
+        return sorted(result)
 
     def resolve(self, relative: str) -> Path:
         path = (self.root / relative).resolve()
@@ -547,7 +581,8 @@ class PortalService:
         self, source_root: Path, models_root: Path, state: Path, *,
         allow_cloud: bool = False, output_root: Path | None = None,
     ):
-        self.source = LocalFootageSource(source_root)
+        self.source: LocalFootageSource | AdlsFootageSource = LocalFootageSource(source_root)
+        self.local_source = self.source
         self.models_root = models_root.resolve()
         self.state = state.resolve()
         self.state.mkdir(parents=True, exist_ok=True)
@@ -556,6 +591,11 @@ class PortalService:
             raise ValueError("The package output root must be separate from the source root")
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.store = PortalStore(self.state / "portal.sqlite3")
+        roots = self.store.entries("local_source")
+        if roots and roots[0]["root"] != str(self.local_source.root):
+            raise ValueError("This portal state belongs to a different local footage root. Restore that root or use a separate state directory.")
+        if not roots:
+            self.store.put("local_source", "root", {"root": str(self.local_source.root)})
         known = {item["id"] for item in self.store.entries("footage")}
         for item in self.store.entries("camera"):
             if item["video"] not in known:
@@ -564,6 +604,147 @@ class PortalService:
         self.catalog = self.state / "backfill-catalog.json"
         self.allow_cloud = allow_cloud
         self.worker_error: str | None = None
+        self._azure: Any = None
+
+    @property
+    def azure(self) -> Any:
+        if self._azure is None:
+            from people_counter.portal_azure import PortalAzureSession
+
+            self._azure = PortalAzureSession()
+        return self._azure
+
+    def new_draft(self, name: str) -> dict[str, Any]:
+        identity = uuid.uuid4().hex
+        draft = {
+            "name": _identifier(name, "Package name"), "source": {"kind": "local", "root": str(self.local_source.root)},
+            "mode": "individual", "videos": [], "observations": {}, "folder": "", "destination": "",
+        }
+        self.store.put("draft", identity, draft)
+        return {"id": identity, **draft}
+
+    def draft(self, identity: str) -> dict[str, Any]:
+        self.job_dir(identity)
+        found = next((row for row in self.store.entries("draft") if row["id"] == identity), None)
+        if found is None:
+            raise ValueError("Package draft does not exist")
+        return found
+
+    def for_source(self, descriptor: Mapping[str, Any]) -> PortalService:
+        kind = descriptor.get("kind", "local")
+        if kind not in {"local", "adls"}:
+            raise ValueError("Select Local folder or ADLS Gen2")
+        if kind == "local" and descriptor.get("root", str(self.local_source.root)) != str(self.local_source.root):
+            raise ValueError("The draft belongs to a different configured local root")
+        result = copy.copy(self)
+        result.source = self.local_source if kind == "local" else AdlsFootageSource(descriptor, self.azure, self.store)
+        return result
+
+    def full_preview(self, video: str, seconds: float, *, observations: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(self.source, AdlsFootageSource):
+            raise ValueError("Full-download fallback applies only to ADLS footage")
+        properties = dict(observations)
+        if self.source.properties(video) != properties:
+            raise ValueError("Footage changed after approval. Review and approve the full preview again.")
+        if shutil.disk_usage(self.state).free < properties["size"] + 64 * 1024 * 1024:
+            raise ValueError("Insufficient private disk space for the approved full preview")
+        identity = uuid.uuid4().hex
+        with TemporaryDirectory(prefix="full-preview-", dir=self.state) as directory:
+            path = Path(directory) / Path(video).name
+            inputs = SelectedFootageInput(self.source, [video], {video: properties})
+            count = 0
+            with path.open("wb") as handle:
+                for chunk in inputs.chunks(self.source.relative_video(video)):
+                    count += len(chunk)
+                    if count > properties["size"]:
+                        raise ValueError("ADLS footage grew during full download")
+                    handle.write(chunk)
+            if count != properties["size"] or self.source.properties(video) != properties:
+                raise ValueError("ADLS footage changed or was truncated during full download")
+            metadata = probe_video(path)
+            content, width, height = LocalFootageSource(Path(directory)).frame(path.name, seconds)
+            if (width, height) != (metadata.width, metadata.height):
+                raise ValueError("Full preview dimensions conflict with media metadata")
+        previews = self.state / "previews"
+        previews.mkdir(exist_ok=True)
+        (previews / (identity + ".jpg")).write_bytes(content)
+        result = {
+            "video": self.source.relative_video(video), "seconds": seconds,
+            "observations": properties, "metadata": asdict(metadata),
+        }
+        self.store.put("source_preview", identity, result)
+        return {"id": identity, **result}
+
+    def update_draft(self, identity: str, changes: Mapping[str, Any]) -> None:
+        draft = self.draft(identity)
+        source = dict(changes.get("source", draft["source"]))
+        if source.get("kind") == "local":
+            source["root"] = str(self.local_source.root)
+        scoped = self.for_source(source)
+        changed_source = source != draft["source"]
+        mode = "individual" if changed_source else changes.get("mode", draft["mode"])
+        if mode not in {"individual", "recursive"}:
+            raise ValueError("Select individual videos or a recursive folder")
+        folder = "" if changed_source else scoped.source.canonical(changes.get("folder", draft["folder"]), directory=True)
+        videos = [] if changed_source else changes.get("videos", draft["videos"])
+        refresh = not changed_source and mode == "recursive" and any(key in changes for key in ("folder", "mode"))
+        if refresh:
+            videos = scoped.source.videos(folder)
+        if not isinstance(videos, list) or len(videos) > 10000:
+            raise ValueError("Select at most 10,000 videos")
+        videos = sorted({scoped.source.canonical(video) for video in videos})
+        previous = {} if changed_source or refresh else draft["observations"]
+        observations = {
+            video: previous[video] if video in previous else scoped.source.properties(video)
+            for video in videos
+        }
+        saved = {
+            **draft, "source": dict(source), "folder": folder, "mode": mode, "videos": videos,
+            "observations": observations, "destination": str(changes.get("destination", draft["destination"])),
+        }
+        self.store.put("draft", identity, {key: value for key, value in saved.items() if key != "id"})
+        if isinstance(scoped.source, AdlsFootageSource):
+            self.store.put("source", scoped.source.identity, dict(source))
+
+    def source_descriptor(self, identity: str) -> dict[str, Any]:
+        if identity == "local":
+            return {"kind": "local", "root": str(self.local_source.root)}
+        found = next((row for row in self.store.entries("source") if row["id"] == identity), None)
+        if found is None:
+            raise ValueError("The source metadata is missing. Restore the original source descriptor.")
+        return found
+
+    def reference_context(self, video: str) -> dict[str, str]:
+        if video.startswith("\0"):
+            identity, separator, path = video[1:].partition(":")
+            if not separator:
+                raise ValueError("Invalid source-qualified footage reference")
+            source = self.source_descriptor(identity)
+            return {
+                "video": path, "source_id": identity,
+                "label": f"{source['account']} / {source['filesystem']}",
+            }
+        return {"video": video, "source_id": "local", "label": "Local folder"}
+
+    def draft_input(self, draft: Mapping[str, Any]) -> SelectedFootageInput:
+        return SelectedFootageInput(self.for_source(draft["source"]).source, draft["videos"], draft["observations"])
+
+    def generate_draft(self, identity: str) -> str:
+        draft = self.draft(identity)
+        if not draft["videos"]:
+            raise ValueError("Select footage before generating a package")
+        scoped = self.for_source(draft["source"])
+        assignments = scoped.footage_assignments()
+        for video in draft["videos"]:
+            if not assignments.get(video):
+                raise ValueError(f"{video}: Choose an existing camera before generating")
+        payload = {
+            "source": draft["source"], "videos": draft["videos"], "observations": draft["observations"],
+            "draft_id": identity,
+        }
+        if draft["source"]["kind"] == "adls":
+            payload["execution_identity"] = self.azure.require_identity()
+        return scoped.enqueue_preparation("", name=draft["name"], destination=draft["destination"], selection=payload)
 
     def job_dir(self, identity: str) -> Path:
         if len(identity) != 32 or any(char not in "0123456789abcdef" for char in identity):
@@ -583,9 +764,20 @@ class PortalService:
         assignments.update({
             item["id"]: item["camera_id"] for item in self.store.entries("footage")
         })
-        return assignments
+        prefix = self.source.assignment_prefix
+        return {
+            video.removeprefix(prefix): owner for video, owner in assignments.items()
+            if (video.startswith(prefix) if prefix else not video.startswith("\0"))
+        }
+
+    def video_key(self, video: str) -> str:
+        return self.source.assignment_prefix + self.source.canonical(video)
 
     def media_metadata(self, video: str) -> VideoMetadata:
+        if isinstance(self.source, AdlsFootageSource):
+            metadata = self.source.probe(video)
+            self.source.frame(video)
+            return metadata
         path = self.source.resolve(video)
         if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES:
             raise ValueError("Select a supported video file")
@@ -609,13 +801,15 @@ class PortalService:
         return camera
 
     def footage_readiness(self, video: str, *, draft: Mapping[str, str] | None = None) -> dict[str, Any]:
-        path = self.source.resolve(video)
-        relative = path.relative_to(self.source.video_root).as_posix()
+        relative = self.source.relative_video(video)
         assignments = self.footage_assignments()
         saved_camera = assignments.get(video, "")
         if draft is not None:
             assignments = {**assignments, video: draft.get("camera_id", saved_camera)}
-        inventory_rows = self.store.entries("exception")
+        inventory_rows = [
+            row for row in self.store.entries("exception")
+            if row.get("video_relative_path", row["id"]).startswith(self.source.logical_prefix)
+        ]
         result: dict[str, Any] = {
             "media_ok": False, "metadata": None, "issues": [], "config_id": "",
             "camera_values": {}, "captured_at_utc": "", "capture_time_source": "",
@@ -686,7 +880,7 @@ class PortalService:
         applicable = [
             row for row in configs
             if parse_utc_timestamp(row["catalog"]["effective_from_utc"], "effective from") == entry.effective_from_utc
-            and _configuration_covers_video(row, video)
+            and (isinstance(self.source, AdlsFootageSource) or _configuration_covers_video(row, video))
         ]
         if len(applicable) == 1:
             result.update(camera_values=applicable[0]["catalog"], config_id=applicable[0]["id"])
@@ -697,18 +891,16 @@ class PortalService:
         self.registered_camera(camera_id)
         canonical = []
         for video in videos:
-            path = self.source.resolve(video)
-            if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES:
-                raise ValueError("Select supported video files")
+            self.source.properties(video)
             self.media_metadata(video)
-            canonical.append(path.relative_to(self.source.root).as_posix())
+            canonical.append(self.source.canonical(video))
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             for video in sorted(set(canonical)):
-                previous = db.execute("SELECT data FROM entries WHERE kind='footage' AND id=?", (video,)).fetchone()
+                previous = db.execute("SELECT data FROM entries WHERE kind='footage' AND id=?", (self.video_key(video),)).fetchone()
                 if previous and json.loads(previous["data"])["camera_id"] == camera_id:
                     continue
-                relative = self.source.root.name + "/" + video
+                relative = self.source.relative_video(video)
                 saved = db.execute("SELECT data FROM entries WHERE kind='exception' AND id=?", (relative,)).fetchone()
                 exception = json.loads(saved["data"]) if saved else {}
                 if exception.get("frame_width"):
@@ -722,7 +914,7 @@ class PortalService:
                             db.execute("INSERT INTO entries VALUES ('exception',?,?)", (relative, json.dumps(exception)))
                 db.execute(
                     "INSERT INTO entries VALUES ('footage',?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
-                    (video, json.dumps({"camera_id": camera_id})),
+                    (self.video_key(video), json.dumps({"camera_id": camera_id})),
                 )
 
     def save_camera_line(self, camera_id: str, form: Mapping[str, str]) -> None:
@@ -733,7 +925,7 @@ class PortalService:
         metadata = self.media_metadata(video)
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            owner = db.execute("SELECT data FROM entries WHERE kind='footage' AND id=?", (video,)).fetchone()
+            owner = db.execute("SELECT data FROM entries WHERE kind='footage' AND id=?", (self.video_key(video),)).fetchone()
             if owner is None or json.loads(owner["data"])["camera_id"] != camera_id:
                 raise ValueError("Choose reference footage already associated with this camera")
             configs = [row for row in self.store.entries("camera") if row["catalog"]["camera_id"] == camera_id]
@@ -758,7 +950,7 @@ class PortalService:
             self.validate_csv(tuple(sorted(CATALOG_COLUMNS)), [
                 other["catalog"] for other in configs if other["id"] != config_id
             ] + [row])
-            data = {"catalog": row, "folder": found["folder"] if found else "", "video": video}
+            data = {"catalog": row, "folder": found["folder"] if found else "", "video": self.video_key(video)}
             db.execute("INSERT OR REPLACE INTO entries VALUES ('camera',?,?)", (config_id, json.dumps(data)))
 
     def camera_catalog(self, *, assignments: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
@@ -769,11 +961,13 @@ class PortalService:
             if not any(_prefix_conflicts(item["catalog"], other["catalog"]) for other in cameras)
         ]
         for video, camera_id in assignments.items():
-            relative = self.source.root.name + "/" + video
+            relative = self.source.relative_video(video)
             rows.extend({
                 **item["catalog"], "video_relative_path": relative,
                 "source_path_prefix": relative.rsplit("/", 1)[0] + "/",
-            } for item in _camera_configurations(cameras, camera_id, video))
+            } for item in _camera_configurations(
+                cameras, camera_id, None if isinstance(self.source, AdlsFootageSource) else video,
+            ))
         return rows
 
     def update_camera_metadata(
@@ -801,7 +995,7 @@ class PortalService:
         line = {name: str(int(form.get(name, ""))) for name in LINE_FIELDS}
         dimensions = {"frame_width": str(width), "frame_height": str(height)}
         if form.get("scope") == "video":
-            relative = self.source.resolve(video).relative_to(self.source.video_root).as_posix()
+            relative = self.source.relative_video(video)
             row = {
                 "video_relative_path": relative, "captured_at_utc": form.get("captured_at_utc", ""),
                 **dimensions, **line,
@@ -816,7 +1010,7 @@ class PortalService:
         assigned = self.footage_assignments().get(video)
         if assigned is not None and assigned != camera_id:
             raise ValueError("Assign this footage to the selected camera before changing its counting line")
-        if not self.source.resolve(video).is_relative_to(self.source.resolve(folder)) and assigned != camera_id:
+        if folder and not video.startswith(folder.rstrip("/") + "/") and assigned != camera_id:
             raise ValueError("The preview video must be inside the selected camera folder")
         row = {
             "catalog_version": "1", "source_path_prefix": self.source.prefix(folder),
@@ -842,16 +1036,14 @@ class PortalService:
             if item["id"] != identity and item["catalog"]["camera_id"] == camera_id
         ] + [row]
         self.validate_csv(tuple(sorted(CATALOG_COLUMNS)), candidates)
-        self.store.put("camera", identity, {"catalog": row, "folder": folder, "video": video})
+        self.store.put("camera", identity, {"catalog": row, "folder": folder, "video": self.video_key(video)})
         if assigned is None:
-            self.store.assign_footage(camera_id, [video])
+            self.store.assign_footage(camera_id, [self.video_key(video)])
         return "Saved camera configuration. Generate a new package to use this calibration."
 
     def video_exception(self, video: str) -> dict[str, Any]:
-        path = self.source.resolve(video)
-        if not path.is_file() or path.suffix.lower() not in CONTENT_TYPES:
-            raise ValueError("Select a supported video file")
-        relative = path.relative_to(self.source.video_root).as_posix()
+        self.source.properties(video)
+        relative = self.source.relative_video(video)
         return next(
             (row for row in self.store.entries("exception") if row["id"] == relative),
             {"video_relative_path": relative},
@@ -899,9 +1091,14 @@ class PortalService:
             raise ValueError("Cloud actions are disabled")
         return self.store.enqueue(kind, payload)
 
-    def enqueue_preparation(self, folder: str, *, name: str = "", destination: str = "") -> str:
+    def enqueue_preparation(
+        self, folder: str, *, name: str = "", destination: str = "",
+        selection: Mapping[str, Any] | None = None,
+    ) -> str:
+        if isinstance(self.source, AdlsFootageSource) and selection is None:
+            raise ValueError("Use a package draft to freeze ADLS footage selection")
         self.source.prefix(folder)
-        relative = self.source.resolve(folder).relative_to(self.source.root).as_posix()
+        relative = self.source.canonical(folder, directory=True)
         folder = "" if relative == "." else relative
         calibrated = {item["catalog"]["camera_id"] for item in self.store.entries("camera")}
         payload = {
@@ -914,6 +1111,9 @@ class PortalService:
                 and camera_id not in calibrated
             }),
         }
+        if selection is not None:
+            payload.update(selection)
+            payload.update(self._selected_catalog_snapshot(selection["videos"], calibrated))
         if not name and not destination:
             return self.enqueue("prepare", payload)
         name = _identifier(name, "Package name")
@@ -953,6 +1153,22 @@ class PortalService:
             )
         return identity
 
+    def _selected_catalog_snapshot(self, videos: list[str], calibrated: set[str]) -> dict[str, Any]:
+        selected = set(videos)
+        relative = {self.source.relative_video(video) for video in videos}
+        assignments = {video: owner for video, owner in self.footage_assignments().items() if video in selected}
+        return {
+            "cameras": [
+                row for row in self.camera_catalog(assignments=assignments)
+                if row.get("video_relative_path") in relative
+            ],
+            "uncalibrated": sorted({owner for owner in assignments.values() if owner not in calibrated}),
+            "exceptions": [
+                row for row in self.store.entries("exception")
+                if row.get("video_relative_path", row["id"]) in relative
+            ],
+        }
+
     def packages(self) -> list[dict[str, Any]]:
         with self.store.connection() as db:
             rows = db.execute(
@@ -984,7 +1200,7 @@ class PortalService:
         path = saved_path.resolve()
         if path != saved_path:
             raise ValueError("Package destination changed since preparation was queued")
-        if path == allowed or not path.is_relative_to(allowed) or path.is_relative_to(self.source.root):
+        if path == allowed or not path.is_relative_to(allowed) or path.is_relative_to(self.local_source.root):
             raise ValueError("Package destination is outside its saved output root")
         return path
 
@@ -1029,6 +1245,7 @@ class PortalService:
     ) -> str:
         if not self.allow_cloud:
             raise ValueError("Cloud actions are disabled")
+        execution_identity = self.azure.require_identity()
         package = self.store.job(package_id)
         if package is None or package["kind"] != "prepare" or package["status"] != "SUCCEEDED":
             raise ValueError("Select a successfully prepared package")
@@ -1040,7 +1257,10 @@ class PortalService:
         if capacity and capacity not in {f"F{2 ** exponent}" for exponent in range(1, 12)}:
             raise ValueError("Select an available capacity SKU or Unknown")
         config = backfill.load_target(self.catalog, target, profile, overrides=overrides)
-        payload = {"package_id": package_id, "config": asdict(config), "wait": wait}
+        payload = {
+            "package_id": package_id, "config": asdict(config), "wait": wait,
+            "execution_identity": execution_identity,
+        }
         if capacity:
             payload["capacity"] = {"sku": capacity, "source": "operator-declared"}
         # Serialize eligibility with deletion so a selected revision cannot disappear while queued.
@@ -1067,49 +1287,102 @@ class PortalService:
         catalog.write_text(csv_text(PORTAL_CATALOG_FIELDS, payload["cameras"]), encoding="utf-8")
         inventory.write_text(csv_text(EXCEPTION_FIELDS, payload["exceptions"]), encoding="utf-8")
         package = self.package_dir(identity)
+        source = self.for_source(payload.get("source", {"kind": "local"})).source
+        inputs = (
+            SelectedFootageInput(
+                source, payload["videos"], payload["observations"],
+                progress=lambda message: self.store.event(identity, message),
+            ) if "videos" in payload else None
+        )
+        if payload.get("execution_identity"):
+            self.azure.credential(payload["execution_identity"]).get_token("https://storage.azure.com/.default")
         config = PublisherConfig(
-            catalog, inventory, self.source.video_root, self.source.prefix(payload["folder"]),
+            catalog, inventory, self.local_source.video_root, source.prefix(payload["folder"]),
             "offline", "offline", "staging", "incoming", folder / "prepare.sqlite3",
             package / "rejection-report.csv", package / "generated-video-inventory.csv",
             10000, True, output_dir=package, summary_report_path=package / "summary.json",
         )
 
         def inspect(path: Path):
-            self.store.event(identity, f"Inspecting and hashing {path.relative_to(self.source.root)}")
+            self.store.event(identity, f"Inspecting and hashing {path.relative_to(self.local_source.root)}")
             return inspect_video(path)
 
         try:
-            summary = run_publisher(config, storage=None, inspector=inspect)
+            if inputs is None:
+                summary = run_publisher(config, storage=None, inspector=inspect)
+            else:
+                summary = run_publisher(config, storage=None, input_source=inputs)
         finally:
             self._retain_reports(identity, package)
         if summary.rejected:
             raise ValueError(f"{summary.rejected} videos rejected. Review the rejection report, correct metadata, and prepare a new package.")
         if not summary.planned:
             raise ValueError("No supported videos were found in this folder")
+        if "source" in payload:
+            (package / "source-provenance.json").write_text(json.dumps({
+                "source": payload["source"], "selected_videos": payload["videos"],
+                "observations": payload["observations"],
+                "reopen": "Use this portal revision with its original source. The metadata ZIP does not contain footage.",
+            }, allow_nan=False, indent=2) + "\n", encoding="utf-8")
         return asdict(summary)
 
     def _cloud(self, identity: str, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         if not self.allow_cloud:
             raise ValueError("Cloud actions are disabled")
         config = backfill._parse_config({"intake_mode": "explicit", **payload["config"]})
+        execution_identity = payload.get("execution_identity") or self.azure.require_identity()
+        credential = self.azure.credential(execution_identity)
+        identity_policy = self.azure.policy(execution_identity)
         package_dir = self.package_dir(payload["package_id"])
-        publication = backfill.publication_config(
-            package_dir, self.source.video_root, self.job_dir(identity), config,
+        prepared = self.store.job(payload["package_id"])
+        if prepared is None:
+            raise ValueError("The prepared package job is missing")
+        source_payload = prepared["payload"]
+        source = self.for_source(source_payload.get("source", {"kind": "local"})).source
+        inputs = (
+            SelectedFootageInput(source, source_payload["videos"], source_payload["observations"])
+            if "videos" in source_payload else None
         )
-        package = validate_manifest_package(publication)
+        publication = backfill.publication_config(
+            package_dir, self.local_source.video_root, self.job_dir(identity), config,
+        )
+        package = validate_manifest_package(publication, input_source=inputs)
+        self.protect_source_files(source, source_payload.get("videos", []), config, package)
         if kind == "publish":
             self.store.event(identity, "Publishing videos first and final manifests last")
-            storage = AzureDataLakeStorage(config.storage_account, config.filesystem, chunk_size=publication.chunk_size)
-            summary = publish_manifest_package(publication, storage, validated_package=package)
+            storage = AzureDataLakeStorage(
+                config.storage_account, config.filesystem, chunk_size=publication.chunk_size,
+                credential=credential,
+                identity_policy=identity_policy,
+            )
+            summary = publish_manifest_package(publication, storage, validated_package=package, input_source=inputs)
             if summary.rejected:
                 raise ValueError("Publication rejected videos; inspect the publication rejection report")
             return asdict(summary)
         if payload["wait"]:
-            with backfill.processing_reader(config) as connection:
-                result = backfill.submit(package, publication, config, self.job_dir(identity))
+            with backfill.processing_reader(config, credential=credential) as connection:
+                result = backfill.submit(
+                    package, publication, config, self.job_dir(identity),
+                    credential=credential, input_source=inputs, identity_policy=identity_policy,
+                )
                 result.update(backfill.wait_for_processing(connection, config, self.job_dir(identity)))
                 return result
-        return backfill.submit(package, publication, config, self.job_dir(identity))
+        return backfill.submit(
+            package, publication, config, self.job_dir(identity),
+            credential=credential, input_source=inputs, identity_policy=identity_policy,
+        )
+
+    def protect_source_files(
+        self, source: LocalFootageSource | AdlsFootageSource, videos: list[str],
+        config: backfill.BackfillConfig, package: ValidatedManifestPackage,
+    ) -> None:
+        if not isinstance(source, AdlsFootageSource):
+            return
+        if (source.account, source.filesystem) != (config.storage_account, config.filesystem):
+            return
+        source_paths = {source.remote_path(video) for video in videos}
+        if any(plan.staging_video_path in source_paths for plan in package.plans):
+            raise ValueError("Publication staging would modify source footage. Choose a separate source or target.")
 
     def run_next_job(self) -> bool:
         job = self.store.claim()

@@ -61,6 +61,13 @@ Open **http://127.0.0.1:8088**. The portal and live Tailwind watcher start, not 
 models are mounted read-only, state persists in named volumes, and cloud
 actions are disabled by default. See the [operator portal guide](docs/operator-portal.md)
 for source-folder configuration, Azure sign-in, recovery, and Playwright/CI tests.
+For ADLS sources using the current host user's Azure CLI identity, run
+`uv run pc-admin --source-root /absolute/path/to/footage` on that host after
+installing the `portal`, `publisher`, and `demo` extras. Docker retains its isolated
+CLI configuration and does not reuse the host login. Packages is the landing page:
+choose **New package**, select local or ADLS footage, associate cameras, generate,
+then explicitly publish. Remote previews use bounded range reads; complete content
+hashing and publication stream all original bytes without normal full-video retention.
 Register named locations and cameras without footage; IDs are generated from
 their names. Calibration selects a location, one of its cameras, and an IANA timezone.
 
