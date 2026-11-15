@@ -307,18 +307,15 @@ def run_with_runtime(
             f"expected {expected_spec!r}, got {runtime.spec!r}"
         )
     config.result.ensure_unused()
-    capture = cv2.VideoCapture(str(config.video))
-    if not capture.isOpened():
-        raise RuntimeError(f"Could not open input video: {config.video}")
-    try:
-        metadata = read_video_metadata(capture, config.video)
-    except Exception:
-        capture.release()
-        raise
     read_state = FrameReadState()
-    processing_started = time.perf_counter()
+    processing_started = None
     line_zone = None
+    capture = cv2.VideoCapture(str(config.video))
     try:
+        if not capture.isOpened():
+            raise RuntimeError(f"Could not open input video: {config.video}")
+        metadata = read_video_metadata(capture, config.video)
+        processing_started = time.perf_counter()
         state = initialize_run_state(config, runtime, metadata)
         line_zone = state.line_zone
         for frame_batch in iter_sampled_frame_batches(
@@ -330,13 +327,16 @@ def run_with_runtime(
         ):
             process_frame_batch(state, frame_batch)
     finally:
-        finalize_run(
-            config.result,
-            capture,
-            read_state,
-            processing_started,
-            line_zone,
-        )
+        if processing_started is None:
+            capture.release()
+        else:
+            finalize_run(
+                config.result,
+                capture,
+                read_state,
+                processing_started,
+                line_zone,
+            )
     return config.result
 
 

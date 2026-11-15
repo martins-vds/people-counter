@@ -46,7 +46,7 @@ None/
 .ruff_cache/
 .test-artifacts/
 test-results/
-tmp*/
+*tmp*/
 
 # Portal JavaScript development dependencies
 node_modules/

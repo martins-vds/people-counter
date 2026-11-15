@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from people_counter.manifest import (
     CONTENT_TYPES,
@@ -14,6 +15,18 @@ from people_counter.manifest import (
     inspect_video,
     normalize_relative_path,
 )
+
+_T = TypeVar("_T")
+
+
+@contextmanager
+def closing_iterator(values: Iterator[_T]) -> Iterator[Iterator[_T]]:
+    try:
+        yield values
+    finally:
+        close = getattr(values, "close", None)
+        if callable(close):
+            close()
 
 
 @dataclass(frozen=True)

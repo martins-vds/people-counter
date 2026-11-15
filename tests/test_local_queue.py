@@ -10,6 +10,7 @@ from people_counter.local_queue import (
     ActorClosedError,
     ActorDiedError,
     LeaseLostError,
+    MessageNotFoundError,
     QueueConflictError,
     SQLiteQueue,
     SerializedQueueActor,
@@ -24,6 +25,48 @@ class SQLiteQueueTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_lookup_reports_the_invalid_field_and_missing_identifier(self):
+        with self.assertRaises(ValueError) as invalid:
+            self.queue.get(" ")
+        self.assertEqual(str(invalid.exception), "message_id must be a non-empty string")
+        with self.assertRaises(MessageNotFoundError) as missing:
+            self.queue.get(" missing-message ")
+        self.assertEqual(missing.exception.args, ("missing-message",))
+
+    def test_direct_connections_close_on_success_and_sql_error(self):
+        message_id = self.queue.enqueue("connection-lifetime", {})
+        operations = (
+            self.queue.initialize,
+            lambda: self.queue.get(message_id),
+            self.queue.list,
+        )
+        connect = self.queue._connect
+        for operation in operations:
+            for fail in (False, True):
+                with self.subTest(operation=operation, fail=fail):
+                    connections = []
+
+                    def spy_connect():
+                        connection = connect()
+                        connections.append(connection)
+                        if fail:
+                            connection.set_authorizer(lambda *_: sqlite3.SQLITE_DENY)
+                        return connection
+
+                    try:
+                        with patch.object(self.queue, "_connect", side_effect=spy_connect):
+                            if fail:
+                                with self.assertRaises(sqlite3.DatabaseError):
+                                    operation()
+                            else:
+                                operation()
+                        self.assertEqual(len(connections), 1)
+                        with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                            connections[0].execute("SELECT 1")
+                    finally:
+                        for connection in connections:
+                            connection.close()
 
     def test_enqueue_is_idempotent_only_for_identical_content(self):
         first = self.queue.enqueue("camera:a", {"video": "a.mp4"})

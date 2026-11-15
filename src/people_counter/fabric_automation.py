@@ -29,6 +29,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
@@ -169,6 +170,11 @@ class GitHubOidcResourceTokenProvider:
         try:
             with urlopen(request, timeout=60) as response:
                 payload = self._response_json(response, "GitHub OIDC")
+        except HTTPError as error:
+            try:
+                raise FabricApiError("GitHub OIDC assertion request failed") from error
+            finally:
+                error.close()
         except OSError as error:
             raise FabricApiError("GitHub OIDC assertion request failed") from error
         assertion = payload.get("value")
@@ -202,6 +208,11 @@ class GitHubOidcResourceTokenProvider:
         try:
             with urlopen(request, timeout=60) as response:
                 payload = self._response_json(response, "Microsoft Entra token")
+        except HTTPError as error:
+            try:
+                raise FabricApiError("Microsoft Entra token exchange failed") from error
+            finally:
+                error.close()
         except OSError as error:
             raise FabricApiError("Microsoft Entra token exchange failed") from error
         token = payload.get("access_token")

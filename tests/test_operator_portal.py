@@ -160,16 +160,133 @@ def test_portal_shutdown_closes_runtime_credentials(monkeypatch, tmp_path):
     from people_counter import operator_portal
 
     credential = SimpleNamespace(close=Mock())
-    runtime = SimpleNamespace(state=tmp_path, work=lambda stop: None, _azure=object(), azure=credential)
+    runtime = SimpleNamespace(state=tmp_path, work=lambda stop: None, close=credential.close)
     handlers = {}
     monkeypatch.setattr(signal, "signal", lambda name, handler: handlers.setdefault(name, handler))
     monkeypatch.setattr(operator_portal.PortalService, "from_environment", lambda *args, **kwargs: runtime)
     monkeypatch.setattr(operator_portal, "create_app", lambda service: object())
     monkeypatch.setattr("sys.argv", ["pc-admin"])
-    monkeypatch.setattr("waitress.serve", lambda *args, **kwargs: handlers[signal.SIGTERM](signal.SIGTERM, None))
+    monkeypatch.setattr("waitress.task.ThreadedTaskDispatcher", Mock())
+    monkeypatch.setattr("waitress.server.create_server", lambda *args, **kwargs: SimpleNamespace(
+        run=lambda: handlers[signal.SIGTERM](signal.SIGTERM, None),
+    ))
     with pytest.raises(SystemExit):
         operator_portal.main()
     credential.close.assert_called_once()
+
+
+def test_shutdown_drains_channels_and_worker_before_closing_runtime(monkeypatch, tmp_path):
+    import signal
+    import threading
+    from unittest.mock import Mock
+    from people_counter import operator_portal
+
+    entered = threading.Event()
+    events = []
+    def work(stop):
+        entered.set()
+        assert stop.wait(5)
+        events.append("worker")
+    runtime = SimpleNamespace(state=tmp_path, work=work, close=lambda: events.append("runtime"))
+    dispatcher = Mock()
+    dispatcher.shutdown.side_effect = lambda **kwargs: events.append("http")
+    def create_server(*args, **kwargs):
+        kwargs["map"][1] = SimpleNamespace(close=lambda: events.append("channel"))
+        return SimpleNamespace(run=lambda: entered.wait(5))
+    monkeypatch.setattr(signal, "signal", lambda *args: signal.SIG_DFL)
+    monkeypatch.setattr(operator_portal.PortalService, "from_environment", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(operator_portal, "create_app", lambda service: object())
+    monkeypatch.setattr("waitress.task.ThreadedTaskDispatcher", lambda: dispatcher)
+    monkeypatch.setattr("waitress.server.create_server", create_server)
+    monkeypatch.setattr("sys.argv", ["pc-admin"])
+    operator_portal.main()
+    assert events.index("channel") < events.index("http")
+    assert events.index("worker") < events.index("runtime")
+    assert events.index("http") < events.index("runtime")
+
+
+def test_server_startup_failure_cleans_acquired_channels_and_restores_signals(monkeypatch, tmp_path):
+    import signal
+    from unittest.mock import Mock
+    from people_counter import operator_portal
+
+    runtime = SimpleNamespace(state=tmp_path, work=Mock(), close=Mock())
+    channel, dispatcher = Mock(), Mock()
+    previous = {signal.SIGTERM: signal.SIG_DFL, signal.SIGINT: signal.SIG_IGN}
+    signals = Mock(side_effect=lambda name, handler: previous[name])
+    def create_server(*args, **kwargs):
+        kwargs["map"][1] = channel
+        raise OSError("Bind failed")
+    monkeypatch.setattr(signal, "signal", signals)
+    monkeypatch.setattr(operator_portal.PortalService, "from_environment", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(operator_portal, "create_app", lambda service: object())
+    monkeypatch.setattr("waitress.task.ThreadedTaskDispatcher", lambda: dispatcher)
+    monkeypatch.setattr("waitress.server.create_server", create_server)
+    monkeypatch.setattr("sys.argv", ["pc-admin"])
+    with pytest.raises(OSError, match="Bind failed"):
+        operator_portal.main()
+    runtime.work.assert_not_called()
+    channel.close.assert_called_once()
+    dispatcher.shutdown.assert_called_once()
+    runtime.close.assert_called_once()
+    assert [call.args for call in signals.call_args_list[-2:]] == list(previous.items())
+
+
+def test_channel_close_error_does_not_skip_other_channel_cleanup():
+    from unittest.mock import Mock
+    from people_counter.operator_portal import _close_server_channels
+
+    good, broken = Mock(), Mock()
+    broken.close.side_effect = OSError("Close failed")
+    channels = {1: good, 2: broken}
+    with pytest.raises(OSError, match="Close failed"):
+        _close_server_channels(channels)
+    good.close.assert_called_once()
+    broken.close.assert_called_once()
+    assert channels == {}
+
+
+def test_shutdown_wakes_native_http_download_backpressure(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Condition, Event
+    from unittest.mock import Mock
+    from waitress.channel import HTTPChannel
+    from people_counter.operator_portal import _close_server_channels
+
+    waiting = Event()
+    channel = HTTPChannel.__new__(HTTPChannel)
+    buffer = Mock()
+    for name, value in {
+        "outbuf_lock": Condition(), "outbufs": [buffer], "total_outbufs_len": 2,
+        "connected": True, "adj": SimpleNamespace(outbuf_high_watermark=1),
+        "server": SimpleNamespace(pull_trigger=waiting.set, active_channels={}),
+        "_flush_exception": lambda *args, **kwargs: (False, None),
+        "_flush_some": lambda: False, "_map": {}, "_fileno": None, "socket": Mock(),
+    }.items():
+        monkeypatch.setattr(channel, name, value, raising=False)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        task = pool.submit(getattr(channel, "_flush_outbufs_below_high_watermark"))
+        try:
+            assert waiting.wait(2)
+            _close_server_channels({1: channel})
+            task.result(timeout=2)
+            buffer.close.assert_called_once()
+        finally:
+            if not task.done():
+                channel.handle_close()
+
+
+def test_service_close_releases_credentials_even_when_source_cleanup_fails(service, monkeypatch):
+    from unittest.mock import Mock
+    from people_counter.portal_sources import AdlsFootageSource
+
+    close = Mock()
+    service._azure = SimpleNamespace(close=close)
+    service.source = AdlsFootageSource({"kind": "adls", "account": "testing", "filesystem": "videos"}, Mock())
+    monkeypatch.setattr(service.source, "reset", Mock(side_effect=OSError("Source close failed")))
+    with pytest.raises(OSError, match="Source close failed"):
+        service.close()
+    close.assert_called_once()
 
 
 def test_package_draft_survives_restart_and_selects_only_explicit_files(service):
@@ -511,10 +628,12 @@ def test_portal_cli_preserves_binding_options_for_configured_adls_startup(servic
     monkeypatch.setattr(portal_web.PortalService, "from_environment", lambda *args, **kwargs: service)
     previous_umask = os.umask(0o077)
     try:
-        with patch("waitress.serve") as serve:
+        with patch("waitress.server.create_server") as serve, patch("waitress.task.ThreadedTaskDispatcher"):
             portal_web.main()
         assert serve.call_args.args[0].extensions["portal_service"] is service
-        assert serve.call_args.kwargs == {"host": host, "port": 8088, "threads": 4}
+        assert {key: serve.call_args.kwargs[key] for key in ("host", "port", "threads")} == {
+            "host": host, "port": 8088, "threads": 4,
+        }
     finally:
         os.umask(previous_umask)
 

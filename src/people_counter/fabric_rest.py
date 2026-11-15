@@ -114,11 +114,14 @@ class UrllibTransport:
                     response.read(),
                 )
         except urllib.error.HTTPError as error:
-            return HTTPResponse(
-                error.code,
-                dict(error.headers.items()),
-                error.read(),
-            )
+            try:
+                return HTTPResponse(
+                    error.code,
+                    dict(error.headers.items()),
+                    error.read(),
+                )
+            finally:
+                error.close()
 
 
 def _canonical_bytes(value: object) -> bytes:

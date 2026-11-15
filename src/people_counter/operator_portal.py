@@ -10,7 +10,10 @@ import secrets
 import signal
 import threading
 from collections.abc import Mapping
+from contextlib import ExitStack
 from pathlib import Path
+from sys import maxsize
+from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import available_timezones
 from werkzeug.exceptions import SecurityError
@@ -257,9 +260,9 @@ def create_app(root_service: PortalService) -> Flask:
         if not isinstance(source, AdlsFootageSource):
             raise ValueError("Choose a folder in the configured ADLS source")
         if source.remote_path(folder):
-            source._call(source.client.get_directory_client(source.remote_path(folder)).get_directory_properties)
+            source._call(lambda: source.client.get_directory_client(source.remote_path(folder)).get_directory_properties())
         else:
-            source._call(source.client.get_file_system_properties)
+            source._call(lambda: source.client.get_file_system_properties())
         return {"folder": folder}
 
     @app.get("/intake/download")
@@ -905,9 +908,21 @@ def create_app(root_service: PortalService) -> Flask:
     return app
 
 
+def _close_server_channels(channels: dict[int, Any]) -> None:
+    from waitress.channel import HTTPChannel
+
+    try:
+        with ExitStack() as resources:
+            for channel in list(channels.values()):
+                resources.callback(channel.handle_close if isinstance(channel, HTTPChannel) else channel.close)
+    finally:
+        channels.clear()
+
+
 def main() -> None:
     from filelock import FileLock
-    from waitress import serve
+    from waitress.server import create_server
+    from waitress.task import ThreadedTaskDispatcher
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models-root", type=Path, default=Path(os.environ.get("PC_PORTAL_MODELS_ROOT", "offline-models")))
@@ -927,23 +942,48 @@ def main() -> None:
         args.models_root, args.state_dir,
         allow_cloud=args.allow_cloud, output_root=args.output_root,
     )
-    with FileLock(service.state / "server.lock", timeout=0):
-        def exit_on_signal(signum, frame):
+    previous_handlers = {}
+    stop = threading.Event()
+
+    def exit_on_signal(signum, frame):
+        if not stop.is_set():
+            stop.set()
             raise SystemExit(0)
 
-        previous_handler = signal.signal(signal.SIGTERM, exit_on_signal)
-        stop = threading.Event()
-        worker = threading.Thread(target=service.work, args=(stop,), daemon=True)
-        worker.start()
-        try:
-            print(f"Operator portal: {_codespaces_origin() or f'http://{args.host}:{args.port}'}", flush=True)
-            serve(create_app(service), host=args.host, port=args.port, threads=4)
-        finally:
-            stop.set()
-            if service._azure is not None:
-                service.azure.close()
-            worker.join(timeout=5)
-            signal.signal(signal.SIGTERM, previous_handler)
+    try:
+        with ExitStack() as resources:
+            resources.callback(service.close)
+            with FileLock(service.state / "server.lock", timeout=0):
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    previous_handlers[signum] = signal.signal(signum, exit_on_signal)
+                worker = threading.Thread(target=service.work, args=(stop,), daemon=True)
+
+                def finish_worker():
+                    stop.set()
+                    if worker.ident is not None:
+                        worker.join()
+
+                resources.callback(finish_worker)
+                dispatcher = ThreadedTaskDispatcher()
+                resources.callback(dispatcher.shutdown, timeout=maxsize)
+                channels: dict[int, Any] = {}
+                resources.callback(_close_server_channels, channels)
+                try:
+                    dispatcher.set_thread_count(4)
+                    server = create_server(
+                        create_app(service), host=args.host, port=args.port,
+                        threads=4, map=channels, _dispatcher=dispatcher,
+                    )
+                    worker.start()
+                    print(f"Operator portal: {_codespaces_origin() or f'http://{args.host}:{args.port}'}", flush=True)
+                    server.run()
+                finally:
+                    stop.set()
+                    # Drain resource users before releasing the state-directory lock.
+                    resources.close()
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

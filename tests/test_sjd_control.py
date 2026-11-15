@@ -50,6 +50,58 @@ class SJDControlTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_lookup_reports_the_invalid_field_and_missing_work(self):
+        with self.assertRaises(ValueError) as invalid:
+            self.store.get_work(" ")
+        self.assertEqual(str(invalid.exception), "work_id must be a non-empty string")
+        with self.assertRaises(KeyError) as missing:
+            self.store.get_work("missing-work")
+        self.assertEqual(missing.exception.args, ("missing-work",))
+
+    def test_direct_connections_close_on_success_and_sql_error(self):
+        self.register("connection-lifetime")
+        batch = self.claim()
+        envelope = verify_envelope(
+            self.store.load_claim_envelope(batch.batch_id),
+            batch_id=batch.batch_id,
+            envelope_sha256=batch.envelope_sha256,
+        )
+        operations = (
+            self.store.bootstrap,
+            lambda: self.store.get_work("connection-lifetime"),
+            lambda: self.store.load_claim_envelope(batch.batch_id),
+            lambda: self.store.load_claim_envelope_with_digest(batch.batch_id),
+            lambda: self.store.process_batch_state(envelope),
+            self.store.status,
+        )
+        connect = self.store._connect
+        for operation in operations:
+            for fail in (False, True):
+                with self.subTest(operation=operation, fail=fail):
+                    connections = []
+
+                    def spy_connect():
+                        connection = connect()
+                        connections.append(connection)
+                        if fail:
+                            connection.set_authorizer(lambda *_: sqlite3.SQLITE_DENY)
+                        return connection
+
+                    try:
+                        with patch.object(self.store, "_connect", side_effect=spy_connect):
+                            if fail:
+                                with self.assertRaises(sqlite3.DatabaseError):
+                                    operation()
+                            else:
+                                operation()
+                        self.assertTrue(connections)
+                        for connection in connections:
+                            with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                                connection.execute("SELECT 1")
+                    finally:
+                        for connection in connections:
+                            connection.close()
+
     def register(self, work_id, *, runtime="runtime-a", max_attempts=3, duration=10):
         return self.store.register(
             work_id,

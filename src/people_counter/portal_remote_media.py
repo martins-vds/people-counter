@@ -18,7 +18,9 @@ import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
+from contextlib import ExitStack
 from fractions import Fraction
+from multiprocessing.process import BaseProcess
 from typing import Any
 
 import av
@@ -304,6 +306,12 @@ def _worker(
             connection.send((True, result))
 
 
+def _stop_decoder(process: BaseProcess) -> None:
+    if process.is_alive():
+        process.kill()
+    process.join()
+
+
 def _run(
     client: DataLakeFileClient, etag: str, size: int, seconds: float | None,
     check_identity: Callable[[], None] | None = None,
@@ -313,12 +321,24 @@ def _run(
         raise RemoteMediaError("Bounded remote decoding requires a fork-capable host")
     context = multiprocessing.get_context("fork")
     parent, child = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_worker, args=(child, client, etag, size, seconds, deadline, check_identity),
-    )
-    process.start()
-    child.close()
-    try:
+    with ExitStack() as resources:
+        resources.callback(parent.close)
+        child_closed = False
+
+        def close_child() -> None:
+            nonlocal child_closed
+            if not child_closed:
+                child.close()
+                child_closed = True
+
+        resources.callback(close_child)
+        process = context.Process(
+            target=_worker, args=(child, client, etag, size, seconds, deadline, check_identity),
+        )
+        resources.callback(process.close)
+        process.start()
+        resources.callback(_stop_decoder, process)
+        close_child()
         if not parent.poll(max(0.0, deadline - time.monotonic())):
             raise PreviewLimitError("Remote preview deadline exceeded")
         try:
@@ -330,12 +350,6 @@ def _run(
         if not ok:
             raise result
         return result
-    finally:
-        parent.close()
-        if process.is_alive():
-            process.kill()
-        process.join()
-        process.close()
 
 
 def remote_probe(

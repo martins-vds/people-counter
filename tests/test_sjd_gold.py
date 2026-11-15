@@ -3,6 +3,7 @@ import json
 import sqlite3
 import sys
 import types
+from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, call
@@ -25,6 +26,7 @@ from people_counter.sjd_gold import (
     GoldValidationError,
     LocalGoldJob,
     LocalJsonGoldStore,
+    SQLiteGoldState,
     SourceCheckpoint,
     UnsupportedGoldBackendError,
     _checkpoint_targets_match,
@@ -42,6 +44,133 @@ from people_counter.sjd_gold import (
 )
 
 pytest_plugins = ("tests.test_fabric_gold",)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "checkpoint",
+        "save_checkpoint",
+        "enqueue_refresh",
+        "save_checkpoints_and_enqueue",
+        "save_checkpoints_without_refresh",
+        "pending_refreshes",
+        "acknowledge_refresh",
+        "_bootstrap",
+        "source_checkpoint",
+        "operations_source_checkpoint",
+        "committed_outputs",
+        "_control_rows",
+    ],
+)
+@pytest.mark.parametrize("fail", [False, True])
+def test_direct_connections_close_on_success_and_sql_error(
+    gold_fixture, monkeypatch, operation, fail
+):
+    job = gold_fixture.job()
+    source = SourceCheckpoint(0, {})
+    state = job.state
+    operations = {
+        "checkpoint": lambda: state.checkpoint("facts"),
+        "save_checkpoint": lambda: state.save_checkpoint("facts", source, {}),
+        "enqueue_refresh": lambda: state.enqueue_refresh("test", source, {}),
+        "save_checkpoints_and_enqueue": lambda: state.save_checkpoints_and_enqueue(
+            {"facts": (source, {})}, "test", source, {}
+        ),
+        "save_checkpoints_without_refresh": lambda: state.save_checkpoints_and_enqueue(
+            {"facts": (source, {})}, None, source, {}
+        ),
+        "pending_refreshes": state.pending_refreshes,
+        "acknowledge_refresh": lambda: state.acknowledge_refresh(1),
+        "_bootstrap": state._bootstrap,
+        "source_checkpoint": job.source_checkpoint,
+        "operations_source_checkpoint": job.operations_source_checkpoint,
+        "committed_outputs": job.committed_outputs,
+        "_control_rows": job._control_rows,
+    }
+    owner = job if operation in {
+        "source_checkpoint", "operations_source_checkpoint",
+        "committed_outputs", "_control_rows",
+    } else state
+    connect = owner._connect
+    connections = []
+
+    def spy_connect():
+        connection = connect()
+        connections.append(connection)
+        if fail:
+            connection.set_authorizer(lambda *_: sqlite3.SQLITE_DENY)
+        return connection
+
+    monkeypatch.setattr(owner, "_connect", spy_connect)
+    try:
+        if fail:
+            with pytest.raises(sqlite3.DatabaseError):
+                operations[operation]()
+        else:
+            operations[operation]()
+        assert len(connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connections[0].execute("SELECT 1")
+    finally:
+        for connection in connections:
+            connection.close()
+
+
+@pytest.mark.parametrize("reason", [None, "refresh"])
+def test_checkpoint_transaction_commits_on_early_return_and_rolls_back_on_error(
+    tmp_path, monkeypatch, reason
+):
+    database = tmp_path / "gold.sqlite3"
+    state = SQLiteGoldState(database)
+    source = SourceCheckpoint(7, {"work": "version"})
+    connections = []
+    connect = state._connect
+
+    def spy_connect():
+        connection = connect()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(state, "_connect", spy_connect)
+    try:
+        outbox_id = state.save_checkpoints_and_enqueue(
+            {"kept": (source, {"gold_video": 1})}, reason, source, {}
+        )
+        with closing(sqlite3.connect(database)) as reader, reader:
+            assert reader.execute(
+                "SELECT publication_sequence FROM gold_checkpoints WHERE stage = 'kept'"
+            ).fetchone() == (7,)
+            assert reader.execute(
+                "SELECT COUNT(*) FROM semantic_refresh_outbox"
+            ).fetchone() == (int(reason is not None),)
+            reader.execute(
+                """
+                CREATE TRIGGER reject_checkpoint BEFORE INSERT ON gold_checkpoints
+                WHEN NEW.stage = 'reject'
+                BEGIN SELECT RAISE(ABORT, 'checkpoint rejected'); END;
+                """
+            )
+        assert (outbox_id is None) == (reason is None)
+        with pytest.raises(sqlite3.IntegrityError, match="checkpoint rejected"):
+            state.save_checkpoints_and_enqueue(
+                {"rolled-back": (source, {}), "reject": (source, {})},
+                reason, source, {},
+            )
+        with closing(sqlite3.connect(database)) as reader, reader:
+            assert reader.execute(
+                "SELECT stage FROM gold_checkpoints ORDER BY stage"
+            ).fetchall() == [("kept",)]
+            assert reader.execute(
+                "SELECT COUNT(*) FROM semantic_refresh_outbox"
+            ).fetchone() == (int(reason is not None),)
+        assert len(connections) == 2
+        for connection in connections:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                connection.execute("SELECT 1")
+    finally:
+        for connection in connections:
+            connection.close()
 
 
 def test_fabric_gold_store_bootstrap_creates_missing_typed_tables() -> None:

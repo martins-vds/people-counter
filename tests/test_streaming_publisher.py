@@ -3,10 +3,11 @@
 import hashlib
 import sqlite3
 from dataclasses import replace
+from unittest.mock import Mock
 
 import pytest
 
-from people_counter.adls import PublicationConflictError, RemoteObject
+from people_counter.adls import AzureDataLakeStorage, PublicationConflictError, RemoteObject
 from people_counter.manifest import (
     ManifestPublisherError,
     VideoInspection,
@@ -26,6 +27,92 @@ from tests.test_manifest_publisher import FakeStorage, write_catalog
 from tests.test_manifest_publisher import adls_storage as _adls_storage
 
 adls_storage = _adls_storage
+
+
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_storage_closes_service_and_only_its_owned_credential(monkeypatch, borrowed):
+    credential, service = Mock(), Mock()
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", Mock(return_value=credential))
+    monkeypatch.setattr("azure.storage.filedatalake.DataLakeServiceClient", Mock(return_value=service))
+    storage = AzureDataLakeStorage(
+        "testaccount", "footage", chunk_size=2, credential=credential if borrowed else None,
+    )
+    service.close.assert_not_called()
+    storage.close()
+    storage.close()
+    service.close.assert_called_once()
+    assert credential.close.call_count == (0 if borrowed else 1)
+
+
+def test_storage_constructor_failure_closes_all_acquired_resources(monkeypatch):
+    credential, service = Mock(), Mock()
+    service.get_file_system_client.side_effect = RuntimeError("Filesystem initialization failed")
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", Mock(return_value=credential))
+    monkeypatch.setattr("azure.storage.filedatalake.DataLakeServiceClient", Mock(return_value=service))
+    with pytest.raises(RuntimeError, match="Filesystem initialization"):
+        AzureDataLakeStorage("testaccount", "footage", chunk_size=2)
+    service.close.assert_called_once()
+    credential.close.assert_called_once()
+
+
+def test_storage_close_failure_still_closes_owned_credential(monkeypatch):
+    credential, service = Mock(), Mock()
+    service.close.side_effect = RuntimeError("Transport close failed")
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", Mock(return_value=credential))
+    monkeypatch.setattr("azure.storage.filedatalake.DataLakeServiceClient", Mock(return_value=service))
+    storage = AzureDataLakeStorage("testaccount", "footage", chunk_size=2)
+    with pytest.raises(RuntimeError, match="Transport close"):
+        storage.close()
+    credential.close.assert_called_once()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_storage_context_closes_resources_and_preserves_body_error(monkeypatch, fails):
+    credential, service = Mock(), Mock()
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", Mock(return_value=credential))
+    monkeypatch.setattr("azure.storage.filedatalake.DataLakeServiceClient", Mock(return_value=service))
+    def publish():
+        with AzureDataLakeStorage("testaccount", "footage", chunk_size=2):
+            if fails:
+                raise ValueError("Publication failed")
+    if fails:
+        with pytest.raises(ValueError, match="Publication failed"):
+            publish()
+    else:
+        publish()
+    service.close.assert_called_once()
+    credential.close.assert_called_once()
+
+
+def test_resumed_upload_closes_each_retained_source_iterator(tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"abcd")
+    handles, iterators = [], []
+    def chunks():
+        def generate():
+            with path.open("rb") as handle:
+                handles.append(handle)
+                while block := handle.read(2):
+                    yield block
+        iterator = generate()
+        iterators.append(iterator)
+        return iterator
+    storage = AzureDataLakeStorage.__new__(AzureDataLakeStorage)
+    storage._chunk_size = 2
+    storage.stat = lambda path: RemoteObject(size=2, etag="version")
+    storage.sha256 = lambda path: hashlib.sha256(b"ab").hexdigest()
+    storage._ensure_parent = lambda path: None
+    client = Mock()
+    client.append_data.side_effect = RuntimeError("Upload stopped")
+    storage._file_client = lambda path: client
+    try:
+        with pytest.raises(RuntimeError, match="Upload stopped"):
+            storage.upload_stream(chunks, "clip.mp4", "video/mp4", 4, hashlib.sha256(b"abcd").hexdigest())
+        assert len(handles) == 2
+        assert all(handle.closed for handle in handles)
+    finally:
+        for iterator in iterators:
+            iterator.close()
 
 
 RELATIVE = "north/camera-17/clip-20260601T120000Z.mp4"

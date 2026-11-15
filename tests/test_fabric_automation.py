@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from io import BytesIO
+from urllib.error import HTTPError
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -280,8 +283,9 @@ def test_resource_token_provider_validates_resource_and_redacts_repr(
     assert "access-token" not in repr(provider)
 
 
+@pytest.mark.parametrize("query", ["", "?api-version=2.0"])
 def test_resource_token_provider_uses_github_oidc_and_caches_access_token(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, query: str,
 ) -> None:
     requests: list[Request] = []
     responses = [
@@ -301,7 +305,7 @@ def test_resource_token_provider_uses_github_oidc_and_caches_access_token(
         env={
             "ACTIONS_ID_TOKEN_REQUEST_URL": (
                 "https://vstoken.actions.githubusercontent.com/"
-                "oidc?api-version=2.0"
+                f"oidc{query}"
             ),
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "github-request-token",
             "ARM_CLIENT_ID": "88fb936a-6e03-42f2-9ca9-6a0869e1523e",
@@ -319,6 +323,11 @@ def test_resource_token_provider_uses_github_oidc_and_caches_access_token(
     )
     assert assertion_request.full_url.endswith(
         "audience=api%3A%2F%2FAzureADTokenExchange"
+    )
+    assert assertion_request.full_url == (
+        "https://vstoken.actions.githubusercontent.com/oidc"
+        + query + ("&" if query else "?")
+        + "audience=api%3A%2F%2FAzureADTokenExchange"
     )
     token_request = requests[1]
     token_form = parse_qs(token_request.data.decode())
@@ -425,6 +434,8 @@ def test_oidc_provider_rejects_invalid_identity_before_network(changes, message)
     ([_UrlResponse(b'{"value":"assertion"}'), OSError("unavailable")], "token exchange failed"),
 ])
 def test_oidc_exchange_reports_external_failures(monkeypatch, responses, message):
+    responses = list(responses)
+
     def open_url(*args, **kwargs):
         response = responses.pop(0)
         if isinstance(response, OSError):
@@ -442,6 +453,55 @@ def test_oidc_exchange_reports_external_failures(monkeypatch, responses, message
     with pytest.raises(FabricApiError, match=message):
         provider.get_token()
     assert responses == []
+
+
+@pytest.mark.parametrize("payload,message", [
+    (b"{", "GitHub OIDC is invalid JSON"),
+    (b'{"value":7}', "GitHub OIDC response omitted the assertion"),
+    (b'{"value":""}', "GitHub OIDC response omitted the assertion"),
+    (b'{}', "GitHub OIDC response omitted the assertion"),
+])
+def test_oidc_assertion_errors_identify_the_failing_exchange(monkeypatch, payload, message):
+    monkeypatch.setattr(fabric_automation, "urlopen", lambda *args, **kwargs: _UrlResponse(payload))
+    provider = GitHubOidcResourceTokenProvider(
+        resource="https://storage.azure.com/",
+        client_id="88fb936a-6e03-42f2-9ca9-6a0869e1523e",
+        tenant_id="b8005d83-0703-4f94-8749-5c3e02f07bba",
+        request_url="https://vstoken.actions.githubusercontent.com/oidc",
+        request_token="test-token",
+    )
+    with pytest.raises(FabricApiError) as error:
+        provider.get_token()
+    assert str(error.value) == message
+
+
+@pytest.mark.parametrize("http_error", [False, True])
+def test_oidc_assertion_network_failure_preserves_cause_and_safe_message(monkeypatch, http_error):
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    body = BytesIO(b"private failure detail")
+    failure = HTTPError("https://vstoken.actions.githubusercontent.com/oidc", 503, "failed", {}, body) \
+        if http_error else OSError("private failure detail")
+    def unavailable(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(fabric_automation, "urlopen", unavailable)
+    provider = GitHubOidcResourceTokenProvider(
+        resource="https://storage.azure.com/",
+        client_id="88fb936a-6e03-42f2-9ca9-6a0869e1523e",
+        tenant_id="b8005d83-0703-4f94-8749-5c3e02f07bba",
+        request_url="https://vstoken.actions.githubusercontent.com/oidc",
+        request_token="test-token",
+    )
+    try:
+        with pytest.raises(FabricApiError) as error:
+            provider.get_token()
+        assert str(error.value) == "GitHub OIDC assertion request failed"
+        assert error.value.__cause__ is failure
+        if http_error:
+            assert body.closed
+    finally:
+        body.close()
 
 
 @pytest.mark.parametrize("failure", [False, True])
@@ -1058,3 +1118,25 @@ def test_resource_token_provider_uses_explicit_guarded_credential():
         assert provider.get_token() == "guarded-token"
     credential.get_token.assert_called_once_with("https://api.fabric.microsoft.com/.default")
     assert "guarded-token" not in repr(provider)
+@pytest.mark.parametrize("exchange", [False, True])
+def test_oidc_http_error_closes_owned_body(monkeypatch, exchange):
+    body = BytesIO(b"denied")
+    error = HTTPError("https://example.test", 403, "denied", {}, body)
+    provider = GitHubOidcResourceTokenProvider(
+        resource="https://storage.azure.com/",
+        client_id="88fb936a-6e03-42f2-9ca9-6a0869e1523e",
+        tenant_id="b8005d83-0703-4f94-8749-5c3e02f07bba",
+        request_url="https://pipelinesghubeus2.actions.githubusercontent.com/oidc",
+        request_token="request-token",
+    )
+    if exchange:
+        monkeypatch.setattr(type(provider), "_github_assertion", lambda self: "assertion")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("people_counter.fabric_automation.urlopen", fail)
+    with pytest.raises(FabricApiError) as raised:
+        provider.get_token()
+    assert raised.value.__cause__ is error
+    assert body.closed

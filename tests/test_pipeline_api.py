@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
+import pytest
 
 from people_counter.api import (
     load_runtime,
@@ -33,6 +34,28 @@ from people_counter.pipelines.rtdetr_osnet import (
 )
 from people_counter.video import read_video_metadata
 from tests.helpers import FakeCapture, RecordingEmbedder
+
+
+@pytest.mark.parametrize("botsort", [False, True])
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, SystemExit, RuntimeError])
+def test_capture_released_when_metadata_probe_raises(monkeypatch, botsort, failure):
+    from people_counter.pipelines import rfdetr_botsort, rtdetr_osnet
+
+    pipeline = rfdetr_botsort if botsort else rtdetr_osnet
+    config_type = RFDetrBotsortConfig if botsort else RTDetrOsnetConfig
+    config = config_type(video=Path("video.mp4"), device_variant="cpu", device="cpu", batch_size=1)
+    runtime = MagicMock()
+    runtime.spec = pipeline.runtime_spec(config)
+    capture = FakeCapture([np.zeros((1, 1, 3), dtype=np.uint8)])
+    monkeypatch.setattr(pipeline.cv2, "VideoCapture", lambda _: capture)
+
+    def fail(*args):
+        raise failure("metadata failed")
+
+    monkeypatch.setattr(pipeline, "read_video_metadata", fail)
+    with pytest.raises(failure, match="metadata failed"):
+        pipeline.run_with_runtime(config, runtime)
+    assert capture.released
 
 
 def rtdetr_spec() -> RTDetrRuntimeSpec:

@@ -6,9 +6,11 @@ import hashlib
 import logging
 import os
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path, PurePosixPath
+from threading import RLock
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -70,47 +72,63 @@ class AdlsFootageSource:
         self.preview_store = preview_store
         self.execution_identity: dict | None = None
         self._client: Any = None
+        self._resources = ExitStack()
+        self._client_lock = RLock()
 
     @property
     def client(self) -> Any:
-        if self._client is None:
-            self._client = self._open()
-        return self._client
+        with self._client_lock:
+            if self._client is None:
+                self._client = self._open()
+            return self._client
+
+    @contextmanager
+    def lease(self) -> Iterator[None]:
+        with self._client_lock:
+            yield
 
     def _open(self) -> Any:
         from azure.storage.filedatalake import DataLakeServiceClient
 
         self.execution_identity = self.azure.require_identity()
         credential = self.azure.credential(self.execution_identity)
-        return DataLakeServiceClient(
-            f"https://{self.account}.dfs.core.windows.net", credential=credential,
-            max_single_get_size=8 * 1024 * 1024, max_chunk_get_size=8 * 1024 * 1024,
-            connection_timeout=10, read_timeout=10,
-            _additional_pipeline_policies=[self.azure.policy(self.execution_identity)],
-        ).get_file_system_client(self.filesystem)
+        with ExitStack() as resources:
+            service = DataLakeServiceClient(
+                f"https://{self.account}.dfs.core.windows.net", credential=credential,
+                max_single_get_size=8 * 1024 * 1024, max_chunk_get_size=8 * 1024 * 1024,
+                connection_timeout=10, read_timeout=10,
+                _additional_pipeline_policies=[self.azure.policy(self.execution_identity)],
+            )
+            resources.callback(service.close)
+            client = service.get_file_system_client(self.filesystem)
+            self._resources = resources.pop_all()
+            return client
 
     def _call(self, function: Any, *args: Any, **kwargs: Any) -> Any:
         from azure.core.exceptions import AzureError
 
-        try:
-            self.assert_identity()
-            return function(*args, **kwargs)
-        except AzureError as error:
-            logging.getLogger(__name__).warning("ADLS source operation failed: %s", type(error).__name__)
-            raise ValueError(
-                f"ADLS access failed ({type(error).__name__}). Check runtime credentials, "
-                "Storage Blob data/ACL permissions, and storage network access."
-            ) from error
+        with self._client_lock:
+            try:
+                self.assert_identity()
+                return function(*args, **kwargs)
+            except AzureError as error:
+                logging.getLogger(__name__).warning("ADLS source operation failed: %s", type(error).__name__)
+                raise ValueError(
+                    f"ADLS access failed ({type(error).__name__}). Check runtime credentials, "
+                    "Storage Blob data/ACL permissions, and storage network access."
+                ) from error
 
     def assert_identity(self) -> None:
         if self.execution_identity is not None:
             self.azure.check_identity(self.execution_identity)
 
     def reset(self) -> None:
-        if self._client is not None:
-            self._client.close()
-        self._client = None
-        self.execution_identity = None
+        with self._client_lock:
+            try:
+                self._resources.close()
+            finally:
+                self._client = None
+                self.execution_identity = None
 
     def canonical(self, path: str, *, directory: bool = False) -> str:
         if not path and directory:
@@ -134,33 +152,36 @@ class AdlsFootageSource:
         return self.client.get_file_client(self.remote_path(video))
 
     def properties(self, video: str) -> dict[str, Any]:
-        value = self._call(self.file_client(video).get_file_properties)
-        return {"size": int(value.size), "etag": str(value.etag)}
+        with self.lease():
+            value = self._call(self.file_client(video).get_file_properties)
+            return {"size": int(value.size), "etag": str(value.etag)}
 
     def frame(self, video: str, seconds: float = 0) -> tuple[bytes, int, int]:
-        from people_counter.portal_remote_media import remote_frame
+        with self.lease():
+            from people_counter.portal_remote_media import remote_frame
 
-        properties = self.properties(video)
-        cached = self._preview(video, properties)
-        if cached is not None and cached["seconds"] == seconds:
-            path = self.preview_store.path.parent / "previews" / (cached["id"] + ".jpg")
-            return path.read_bytes(), cached["metadata"]["width"], cached["metadata"]["height"]
-        return remote_frame(
-            self.file_client(video), properties["etag"], properties["size"], seconds,
-            check_identity=self.assert_identity,
-        )
+            properties = self.properties(video)
+            cached = self._preview(video, properties)
+            if cached is not None and cached["seconds"] == seconds:
+                path = self.preview_store.path.parent / "previews" / (cached["id"] + ".jpg")
+                return path.read_bytes(), cached["metadata"]["width"], cached["metadata"]["height"]
+            return remote_frame(
+                self.file_client(video), properties["etag"], properties["size"], seconds,
+                check_identity=self.assert_identity,
+            )
 
     def probe(self, video: str) -> Any:
-        from people_counter.portal_remote_media import remote_probe
+        with self.lease():
+            from people_counter.portal_remote_media import remote_probe
 
-        properties = self.properties(video)
-        cached = self._preview(video, properties)
-        if cached is not None:
-            return VideoMetadata(**cached["metadata"])
-        return remote_probe(
-            self.file_client(video), properties["etag"], properties["size"],
-            check_identity=self.assert_identity,
-        )
+            properties = self.properties(video)
+            cached = self._preview(video, properties)
+            if cached is not None:
+                return VideoMetadata(**cached["metadata"])
+            return remote_probe(
+                self.file_client(video), properties["etag"], properties["size"],
+                check_identity=self.assert_identity,
+            )
 
     def _preview(self, video: str, properties: Mapping[str, Any]) -> dict[str, Any] | None:
         if self.preview_store is None:
@@ -171,25 +192,26 @@ class AdlsFootageSource:
         ), None)
 
     def page(self, folder: str, token: str | None = None) -> tuple[list[dict[str, Any]], str | None]:
-        folder = self.canonical(folder, directory=True)
-        paths = self.client.get_paths(path=self.remote_path(folder) or None, recursive=False, max_results=100)
-        pages = paths.by_page(continuation_token=token)
-        values = self._call(lambda: list(next(pages, [])))
-        entries = []
-        for value in values:
-            path = value.name.removeprefix(self.remote_root + "/") if self.remote_root else value.name
-            path = self.canonical(path, directory=bool(value.is_directory))
-            modified = value.last_modified.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            entries.append({
-                "name": PurePosixPath(path).name, "path": path, "directory": value.is_directory,
-                "video": not value.is_directory and PurePosixPath(path).suffix.lower() in CONTENT_TYPES,
-                "size_bytes": None if value.is_directory else value.content_length,
-                "modified_utc": modified, "blocked": False, "error": None,
-            })
-        continuation = getattr(pages, "continuation_token", None)
-        if continuation is not None and not isinstance(continuation, str):
-            raise ValueError("ADLS returned an invalid continuation token")
-        return sorted(entries, key=lambda row: (not row["directory"], row["name"].casefold())), continuation
+        with self.lease():
+            folder = self.canonical(folder, directory=True)
+            paths = self.client.get_paths(path=self.remote_path(folder) or None, recursive=False, max_results=100)
+            pages = paths.by_page(continuation_token=token)
+            values = self._call(lambda: list(next(pages, [])))
+            entries = []
+            for value in values:
+                path = value.name.removeprefix(self.remote_root + "/") if self.remote_root else value.name
+                path = self.canonical(path, directory=bool(value.is_directory))
+                modified = value.last_modified.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                entries.append({
+                    "name": PurePosixPath(path).name, "path": path, "directory": value.is_directory,
+                    "video": not value.is_directory and PurePosixPath(path).suffix.lower() in CONTENT_TYPES,
+                    "size_bytes": None if value.is_directory else value.content_length,
+                    "modified_utc": modified, "blocked": False, "error": None,
+                })
+            continuation = getattr(pages, "continuation_token", None)
+            if continuation is not None and not isinstance(continuation, str):
+                raise ValueError("ADLS returned an invalid continuation token")
+            return sorted(entries, key=lambda row: (not row["directory"], row["name"].casefold())), continuation
 
     def entries(self, folder: str) -> list[dict[str, Any]]:
         return self.page(folder)[0]
@@ -204,21 +226,22 @@ class AdlsFootageSource:
         return []
 
     def videos(self, folder: str, limit: int = 10000) -> list[str]:
-        from azure.core.exceptions import AzureError
+        with self.lease():
+            from azure.core.exceptions import AzureError
 
-        paths = self.client.get_paths(path=self.remote_path(folder) or None, recursive=True)
-        videos = []
-        try:
-            for value in paths:
-                if not value.is_directory and PurePosixPath(value.name).suffix.lower() in CONTENT_TYPES:
-                    path = value.name.removeprefix(self.remote_root + "/") if self.remote_root else value.name
-                    videos.append(self.canonical(path))
-                    if len(videos) > limit:
-                        raise ValueError(f"Selection exceeds the {limit:,}-video package limit. Choose a smaller folder.")
-        except AzureError as error:
-            logging.getLogger(__name__).warning("ADLS recursive listing failed: %s", type(error).__name__)
-            raise ValueError("Cannot enumerate ADLS folder. Check permissions and network access.") from error
-        return sorted(videos)
+            paths = self.client.get_paths(path=self.remote_path(folder) or None, recursive=True)
+            videos = []
+            try:
+                for value in paths:
+                    if not value.is_directory and PurePosixPath(value.name).suffix.lower() in CONTENT_TYPES:
+                        path = value.name.removeprefix(self.remote_root + "/") if self.remote_root else value.name
+                        videos.append(self.canonical(path))
+                        if len(videos) > limit:
+                            raise ValueError(f"Selection exceeds the {limit:,}-video package limit. Choose a smaller folder.")
+            except AzureError as error:
+                logging.getLogger(__name__).warning("ADLS recursive listing failed: %s", type(error).__name__)
+                raise ValueError("Cannot enumerate ADLS folder. Check permissions and network access.") from error
+            return sorted(videos)
 
 
 class SelectedFootageInput:
@@ -260,11 +283,12 @@ class SelectedFootageInput:
         if isinstance(self.source, AdlsFootageSource):
             from people_counter.portal_remote_media import complete_chunks
 
-            metadata = self.stat(relative)
-            yield from complete_chunks(
-                self.source.file_client(video), metadata.version, metadata.size,
-                check_identity=self.source.assert_identity,
-            )
+            with self.source.lease():
+                metadata = self.stat(relative)
+                yield from complete_chunks(
+                    self.source.file_client(video), metadata.version, metadata.size,
+                    check_identity=self.source.assert_identity,
+                )
         else:
             with self.source.resolve(video).open("rb") as handle:
                 while chunk := handle.read(8 * 1024 * 1024):

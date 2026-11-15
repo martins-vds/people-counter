@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 
 if TYPE_CHECKING:
     from azure.core.credentials import TokenCredential
     from azure.core.pipeline.policies import SansIOHTTPPolicy
 
 from people_counter.manifest import ManifestPublisherError
+from people_counter.video_input import closing_iterator
 
 
 class PublicationConflictError(ManifestPublisherError):
@@ -94,21 +97,36 @@ class AzureDataLakeStorage:
                 "`uv sync --extra publisher`."
             ) from error
 
-        credential = credential if credential is not None else DefaultAzureCredential()
         policy_options: IdentityPolicyOptions = (
             {"_additional_pipeline_policies": [identity_policy]} if identity_policy is not None else {}
         )
-        service = DataLakeServiceClient(
-            account_url=(
-                f"https://{storage_account}.dfs.core.windows.net"
-            ),
-            credential=credential,
-            **policy_options,
-        )
+        with ExitStack() as resources:
+            if credential is None:
+                credential = DefaultAzureCredential()
+                resources.callback(credential.close)
+            service = DataLakeServiceClient(
+                account_url=f"https://{storage_account}.dfs.core.windows.net",
+                credential=credential, **policy_options,
+            )
+            resources.callback(service.close)
+            self._client = service.get_file_system_client(filesystem)
+            self._resources = resources.pop_all()
         self._filesystem = filesystem
-        self._client = service.get_file_system_client(filesystem)
         self._chunk_size = chunk_size
         self._known_directories: set[str] = set()
+
+    def close(self) -> None:
+        self._resources.close()
+
+    def __enter__(self) -> AzureDataLakeStorage:
+        return self
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        self._resources.__exit__(exc_type, exc, traceback)
+        return False
 
     def _file_client(self, path: str) -> Any:
         return self._client.get_file_client(path)
@@ -203,11 +221,12 @@ class AzureDataLakeStorage:
         if offset:
             prefix = hashlib.sha256()
             remaining = offset
-            for chunk in chunks():
-                prefix.update(memoryview(chunk)[:remaining])
-                remaining -= min(len(chunk), remaining)
-                if not remaining:
-                    break
+            with closing_iterator(chunks()) as values:
+                for chunk in values:
+                    prefix.update(memoryview(chunk)[:remaining])
+                    remaining -= min(len(chunk), remaining)
+                    if not remaining:
+                        break
             if remaining or prefix.hexdigest() != self.sha256(remote_path):
                 client.delete_file()
                 existing = None
@@ -218,21 +237,22 @@ class AzureDataLakeStorage:
 
         digest = hashlib.sha256()
         source_offset = 0
-        for chunk in chunks():
-            for start in range(0, len(chunk), self._chunk_size):
-                block = memoryview(chunk)[start:start + self._chunk_size]
-                digest.update(block)
-                end = source_offset + len(block)
-                if end > expected_size:
-                    raise PublicationConflictError(
-                        f"Source video changed during upload: {remote_path}"
-                    )
-                if end > offset:
-                    upload = bytes(block[max(0, offset - source_offset):])
-                    client.append_data(upload, offset=offset, length=len(upload))
-                    offset += len(upload)
-                    client.flush_data(offset, content_settings=settings)
-                source_offset = end
+        with closing_iterator(chunks()) as values:
+            for chunk in values:
+                for start in range(0, len(chunk), self._chunk_size):
+                    block = memoryview(chunk)[start:start + self._chunk_size]
+                    digest.update(block)
+                    end = source_offset + len(block)
+                    if end > expected_size:
+                        raise PublicationConflictError(
+                            f"Source video changed during upload: {remote_path}"
+                        )
+                    if end > offset:
+                        upload = bytes(block[max(0, offset - source_offset):])
+                        client.append_data(upload, offset=offset, length=len(upload))
+                        offset += len(upload)
+                        client.flush_data(offset, content_settings=settings)
+                    source_offset = end
         if source_offset != expected_size or digest.hexdigest() != expected_sha256:
             raise PublicationConflictError(
                 f"Source video changed during upload: {remote_path}"

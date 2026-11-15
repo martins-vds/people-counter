@@ -1502,20 +1502,26 @@ def _read_selected_delta_records(
         .orderBy("physical_partition", "record_ordinal")
     )
     grouped: dict[tuple[int, int, int], list[tuple[int, dict[str, Any]]]] = {}
-    for raw in selected.toLocalIterator():
-        row = raw.asDict(recursive=True) if hasattr(raw, "asDict") else dict(raw)
-        try:
-            value = json.loads(str(row["record_json"]))
-        except json.JSONDecodeError as error:
-            raise StagingConflictError("Delta staged record JSON is invalid") from error
-        if not isinstance(value, dict):
-            raise StagingConflictError("Delta staged record is not an object")
-        identity = (
-            int(row["physical_partition"]),
-            int(row["task_attempt_id"]),
-            int(row["attempt_number"]),
-        )
-        grouped.setdefault(identity, []).append((int(row["record_ordinal"]), value))
+    rows = selected.toLocalIterator()
+    try:
+        for raw in rows:
+            row = raw.asDict(recursive=True) if hasattr(raw, "asDict") else dict(raw)
+            try:
+                value = json.loads(str(row["record_json"]))
+            except json.JSONDecodeError as error:
+                raise StagingConflictError("Delta staged record JSON is invalid") from error
+            if not isinstance(value, dict):
+                raise StagingConflictError("Delta staged record is not an object")
+            identity = (
+                int(row["physical_partition"]),
+                int(row["task_attempt_id"]),
+                int(row["attempt_number"]),
+            )
+            grouped.setdefault(identity, []).append((int(row["record_ordinal"]), value))
+    finally:
+        close = getattr(rows, "close", None)
+        if callable(close):
+            close()
     records: list[dict[str, Any]] = []
     for receipt in receipts:
         identity = (

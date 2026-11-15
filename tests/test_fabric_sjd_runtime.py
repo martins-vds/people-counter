@@ -10,6 +10,8 @@ import os
 import sys
 import time
 import warnings
+from io import BytesIO
+from urllib.error import HTTPError
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -18,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 
 from people_counter.fabric_namespace import (
     FILES_ROOT,
@@ -5443,3 +5446,26 @@ def test_clear_stale_lock_uses_exact_owner_cas_and_exact_readback(
     assert result["cleared_owner_id"] == "owner-1"
     with pytest.raises(RuntimeError, match="precondition"):
         _clear_stale_lock(spark, "other-owner")
+
+
+@pytest.mark.parametrize("failed_read", [False, True])
+def test_power_bi_closes_http_error_body(monkeypatch, failed_read):
+    from people_counter.fabric_sjd_runtime import _power_bi_json
+
+    class Body(BytesIO):
+        def read(self, *args):
+            if failed_read:
+                raise OSError("body read failed")
+            return super().read(*args)
+
+    body = Body(b"denied")
+    error = HTTPError("https://example.test", 403, "denied", {}, body)
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("urllib.request.urlopen", fail)
+    expected = OSError if failed_read else RuntimeError
+    with pytest.raises(expected, match="body read failed" if failed_read else "403: denied"):
+        _power_bi_json("GET", "https://example.test", "token")
+    assert body.closed

@@ -19,7 +19,7 @@ import unicodedata
 import uuid
 import zipfile
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from itertools import islice
@@ -647,6 +647,13 @@ class PortalService:
 
             self._azure = PortalAzureSession()
         return self._azure
+
+    def close(self) -> None:
+        with ExitStack() as resources:
+            if self._azure is not None:
+                resources.callback(self._azure.close)
+            if isinstance(self.source, AdlsFootageSource):
+                resources.callback(self.source.reset)
 
     @property
     def intake(self) -> Any:
@@ -1476,12 +1483,12 @@ class PortalService:
         self.protect_source_files(source, source_payload.get("videos", []), config, package)
         if kind == "publish":
             self.store.event(identity, "Publishing videos first and final manifests last")
-            storage = AzureDataLakeStorage(
+            with AzureDataLakeStorage(
                 config.storage_account, config.filesystem, chunk_size=publication.chunk_size,
                 credential=credential,
                 identity_policy=identity_policy,
-            )
-            summary = publish_manifest_package(publication, storage, validated_package=package, input_source=inputs)
+            ) as storage:
+                summary = publish_manifest_package(publication, storage, validated_package=package, input_source=inputs)
             if summary.rejected:
                 raise ValueError("Publication rejected videos; inspect the publication rejection report")
             return asdict(summary)

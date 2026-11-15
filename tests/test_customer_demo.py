@@ -277,6 +277,195 @@ def notebook_cells():
     }
 
 
+@pytest.fixture
+def notebook_preflight(monkeypatch):
+    import azure.identity
+    import azure.storage.filedatalake
+    import duckdb
+    import importlib
+    import people_counter.adls as adls
+    import people_counter.customer_demo as demo
+    import people_counter.fabric_automation as automation
+    import people_counter.fabric_sjd_definition as definitions
+
+    resources = []
+    close_order = []
+    failure = {"at": None, "error": None}
+
+    class Handle:
+        def __init__(self, name):
+            self.name = name
+            self.closes = 0
+            resources.append(self)
+
+        def close(self):
+            self.closes += 1
+            close_order.append(self.name)
+
+    def fail_at(operation):
+        if failure["at"] == operation:
+            raise failure["error"]
+
+    def credential():
+        return Handle("credential")
+
+    def storage(*args, credential, **kwargs):
+        handle = Handle("storage")
+        handle.upload_bytes = lambda *args: None
+
+        def read_bytes(*args):
+            assert handle.closes == 0
+            return b'{"demo_access_probe":true}'
+
+        handle.read_bytes = read_bytes
+        return handle
+
+    def service(url, **kwargs):
+        handle = Handle("onelake" if "onelake" in url else "adls")
+        child = Mock()
+        child.get_file_client.return_value.delete_file.side_effect = lambda: fail_at("probe")
+        # Native SDK children do not close their parent transport.
+        child.close.side_effect = lambda: None
+        handle.child = child
+        handle.get_file_system_client = lambda *args: (
+            fail_at("onelake-child" if handle.name == "onelake" else "child"), child,
+        )[1]
+        return handle
+
+    def connect():
+        handle = Handle("duckdb")
+        handle.execute = lambda sql: fail_at("install" if sql.startswith("INSTALL") else "secret")
+        return handle
+
+    fabric = Mock()
+    names = (
+        "pc-event-intake", "pc_manifest_arrival_activator", "azure_storage_events_eventstream",
+        "pc-sjd-production-control-v001", "pc-sjd-dispatcher",
+        "pc-sjd-production-process-v001", "pc-sjd-production-gold-v001",
+    )
+
+    def request(method, path, **kwargs):
+        if path.endswith("/spark/settings"):
+            return {"pool": {"customizeComputeEnabled": True,
+                             "starterPool": {"maxExecutors": 2, "maxNodeCount": 3}}}
+        if "/shortcuts/" in path:
+            return {"target": {"adlsGen2": {"location": "https://account.dfs.core.windows.net",
+                                           "subpath": "videos"}}}
+        return {"capacityId": "capacity"}
+
+    fabric.request_json.side_effect = request
+    fabric.list_pages.side_effect = lambda path: (
+        [{"enabled": True}] if path.endswith("/schedules")
+        else [{"id": name, "displayName": name} for name in names]
+    )
+    monkeypatch.setattr(azure.identity, "AzureCliCredential", credential)
+    monkeypatch.setattr(azure.storage.filedatalake, "DataLakeServiceClient", service)
+    monkeypatch.setattr(adls, "AzureDataLakeStorage", storage)
+    monkeypatch.setattr(duckdb, "connect", connect)
+    monkeypatch.setattr(automation, "FabricAutomationClient", lambda *args, **kwargs: fabric)
+    monkeypatch.setattr(importlib, "reload", lambda module: module)
+    monkeypatch.setattr(demo, "verify_compute_policy", lambda *args: None)
+    monkeypatch.setattr(demo, "verify_arrival_runtime", lambda *args, **kwargs: None)
+    def read_delta(connection, *args):
+        assert connection.closes == 0
+        fail_at("read")
+
+    monkeypatch.setattr(demo, "read_demo_delta", read_delta)
+    monkeypatch.setattr(definitions, "reviewed_compute_settings", lambda _: {
+        "sparkProperties": [{"key": "spark.executor.instances", "value": "2"}],
+    })
+    namespace = {
+        "RUN_PREFLIGHT": True, "CAPACITY_RESOURCE_ID": "/capacity",
+        "SUBSCRIPTION_ID": "subscription", "CAPACITY_FABRIC_ID": "capacity",
+        "WORKSPACE_ID": "workspace", "LAKEHOUSE_ID": "lakehouse",
+        "ENVIRONMENT_ID": "environment", "STORAGE_RESOURCE_ID": "/storage",
+        "STORAGE_ACCOUNT": "account", "FILESYSTEM": "videos", "SHORTCUT_NAME": "videos",
+        "TABLE_DIRECTORY": "Tables/dbo", "RUN_LABEL": "test",
+        "ALLOW_CAPACITY_RESUME": False, "ALLOW_ROLE_GRANT": False,
+        "ENABLE_EXISTING_SCHEDULES": False,
+        "package_config": SimpleNamespace(chunk_size=1024),
+        "azure_cli": lambda args: (
+            {"sku": {"name": "F64"}} if args[0] == "resource"
+            else {"id": "subscription", "user": {"type": "user"}} if args[0] == "account"
+            else "principal"
+        ),
+        "ensure_capacity": lambda *args, **kwargs: "Active",
+        "ensure_storage_role": lambda *args, **kwargs: None,
+        "time": __import__("time"), "re": __import__("re"), "json": json,
+        "spark": Mock(),
+    }
+    source = notebook_cells()["live-preflight"]
+
+    def run():
+        exec(compile(source, str(NOTEBOOK), "exec"), namespace)
+
+    return SimpleNamespace(
+        run=run, namespace=namespace, resources=resources, failure=failure, close_order=close_order,
+    )
+
+
+@pytest.mark.parametrize("operation", ["child", "probe", "install", "secret", "onelake-child", "read"])
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt])
+def test_notebook_preflight_closes_allocations_when_setup_fails(
+    notebook_preflight, operation, error_type,
+):
+    run = notebook_preflight
+    error = error_type("injected setup failure")
+    run.failure.update(at=operation, error=error)
+    with pytest.raises(error_type) as caught:
+        run.run()
+    assert caught.value is error
+    assert run.namespace["PREFLIGHT_OK"] is False
+    assert run.resources
+    assert all(handle.closes == 1 for handle in run.resources)
+    run.namespace["spark"].stop.assert_not_called()
+
+
+def test_notebook_resources_stay_live_until_final_cleanup_and_reexecution(notebook_preflight):
+    run = notebook_preflight
+    run.run()
+    first = list(run.resources)
+    assert run.namespace["PREFLIGHT_OK"] is True
+    assert all(handle.closes == 0 for handle in first)
+    run.namespace["storage"].read_bytes("later-cell")
+    run.namespace["read_delta"]("work", ["work_id"])
+    run.run()
+    assert all(handle.closes == 1 for handle in first)
+    assert run.close_order == ["onelake", "duckdb", "adls", "storage", "credential"]
+    second = run.resources[len(first):]
+    assert {handle.name for handle in second} == {"credential", "storage", "adls", "duckdb", "onelake"}
+    assert all(handle.closes == 0 for handle in second)
+    notebook = json.loads(NOTEBOOK.read_text())
+    cleanup = "".join(notebook["cells"][-1]["source"])
+    exec(compile(cleanup, str(NOTEBOOK), "exec"), run.namespace)
+    exec(compile(cleanup, str(NOTEBOOK), "exec"), run.namespace)
+    assert all(handle.closes == 1 for handle in run.resources)
+    assert run.namespace["PREFLIGHT_OK"] is False
+    assert all(handle.child.close.call_count == 0 for handle in run.resources if hasattr(handle, "child"))
+    run.namespace["spark"].stop.assert_not_called()
+    run.run()
+    assert run.namespace["PREFLIGHT_OK"] is True
+    assert all(handle.closes == 0 for handle in run.resources[len(first) + len(second):])
+    exec(compile(cleanup, str(NOTEBOOK), "exec"), run.namespace)
+
+
+def test_notebook_failed_reexecution_closes_previous_and_new_handles(notebook_preflight):
+    run = notebook_preflight
+    run.run()
+    run.failure.update(at="install", error=SystemExit("interrupted"))
+    with pytest.raises(SystemExit):
+        run.run()
+    assert all(handle.closes == 1 for handle in run.resources)
+    assert run.namespace["PREFLIGHT_OK"] is False
+
+
+def test_notebook_cleanup_is_safe_before_preflight():
+    notebook = json.loads(NOTEBOOK.read_text())
+    namespace = {}
+    exec(compile("".join(notebook["cells"][-1]["source"]), str(NOTEBOOK), "exec"), namespace)
+    assert namespace["PREFLIGHT_OK"] is False
+
+
 def test_notebook_is_syntactically_valid_and_gates_are_explicit_booleans():
     cells = notebook_cells()
     for cell_id, source in cells.items():
@@ -580,7 +769,7 @@ def test_notebook_client_follows_only_trusted_regional_history_pages(continuatio
     from people_counter.fabric_automation import FabricApiError, FabricAutomationClient
 
     client_assignment = next(
-        node for node in ast.parse(notebook_cells()["live-preflight"]).body[0].body
+        node for node in ast.walk(ast.parse(notebook_cells()["live-preflight"]))
         if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
         and node.targets[0].id == "fabric"
     )

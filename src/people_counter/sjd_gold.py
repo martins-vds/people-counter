@@ -18,6 +18,7 @@ import sqlite3
 import statistics
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -576,7 +577,7 @@ class SQLiteGoldState:
         self._bootstrap()
 
     def checkpoint(self, stage: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM gold_checkpoints WHERE stage = ?", (stage,)
             ).fetchone()
@@ -588,7 +589,7 @@ class SQLiteGoldState:
         source: SourceCheckpoint,
         target_versions: Mapping[str, int],
     ) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             self._save_checkpoint(
                 connection, stage, source, target_versions, _iso(self._clock())
             )
@@ -606,7 +607,7 @@ class SQLiteGoldState:
             "target_versions": dict(target_versions),
         }
         dedupe_key = _sha256_json(payload)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 INSERT OR IGNORE INTO semantic_refresh_outbox (
@@ -633,7 +634,7 @@ class SQLiteGoldState:
     ) -> int | None:
         """Commit checkpoint advancement and its outbox signal together."""
         now = _iso(self._clock())
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             for stage, (source, target_versions) in checkpoints.items():
                 self._save_checkpoint(
                     connection, stage, source, target_versions, now
@@ -666,7 +667,7 @@ class SQLiteGoldState:
             return int(row[0])
 
     def pending_refreshes(self) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM semantic_refresh_outbox
@@ -684,7 +685,7 @@ class SQLiteGoldState:
     ) -> bool:
         if not actor.strip():
             raise ValueError("actor is required")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             updated = connection.execute(
                 """
                 UPDATE semantic_refresh_outbox
@@ -734,7 +735,7 @@ class SQLiteGoldState:
         )
 
     def _bootstrap(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS gold_checkpoints (
@@ -787,7 +788,7 @@ class LocalGoldJob:
         """Return the committed-pointer source domain for flow and video."""
         versions: dict[str, str] = {}
         publication_sequence = 0
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             required = {"work", "attempts", "publications"}
             if all(_table_exists(connection, table) for table in required):
                 visible = {
@@ -842,7 +843,7 @@ class LocalGoldJob:
         tables = ("work", "attempts", "batches", "publications")
         versions: dict[str, str] = {}
         publication_sequence = 0
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             for table in tables:
                 if not _table_exists(connection, table):
                     versions[table] = _sha256_json([])
@@ -876,7 +877,7 @@ class LocalGoldJob:
         )
 
     def committed_outputs(self) -> list[CommittedOutput]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             required = {"work", "attempts", "publications"}
             missing = sorted(
                 table for table in required if not _table_exists(connection, table)
@@ -1260,7 +1261,7 @@ class LocalGoldJob:
         }
 
     def _control_rows(self) -> dict[str, list[dict[str, Any]]]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             return {
                 "work": [
                     dict(row)

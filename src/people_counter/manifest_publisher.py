@@ -1859,16 +1859,16 @@ def publish_main(argv: Sequence[str] | None = None) -> int:
         chunk_size=args.chunk_size_mib * 1024 * 1024,
     )
     validated_package = validate_manifest_package(config)
-    storage = AzureDataLakeStorage(
+    with AzureDataLakeStorage(
         config.storage_account,
         config.filesystem,
         chunk_size=config.chunk_size,
-    )
-    summary = publish_manifest_package(
-        config,
-        storage,
-        validated_package=validated_package,
-    )
+    ) as storage:
+        summary = publish_manifest_package(
+            config,
+            storage,
+            validated_package=validated_package,
+        )
     print(json.dumps(asdict(summary), sort_keys=True))
     return 2 if summary.rejected else 0
 

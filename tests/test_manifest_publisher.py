@@ -118,6 +118,16 @@ class FakeStorage:
     def __init__(self):
         self.objects = {}
         self.operations = []
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
     def stat(self, path):
         value = self.objects.get(path)
@@ -1682,12 +1692,12 @@ class FakeFileSystem:
 @pytest.fixture
 def adls_storage(monkeypatch):
     filesystem = FakeFileSystem()
-    credential = object()
+    credential = SimpleNamespace(close=lambda: None)
     calls = []
 
     def service_client(**kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(get_file_system_client=lambda name: filesystem)
+        return SimpleNamespace(get_file_system_client=lambda name: filesystem, close=lambda: None)
 
     monkeypatch.setattr("azure.storage.filedatalake.DataLakeServiceClient", service_client)
     monkeypatch.setattr("azure.identity.DefaultAzureCredential", lambda: credential)
@@ -1695,7 +1705,10 @@ def adls_storage(monkeypatch):
     assert calls == [{
         "account_url": "https://testaccount.dfs.core.windows.net", "credential": credential,
     }]
-    return storage, filesystem
+    try:
+        yield storage, filesystem
+    finally:
+        storage.close()
 
 
 @pytest.mark.parametrize("operation", ["read_bytes", "sha256", "rename"])

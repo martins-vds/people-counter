@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
@@ -80,7 +81,7 @@ class SQLiteQueue:
         self.initialize()
 
     def initialize(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS queue_messages (
@@ -367,7 +368,7 @@ class SQLiteQueue:
 
     def get(self, message_id: str) -> QueueMessage:
         identifier = self._required_text(message_id, "message_id")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM queue_messages WHERE message_id = ?",
                 (identifier,),
@@ -385,7 +386,7 @@ class SQLiteQueue:
             query += " WHERE state = ?"
             parameters = (state,)
         query += " ORDER BY created_at, message_id"
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(query, parameters).fetchall()
         return [self._message(row) for row in rows]
 

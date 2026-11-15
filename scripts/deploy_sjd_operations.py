@@ -227,10 +227,13 @@ class FabricApi:
                     )
                 return response.status, dict(response.headers), parsed
         except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")
-            raise OperationsDeploymentError(
-                f"{method} {url} returned {error.code}: {detail}"
-            ) from error
+            try:
+                detail = error.read().decode("utf-8", errors="replace")
+                raise OperationsDeploymentError(
+                    f"{method} {url} returned {error.code}: {detail}"
+                ) from error
+            finally:
+                error.close()
 
     def verify_compute(self) -> None:
         _, _, settings = self.request(

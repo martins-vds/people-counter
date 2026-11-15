@@ -11,11 +11,13 @@ from dataclasses import asdict, replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import people_counter.sjd_process as process_module
+
+
 from people_counter.fabric_executor_inventory import ExecutorRecord
 from people_counter.models import LineCountRecord, RunResult
 from people_counter.sjd_control import (
@@ -3083,6 +3085,57 @@ class SjdProcessTests(unittest.TestCase):
     def test_fabric_attempt_adapter_is_explicitly_unsupported(self):
         with self.assertRaises(UnsupportedAttemptStoreError):
             FabricAttemptAdapter()
+
+
+@pytest.mark.parametrize("record_json", ["invalid", "[]", "{}"])
+@pytest.mark.parametrize("closeable", [False, True])
+def test_selected_delta_iterator_cleanup(record_json, closeable):
+    class Rows:
+        def __init__(self):
+            self.rows = iter([{"record_json": record_json}])
+            self.closed = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self.rows)
+
+    class CloseableRows(Rows):
+        def close(self):
+            self.closed = True
+
+    rows = CloseableRows() if closeable else Rows()
+    frame = MagicMock()
+    frame.where.return_value.select.return_value.orderBy.return_value.toLocalIterator.return_value = rows
+    with pytest.raises((process_module.StagingConflictError, KeyError)):
+        process_module._read_selected_delta_records(frame, [])
+    assert rows.closed is closeable
+    frame.stop.assert_not_called()
+
+
+@pytest.mark.parametrize("close_kind", ["callable", "noncallable", "raises"])
+def test_selected_delta_iterator_exhaustion_and_close_errors(close_kind):
+    class Rows:
+        def __iter__(self):
+            return iter(())
+
+    rows = Rows()
+    close = MagicMock()
+    if close_kind == "raises":
+        close.side_effect = OSError("iterator close failed")
+    rows.close = None if close_kind == "noncallable" else close
+    frame = MagicMock()
+    frame.where.return_value.select.return_value.orderBy.return_value.toLocalIterator.return_value = rows
+    if close_kind == "raises":
+        with pytest.raises(OSError, match="iterator close failed"):
+            process_module._read_selected_delta_records(frame, [])
+    else:
+        assert process_module._read_selected_delta_records(frame, []) == []
+    if close_kind == "noncallable":
+        close.assert_not_called()
+    else:
+        close.assert_called_once_with()
 
 
 if __name__ == "__main__":

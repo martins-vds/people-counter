@@ -329,34 +329,35 @@ class PortalIntake:
             return self._save(operation)
 
     def _hash(self, operation: dict[str, Any], path: str) -> tuple[str, dict[str, Any]]:
-        before = self.source.properties(path)
-        if path == operation["stage"]:
-            owned = self._properties(path)
-            if (owned is None or owned.is_directory or owned.metadata.get("pc_intake") != operation["id"]
-                    or owned.metadata.get("pc_source") != self.source.identity
-                    or {"size": owned.size, "etag": owned.etag} != before):
-                raise ValueError("Upload staging ownership or version changed")
-        if before["size"] != operation["size"]:
-            raise ValueError("Stored upload size does not match")
-        digest = hashlib.sha256()
-        count = 0
+        with self.source.lease():
+            before = self.source.properties(path)
+            if path == operation["stage"]:
+                owned = self._properties(path)
+                if (owned is None or owned.is_directory or owned.metadata.get("pc_intake") != operation["id"]
+                        or owned.metadata.get("pc_source") != self.source.identity
+                        or {"size": owned.size, "etag": owned.etag} != before):
+                    raise ValueError("Upload staging ownership or version changed")
+            if before["size"] != operation["size"]:
+                raise ValueError("Stored upload size does not match")
+            digest = hashlib.sha256()
+            count = 0
 
-        def check() -> None:
-            self._guard(operation)
-            self.source.assert_identity()
-            if self.record(operation["id"])["state"] != "verifying":
-                raise ValueError("Upload verification was cancelled")
+            def check() -> None:
+                self._guard(operation)
+                self.source.assert_identity()
+                if self.record(operation["id"])["state"] != "verifying":
+                    raise ValueError("Upload verification was cancelled")
 
-        for chunk in complete_chunks(self.source.file_client(path), before["etag"], before["size"], check_identity=check):
+            for chunk in complete_chunks(self.source.file_client(path), before["etag"], before["size"], check_identity=check):
+                check()
+                digest.update(chunk)
+                count += len(chunk)
             check()
-            digest.update(chunk)
-            count += len(chunk)
-        check()
-        if count != before["size"] or self.source.properties(path) != before:
-            raise ValueError("Stored upload changed during verification")
-        if digest.hexdigest() != operation.get("expected_sha256"):
-            raise ValueError("Stored upload bytes differ from received bytes")
-        return digest.hexdigest(), before
+            if count != before["size"] or self.source.properties(path) != before:
+                raise ValueError("Stored upload changed during verification")
+            if digest.hexdigest() != operation.get("expected_sha256"):
+                raise ValueError("Stored upload bytes differ from received bytes")
+            return digest.hexdigest(), before
 
     def _rename(self, item: dict[str, Any]) -> None:
         self.source.assert_identity()

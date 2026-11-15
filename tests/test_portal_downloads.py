@@ -28,3 +28,33 @@ def test_source_failure_does_not_finish_a_success_shaped_partial_archive():
             received.extend(block)
     with pytest.raises(zipfile.BadZipFile):
         zipfile.ZipFile(io.BytesIO(received))
+def test_archive_failure_closes_retained_input_iterator(tmp_path):
+    import queue
+    import threading
+    from people_counter.portal_downloads import _ArchiveSink, _produce
+    from people_counter.video_input import LocalVideoInput
+
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"abc")
+    handles, iterators = [], []
+    class Input(LocalVideoInput):
+        def chunks(self, relative):
+            def generate():
+                with path.open("rb") as handle:
+                    handles.append(handle)
+                    yield handle.read()
+            iterator = generate()
+            iterators.append(iterator)
+            return iterator
+    class Sink(_ArchiveSink):
+        def write(self, data):
+            if bytes(data) == b"abc":
+                raise BrokenPipeError("Consumer disconnected")
+            return super().write(data)
+    try:
+        _produce(Input(tmp_path), Sink(queue.Queue(), threading.Event()))
+        assert len(handles) == 1
+        assert handles[0].closed
+    finally:
+        for iterator in iterators:
+            iterator.close()

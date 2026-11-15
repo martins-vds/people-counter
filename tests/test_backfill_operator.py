@@ -3,7 +3,7 @@ import hashlib
 import json
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -380,6 +380,8 @@ def test_submit_publishes_verifies_then_registers_and_resumes(setup, capsys):
     ) as resolver, patch.object(operator, "FabricAutomationClient", return_value=fabric) as client:
         assert operator.main(setup.args + ["--submit"]) == 0
         assert operator.main(setup.args + ["--submit"]) == 0
+    assert storage.close_calls == 2
+    assert files.close.call_count == 2
     assert fabric.request_response.call_count == 1
     call = fabric.request_response.call_args
     assert "sparkJobDefinitions/44444444-4444-4444-4444-444444444444" in call.args[1]
@@ -847,6 +849,7 @@ def test_missing_model_stops_before_publication(setup):
     from azure.core.exceptions import ResourceNotFoundError
 
     files = operator.OneLakeFiles.__new__(operator.OneLakeFiles)
+    files._resources = ExitStack()
     files._workspace = setup.config["workspace_id"]
     files._lakehouse = setup.config["lakehouse_id"]
     files._filesystem = Mock()
@@ -1410,8 +1413,25 @@ def test_onelake_supports_supplied_credential(setup, monkeypatch):
     with patch("azure.storage.filedatalake.DataLakeServiceClient") as service, patch(
         "azure.identity.DefaultAzureCredential", side_effect=AssertionError("Must not use default"),
     ):
-        operator.OneLakeFiles(operator.load_config(setup.config_path), credential=credential)
+        files = operator.OneLakeFiles(operator.load_config(setup.config_path), credential=credential)
+        files.close()
+        files.close()
     assert service.call_args.kwargs["credential"] is credential
+    service.return_value.close.assert_called_once()
+    credential.close.assert_not_called()
+
+
+def test_onelake_constructor_failure_closes_owned_resources(setup, monkeypatch):
+    monkeypatch.undo()
+    credential = Mock()
+    with patch("azure.storage.filedatalake.DataLakeServiceClient") as service, patch(
+        "azure.identity.DefaultAzureCredential", return_value=credential,
+    ):
+        service.return_value.get_file_system_client.side_effect = RuntimeError("Filesystem failed")
+        with pytest.raises(RuntimeError, match="Filesystem failed"):
+            operator.OneLakeFiles(operator.load_config(setup.config_path))
+    service.return_value.close.assert_called_once()
+    credential.close.assert_called_once()
 
 
 @pytest.mark.parametrize("field", ["defaultLakehouseId", "defaultLakehouseWorkspaceId"])

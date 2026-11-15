@@ -16,7 +16,7 @@ import sqlite3
 import time
 import warnings
 from collections.abc import Callable, Collection, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
@@ -299,7 +299,7 @@ class SQLiteControlStore:
 
     def bootstrap(self) -> None:
         """Create or validate the versioned local control schema."""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if current not in (0, 1, SCHEMA_VERSION):
                 raise ControlError(
@@ -746,7 +746,7 @@ class SQLiteControlStore:
         return tuple(registered)
 
     def get_work(self, work_id: str) -> RegisteredWork:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM work WHERE work_id = ?",
                 (_required_text(work_id, "work_id"),),
@@ -1081,7 +1081,7 @@ class SQLiteControlStore:
     ) -> dict[str, Any]:
         """Verify the SJD claim reference and reject malformed envelope objects."""
         identity = _required_text(batch_id, "batch_id")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM batches WHERE batch_id = ?", (identity,)
             ).fetchone()
@@ -1119,7 +1119,7 @@ class SQLiteControlStore:
         self, batch_id: str
     ) -> tuple[dict[str, Any], str]:
         identity = _required_text(batch_id, "batch_id")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT envelope_sha256 FROM batches WHERE batch_id = ?",
                 (identity,),
@@ -1137,7 +1137,7 @@ class SQLiteControlStore:
         return self._now()
 
     def process_batch_state(self, envelope: Any) -> ControlBatchState:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             batch = connection.execute(
                 "SELECT * FROM batches WHERE batch_id = ?",
                 (envelope.batch_id,),
@@ -1831,7 +1831,7 @@ class SQLiteControlStore:
             return findings
 
     def status(self) -> dict[str, Any]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             work = {
                 row["status"]: int(row["count"])
                 for row in connection.execute(

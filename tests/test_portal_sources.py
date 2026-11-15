@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from azure.storage.filedatalake import DataLakeServiceClient as NativeServiceClient
 
 from people_counter.portal_sources import AdlsFootageSource, SelectedFootageInput, source_identity
 from people_counter.manifest import CatalogError
@@ -44,6 +45,85 @@ def test_adls_source_lazily_uses_sdk_credentials_and_original_paths(source):
     assert factory.call_args.kwargs["credential"] is azure.credential.return_value
     filesystem.get_file_client.assert_called_with("entrance/day/clip.mp4")
     filesystem.get_file_client.return_value.download_file.assert_not_called()
+
+
+def test_source_reset_closes_owner_not_borrowed_children_or_credential(source):
+    adapter, filesystem, azure, factory = source
+    adapter.reset()
+    factory.assert_not_called()
+    assert adapter.client is filesystem
+    adapter.reset()
+    adapter.reset()
+    factory.return_value.close.assert_called_once()
+    filesystem.close.assert_not_called()
+    azure.credential.return_value.close.assert_not_called()
+
+
+def test_source_filesystem_failure_closes_new_service(source):
+    adapter, _, _, factory = source
+    factory.return_value.get_file_system_client.side_effect = RuntimeError("Filesystem unavailable")
+    with pytest.raises(RuntimeError, match="Filesystem unavailable"):
+        adapter.client
+    factory.return_value.close.assert_called_once()
+
+
+def test_source_reset_waits_for_active_borrower(source):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    adapter, _, _, factory = source
+    entered, release, resetting = Event(), Event(), Event()
+    def borrow():
+        with adapter.lease():
+            assert adapter.client is source[1]
+            entered.set()
+            assert release.wait(5)
+    def reset():
+        resetting.set()
+        adapter.reset()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        borrower = pool.submit(borrow)
+        try:
+            assert entered.wait(2)
+            cleanup = pool.submit(reset)
+            assert resetting.wait(2)
+            assert not cleanup.done()
+            factory.return_value.close.assert_not_called()
+        finally:
+            release.set()
+        borrower.result()
+        cleanup.result()
+    factory.return_value.close.assert_called_once()
+
+
+def test_source_reset_closes_native_service_transport(source, monkeypatch):
+    from azure.core.pipeline.policies import SansIOHTTPPolicy
+    from azure.core.pipeline.transport import HttpTransport
+
+    class Transport(HttpTransport):
+        close_calls = 0
+        def open(self):
+            pass
+        def close(self):
+            self.close_calls += 1
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.close()
+        def send(self, *args, **kwargs):
+            raise AssertionError("No network allowed")
+    adapter, _, azure, _ = source
+    transport = Transport()
+    azure.policy.return_value = SansIOHTTPPolicy()
+    monkeypatch.setattr(
+        "azure.storage.filedatalake.DataLakeServiceClient",
+        lambda *args, **kwargs: NativeServiceClient(*args, transport=transport, **kwargs),
+    )
+    adapter.client
+    adapter.reset()
+    assert transport.close_calls == 2
+    adapter.reset()
+    assert transport.close_calls == 2
 
 
 @pytest.mark.parametrize("path", ["../clip.mp4", "/clip.mp4", "day/../../clip.mp4", "https://other/clip.mp4"])

@@ -679,8 +679,9 @@ def _stage_hadoop_alias(
     filesystem.mkdirs(destination.getParent())
     if not filesystem.exists(destination):
         source_stream = jvm.java.io.FileInputStream(str(source))
-        destination_stream = filesystem.create(destination, False)
+        destination_stream = None
         try:
+            destination_stream = filesystem.create(destination, False)
             jvm.org.apache.hadoop.io.IOUtils.copyBytes(
                 source_stream,
                 destination_stream,
@@ -691,7 +692,8 @@ def _stage_hadoop_alias(
             try:
                 source_stream.close()
             finally:
-                destination_stream.close()
+                if destination_stream is not None:
+                    destination_stream.close()
     temporary = source.with_name(
         f".{source.name}.alias-verify-{os.getpid()}-{uuid.uuid4().hex}"
     )
@@ -721,8 +723,9 @@ def _stream_hadoop_uri_to_local(
     configuration = context._jsc.hadoopConfiguration()
     source = jvm.org.apache.hadoop.fs.Path(source_uri)
     source_stream = source.getFileSystem(configuration).open(source)
-    destination_stream = jvm.java.io.FileOutputStream(str(destination))
+    destination_stream = None
     try:
+        destination_stream = jvm.java.io.FileOutputStream(str(destination))
         jvm.org.apache.hadoop.io.IOUtils.copyBytes(
             source_stream,
             destination_stream,
@@ -733,7 +736,8 @@ def _stream_hadoop_uri_to_local(
         try:
             source_stream.close()
         finally:
-            destination_stream.close()
+            if destination_stream is not None:
+                destination_stream.close()
 
 
 def _check_synthetic_video_identity(
@@ -1618,10 +1622,13 @@ def _power_bi_json(
                 )
             return parsed, dict(response.headers)
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"{method} {url} returned {error.code}: {detail}"
-        ) from error
+        try:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"{method} {url} returned {error.code}: {detail}"
+            ) from error
+        finally:
+            error.close()
 
 
 def _refresh_semantic_model(

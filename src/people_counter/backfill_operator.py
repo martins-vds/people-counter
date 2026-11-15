@@ -12,12 +12,13 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any, TypedDict
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 if TYPE_CHECKING:
     from azure.core.credentials import AccessToken, TokenCredential
@@ -373,12 +374,30 @@ class OneLakeFiles:
         policy_options: IdentityPolicyOptions = (
             {"_additional_pipeline_policies": [identity_policy]} if identity_policy is not None else {}
         )
-        service = DataLakeServiceClient(
-            "https://onelake.dfs.fabric.microsoft.com",
-            credential=credential if credential is not None else DefaultAzureCredential(),
-            **policy_options,
-        )
-        self._filesystem = service.get_file_system_client(config.workspace_id)
+        with ExitStack() as resources:
+            if credential is None:
+                credential = DefaultAzureCredential()
+                resources.callback(credential.close)
+            service = DataLakeServiceClient(
+                "https://onelake.dfs.fabric.microsoft.com",
+                credential=credential, **policy_options,
+            )
+            resources.callback(service.close)
+            self._filesystem = service.get_file_system_client(config.workspace_id)
+            self._resources = resources.pop_all()
+
+    def close(self) -> None:
+        self._resources.close()
+
+    def __enter__(self) -> OneLakeFiles:
+        return self
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        self._resources.__exit__(exc_type, exc, traceback)
+        return False
 
     def _file(self, path: str) -> Any:
         return self._filesystem.get_file_client(f"{self._lakehouse}/{path}")
@@ -777,123 +796,127 @@ def submit(
     input_source: VideoInput | None = None,
     identity_policy: SansIOHTTPPolicy | None = None,
 ) -> dict[str, Any]:
-    credentials: _StorageCredentials = {"credential": credential} if credential is not None else {}
-    if fabric:
-        if credential is not None or input_source is not None or identity_policy is not None:
-            raise ValueError("Explicit local source/credentials cannot be combined with Fabric notebook identity")
-        _validate_notebook_target(config)
-        credentials["credential"] = NotebookStorageCredential()
-    release = installed_release()
-    _progress(f"Using SDK {release.package_version}")
-    files = (
-        OneLakeFiles(config, **credentials, identity_policy=identity_policy)
-        if identity_policy is not None else OneLakeFiles(config, **credentials)
-    )
-    _progress("Verifying deployed model artifacts...")
-    for name, digest in config.profile["model_artifact_sha256"].items():
-        _progress(f"Verifying model: Files/models/{name}")
-        files.verify_video(f"Files/models/{name}", None, digest)
-    client = FabricAutomationClient(
-        NotebookFabricTokenProvider() if fabric
-        else AzureCliResourceTokenProvider("https://api.fabric.microsoft.com", credential=credential),
-        transport=UrllibTransport(),
-    )
-    _progress(f"Verifying publication shortcut target: {config.shortcut_path}")
-    verify_publication_shortcut(client, config)
-    plan_path = state_dir / "registration-plan.json"
-    previous_plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else None
-    records = _submission_records(package, config, release, previous_plan)
-    plan = {
-        "target": {
-            "workspace_id": config.workspace_id,
-            "lakehouse_id": config.lakehouse_id,
-            "environment_id": config.environment_id,
-            "control_sjd_id": config.control_sjd_id,
-            "storage_account": config.storage_account,
-            "filesystem": config.filesystem,
-        },
-        "package_sha256": _digest(package.index_bytes),
-        "items": records,
-    }
-    if config.files_root != FILES_ROOT:
-        plan["target"]["files_root"] = config.files_root
-    plan_bytes = _json_bytes(plan)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    if plan_path.exists() and plan_path.read_bytes() != plan_bytes:
-        raise ValueError("state directory belongs to a different package, target, profile, or release")
-    _save(plan_path, plan)
-    if identity_policy is None:
-        storage = AzureDataLakeStorage(
-            config.storage_account, config.filesystem, chunk_size=publication.chunk_size, **credentials,
+    with ExitStack() as resources:
+        credentials: _StorageCredentials = {"credential": credential} if credential is not None else {}
+        if fabric:
+            if credential is not None or input_source is not None or identity_policy is not None:
+                raise ValueError("Explicit local source/credentials cannot be combined with Fabric notebook identity")
+            _validate_notebook_target(config)
+            credentials["credential"] = NotebookStorageCredential()
+        release = installed_release()
+        _progress(f"Using SDK {release.package_version}")
+        files = (
+            OneLakeFiles(config, **credentials, identity_policy=identity_policy)
+            if identity_policy is not None else OneLakeFiles(config, **credentials)
         )
-    else:
-        storage = AzureDataLakeStorage(
-            config.storage_account, config.filesystem, chunk_size=publication.chunk_size,
-            **credentials, identity_policy=identity_policy,
+        resources.callback(files.close)
+        _progress("Verifying deployed model artifacts...")
+        for name, digest in config.profile["model_artifact_sha256"].items():
+            _progress(f"Verifying model: Files/models/{name}")
+            files.verify_video(f"Files/models/{name}", None, digest)
+        client = FabricAutomationClient(
+            NotebookFabricTokenProvider() if fabric
+            else AzureCliResourceTokenProvider("https://api.fabric.microsoft.com", credential=credential),
+            transport=UrllibTransport(),
         )
-    _progress(f"Publishing {len(records)} videos and manifests (or verifying existing publications)...")
-    with (TemporaryDirectory(prefix="pc-backfill-") if fabric else nullcontext()) as directory:
-        active_publication = (
-            replace(publication, checkpoint_path=Path(directory) / "publication.sqlite3")
-            if directory is not None else publication
-        )
-        if input_source is None:
-            summary = publish_manifest_package(active_publication, storage, validated_package=package)
+        _progress(f"Verifying publication shortcut target: {config.shortcut_path}")
+        verify_publication_shortcut(client, config)
+        plan_path = state_dir / "registration-plan.json"
+        previous_plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.exists() else None
+        records = _submission_records(package, config, release, previous_plan)
+        plan = {
+            "target": {
+                "workspace_id": config.workspace_id,
+                "lakehouse_id": config.lakehouse_id,
+                "environment_id": config.environment_id,
+                "control_sjd_id": config.control_sjd_id,
+                "storage_account": config.storage_account,
+                "filesystem": config.filesystem,
+            },
+            "package_sha256": _digest(package.index_bytes),
+            "items": records,
+        }
+        if config.files_root != FILES_ROOT:
+            plan["target"]["files_root"] = config.files_root
+        plan_bytes = _json_bytes(plan)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        if plan_path.exists() and plan_path.read_bytes() != plan_bytes:
+            raise ValueError("state directory belongs to a different package, target, profile, or release")
+        _save(plan_path, plan)
+        if identity_policy is None:
+            storage = AzureDataLakeStorage(
+                config.storage_account, config.filesystem, chunk_size=publication.chunk_size, **credentials,
+            )
+            resources.callback(storage.close)
         else:
-            summary = publish_manifest_package(active_publication, storage, validated_package=package, input_source=input_source)
-    if summary.rejected or summary.published + summary.already_published != len(records):
-        raise RuntimeError("publication incomplete; inspect publication-rejections.csv before retrying")
-    _progress(
-        f"Publication complete: {summary.published} published, "
-        f"{summary.already_published} already published."
-    )
-    evidence = []
-    for source, record in zip(
-        sorted(package.plans, key=lambda value: value.relative_path), records
-    ):
-        remote = storage.stat(source.incoming_video_path)
-        if remote is None:
-            raise ValueError(f"published video missing: {source.incoming_video_path}")
-        expected = manifest_bytes(
-            source, storage_account=config.storage_account,
-            filesystem=config.filesystem, source_etag=remote.etag,
+            storage = AzureDataLakeStorage(
+                config.storage_account, config.filesystem, chunk_size=publication.chunk_size,
+                **credentials, identity_policy=identity_policy,
+            )
+            resources.callback(storage.close)
+        _progress(f"Publishing {len(records)} videos and manifests (or verifying existing publications)...")
+        with (TemporaryDirectory(prefix="pc-backfill-") if fabric else nullcontext()) as directory:
+            active_publication = (
+                replace(publication, checkpoint_path=Path(directory) / "publication.sqlite3")
+                if directory is not None else publication
+            )
+            if input_source is None:
+                summary = publish_manifest_package(active_publication, storage, validated_package=package)
+            else:
+                summary = publish_manifest_package(active_publication, storage, validated_package=package, input_source=input_source)
+        if summary.rejected or summary.published + summary.already_published != len(records):
+            raise RuntimeError("publication incomplete; inspect publication-rejections.csv before retrying")
+        _progress(
+            f"Publication complete: {summary.published} published, "
+            f"{summary.already_published} already published."
         )
-        shortcut_manifest = f"{config.shortcut_path}/{source.incoming_manifest_path}"
-        if files.read_bytes(shortcut_manifest) != expected:
-            raise ValueError(f"shortcut manifest does not match the publication: {shortcut_manifest}")
-        files.verify_video(
-            f"{config.shortcut_path}/{source.incoming_video_path}",
-            source.inspection.size_bytes, source.inspection.sha256,
-        )
-        evidence.append({
-            "work_id": record["work_id"],
-            "manifest_path": shortcut_manifest,
-            "source_manifest": json.loads(expected),
-        })
-        _progress(f"Verified Lakehouse source {len(evidence)}/{len(package.plans)}: {source.relative_path}")
-    _save(state_dir / "publication-evidence.json", evidence)
-    jobs = []
-    root = f"{config.runtime_config().file_path('intake/backfill')}/{_digest(plan_bytes)}"
-    for offset in range(0, len(records), PARTITION_SIZE):
-        partition = records[offset:offset + PARTITION_SIZE]
-        name = f"partition-{offset // PARTITION_SIZE + 1:05d}"
-        content = _json_bytes({"items": partition})
-        path = f"{root}/{name}.json"
-        _progress(f"Writing registration partition {name}.json: {len(partition)} items to {path}")
-        files.write_partition(path, content)
-        _progress(f"Verified registration partition: {path}")
-        (state_dir / f"{name}.json").write_bytes(content)
-        jobs.append(_register_partition(
-            client, config, path, content, len(partition), state_dir / f"{name}-job.json"
-        ))
-    report = {
-        "status": "registered", "item_count": len(records),
-        "partition_count": len(jobs), "processing_complete": False,
-        "jobs": jobs,
-        "next_step": "Monitor Dispatcher, committed work, Reconciliation, Gold, and Refresh.",
-    }
-    _save(state_dir / "registration-summary.json", report)
-    return report
+        evidence = []
+        for source, record in zip(
+            sorted(package.plans, key=lambda value: value.relative_path), records
+        ):
+            remote = storage.stat(source.incoming_video_path)
+            if remote is None:
+                raise ValueError(f"published video missing: {source.incoming_video_path}")
+            expected = manifest_bytes(
+                source, storage_account=config.storage_account,
+                filesystem=config.filesystem, source_etag=remote.etag,
+            )
+            shortcut_manifest = f"{config.shortcut_path}/{source.incoming_manifest_path}"
+            if files.read_bytes(shortcut_manifest) != expected:
+                raise ValueError(f"shortcut manifest does not match the publication: {shortcut_manifest}")
+            files.verify_video(
+                f"{config.shortcut_path}/{source.incoming_video_path}",
+                source.inspection.size_bytes, source.inspection.sha256,
+            )
+            evidence.append({
+                "work_id": record["work_id"],
+                "manifest_path": shortcut_manifest,
+                "source_manifest": json.loads(expected),
+            })
+            _progress(f"Verified Lakehouse source {len(evidence)}/{len(package.plans)}: {source.relative_path}")
+        _save(state_dir / "publication-evidence.json", evidence)
+        jobs = []
+        root = f"{config.runtime_config().file_path('intake/backfill')}/{_digest(plan_bytes)}"
+        for offset in range(0, len(records), PARTITION_SIZE):
+            partition = records[offset:offset + PARTITION_SIZE]
+            name = f"partition-{offset // PARTITION_SIZE + 1:05d}"
+            content = _json_bytes({"items": partition})
+            path = f"{root}/{name}.json"
+            _progress(f"Writing registration partition {name}.json: {len(partition)} items to {path}")
+            files.write_partition(path, content)
+            _progress(f"Verified registration partition: {path}")
+            (state_dir / f"{name}.json").write_bytes(content)
+            jobs.append(_register_partition(
+                client, config, path, content, len(partition), state_dir / f"{name}-job.json"
+            ))
+        report = {
+            "status": "registered", "item_count": len(records),
+            "partition_count": len(jobs), "processing_complete": False,
+            "jobs": jobs,
+            "next_step": "Monitor Dispatcher, committed work, Reconciliation, Gold, and Refresh.",
+        }
+        _save(state_dir / "registration-summary.json", report)
+        return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:

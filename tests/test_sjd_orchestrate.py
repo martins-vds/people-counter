@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -14,9 +15,41 @@ from people_counter.sjd_gold import LocalGoldJob
 from people_counter.sjd_orchestrate import (
     LocalPipelineConfig,
     LocalPipelinePaths,
+    _committed_batches,
     main,
     run_local_pipeline,
 )
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_committed_batch_lookup_closes_connection(tmp_path, monkeypatch, fail):
+    database = tmp_path / "control.sqlite3"
+    SQLiteControlStore(database, tmp_path / "content")
+    connect = sqlite3.connect
+    connections = []
+
+    def spy_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        if fail:
+            connection.set_authorizer(lambda *_: sqlite3.SQLITE_DENY)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", spy_connect)
+    try:
+        assert _committed_batches(database, set()) == []
+        assert connections == []
+        if fail:
+            with pytest.raises(sqlite3.DatabaseError):
+                _committed_batches(database, {"work"})
+        else:
+            assert _committed_batches(database, {"work"}) == []
+        assert len(connections) == 1
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connections[0].execute("SELECT 1")
+    finally:
+        for connection in connections:
+            connection.close()
 
 
 def test_full_direct_probe_pipeline_publishes_pointer_and_gold(capsys):

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from typing_extensions import Buffer
 
 from people_counter.manifest import normalize_relative_path
-from people_counter.video_input import VideoInput
+from people_counter.video_input import VideoInput, closing_iterator
 
 
 class _ArchiveSink(io.RawIOBase):
@@ -55,8 +55,9 @@ def _produce(inputs: VideoInput, sink: _ArchiveSink) -> None:
                 for path in inputs.paths():
                     name = normalize_relative_path(path)
                     with archive.open(name, "w", force_zip64=True) as entry:
-                        for chunk in inputs.chunks(path):
-                            entry.write(chunk)
+                        with closing_iterator(inputs.chunks(path)) as values:
+                            for chunk in values:
+                                entry.write(chunk)
             except Exception:
                 # Do not emit a central directory after a source-read failure.
                 sink.failed = True

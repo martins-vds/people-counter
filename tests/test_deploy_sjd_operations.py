@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import sys
+from io import BytesIO
+from urllib.error import HTTPError
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -27,6 +29,27 @@ from tests.fabric_fixtures import (
     TEST_TARGET,
     WORKSPACE_ID,
 )
+
+
+@pytest.mark.parametrize("failed_read", [False, True])
+def test_request_closes_http_error_body(monkeypatch, failed_read):
+    class Body(BytesIO):
+        def read(self, *args):
+            if failed_read:
+                raise OSError("body read failed")
+            return super().read(*args)
+
+    body = Body(b"denied")
+    error = HTTPError("https://example.test", 403, "denied", {}, body)
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("scripts.deploy_sjd_operations.urllib.request.urlopen", fail)
+    expected = OSError if failed_read else OperationsDeploymentError
+    with pytest.raises(expected, match="body read failed" if failed_read else "403: denied"):
+        FabricApi(TEST_TARGET, token="token").request("GET", "/items")
+    assert body.closed
 
 
 def test_fabric_api_uses_the_supplied_bearer_token(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from io import BytesIO
+
 import io
 import subprocess
 import threading
@@ -543,3 +545,26 @@ def test_operation_polling_follows_response_location_and_enforces_deadline():
     )
     with pytest.raises(TimeoutError, match="timed out"):
         client._lro_json("POST", "/items")
+@pytest.mark.parametrize("failed_read", [False, True])
+def test_transport_closes_http_error_body(monkeypatch, failed_read):
+    class Body(BytesIO):
+        def read(self, *args):
+            if failed_read:
+                raise OSError("body read failed")
+            return super().read(*args)
+
+    body = Body(b"denied")
+    error = urllib.error.HTTPError("https://example.test", 403, "denied", {}, body)
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", fail)
+    if failed_read:
+        with pytest.raises(OSError, match="body read failed"):
+            UrllibTransport().request("GET", "https://example.test", headers={}, body=None, timeout=1)
+    else:
+        response = UrllibTransport().request("GET", "https://example.test", headers={}, body=None, timeout=1)
+        assert response.status == 403
+        assert response.body == b"denied"
+    assert body.closed

@@ -230,6 +230,14 @@ Stop without deleting state:
 docker compose --profile portal stop portal portal-tailwind
 ```
 
+Graceful shutdown stops new work, disconnects HTTP streams, and drains request
+threads and the current background job before closing SDK clients and credentials.
+The state-directory lock remains held while jobs drain. Identity refresh also
+waits for active source reads before closing their client.
+Allow enough Docker stop timeout for current work to finish; forced termination
+cannot run Python cleanup. Accepted Fabric jobs are not cancelled by closing
+local resources. Repeated termination signals do not interrupt graceful cleanup.
+
 Camera metadata, generated catalogs, packages, job inputs/results, and progress
 live in the `portal-state` named volume. Azure CLI credentials have a separate
 `portal-azure` volume. Treat both as private and do not share their backups.

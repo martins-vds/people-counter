@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -261,7 +262,7 @@ def _committed_batches(database: Path, work_ids: set[str]) -> list[str]:
     if not work_ids:
         return []
     placeholders = ",".join("?" for _ in work_ids)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         rows = connection.execute(
             f"""
             SELECT DISTINCT b.batch_id, b.committed_at

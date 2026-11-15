@@ -34,6 +34,43 @@ from people_counter.fabric_source_cache import LocalizedSourceCache
 from tests.fabric_fixtures import LAKEHOUSE_ID, TARGET_IDS, WORKSPACE_ID
 
 
+@pytest.mark.parametrize("alias", [False, True])
+@pytest.mark.parametrize("failure", ["acquire", "copy", "source_close"])
+def test_hadoop_copy_closes_every_acquired_stream(tmp_path, alias, failure):
+    spark = MagicMock()
+    jvm = spark.sparkContext._jvm
+    filesystem = jvm.org.apache.hadoop.fs.Path.return_value.getFileSystem.return_value
+    filesystem.exists.return_value = False
+    source = MagicMock()
+    destination = MagicMock()
+    source_factory = jvm.java.io.FileInputStream if alias else filesystem.open
+    destination_factory = filesystem.create if alias else jvm.java.io.FileOutputStream
+    source_factory.return_value = source
+    destination_factory.return_value = destination
+    if failure == "acquire":
+        destination_factory.side_effect = OSError("acquire failed")
+    elif failure == "copy":
+        jvm.org.apache.hadoop.io.IOUtils.copyBytes.side_effect = OSError("copy failed")
+    else:
+        source.close.side_effect = OSError("source_close failed")
+    with pytest.raises(OSError, match=f"{failure} failed"):
+        if alias:
+            candidate_jobs._stage_hadoop_alias(
+                spark, tmp_path / "video", "abfss://container/video",
+                expected_sha256="a" * 64,
+            )
+        else:
+            candidate_jobs._stream_hadoop_uri_to_local(
+                spark, "abfss://container/video", tmp_path / "video",
+            )
+    source.close.assert_called_once_with()
+    if failure == "acquire":
+        destination.close.assert_not_called()
+    else:
+        destination.close.assert_called_once_with()
+    spark.stop.assert_not_called()
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 

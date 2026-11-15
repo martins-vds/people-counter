@@ -7,6 +7,7 @@ import time
 from contextlib import nullcontext
 from fractions import Fraction
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import cv2
 import numpy as np
@@ -19,6 +20,26 @@ from azure.storage.filedatalake import DataLakeFileClient
 from people_counter import portal_remote_media as media
 from people_counter.manifest import probe_video
 
+
+@pytest.mark.parametrize("failure", ["construct", "start"])
+def test_decoder_startup_failure_closes_all_acquired_handles(monkeypatch, failure):
+    parent, child, process = Mock(), Mock(), Mock()
+    context = Mock()
+    context.Pipe.return_value = (parent, child)
+    if failure == "construct":
+        context.Process.side_effect = OSError("Process unavailable")
+    else:
+        context.Process.return_value = process
+        process.start.side_effect = OSError("Process unavailable")
+    monkeypatch.setattr(media.multiprocessing, "get_all_start_methods", lambda: ["fork"])
+    monkeypatch.setattr(media.multiprocessing, "get_context", lambda *args: context)
+    with pytest.raises(OSError, match="Process unavailable"):
+        media._run(Mock(), "etag", 1, None)
+    parent.close.assert_called_once()
+    child.close.assert_called_once()
+    if failure == "start":
+        process.close.assert_called_once()
+        process.join.assert_not_called()
 
 class RangedClient:
     def __init__(self, data, *, etag='"snapshot"', reported_size=None, retries=0):
