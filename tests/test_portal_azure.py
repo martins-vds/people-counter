@@ -112,6 +112,21 @@ def test_compose_empty_secret_keeps_certificate_authentication(monkeypatch, sdk,
     }]
 
 
+@pytest.mark.parametrize("missing", ["AZURE_TENANT_ID", "AZURE_CLIENT_ID"])
+def test_certificate_configuration_without_required_identity_fields_is_rejected(monkeypatch, sdk, missing):
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-1")
+    monkeypatch.setenv("AZURE_CLIENT_ID", "application-client")
+    monkeypatch.delenv(missing)
+    monkeypatch.setenv("AZURE_CLIENT_SECRET", "")
+    monkeypatch.setenv("AZURE_CLIENT_CERTIFICATE_PATH", "/run/secrets/client.pem")
+    calls = []
+    monkeypatch.setattr("azure.identity.CertificateCredential", lambda **kwargs: calls.append(kwargs) or sdk)
+    with pytest.raises(PortalAzureError) as error:
+        PortalAzureSession().require_identity()
+    assert error.value.code == "azure_error"
+    assert calls == []
+
+
 @pytest.mark.parametrize("hostname", [None, "portal.azurewebsites.net"])
 @pytest.mark.parametrize("configuration,expected", [
     ({"AZURE_CLIENT_SECRET": "test-only-secret"}, "environment"),

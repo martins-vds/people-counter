@@ -83,8 +83,8 @@ def _runtime_credential() -> TokenCredential:
     if client_secret or certificate_path:
         if certificate_path and client_secret == "":
             return CertificateCredential(
-                tenant_id=os.getenv("AZURE_TENANT_ID") or "",
-                client_id=os.getenv("AZURE_CLIENT_ID") or "",
+                tenant_id=os.environ["AZURE_TENANT_ID"],
+                client_id=os.environ["AZURE_CLIENT_ID"],
                 certificate_path=certificate_path,
                 password=os.getenv("AZURE_CLIENT_CERTIFICATE_PASSWORD") or None,
                 send_certificate_chain=(os.getenv("AZURE_CLIENT_SEND_CERTIFICATE_CHAIN") or "").lower() == "true",
