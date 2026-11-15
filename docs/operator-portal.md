@@ -101,6 +101,134 @@ Keep the HTTP listener on loopback or private Codespaces forwarding. The user
 badge identifies Azure execution credentials, not the browser visitor; this
 is still a single-operator tool without portal login authentication.
 
+## Minimum permissions for portal features
+
+Assign permissions to the **execution principal shown in the portal header**:
+the signed-in user, service principal, federated workload's service principal,
+or managed identity. Use its **principal/object ID**, not its application/client
+ID, when assigning Azure roles or ACL entries. Authentication settings alone do
+not grant access. Azure RBAC and Fabric workspace roles are separate permission
+systems; an Azure subscription role does not grant Fabric workspace access.
+
+### Minimum built-in role assignments for all features
+
+For an existing, correctly deployed target, use this baseline:
+
+- **Storage Blob Data Contributor** on the configured source ADLS **container**
+  (filesystem).
+- **Storage Blob Data Contributor** on each publication target ADLS **container**,
+  if different from the source.
+- **Contributor** in each target **Fabric workspace** containing the Lakehouse
+  and Control Spark job definition (SJD).
+
+Contributor is the lowest **workspace role** that supplies both OneLake writes
+and Spark job execution. It is not a claim that workspace-wide access is the
+smallest possible custom/item-level grant. The storage roles above are likewise
+the minimum built-in data roles for the full read/write workflow, not an
+instruction to grant subscription-wide access.
+
+| Portal feature | Minimum access | Scope and reason |
+| --- | --- | --- |
+| Identity badge/refresh | A valid Azure credential; no additional Azure management or Microsoft Graph role | Identity display comes from SDK-acquired token claims, not directory lookup. |
+| Locations, cameras, calibration settings, saved drafts, local job/report history and package metadata downloads | No Azure/Fabric role for metadata-only operations | Requires filesystem access to portal state/output and read access to local models. Operations that probe footage also need source read access. |
+| Browse, preview, full-preview approval, individual/ZIP footage download, hash inspection and package generation | **Storage Blob Data Reader** | Source container. Generation reads every selected original byte but writes its package locally. |
+| Upload/verify, create folders, rename/move/replace, cancel upload and reconcile intake | **Storage Blob Data Contributor** | Source container. These operations need reads and writes plus rename/delete capabilities; cancellation deletes only owned staging files. Data Reader alone is insufficient. |
+| Publish a package | Source read access plus **Storage Blob Data Contributor** | Publication target container, covering configured staging/incoming prefixes. Publication checks existing content, uploads, promotes by rename and may remove conflicting resumable staging data. No Fabric role is needed for publish-only. |
+| Submit processing | Publication access plus Fabric **Contributor** | Target workspace. Submission reads `Files/models/...`, lists the existing Lakehouse shortcut, verifies published content through it, writes registration partitions under the configured `files_root/intake/backfill/`, runs the Control SJD and polls its job. |
+| Wait for processing / resume monitoring | Submission access plus OneLake read access to the work Delta table | Already included in target-workspace Contributor. Monitoring reads the configured `table_directory/people_counter_sjd_work` through OneLake, including its Delta log/data files; SQL endpoint read access alone is insufficient. |
+
+With the full baseline, do **not** add Data Reader as well: Data Contributor
+already includes reads. No **Storage Blob Data Owner**, Azure **Owner**,
+**Storage Account Contributor**, Fabric **Member/Admin**, or subscription-wide
+**Contributor** is required for normal portal operations. Generic Azure
+Owner/Contributor/Reader roles are not substitutes for Blob **data** roles.
+The portal does not grant roles, edit ACLs, create accounts/workspaces, deploy
+SJDs, provision capacity, or manage recurring schedules. Capacity SKU selection
+is operator-entered metadata, not permission to resize capacity.
+
+### Least-privilege scopes and shortcut identities
+
+Use the container resource as the Azure assignment scope:
+`/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Storage/storageAccounts/<account>/blobServices/default/containers/<filesystem>`.
+Repeat only for containers actually used. `PC_PORTAL_ADLS_ROOT` constrains the
+portal's paths; it is **not** an Azure security boundary. A container-wide role
+still grants access outside that root to other tools using the same identity.
+
+For directory-level isolation, an administrator can instead design ADLS
+ACL/ABAC grants: traversal (`x`) on ancestors, read/list on browsed directories,
+read on footage, and write/execute on both source and destination parents for
+mutations. Include staging cleanup, replacement and every moved subtree; default
+ACLs affect new children, not existing recordings. Validate all operations,
+including container/root property checks, against the restricted grants.
+ACLs cannot restrict access already granted by an unconditional data-role
+assignment. The portal does not require permission to change ACLs.
+
+OneLake is not your Azure storage-account resource: **do not** try to assign an
+Azure Blob role to `onelake.dfs.fabric.microsoft.com`. Grant Fabric permissions
+on the workspace/items. A more restrictive design must retain Lakehouse metadata
+Read (including listing shortcuts), OneLake read access to models, published
+shortcut data and the work table, write access to registration partitions, and
+Control SJD execution/job-status permissions. A Fabric Viewer role alone does
+not supply that combination.
+
+The existing **ADLS shortcut connection identity** can differ from the portal
+identity. Fabric uses that connection's credentials to reach ADLS; giving the
+portal Contributor does not fix a broken connection. For read-only verification
+and downstream footage reads, grant that identity **Storage Blob Data Reader**
+on its target container. Microsoft's ADLS shortcut authorization also requires
+the account-level **Generate a user delegation key** action for Entra-based
+connections: when data access is container-scoped, add **Storage Blob Delegator**
+at the **storage-account** scope for the connection identity. An account-scoped
+Data Reader/Contributor role already includes that action but grants broader
+data access. A portal identity used only for direct SDK reads/uploads does not
+need this extra shortcut-connection grant. If the same principal fills both
+roles, it needs both sets of permissions.
+
+The deployed Spark jobs and shortcut/workspace identities must independently
+retain their deployment's read/write permissions. Portal role assignments do
+not replace those runtime grants or guarantee downstream Gold/refresh success.
+
+### Fabric tenant and runtime prerequisites
+
+- For service principals, workload identities and managed identities, a Fabric
+  administrator must allow the principal under **Service principals can call
+  Fabric public APIs** (also called **Service principals can use Fabric APIs**).
+  Prefer an allowed security group instead of enabling access for all principals.
+  The separate setting for creating workspaces/connections/deployment pipelines
+  is not required by this portal.
+- Allow **Users can access data stored in OneLake with apps external to Fabric**
+  for the applicable users. The local portal and its processing monitor use
+  OneLake APIs from outside Fabric.
+- For delegated user authentication, the client application also needs the
+  endpoints' delegated scopes: `OneLake.Read.All` (or `OneLake.ReadWrite.All`)
+  for shortcut listing, `SparkJobDefinition.Execute.All` (or `Item.Execute.All`)
+  for Control execution, and `SparkJobDefinition.Read.All` (or `Item.Read.All`,
+  or the corresponding ReadWrite scope) for job polling. These are OAuth scopes,
+  not Azure RBAC roles, and do not replace workspace/item grants. Do not assign
+  these delegated scopes as application permissions to a managed identity.
+- The target workspace must have usable Fabric capacity, a deployed Control
+  SJD/Environment, model files, a valid shortcut and the initialized work table.
+  Storage/OneLake firewalls, private endpoints, tenant policies and reachable
+  token/certificate files remain independent prerequisites; more RBAC will not
+  repair a network or credential configuration error.
+
+An administrator should validate source list/read and a small upload/rename/
+cancel cycle, publication into the approved target prefixes, and submission/
+monitoring against the selected target. Allow role-assignment propagation before
+retrying 403s; refresh the execution identity and re-review affected jobs.
+
+Permission references (Microsoft Learn):
+[ADLS RBAC and ACL evaluation](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-access-control-model),
+[ADLS ACL operations/inheritance](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-access-control),
+[Fabric workspace roles](https://learn.microsoft.com/fabric/fundamentals/roles-workspaces),
+[OneLake security](https://learn.microsoft.com/fabric/onelake/security/get-started-security),
+[ADLS shortcut authorization](https://learn.microsoft.com/fabric/onelake/create-adls-shortcut#authorization),
+[list shortcuts](https://learn.microsoft.com/rest/api/fabric/core/onelake-shortcuts/list-shortcuts),
+[run an SJD](https://learn.microsoft.com/rest/api/fabric/sparkjobdefinition/background-jobs/run-on-demand-spark-job-definition),
+[read job status](https://learn.microsoft.com/rest/api/fabric/core/job-scheduler/get-item-job-instance),
+[service-principal tenant settings](https://learn.microsoft.com/fabric/admin/service-admin-portal-developer),
+and [external OneLake access](https://learn.microsoft.com/fabric/admin/service-admin-portal-onelake).
+
 ## Existing Docker startup
 
 Install Docker with Compose v2.20+ and run from the repository root:
