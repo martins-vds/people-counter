@@ -48,6 +48,9 @@ def form_inputs(content):
 
 
 class FakePortalAzure:
+    def close(self):
+        pass
+
     def status(self):
         return {"signed_in": True, "name": "Test Operator", "initials": "TO", "account": "operator@example.test", "tenant_id": "test-tenant", "error": ""}
 
@@ -151,6 +154,24 @@ def test_identity_refresh_rejects_external_or_ambiguous_return_urls(app, destina
     assert response.status_code == 400
 
 
+def test_portal_shutdown_closes_runtime_credentials(monkeypatch, tmp_path):
+    import signal
+    from unittest.mock import Mock
+    from people_counter import operator_portal
+
+    credential = SimpleNamespace(close=Mock())
+    runtime = SimpleNamespace(state=tmp_path, work=lambda stop: None, _azure=object(), azure=credential)
+    handlers = {}
+    monkeypatch.setattr(signal, "signal", lambda name, handler: handlers.setdefault(name, handler))
+    monkeypatch.setattr(operator_portal.PortalService, "from_environment", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(operator_portal, "create_app", lambda service: object())
+    monkeypatch.setattr("sys.argv", ["pc-admin"])
+    monkeypatch.setattr("waitress.serve", lambda *args, **kwargs: handlers[signal.SIGTERM](signal.SIGTERM, None))
+    with pytest.raises(SystemExit):
+        operator_portal.main()
+    credential.close.assert_called_once()
+
+
 def test_package_draft_survives_restart_and_selects_only_explicit_files(service):
     (service.source.root / "lobby" / "selected.mp4").write_bytes(b"selected")
     (service.source.root / "lobby" / "other.mp4").write_bytes(b"other")
@@ -195,11 +216,10 @@ def test_new_package_flow_requires_csrf_and_persists_selected_draft(app, service
     draft = service.store.entries("draft")[0]
     page = client.get(response.location)
     assert page.status_code == 200
-    assert b"Choose footage source" in page.data
-    assert b"Save source and choose footage" in page.data
+    assert b"Select recordings" in page.data
+    assert b"Choose footage source" not in page.data
     result = client.post(response.location, data={"csrf": token, "action": "source", "kind": "local"})
-    assert result.status_code == 302
-    assert b"Select recordings" in client.get(result.location).data
+    assert result.status_code == 400
     assert service.draft(draft["id"])["source"] == {"kind": "local", "root": str(service.local_source.root)}
 
 
@@ -371,29 +391,22 @@ def test_source_switch_clears_recursive_selection_without_scanning_new_root(serv
     assert saved["observations"] == {}
 
 
-def test_signed_out_adls_draft_can_be_opened_and_switched_to_local(app, service, monkeypatch):
-    from people_counter.portal_azure import PortalAzureError
-    monkeypatch.setattr(service.azure, "status", lambda: {"signed_in": False, "error": "Azure CLI is signed out"})
-
+def test_source_switching_is_removed_and_rejected_without_modifying_a_saved_draft(app, service):
     draft = service.new_draft("Offline")
     service.store.put("draft", draft["id"], {
         **draft, "source": {"kind": "adls", "account": "old", "filesystem": "clips"},
         "mode": "recursive", "videos": ["clip.mp4"],
     })
-    monkeypatch.setattr(service, "for_source", lambda source: (
-        (_ for _ in ()).throw(PortalAzureError("signed_out")) if source["kind"] == "adls"
-        else service
-    ))
     client = app.test_client()
     url = f"/packages/drafts/{draft['id']}?draft={draft['id']}&step=source"
     page = client.get(url)
-    assert page.status_code == 200
-    assert b"Choose footage source" in page.data
+    assert page.status_code == 302
+    assert "step=footage" in page.location
     token = csrf(client)
     changed = client.post(url, data={"csrf": token, "action": "source", "kind": "local", "confirm_source": "yes"})
-    assert changed.status_code == 302
-    assert service.draft(draft["id"])["source"]["kind"] == "local"
-    assert service.draft(draft["id"])["videos"] == []
+    assert changed.status_code == 400
+    assert service.draft(draft["id"])["source"]["kind"] == "adls"
+    assert service.draft(draft["id"])["videos"] == ["clip.mp4"]
 
 
 def test_selection_changes_preserve_old_observations_and_probe_only_new_files(service, monkeypatch):
@@ -493,9 +506,9 @@ def test_portal_cli_rejects_network_exposure_before_creating_state(monkeypatch, 
     (["--host", "::1"], "::1"),
     (["--container-loopback-publish"], "0.0.0.0"),
 ])
-def test_portal_cli_preserves_local_and_explicit_container_startup(service, monkeypatch, arguments, host):
+def test_portal_cli_preserves_binding_options_for_configured_adls_startup(service, monkeypatch, arguments, host):
     monkeypatch.setattr("sys.argv", ["pc-admin", *arguments])
-    monkeypatch.setattr(portal_web, "PortalService", lambda *args, **kwargs: service)
+    monkeypatch.setattr(portal_web.PortalService, "from_environment", lambda *args, **kwargs: service)
     previous_umask = os.umask(0o077)
     try:
         with patch("waitress.serve") as serve:

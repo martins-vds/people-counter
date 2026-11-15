@@ -2,13 +2,56 @@
 {% from "components.html" import icon, heading, badge, folder_nodes, source_context %}
 {% block title %}Footage library{% endblock %}
 {% block content %}
-{% call heading('Footage library', 'Browse recordings, assign them to cameras, or prepare the current folder. Source files remain read-only.', 'Operator portal') %}
-{{ badge('Read-only source', 'success') }}
+{% call heading('Footage library', 'Browse the configured ADLS storage, upload videos, and associate recordings with existing cameras.', 'Operator portal') %}
+{{ badge('ADLS intake', 'success') }}
 {% if draft_id %}<a class="btn" href="{{ url_for('package_workspace',identity=draft_id,step='generate') }}">{{ icon('package', 'size-4') }}Review package generation</a>
 {% elif remote_source %}<a class="btn" href="{{ url_for('packages') }}">{{ icon('package', 'size-4') }}New package</a>
 {% else %}<a class="btn" href="{{ url_for('packages', folder=folder) }}">{{ icon('package', 'size-4') }}Generate manifest package</a>{% endif %}
 {% endcall %}
 <p class="workflow-note">Next: assign footage to a camera, then choose Review footage to edit its line or recording details independently.</p>
+{% if remote_source %}
+<section class="card" id="intake-explorer" data-upload-url="{{ url_for('intake_upload') }}" data-destination-url="{{ url_for('intake_destination') }}" data-review-url="{{ url_for('intake_review') }}" data-move-url="{{ url_for('intake_move') }}" data-folder-url="{{ url_for('intake_folder') }}" data-status-url="{{ url_for('intake_status', identity='OPERATION') }}" data-download-url="{{ url_for('intake_download') }}" data-max-upload-bytes="{{ max_upload_bytes }}">
+  <div class="card-header"><h2>Upload videos to ADLS</h2><span>{{ max_upload_bytes|filesizeformat(true) }} per file</span></div>
+  <div class="card-body">
+    <form data-upload-form>
+      <input type="hidden" name="csrf" value="{{ session.csrf }}">
+      <div class="field"><label for="upload-destination">ADLS destination folder</label><input id="upload-destination" name="folder" value="{{ folder }}" placeholder="Leave blank for the allowed root"><p class="help">Choose the destination in the explorer or enter a folder within {{ root }}. Confirm it before choosing local videos.</p></div>
+      <button class="btn-secondary" type="submit">Confirm destination</button>
+      <div class="field"><label for="upload-files">Choose local videos</label><input id="upload-files" type="file" multiple accept="{{ upload_extensions }}" disabled></div>
+      <button type="button" data-upload-start disabled>Upload selected videos</button>
+    </form>
+    <p data-intake-message role="status" aria-live="polite"></p>
+    <ul data-upload-results></ul>
+    <p class="help">Files are streamed to ADLS before package selection. Verification reads every original byte for SHA-256 and may incur storage transfer costs. Leaving this page stops unfinished transfers; completed files and queued verification jobs remain.</p>
+    <div class="flex flex-wrap gap-2">
+      <button type="button" class="btn-secondary" data-intake-action="create">Create folder</button>
+      <button type="button" class="btn-secondary" data-intake-action="move">Move selected</button>
+      <button type="button" class="btn-secondary" data-intake-action="rename">Rename selected</button>
+      <button type="button" class="btn-secondary" data-intake-action="download">Download selected</button>
+      <a href="{{ url_for('footage', folder=folder, q=query, kind=kind) }}">Refresh folder</a>
+    </div>
+    <p class="help">Bulk actions apply to checked items on this page. Renaming requires one item. Prepared/published footage and active-job references are protected. Folder trees are not merged or replaced.</p>
+  </div>
+  <dialog data-intake-dialog aria-labelledby="intake-dialog-title" class="card">
+    <form data-intake-dialog-form class="card-body">
+      <h2 id="intake-dialog-title">Storage action</h2>
+      <p data-intake-dialog-detail></p>
+      <div class="field" data-intake-dialog-field><label for="intake-dialog-value">Folder or new name</label><input id="intake-dialog-value" name="value"></div>
+      <label class="check" data-intake-confirm-field hidden><input type="checkbox" name="confirm">I approve replacing this exact destination version. Old recording overrides will be invalidated.</label>
+      <div class="flex flex-wrap gap-2"><button type="button" class="btn-secondary" data-intake-dialog-cancel>Cancel</button><button>Confirm</button></div>
+    </form>
+  </dialog>
+</section>
+{% if intake_operations %}
+<section class="card"><div class="card-header"><h2>Intake history and recovery</h2></div><div class="card-body">
+{% for operation in intake_operations %}
+<p>{{ operation.kind }} / {{ operation.state }} / {{ operation.path or operation.target or operation.id }}: {{ operation.message }}</p>
+{% if operation.state == 'recovery' %}<form method="post" action="{{ url_for('intake_reconcile', identity=operation.id) }}"><input type="hidden" name="csrf" value="{{ session.csrf }}"><button class="btn-secondary">Reconcile interrupted operation</button></form>{% endif %}
+{% endfor %}
+<p class="help">Restore the originally reviewed runtime credentials before reconciliation. Unknown remote outcomes remain reserved rather than rewriting references without proof.</p>
+</div></section>
+{% endif %}
+{% endif %}
 <section class="card">
   <div class="explorer-path">
     <button class="btn-secondary btn-sm lg:hidden" type="button" id="toggle-folders" aria-expanded="false" aria-controls="folder-sidebar">{{ icon('folder', 'size-4') }}Folders</button>
@@ -52,28 +95,29 @@
           <thead><tr><th class="footage-select">Select</th><th>Name</th><th class="hidden xl:table-cell">Type</th><th class="hidden xl:table-cell">Size</th><th class="hidden xl:table-cell">Modified (UTC)</th><th>Camera</th><th>Actions</th></tr></thead>
           <tbody>{% for entry in entries %}
             <tr data-entry-path="{{ entry.path }}">
-              <td class="footage-select">{% if entry.video and not entry.blocked and not entry.error %}<label class="check"><input type="checkbox" name="videos" value="{{ entry.path }}" form="assign-footage" aria-label="Select {{ entry.name }}"></label>{% endif %}</td>
+              <td class="footage-select">{% if (entry.video or remote_source and entry.directory) and not entry.blocked and not entry.error %}<label class="check"><input type="checkbox" {% if entry.video %}name="videos" form="assign-footage"{% endif %} value="{{ entry.path }}" data-intake-selection data-directory="{{ 'true' if entry.directory else 'false' }}" aria-label="Select {{ entry.name }}"></label>{% endif %}</td>
               <td><span class="flex min-w-0 items-center gap-2"><span class="shrink-0 text-slate-400">{{ icon('lock' if entry.blocked else 'folder' if entry.directory else 'camera' if entry.video else 'info', 'size-4') }}</span>{% if entry.directory %}<a class="break-all" aria-label="Open folder {{ entry.name }}" href="{{ url_for('footage', folder=entry.path, q=query, kind=kind) }}">{{ entry.name }}/</a>{% else %}<span class="cell-title break-all">{{ entry.name }}</span>{% endif %}</span>
-                {% if entry.blocked %}<p class="text-xs text-red-700">Outside source root</p>{% elif entry.error %}<p class="text-xs text-red-700">{{ entry.error }}</p>{% endif %}
+                {% if entry.blocked or entry.error %}<p class="text-xs text-red-700">{{ entry.error or 'Unavailable during a storage operation' }}</p>{% elif entry.write_error %}<p class="help">{{ entry.write_error }}. Read/review/download remain available.</p>{% endif %}
                 <details class="mt-2 text-xs xl:hidden"><summary>File details</summary><dl><dt>Type</dt><dd>{{ 'Blocked' if entry.blocked else 'Unavailable' if entry.error else 'Folder' if entry.directory else 'Video' if entry.video else 'Other file' }}</dd><dt>Size</dt><dd>{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else 'Not available' }}</dd><dt>Modified (UTC)</dt><dd>{{ entry.modified_utc or 'Not available' }}</dd></dl></details>
               </td>
               <td class="hidden text-xs text-slate-500 xl:table-cell">{{ 'Blocked' if entry.blocked else 'Unavailable' if entry.error else 'Folder' if entry.directory else 'Video' if entry.video else 'Other file' }}</td>
               <td class="hidden whitespace-nowrap text-xs text-slate-500 xl:table-cell">{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else '&mdash;'|safe }}</td>
               <td class="hidden whitespace-nowrap text-xs text-slate-500 xl:table-cell">{{ entry.modified_utc or '&mdash;'|safe }}</td>
               <td class="footage-camera">{% if entry.video and not entry.blocked %}{% if entry.camera_id %}<a class="break-all" aria-label="Camera {{ entry.camera_id }}" href="{{ url_for('camera_footage', camera_id=entry.camera_id) }}">{{ camera_names.get(entry.camera_id, entry.camera_id) }}</a><code class="cell-meta hidden xl:block">{{ entry.camera_id }}</code>{% else %}<span class="text-xs text-slate-500">Unassigned</span>{% endif %}{% endif %}</td>
-              <td>{% if entry.video and not entry.blocked and not entry.error %}<a class="btn btn-secondary btn-sm" href="{{ url_for('review', video=entry.path, folder=folder, q=query, kind=kind) }}">Review footage</a>{% endif %}</td>
+              <td>{% if entry.video and not entry.blocked and not entry.error %}<a class="btn btn-secondary btn-sm" href="{{ url_for('review', video=entry.path, folder=folder, q=query, kind=kind) }}">Review footage</a>{% if remote_source %}<a class="btn btn-secondary btn-sm" href="{{ url_for('intake_download', video=entry.path) }}">Download</a>{% endif %}{% endif %}</td>
             </tr>
           {% else %}<tr><td colspan="7"><div class="empty-state">{{ icon('folder', 'size-8 text-slate-400') }}{% if total %}<p class="empty-title">No matching items</p><p class="empty-copy">Change the name or type filter. Other folders remain available in the folder pane.</p>{% else %}<p class="empty-title">This folder is empty.</p><p class="empty-copy">Choose another folder or add footage to the mounted source directory.</p>{% endif %}</div></td></tr>{% endfor %}</tbody>
         </table>
       </div>
       <div class="explorer-footer"><span>Showing {{ entries|length }} of {{ total }} items</span><span>Filesystem modification time is not recording time.</span></div>
+      {% if next_token %}<a href="{{ url_for('footage', folder=folder, q=query, kind=kind, continuation=next_token) }}">Next source page</a>{% endif %}
     </div>
   </div>
 </section>
 <details class="technical-details"><summary>Source configuration</summary>
   <div class="card-body">
     <div class="form-grid">
-      <div class="field"><p class="text-sm font-medium">Footage source</p><p>This library uses its current source. Choose <a href="{{ url_for('packages') }}">New package</a> to select Local folder or ADLS Gen2.</p></div>
+      <div class="field"><p class="text-sm font-medium">Footage source</p><p>This library uses the environment-configured ADLS account, filesystem and allowed root. <a href="{{ url_for('packages') }}">New package</a> starts with footage selection.</p></div>
       <div class="field"><p class="text-sm font-medium">Allowed source root</p><code>{{ root }}</code><p class="help"><a href="{{ url_for('locations') }}">Manage locations</a> separately from footage folders.</p></div>
     </div>
     <form method="get" class="flex flex-col items-start gap-3 sm:flex-row sm:items-end">

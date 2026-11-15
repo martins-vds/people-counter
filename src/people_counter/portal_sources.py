@@ -4,13 +4,47 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
-from people_counter.manifest import CONTENT_TYPES, VideoInspection, VideoMetadata, inspect_video, normalize_relative_path
+from people_counter.manifest import CatalogError, CONTENT_TYPES, VideoInspection, VideoMetadata, inspect_video, normalize_relative_path
 from people_counter.manifest_publisher import FILESYSTEM_NAME, STORAGE_ACCOUNT_NAME
+
+
+@dataclass(frozen=True)
+class AdlsPortalConfig:
+    descriptor: dict[str, str]
+    max_upload_bytes: int
+
+    @classmethod
+    def from_environment(cls) -> AdlsPortalConfig:
+        endpoint = urlsplit(os.environ.get("PC_PORTAL_ADLS_ACCOUNT_URL", ""))
+        suffix = ".dfs.core.windows.net"
+        account = (endpoint.hostname or "").removesuffix(suffix)
+        if (endpoint.scheme != "https" or not (endpoint.hostname or "").endswith(suffix)
+                or endpoint.netloc != endpoint.hostname or endpoint.path not in {"", "/"}
+                or endpoint.query or endpoint.fragment or not STORAGE_ACCOUNT_NAME.fullmatch(account)):
+            raise ValueError("PC_PORTAL_ADLS_ACCOUNT_URL must be an HTTPS ADLS account endpoint")
+        filesystem = os.environ.get("PC_PORTAL_ADLS_FILESYSTEM", "")
+        if not FILESYSTEM_NAME.fullmatch(filesystem):
+            raise ValueError("PC_PORTAL_ADLS_FILESYSTEM must identify an existing filesystem")
+        root = os.environ.get("PC_PORTAL_ADLS_ROOT", "")
+        try:
+            root = normalize_relative_path(root, directory=True).rstrip("/") if root else ""
+        except CatalogError as error:
+            raise ValueError(str(error)) from None
+        try:
+            limit = int(os.environ.get("PC_PORTAL_MAX_UPLOAD_BYTES", str(5 * 1024**3)))
+        except ValueError:
+            raise ValueError("PC_PORTAL_MAX_UPLOAD_BYTES must be a positive integer") from None
+        if limit <= 0:
+            raise ValueError("PC_PORTAL_MAX_UPLOAD_BYTES must be a positive integer")
+        return cls({"kind": "adls", "account": account, "filesystem": filesystem, "root": root}, limit)
 
 
 def source_identity(descriptor: Mapping[str, Any]) -> str:
@@ -20,8 +54,6 @@ def source_identity(descriptor: Mapping[str, Any]) -> str:
 
 class AdlsFootageSource:
     def __init__(self, descriptor: Mapping[str, Any], azure: Any, preview_store: Any = None) -> None:
-        from azure.storage.filedatalake import DataLakeServiceClient
-
         self.descriptor = dict(descriptor)
         self.account = str(descriptor.get("account", ""))
         self.filesystem = str(descriptor.get("filesystem", ""))
@@ -36,13 +68,25 @@ class AdlsFootageSource:
         self.label = f"ADLS / {self.account} / {self.filesystem}"
         self.azure = azure
         self.preview_store = preview_store
-        self.execution_identity = azure.require_identity()
-        credential = azure.credential(self.execution_identity, subscription=descriptor.get("subscription"))
-        self.client = DataLakeServiceClient(
+        self.execution_identity: dict | None = None
+        self._client: Any = None
+
+    @property
+    def client(self) -> Any:
+        if self._client is None:
+            self._client = self._open()
+        return self._client
+
+    def _open(self) -> Any:
+        from azure.storage.filedatalake import DataLakeServiceClient
+
+        self.execution_identity = self.azure.require_identity()
+        credential = self.azure.credential(self.execution_identity)
+        return DataLakeServiceClient(
             f"https://{self.account}.dfs.core.windows.net", credential=credential,
             max_single_get_size=8 * 1024 * 1024, max_chunk_get_size=8 * 1024 * 1024,
             connection_timeout=10, read_timeout=10,
-            _additional_pipeline_policies=[azure.policy(self.execution_identity)],
+            _additional_pipeline_policies=[self.azure.policy(self.execution_identity)],
         ).get_file_system_client(self.filesystem)
 
     def _call(self, function: Any, *args: Any, **kwargs: Any) -> Any:
@@ -54,12 +98,19 @@ class AdlsFootageSource:
         except AzureError as error:
             logging.getLogger(__name__).warning("ADLS source operation failed: %s", type(error).__name__)
             raise ValueError(
-                f"ADLS access failed ({type(error).__name__}). Check Azure CLI sign-in, "
-                "Storage Blob Data Reader/ACL permissions, and storage network access."
+                f"ADLS access failed ({type(error).__name__}). Check runtime credentials, "
+                "Storage Blob data/ACL permissions, and storage network access."
             ) from error
 
     def assert_identity(self) -> None:
-        self.azure.check_identity(self.execution_identity)
+        if self.execution_identity is not None:
+            self.azure.check_identity(self.execution_identity)
+
+    def reset(self) -> None:
+        if self._client is not None:
+            self._client.close()
+        self._client = None
+        self.execution_identity = None
 
     def canonical(self, path: str, *, directory: bool = False) -> str:
         if not path and directory:

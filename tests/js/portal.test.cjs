@@ -11,10 +11,14 @@ beforeEach(() => {
   document.body.innerHTML = "";
   global.fetch = jest.fn();
   jest.spyOn(document, "addEventListener");
+  jest.spyOn(window, "addEventListener");
 });
 
 afterEach(() => {
+  window.dispatchEvent(new Event("pagehide"));
   for (const args of document.addEventListener.mock.calls) document.removeEventListener(...args);
+  for (const args of window.addEventListener.mock.calls) window.removeEventListener(...args);
+  jest.useRealTimers();
   jest.restoreAllMocks();
   delete global.fetch;
 });
@@ -56,6 +60,17 @@ test("loads identity separately and escapes returned account text", async () => 
   expect(document.querySelector("[data-identity-tenant]")).toHaveTextContent("tenant");
   expect(screen.getByRole("status")).toBeEmptyDOMElement();
   expect(document.querySelector("[data-azure-identity]")).toHaveAttribute("aria-busy", "false");
+});
+
+test("a delayed signed-in identity lookup does not steal focus from local edits", async () => {
+  let resolveIdentity;
+  fetch.mockImplementationOnce(() => new Promise(resolve => { resolveIdentity = resolve; }));
+  identityPage();
+  const field = screen.getByRole("textbox", { name: "Unsaved account" });
+  field.focus();
+  resolveIdentity({ ok: true, json: async () => identityStatus });
+  await screen.findByText("Alice Example");
+  expect(field).toHaveFocus();
 });
 
 test("dismisses identity disclosure on Escape and when keyboard focus leaves", async () => {
@@ -122,7 +137,7 @@ test.each([
 ])("identity failures remain visible rather than looking signed in", async (response, reason) => {
   fetch.mockResolvedValue(response);
   identityPage();
-  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Unable to refresh Azure CLI identity"));
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Unable to refresh Azure execution identity"));
   expect(screen.getByRole("status")).toHaveTextContent(reason);
   expect(document.querySelector("[data-azure-identity]")).toHaveAttribute("aria-busy", "false");
   expect(screen.getByText("Checking identity")).toBeVisible();
@@ -132,7 +147,7 @@ test("pending identity lookup exposes busy state without hiding the page", () =>
   fetch.mockReturnValue(new Promise(() => {}));
   identityPage();
   expect(document.querySelector("[data-azure-identity]")).toHaveAttribute("aria-busy", "true");
-  expect(screen.getByRole("status")).toHaveTextContent("Checking Azure CLI identity...");
+  expect(screen.getByRole("status")).toHaveTextContent("Checking Azure execution identity...");
   expect(screen.getByRole("textbox", { name: "Unsaved account" })).toBeVisible();
 });
 

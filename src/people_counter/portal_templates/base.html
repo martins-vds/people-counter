@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='build/portal.css') }}">
   <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
   {% block head %}{% endblock %}
+  <script defer src="{{ url_for('static', filename='portal_intake.js') }}"></script>
 </head>
 <body class="app-shell">
 <a href="#main" class="skip-link">Skip to main content</a>
@@ -21,18 +22,18 @@
       {{ badge('Local operator mode', 'dark') }}
       <span class="badge badge-dark">{{ icon('cloud' if cloud_enabled else 'lock', 'size-3.5') }} Publishing {{ 'enabled' if cloud_enabled else 'locked' }}</span>
     </div>
-    <details class="relative min-w-0" aria-label="Azure CLI identity" data-azure-identity data-status-url="{{ url_for('identity_status') }}">
+    <details class="relative min-w-0" aria-label="Azure execution identity" data-azure-identity data-status-url="{{ url_for('identity_status') }}">
       <summary class="flex min-h-11 items-center gap-2 text-white">
         <span class="flex size-10 items-center justify-center rounded-full bg-brand-700" data-identity-initials aria-hidden="true">{{ azure_identity.initials or '?' }}</span>
-        <span class="min-w-0 max-w-40 break-words" data-identity-name>{{ azure_identity.name or 'Azure CLI signed out' }}</span>
+        <span class="min-w-0 max-w-40 break-words" data-identity-name>{{ azure_identity.name or 'Credentials unavailable' }}</span>
       </summary>
       <div class="absolute right-0 z-40 w-72 max-w-[calc(100vw-2rem)] break-words rounded-lg bg-white p-4 text-slate-800 shadow-sm">
-        <p>Azure CLI execution identity</p>
+        <p>Azure execution identity</p>
         <p data-identity-account>{{ azure_identity.account or 'No signed-in user' }}</p>
         <p>Tenant: <span data-identity-tenant>{{ azure_identity.tenant_id or 'Not available' }}</span></p>
         <p role="status" data-identity-error>{{ azure_identity.error }}</p>
-        <p>Run <code>az login</code> in the terminal, then refresh. This does not sign in browser visitors.</p>
-        <form method="post" action="{{ url_for('identity_refresh') }}" data-identity-refresh><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="return_to" value="{{ request.full_path }}"><button class="btn-secondary">Refresh Azure CLI identity</button></form>
+        <p>DefaultAzureCredential resolves credentials in this portal runtime. Configure runtime credentials externally; this does not authenticate browser visitors.</p>
+        <form method="post" action="{{ url_for('identity_refresh') }}" data-identity-refresh><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="return_to" value="{{ request.full_path }}"><button class="btn-secondary">Refresh execution identity</button></form>
       </div>
     </details>
   </div>

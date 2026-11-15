@@ -490,7 +490,7 @@ class _CredentialProcessingReader:
 
         token = self.credential.get_token("https://storage.azure.com/.default").token
         if not token:
-            raise RuntimeError("Azure CLI returned an empty processing-monitor token")
+            raise RuntimeError("Runtime credentials returned an empty processing-monitor token")
         escaped = token.replace("'", "''")
         try:
             self.connection.execute(
@@ -499,7 +499,7 @@ class _CredentialProcessingReader:
                 "ENDPOINT 'https://onelake.blob.fabric.microsoft.com')"
             )
         except duckdb.Error:
-            raise RuntimeError("Cannot configure the CLI processing-monitor token") from None
+            raise RuntimeError("Cannot configure the SDK processing-monitor token") from None
         if parameters is None:
             return self.connection.execute(query)
         return self.connection.execute(query, parameters)

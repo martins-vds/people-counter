@@ -33,14 +33,15 @@ def test_adls_source_identity_is_storage_qualified_and_stable_across_browsing():
         assert source_identity(first) != source_identity({**first, key: value})
 
 
-def test_adls_source_uses_explicit_cli_credentials_and_original_paths(source):
+def test_adls_source_lazily_uses_sdk_credentials_and_original_paths(source):
     adapter, filesystem, azure, factory = source
-    azure.credential.assert_called_once_with(azure.require_identity.return_value, subscription="subscription")
-    assert factory.call_args.kwargs["credential"] is azure.credential.return_value
+    azure.credential.assert_not_called()
     assert adapter.remote_path("day/clip.mp4") == "entrance/day/clip.mp4"
     assert adapter.relative_video("day/clip.mp4").endswith("/day/clip.mp4")
     filesystem.get_file_client.return_value.get_file_properties.return_value = SimpleNamespace(size=7, etag='"version"')
     assert adapter.properties("day/clip.mp4") == {"size": 7, "etag": '"version"'}
+    azure.credential.assert_called_once_with(azure.require_identity.return_value)
+    assert factory.call_args.kwargs["credential"] is azure.credential.return_value
     filesystem.get_file_client.assert_called_with("entrance/day/clip.mp4")
     filesystem.get_file_client.return_value.download_file.assert_not_called()
 

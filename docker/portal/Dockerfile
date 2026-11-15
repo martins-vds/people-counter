@@ -23,7 +23,6 @@ ENV UV_PYTHON=3.13 \
     PATH=/opt/people-counter/.venv/bin:${PATH} \
     HOME=/var/lib/people-counter/portal \
     AZURE_CONFIG_DIR=/var/lib/people-counter/azure \
-    PC_PORTAL_SOURCE_ROOT=/data/videos \
     PC_PORTAL_MODELS_ROOT=/data/models \
     PC_PORTAL_STATE_DIR=/var/lib/people-counter/portal
 COPY pyproject.toml uv.lock README.md ./
@@ -33,7 +32,7 @@ COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable --extra portal --extra publisher --extra demo \
     && useradd --uid 10001 --no-create-home portal \
-    && mkdir -p /data/videos /data/models /var/lib/people-counter/portal /var/lib/people-counter/azure \
+    && mkdir -p /data/models /var/lib/people-counter/portal /var/lib/people-counter/azure \
     && chown -R 10001:10001 /var/lib/people-counter
 USER 10001:10001
 EXPOSE 8088

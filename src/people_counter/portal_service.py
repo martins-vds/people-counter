@@ -18,14 +18,15 @@ import traceback
 import unicodedata
 import uuid
 import zipfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from itertools import islice
+from functools import wraps
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Concatenate, ParamSpec, TypeVar
 
 from people_counter import backfill_operator as backfill
 from people_counter.adls import AzureDataLakeStorage
@@ -39,7 +40,7 @@ from people_counter.manifest_publisher import (
     MANIFEST_PACKAGE_VERSION, PublisherConfig, ValidatedManifestPackage,
     publish_manifest_package, run_publisher, validate_manifest_package,
 )
-from people_counter.portal_sources import AdlsFootageSource, SelectedFootageInput
+from people_counter.portal_sources import AdlsFootageSource, AdlsPortalConfig, SelectedFootageInput, source_identity
 
 LINE_FIELDS = ("counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2")
 EXCEPTION_FIELDS = ("video_relative_path", "captured_at_utc", "frame_width", "frame_height", *LINE_FIELDS)
@@ -576,28 +577,45 @@ class PortalStore:
             raise ValueError("Only failed or interrupted jobs can be resumed")
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _source_operation(method: Callable[Concatenate[PortalService, _P], _R]) -> Callable[Concatenate[PortalService, _P], _R]:
+    @wraps(method)
+    def locked(self: PortalService, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with self.operation_lock:
+            return method(self, *args, **kwargs)
+    return locked
+
+
 class PortalService:
     def __init__(
-        self, source_root: Path, models_root: Path, state: Path, *,
+        self, source_root: Path | AdlsFootageSource, models_root: Path, state: Path, *,
         allow_cloud: bool = False, output_root: Path | None = None,
     ):
-        self.source: LocalFootageSource | AdlsFootageSource = LocalFootageSource(source_root)
-        self.local_source = self.source
+        self.source: LocalFootageSource | AdlsFootageSource = (
+            source_root if isinstance(source_root, AdlsFootageSource) else LocalFootageSource(source_root)
+        )
+        self.local_source = self.source if isinstance(self.source, LocalFootageSource) else None
         self.models_root = models_root.resolve()
         self.state = state.resolve()
         self.state.mkdir(parents=True, exist_ok=True)
         self.output_root = (output_root or self.state / "packages").resolve()
-        if self.output_root.is_relative_to(self.source.root) or self.source.root.is_relative_to(self.output_root):
+        if self.local_source is not None and (
+            self.output_root.is_relative_to(self.local_source.root) or self.local_source.root.is_relative_to(self.output_root)
+        ):
             raise ValueError("The package output root must be separate from the source root")
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.store = PortalStore(self.state / "portal.sqlite3")
-        roots = self.store.entries("local_source")
-        if roots and roots[0]["root"] != str(self.local_source.root):
-            raise ValueError("This portal state belongs to a different local footage root. Restore that root or use a separate state directory.")
-        if not roots:
-            self.store.put("local_source", "root", {"root": str(self.local_source.root)})
+        if self.local_source is not None:
+            roots = self.store.entries("local_source")
+            if roots and roots[0]["root"] != str(self.local_source.root):
+                raise ValueError("This portal state belongs to a different local footage root. Restore that root or use a separate state directory.")
+            if not roots:
+                self.store.put("local_source", "root", {"root": str(self.local_source.root)})
         known = {item["id"] for item in self.store.entries("footage")}
-        for item in self.store.entries("camera"):
+        for item in self.store.entries("camera") if self.local_source is not None else []:
             if item["video"] not in known:
                 self.store.assign_footage(item["catalog"]["camera_id"], [item["video"]])
                 known.add(item["video"])
@@ -605,6 +623,22 @@ class PortalService:
         self.allow_cloud = allow_cloud
         self.worker_error: str | None = None
         self._azure: Any = None
+        self._intake: Any = None
+        self.input_root = self.local_source.video_root if self.local_source else self.state / "inputs"
+        self.max_upload_bytes = 5 * 1024**3
+        self.operation_lock = threading.RLock()
+        if isinstance(self.source, AdlsFootageSource):
+            self._azure = self.source.azure
+            self.source.preview_store = self.store
+            self.store.put("source", self.source.identity, self.source.descriptor)
+
+    @classmethod
+    def from_environment(cls, models_root: Path, state: Path, **kwargs: Any) -> PortalService:
+        from people_counter.portal_azure import PortalAzureSession
+        config = AdlsPortalConfig.from_environment()
+        result = cls(AdlsFootageSource(config.descriptor, PortalAzureSession()), models_root, state, **kwargs)
+        result.max_upload_bytes = config.max_upload_bytes
+        return result
 
     @property
     def azure(self) -> Any:
@@ -614,10 +648,25 @@ class PortalService:
             self._azure = PortalAzureSession()
         return self._azure
 
+    @property
+    def intake(self) -> Any:
+        if not isinstance(self.source, AdlsFootageSource):
+            raise ValueError("Intake operations require the configured ADLS source")
+        if self._intake is None:
+            from people_counter.portal_intake import PortalIntake
+            self._intake = PortalIntake(self)
+        return self._intake
+
+    def source_matches(self, descriptor: Mapping[str, Any]) -> bool:
+        return isinstance(self.source, AdlsFootageSource) and descriptor.get("kind") == "adls" and source_identity(descriptor) == self.source.identity
+
     def new_draft(self, name: str) -> dict[str, Any]:
         identity = uuid.uuid4().hex
         draft = {
-            "name": _identifier(name, "Package name"), "source": {"kind": "local", "root": str(self.local_source.root)},
+            "name": _identifier(name, "Package name"), "source": (
+                dict(self.source.descriptor) if isinstance(self.source, AdlsFootageSource)
+                else {"kind": "local", "root": str(self.source.root)}
+            ),
             "mode": "individual", "videos": [], "observations": {}, "folder": "", "destination": "",
         }
         self.store.put("draft", identity, draft)
@@ -631,9 +680,14 @@ class PortalService:
         return found
 
     def for_source(self, descriptor: Mapping[str, Any]) -> PortalService:
+        if isinstance(self.source, AdlsFootageSource):
+            if descriptor.get("kind") != "adls" or source_identity(descriptor) != self.source.identity:
+                raise ValueError("This record does not belong to the configured ADLS source; it is read-only history")
+            return self
         kind = descriptor.get("kind", "local")
         if kind not in {"local", "adls"}:
             raise ValueError("Select Local folder or ADLS Gen2")
+        assert self.local_source is not None
         if kind == "local" and descriptor.get("root", str(self.local_source.root)) != str(self.local_source.root):
             raise ValueError("The draft belongs to a different configured local root")
         result = copy.copy(self)
@@ -675,10 +729,13 @@ class PortalService:
         self.store.put("source_preview", identity, result)
         return {"id": identity, **result}
 
+    @_source_operation
     def update_draft(self, identity: str, changes: Mapping[str, Any]) -> None:
         draft = self.draft(identity)
         source = dict(changes.get("source", draft["source"]))
         if source.get("kind") == "local":
+            if self.local_source is None:
+                raise ValueError("Only the configured ADLS source can be selected")
             source["root"] = str(self.local_source.root)
         scoped = self.for_source(source)
         changed_source = source != draft["source"]
@@ -693,6 +750,8 @@ class PortalService:
         if not isinstance(videos, list) or len(videos) > 10000:
             raise ValueError("Select at most 10,000 videos")
         videos = sorted({scoped.source.canonical(video) for video in videos})
+        if isinstance(scoped.source, AdlsFootageSource):
+            scoped.intake.assert_available(videos)
         previous = {} if changed_source or refresh else draft["observations"]
         observations = {
             video: previous[video] if video in previous else scoped.source.properties(video)
@@ -708,7 +767,8 @@ class PortalService:
 
     def source_descriptor(self, identity: str) -> dict[str, Any]:
         if identity == "local":
-            return {"kind": "local", "root": str(self.local_source.root)}
+            roots = self.store.entries("local_source")
+            return {"kind": "local", "root": roots[0]["root"] if roots else ""}
         found = next((row for row in self.store.entries("source") if row["id"] == identity), None)
         if found is None:
             raise ValueError("The source metadata is missing. Restore the original source descriptor.")
@@ -729,11 +789,17 @@ class PortalService:
     def draft_input(self, draft: Mapping[str, Any]) -> SelectedFootageInput:
         return SelectedFootageInput(self.for_source(draft["source"]).source, draft["videos"], draft["observations"])
 
+    @_source_operation
     def generate_draft(self, identity: str) -> str:
         draft = self.draft(identity)
         if not draft["videos"]:
             raise ValueError("Select footage before generating a package")
         scoped = self.for_source(draft["source"])
+        if isinstance(scoped.source, AdlsFootageSource):
+            scoped.intake.assert_available(draft["videos"])
+            review = {row["id"] for row in self.store.entries("source_review")}
+            if any(scoped.source.relative_video(video) in review for video in draft["videos"]):
+                raise ValueError("Replaced footage requires fresh recording or counting-line review before generation")
         assignments = scoped.footage_assignments()
         for video in draft["videos"]:
             if not assignments.get(video):
@@ -775,6 +841,7 @@ class PortalService:
 
     def media_metadata(self, video: str) -> VideoMetadata:
         if isinstance(self.source, AdlsFootageSource):
+            self.intake.assert_available([video])
             metadata = self.source.probe(video)
             self.source.frame(video)
             return metadata
@@ -800,6 +867,7 @@ class PortalService:
             raise ValueError("The camera's location is missing; correct its location before preparation")
         return camera
 
+    @_source_operation
     def footage_readiness(self, video: str, *, draft: Mapping[str, str] | None = None) -> dict[str, Any]:
         relative = self.source.relative_video(video)
         assignments = self.footage_assignments()
@@ -817,6 +885,9 @@ class PortalService:
             "exception": next((row for row in inventory_rows if row["id"] == relative), {"video_relative_path": relative}),
         }
         self._check_readiness_media(video, result)
+        if any(row["id"] == relative for row in self.store.entries("source_review")):
+            result["issues"].append({"code": "CONTENT_REPLACED", "scope": "package",
+                                    "message": "This video was replaced.", "action": "Save a fresh recording or counting-line review."})
         if not result["camera_id"]:
             result["issues"].append({
                 "code": "CAMERA_UNASSIGNED", "scope": "package",
@@ -885,6 +956,7 @@ class PortalService:
         if len(applicable) == 1:
             result.update(camera_values=applicable[0]["catalog"], config_id=applicable[0]["id"])
 
+    @_source_operation
     def assign_footage(self, camera_id: str, videos: list[str], *, geometry_action: str = "") -> None:
         if not videos:
             raise ValueError("Select one or more video files")
@@ -917,6 +989,7 @@ class PortalService:
                     (self.video_key(video), json.dumps({"camera_id": camera_id})),
                 )
 
+    @_source_operation
     def save_camera_line(self, camera_id: str, form: Mapping[str, str]) -> None:
         camera = self.registered_camera(camera_id)
         if form.get("camera_id", camera_id) != camera_id or form.get("location_id", camera["location_id"]) != camera["location_id"]:
@@ -987,6 +1060,7 @@ class PortalService:
         ])
         self.store.put("camera", config_id, {**item, "catalog": row})
 
+    @_source_operation
     def save_calibration(self, form: Mapping[str, str]) -> str:
         if form.get("scope") not in {"camera", "video"}:
             raise ValueError("Select camera defaults or a per-video exception")
@@ -1049,6 +1123,7 @@ class PortalService:
             {"video_relative_path": relative},
         )
 
+    @_source_operation
     def update_video_exception(
         self, video: str, changes: Mapping[str, str], remove: tuple[str, ...] = (),
     ) -> None:
@@ -1071,6 +1146,7 @@ class PortalService:
             else:
                 db.execute("DELETE FROM entries WHERE kind='exception' AND id=?", (relative,))
 
+    @_source_operation
     def save_line(self, form: Mapping[str, str]) -> None:
         video = form.get("video", "")
         if form.get("use_camera") == "yes":
@@ -1084,8 +1160,56 @@ class PortalService:
         else:
             raise ValueError("Footage line edits are video-only; use camera calibration to change its default")
 
+    @_source_operation
+    def clear_intake_review(self, video: str) -> None:
+        if not isinstance(self.source, AdlsFootageSource):
+            return
+        relative = self.source.relative_video(video)
+        if not any(row["id"] == relative for row in self.store.entries("source_review")):
+            return
+        self.media_metadata(video)
+        properties = self.source.properties(video)
+        with self.store.connection() as db:
+            db.execute("DELETE FROM entries WHERE kind='source_review' AND id=?", (relative,))
+            reviews = {row["id"] for row in db.execute("SELECT id FROM entries WHERE kind='source_review'")}
+            for row in db.execute("SELECT id,data FROM entries WHERE kind='draft'").fetchall():
+                draft = json.loads(row["data"])
+                if self.source_matches(draft["source"]) and video in draft["videos"]:
+                    draft["observations"][video] = properties
+                    draft["needs_review"] = [path for path in draft.get("needs_review", []) if path != video]
+                    draft["review_required"] = any(self.source.relative_video(path) in reviews for path in draft["videos"])
+                    db.execute("UPDATE entries SET data=? WHERE kind='draft' AND id=?", (json.dumps(draft), row["id"]))
+
+    @_source_operation
+    def delete_legacy_draft(self, identity: str) -> None:
+        draft = self.draft(identity)
+        if draft["source"].get("kind") != "local":
+            raise ValueError("Select a legacy local draft")
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for job in db.execute("SELECT kind,payload FROM jobs WHERE status IN ('QUEUED','RUNNING','INTERRUPTED')"):
+                payload = json.loads(job["payload"])
+                if job["kind"] == "prepare" and payload.get("source", {}).get("kind", "local") == "local":
+                    raise ValueError("Active local jobs block metadata deletion")
+                package = self.store.job(payload["package_id"]) if payload.get("package_id") else None
+                if package and package["payload"].get("source", {}).get("kind", "local") == "local":
+                    raise ValueError("Active local package jobs block metadata deletion")
+            other = [
+                json.loads(row["data"]) for row in db.execute("SELECT data FROM entries WHERE kind='draft' AND id!=?", (identity,))
+            ]
+            shared = {video for item in other if item["source"].get("kind") == "local" for video in item["videos"]}
+            videos = set(draft["videos"]) - shared
+            prefix = Path(draft["source"]["root"]).name + "/"
+            for row in db.execute("SELECT kind,id,data FROM entries WHERE kind IN ('footage','camera','exception','source_preview')").fetchall():
+                data = json.loads(row["data"])
+                key = row["id"] if row["kind"] == "footage" else data.get("video") if row["kind"] in {"camera", "source_preview"} else row["id"]
+                matches = key in videos if row["kind"] in {"footage", "camera"} else key in {prefix + video for video in videos}
+                if matches:
+                    db.execute("DELETE FROM entries WHERE kind=? AND id=?", (row["kind"], row["id"]))
+            db.execute("DELETE FROM entries WHERE kind='draft' AND id=?", (identity,))
+
     def enqueue(self, kind: str, payload: Mapping[str, Any]) -> str:
-        if kind not in {"prepare", "profiles", "publish", "submit"}:
+        if kind not in {"prepare", "profiles", "publish", "submit", "intake"}:
             raise ValueError("Unsupported operator job")
         if kind in {"publish", "submit"} and not self.allow_cloud:
             raise ValueError("Cloud actions are disabled")
@@ -1200,7 +1324,9 @@ class PortalService:
         path = saved_path.resolve()
         if path != saved_path:
             raise ValueError("Package destination changed since preparation was queued")
-        if path == allowed or not path.is_relative_to(allowed) or path.is_relative_to(self.local_source.root):
+        if path == allowed or not path.is_relative_to(allowed) or (
+            self.local_source is not None and path.is_relative_to(self.local_source.root)
+        ):
             raise ValueError("Package destination is outside its saved output root")
         return path
 
@@ -1297,14 +1423,14 @@ class PortalService:
         if payload.get("execution_identity"):
             self.azure.credential(payload["execution_identity"]).get_token("https://storage.azure.com/.default")
         config = PublisherConfig(
-            catalog, inventory, self.local_source.video_root, source.prefix(payload["folder"]),
+            catalog, inventory, self.input_root, source.prefix(payload["folder"]),
             "offline", "offline", "staging", "incoming", folder / "prepare.sqlite3",
             package / "rejection-report.csv", package / "generated-video-inventory.csv",
             10000, True, output_dir=package, summary_report_path=package / "summary.json",
         )
 
         def inspect(path: Path):
-            self.store.event(identity, f"Inspecting and hashing {path.relative_to(self.local_source.root)}")
+            self.store.event(identity, f"Inspecting and hashing {path.relative_to(self.input_root)}")
             return inspect_video(path)
 
         try:
@@ -1344,7 +1470,7 @@ class PortalService:
             if "videos" in source_payload else None
         )
         publication = backfill.publication_config(
-            package_dir, self.local_source.video_root, self.job_dir(identity), config,
+            package_dir, self.input_root, self.job_dir(identity), config,
         )
         package = validate_manifest_package(publication, input_source=inputs)
         self.protect_source_files(source, source_payload.get("videos", []), config, package)
@@ -1395,6 +1521,13 @@ class PortalService:
             with backfill.progress_reporter(lambda message: self.store.event(identity, message)):
                 if kind == "prepare":
                     result = self._prepare(identity, payload)
+                elif kind == "intake":
+                    result = (
+                        self.intake.reconcile(payload["operation_id"]) if payload.get("reconcile")
+                        else self.intake.complete(payload["operation_id"])
+                    )
+                    if result["state"] != "completed" and not (payload.get("reconcile") and result["state"] == "cancelled"):
+                        raise ValueError(result.get("message") or "Intake operation requires recovery")
                 elif kind == "profiles":
                     result = backfill.prepare_catalog(
                         payload["target"], payload["binding"], self.models_root,
@@ -1415,6 +1548,8 @@ class PortalService:
     def work(self, stop: threading.Event) -> None:
         try:
             self.store.recover()
+            if isinstance(self.source, AdlsFootageSource):
+                self.intake.recover()
             while not stop.is_set():
                 if not self.run_next_job():
                     stop.wait(0.5)

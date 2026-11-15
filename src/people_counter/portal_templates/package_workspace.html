@@ -4,37 +4,15 @@
 {% block content %}
 {% call heading(draft.name, 'Select footage, associate existing cameras, and generate an immutable package revision.', 'Package draft') %}<a class="btn btn-secondary" href="{{ url_for('packages') }}">Package history</a>{% endcall %}
 <nav aria-label="Package steps" class="flex flex-wrap gap-3">
-{% for value, label in [('source','Source'),('footage','Footage'),('cameras','Cameras and readiness'),('generate','Generate')] %}
+{% for value, label in [('footage','Footage'),('cameras','Cameras and readiness'),('generate','Generate')] %}
 <a class="btn {{ 'btn-secondary' if step != value else '' }}" href="{{ url_for('package_workspace', identity=draft.id, step=value) }}" {% if step == value %}aria-current="step"{% endif %}>{{ loop.index }}. {{ label }}</a>
 {% endfor %}
 </nav>
-<p class="workflow-note">{% if draft.source.kind == 'adls' %}ADLS / {{ draft.source.account }} / {{ draft.source.filesystem }}{% else %}Local folder / {{ local_root }}{% endif %}. {{ draft.videos|length }} selected recordings, {{ selected_bytes|filesizeformat(true) }}. Draft changes are saved locally.</p>
-{% if step == 'source' %}
-<section class="card"><div class="card-header"><h2>Choose footage source</h2></div><div class="card-body">
-{% if source_error %}<p class="alert alert-warning" role="status">{{ source_error }} Local source selection remains available.</p>{% endif %}
-<form method="get">
-  <input type="hidden" name="draft" value="{{ draft.id }}"><input type="hidden" name="step" value="source">
-  <div class="field"><label for="source-kind">Footage source</label><select id="source-kind" name="kind"><option value="local" {% if kind == 'local' %}selected{% endif %}>Local folder</option><option value="adls" {% if kind == 'adls' %}selected{% endif %}>ADLS Gen2</option></select></div>
-  {% if kind == 'adls' %}
-  <div class="field"><label for="source-subscription">Subscription</label><select id="source-subscription" name="subscription"><option value="">Choose subscription</option>{% for item in subscriptions %}<option value="{{ item.id }}" {% if item.id == subscription %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
-  <div class="field"><label for="source-account">Storage account</label><select id="source-account" name="account"><option value="">Choose account</option>{% for item in accounts %}<option value="{{ item.name }}" {% if item.name == account %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
-  {% endif %}
-  <button class="btn-secondary">Browse source options</button>
-</form>
-<form method="post">
-  <input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="source"><input type="hidden" name="kind" value="{{ kind }}">
-  {% if kind == 'adls' %}
-  <input type="hidden" name="subscription" value="{{ subscription }}"><input type="hidden" name="account" value="{{ account }}">
-  <div class="field"><label for="source-filesystem">Filesystem / container</label><select id="source-filesystem" name="filesystem" required><option value="">Choose filesystem</option>{% for item in filesystems %}<option value="{{ item.name }}" {% if item.name == draft.source.get('filesystem') %}selected{% endif %}>{{ item.name }}</option>{% endfor %}</select></div>
-  <div class="field"><label for="source-root">Folder within filesystem (optional)</label><input id="source-root" name="root" value="{{ draft.source.get('root','') if draft.source.kind == 'adls' else '' }}"><p class="help">Leave blank to browse the filesystem. Source access is read-only.</p></div>
-  {% else %}<p>Allowed local root: {{ local_root }}. The portal cannot browse arbitrary host folders.</p>{% endif %}
-  {% if draft.videos %}<label class="check"><input type="checkbox" name="confirm_source" value="yes">I approve clearing selected footage if the source changes.</label>{% endif %}
-  <button>Save source and choose footage</button>
-</form>
-</div></section>
-{% elif step == 'footage' %}
+<p class="workflow-note">{{ source.label }}. {{ draft.videos|length }} selected recordings, {{ selected_bytes|filesizeformat(true) }}. Draft changes are saved locally.</p>
+{% if step == 'footage' %}
 <section class="card"><div class="card-header"><h2>Select recordings</h2></div><div class="card-body">
 <p>Current folder: {{ folder or 'Source root' }}. Selecting a folder recursively freezes its current recordings; it does not include later additions.</p>
+{% if draft.source.kind == 'adls' %}<p><a href="{{ url_for('footage', folder=folder, draft=draft.id) }}">Upload or manage videos in this ADLS folder</a>. Uploading does not automatically select recordings for this package.</p>{% endif %}
 {% if folder %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder.rsplit('/',1)[0] if '/' in folder else '') }}">Parent folder</a>{% endif %}
 <form method="post">
 <input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="selection"><input type="hidden" name="folder" value="{{ folder }}">

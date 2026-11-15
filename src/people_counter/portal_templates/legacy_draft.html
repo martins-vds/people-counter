@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Read-only draft history{% endblock %}
+{% block content %}
+<section class="card"><div class="card-header"><h1>{{ draft.name }}</h1></div><div class="card-body">
+<p>This draft belongs to another source and is read-only history. Upload footage to the configured ADLS root and create a new package; equal filenames do not establish equivalent content.</p>
+<p>{{ draft.videos|length }} selected recordings.</p>
+{% if draft.source.kind == 'local' %}
+<form method="post" action="{{ url_for('delete_legacy_draft', identity=draft.id) }}">
+<input type="hidden" name="csrf" value="{{ session.csrf }}">
+<label class="check"><input type="checkbox" name="confirm" value="yes" required>I approve deleting this local draft and its unshared footage-specific metadata. Local videos, locations, cameras and job/audit history remain.</label>
+<button class="btn-secondary">Delete local metadata</button>
+</form>
+{% endif %}
+<a href="{{ url_for('packages') }}">Return to packages</a>
+</div></section>
+{% endblock %}

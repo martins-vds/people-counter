@@ -7,6 +7,7 @@ import csv
 import os
 import re
 import secrets
+import signal
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -23,11 +24,11 @@ from itsdangerous import BadSignature, URLSafeSerializer
 from people_counter import backfill_operator as backfill
 from people_counter.csv_reports import spreadsheet_csv
 from people_counter.inference_profiles import PRESETS
-from people_counter.manifest import ManifestPublisherError
+from people_counter.manifest import CONTENT_TYPES, ManifestPublisherError
 from people_counter.portal_service import (
     LINE_FIELDS, METADATA_FIELDS, PORTAL_CATALOG_FIELDS, REPORT_TYPES, PortalService, report_type,
 )
-from people_counter.portal_sources import AdlsFootageSource
+from people_counter.portal_sources import AdlsFootageSource, SelectedFootageInput
 from people_counter.portal_azure import PortalAzureError
 
 
@@ -85,11 +86,14 @@ def create_app(root_service: PortalService) -> Flask:
     )
     app.extensions["portal_service"] = root_service
     preview_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="full-preview-approval")
+    intake_signer = URLSafeSerializer(app.config["SECRET_KEY"], salt="intake-replacement")
     service = LocalProxy(lambda: getattr(g, "portal_service", root_service))
 
     @app.before_request
     def select_draft_source():
-        if request.endpoint in {"health", "static", "jobs", "job", "report", "report_view", "package_zip", "identity_refresh", "identity_status"}:
+        if request.endpoint == "intake_chunk":
+            request.max_content_length = 8 * 1024 * 1024
+        if (request.endpoint or "").startswith("intake_") or request.endpoint in {"health", "static", "jobs", "job", "report", "report_view", "package_zip", "identity_refresh", "identity_status"}:
             return
         identity = request.args.get("draft") or request.form.get("draft")
         g.draft_id = identity
@@ -120,7 +124,7 @@ def create_app(root_service: PortalService) -> Flask:
     @app.before_request
     def protect_forms():
         session.setdefault("csrf", secrets.token_urlsafe(32))
-        if request.method == "POST":
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             origin = request.headers.get("Origin")
             if origin:
                 parsed = urlsplit(origin)
@@ -131,7 +135,8 @@ def create_app(root_service: PortalService) -> Flask:
                 )
                 if address not in {(request.scheme, request.host.lower()), forwarded}:
                     abort(403, "Cross-origin actions are not permitted")
-            if not secrets.compare_digest(request.form.get("csrf", ""), session["csrf"]):
+            token = request.headers.get("X-CSRF-Token", "") if request.endpoint == "intake_chunk" else request.form.get("csrf", "")
+            if not secrets.compare_digest(token, session["csrf"]):
                 abort(403, "Invalid form token; reload the page and try again")
 
     @app.after_request
@@ -157,11 +162,15 @@ def create_app(root_service: PortalService) -> Flask:
 
     @app.errorhandler(PortalAzureError)
     def azure_error(error):
+        if (request.endpoint or "").startswith("intake_"):
+            return {"error": str(error)}, 403
         return render_template("error.html", message=str(error)), 403
 
     @app.errorhandler(ValueError)
     @app.errorhandler(ManifestPublisherError)
     def invalid_input(error):
+        if (request.endpoint or "").startswith("intake_"):
+            return {"error": str(error)}, 400
         return render_template("error.html", message=str(error)), 400
 
     @app.errorhandler(400)
@@ -171,6 +180,8 @@ def create_app(root_service: PortalService) -> Flask:
     def http_error(error):
         if isinstance(error, SecurityError):
             return "Untrusted host", 400, {"Content-Type": "text/plain; charset=utf-8"}
+        if (request.endpoint or "").startswith("intake_"):
+            return {"error": error.description}, error.code
         return render_template("error.html", message=error.description), error.code
 
     @app.get("/healthz")
@@ -195,7 +206,10 @@ def create_app(root_service: PortalService) -> Flask:
             or any(character in destination for character in "\r\n\t")
         ):
             abort(400, "Identity refresh must return to a local portal page")
-        root_service.azure.refresh()
+        with root_service.operation_lock:
+            root_service.azure.refresh()
+            if isinstance(root_service.source, AdlsFootageSource):
+                root_service.source.reset()
         if request.accept_mimetypes.best == "application/json":
             return root_service.azure.status()
         return redirect(destination)
@@ -204,16 +218,148 @@ def create_app(root_service: PortalService) -> Flask:
     def identity_status():
         return root_service.azure.status()
 
+    def replacement_etag(path, token):
+        if not token:
+            return None
+        if request.form.get("confirm_replace") != "yes":
+            raise ValueError("Explicit replacement confirmation is required")
+        try:
+            reviewed = intake_signer.loads(token)
+        except BadSignature:
+            raise ValueError("Invalid replacement review; review the destination again") from None
+        if reviewed.get("path") != path:
+            raise ValueError("Replacement review belongs to another destination")
+        return reviewed["etag"]
+
+    @app.post("/intake/review")
+    def intake_review():
+        from azure.core.exceptions import ResourceNotFoundError
+        source = root_service.source
+        if not isinstance(source, AdlsFootageSource):
+            raise ValueError("Replacement review requires the configured ADLS source")
+        path = source.canonical(request.form.get("path", ""))
+        root_service.intake.assert_available([path])
+        def lookup():
+            try:
+                return source.file_client(path).get_file_properties()
+            except ResourceNotFoundError:
+                return None
+        properties = source._call(lookup)
+        if properties is None:
+            return {"exists": False, "path": path}
+        return {"exists": True, "size": properties.size, "etag": properties.etag, "path": path,
+                "confirmation": intake_signer.dumps({"path": path, "etag": properties.etag})}
+
+    @app.post("/intake/destination")
+    def intake_destination():
+        folder = root_service.source.canonical(request.form.get("folder", ""), directory=True)
+        source = root_service.source
+        if not isinstance(source, AdlsFootageSource):
+            raise ValueError("Choose a folder in the configured ADLS source")
+        if source.remote_path(folder):
+            source._call(source.client.get_directory_client(source.remote_path(folder)).get_directory_properties)
+        else:
+            source._call(source.client.get_file_system_properties)
+        return {"folder": folder}
+
+    @app.get("/intake/download")
+    def intake_download():
+        from urllib.parse import quote
+        from people_counter.portal_downloads import stream_archive
+        source = root_service.source
+        if not isinstance(source, AdlsFootageSource):
+            raise ValueError("Downloads require the configured ADLS source")
+        videos = sorted({source.canonical(video) for video in request.args.getlist("video")})
+        if not videos or len(videos) > 10000:
+            raise ValueError("Select between 1 and 10,000 supported videos")
+        root_service.intake.assert_available(videos)
+        observations = {video: source.properties(video) for video in videos}
+        inputs = SelectedFootageInput(source, videos, observations)
+        if len(videos) == 1:
+            video = videos[0]
+            filename = quote(Path(video).name, safe="")
+            return app.response_class(
+                inputs.chunks(source.relative_video(video)), mimetype="application/octet-stream",
+                headers={"Content-Length": str(observations[video]["size"]),
+                         "Content-Disposition": f"attachment; filename=video{Path(video).suffix}; filename*=UTF-8''{filename}"},
+            )
+        return app.response_class(stream_archive(inputs), mimetype="application/zip",
+                                  headers={"Content-Disposition": 'attachment; filename="footage.zip"'})
+
+    @app.post("/intake/folders")
+    def intake_folder():
+        record = root_service.intake.create_folder(request.form.get("path", ""))
+        if record["state"] != "completed":
+            raise ValueError(record.get("message") or "Folder creation requires recovery")
+        return record
+
+    @app.post("/intake/uploads")
+    def intake_upload():
+        folder, name = request.form.get("folder", ""), request.form.get("name", "")
+        path = root_service.source.canonical("/".join(part for part in (folder, name) if part))
+        etag = replacement_etag(path, request.form.get("confirmation", ""))
+        return root_service.intake.start_upload(
+            folder, name, int(request.form.get("size", "")), replace=etag is not None, destination_etag=etag,
+        )
+
+    @app.put("/intake/uploads/<identity>/chunks")
+    def intake_chunk(identity):
+        if request.mimetype != "application/octet-stream":
+            raise ValueError("Upload chunks must use application/octet-stream")
+        return root_service.intake.append_upload(identity, int(request.args.get("offset", "")), request.stream.read())
+
+    def enqueue_intake(record):
+        if record["state"] != "queued":
+            raise ValueError(record.get("message") or "Intake operation requires recovery")
+        job = root_service.enqueue("intake", {"operation_id": record["id"]})
+        return {**record, "job_id": job}, 202
+
+    @app.post("/intake/uploads/<identity>/finish")
+    def intake_finish(identity):
+        return enqueue_intake(root_service.intake.ready_upload(identity))
+
+    @app.get("/intake/operations/<identity>")
+    def intake_status(identity):
+        return root_service.intake.record(identity)
+
+    @app.post("/intake/operations/<identity>/cancel")
+    def intake_cancel(identity):
+        return root_service.intake.cancel(identity)
+
+    @app.post("/intake/operations/<identity>/reconcile")
+    def intake_reconcile(identity):
+        record = root_service.intake.record(identity)
+        if record["state"] != "recovery":
+            raise ValueError("Select an intake operation requiring recovery")
+        job = root_service.enqueue("intake", {"operation_id": identity, "reconcile": True})
+        return redirect(url_for("job", identity=job))
+
+    @app.post("/intake/move")
+    def intake_move():
+        import json
+        reviews = json.loads(request.form.get("replacements", "{}"))
+        if not isinstance(reviews, dict):
+            raise ValueError("Invalid replacement review")
+        replacements = {path: replacement_etag(path, token) for path, token in reviews.items()}
+        return enqueue_intake(root_service.intake.start_move(
+            request.form.getlist("paths"), request.form.get("destination", ""),
+            rename=request.form.get("rename") or None, replacements=replacements,
+        ))
+
     @app.get("/footage")
     def footage():
         folder = request.args.get("folder", "")
         canonical = service.source.canonical(folder, directory=True)
         folder = "" if canonical == "." else canonical
         query = request.args.get("q", "")
-        kind = request.args.get("kind", "videos")
+        kind = request.args.get("kind", "all" if isinstance(service.source, AdlsFootageSource) else "videos")
         if kind not in {"all", "videos", "folders"}:
             raise ValueError("Select All types, Videos, or Folders")
-        entries = service.source.entries(folder)
+        next_token = None
+        if isinstance(service.source, AdlsFootageSource):
+            entries, next_token = service.intake.page(folder, request.args.get("continuation"))
+        else:
+            entries = service.source.entries(folder)
         assignments = service.footage_assignments()
         directory = service.store.entries("camera_identity")
         for entry in entries:
@@ -237,6 +383,12 @@ def create_app(root_service: PortalService) -> Flask:
             camera_names={
                 item["id"]: item["display_name"] for item in directory
             },
+            next_token=next_token, max_upload_bytes=service.max_upload_bytes,
+            upload_extensions=",".join(CONTENT_TYPES),
+            intake_operations=[
+                item for item in service.store.entries("intake")
+                if isinstance(service.source, AdlsFootageSource) and item.get("source") == service.source.descriptor
+            ],
         )
 
     @app.post("/footage/assign")
@@ -367,6 +519,7 @@ def create_app(root_service: PortalService) -> Flask:
         else:
             form["captured_at_utc"] = _calendar_capture_time(form.get("captured_at_utc", ""))
             flash(service.save_calibration(form))
+        service.clear_intake_review(form.get("video", ""))
         return redirect(url_for("cameras"))
 
     def back_to_review():
@@ -381,12 +534,14 @@ def create_app(root_service: PortalService) -> Flask:
         service.update_video_exception(request.form.get("video", ""), {
             "captured_at_utc": _calendar_capture_time(request.form.get("captured_at_utc", "")),
         })
+        service.clear_intake_review(request.form.get("video", ""))
         flash("Recording details saved. Counting line unchanged. Prepare a new package to use these changes.")
         return back_to_review()
 
     @app.post("/footage/line")
     def save_line():
         service.save_line(request.form)
+        service.clear_intake_review(request.form.get("video", ""))
         flash("Video counting line saved. Camera calibration and recording details unchanged.")
         return back_to_review()
 
@@ -486,25 +641,28 @@ def create_app(root_service: PortalService) -> Flask:
             cameras=service.store.entries("camera"), packages=service.packages(),
             output_root=service.output_root,
             drafts=service.store.entries("draft"),
+            remote_source=isinstance(service.source, AdlsFootageSource),
         )
 
     @app.post("/packages/new")
     def new_package():
         draft = root_service.new_draft(request.form.get("package_name", ""))
-        return redirect(url_for("package_workspace", identity=draft["id"], step="source", draft=draft["id"]))
+        return redirect(url_for("package_workspace", identity=draft["id"], step="footage", draft=draft["id"]))
 
     @app.route("/packages/drafts/<identity>", methods=["GET", "POST"])
     def package_workspace(identity):
         draft = root_service.draft(identity)
         g.draft_id = identity
-        step = request.args.get("step", "source")
-        if step not in {"source", "footage", "cameras", "generate"}:
+        step = request.args.get("step", "footage")
+        if step == "source":
+            if request.method == "POST":
+                raise ValueError("Source selection was removed; the portal uses its configured ADLS root")
+            return redirect(url_for("package_workspace", identity=identity, step="footage", draft=identity))
+        if step not in {"footage", "cameras", "generate"}:
             raise ValueError("Select an existing package step")
-        selecting_source = (
-            request.method == "GET" and step == "source"
-            or request.method == "POST" and request.form.get("action") == "source"
-        )
-        scoped = root_service if selecting_source else root_service.for_source(draft["source"])
+        if isinstance(root_service.source, AdlsFootageSource) and not root_service.source_matches(draft["source"]):
+            return render_template("legacy_draft.html", draft=draft)
+        scoped = root_service.for_source(draft["source"])
         if request.method == "POST":
             step = save_package_step(identity, draft, scoped)
             if not isinstance(step, str):
@@ -518,32 +676,11 @@ def create_app(root_service: PortalService) -> Flask:
         has_more = False
         if step == "footage":
             if isinstance(scoped.source, AdlsFootageSource):
-                rows, next_token = scoped.source.page(folder, request.args.get("continuation"))
+                rows, next_token = scoped.intake.page(folder, request.args.get("continuation"))
             else:
                 entries = scoped.source.entries(folder)
                 rows = entries[(page - 1) * 100:page * 100]
                 has_more = len(entries) > page * 100
-        subscriptions, accounts, filesystems = [], [], []
-        kind = request.args.get("kind", draft["source"]["kind"])
-        subscription = request.args.get("subscription", draft["source"].get("subscription", ""))
-        account = request.args.get("account", draft["source"].get("account", ""))
-        source_error = ""
-        if step == "source" and kind == "adls":
-            identity_status = (
-                root_service.azure.status() if "kind" in request.args
-                else root_service.azure.cached_status()
-            )
-            if not identity_status["signed_in"]:
-                source_error = identity_status["error"]
-            elif "kind" in request.args:
-                try:
-                    subscriptions = root_service.azure.subscriptions()
-                    if subscription:
-                        accounts = root_service.azure.accounts(subscription)
-                    if account and subscription:
-                        filesystems = root_service.azure.filesystems(account, subscription)
-                except PortalAzureError as error:
-                    source_error = str(error)
         selected = draft["videos"][(page - 1) * 100:page * 100]
         return render_template(
             "package_workspace.html", draft=draft, step=step, source=scoped.source,
@@ -551,30 +688,13 @@ def create_app(root_service: PortalService) -> Flask:
             has_more=has_more,
             selected=selected, assignments=scoped.footage_assignments(),
             cameras=service.store.entries("camera_identity"), locations=service.store.locations(),
-            subscriptions=subscriptions, accounts=accounts, filesystems=filesystems,
-            kind=kind, subscription=subscription, account=account, page=page,
-            source_error=source_error,
+            page=page,
             selected_bytes=sum(value["size"] for value in draft["observations"].values()),
             output_root=service.output_root,
-            local_root=root_service.local_source.root,
         )
 
     def save_package_step(identity, draft, scoped):
         action = request.form.get("action", "")
-        if action == "source":
-            descriptor = {"kind": request.form.get("kind", "")}
-            if descriptor["kind"] == "local":
-                descriptor["root"] = str(root_service.local_source.root)
-            if descriptor["kind"] == "adls":
-                descriptor.update({key: request.form.get(key, "") for key in ("subscription", "account", "filesystem", "root")})
-                if not any(row["name"] == descriptor["account"] for row in root_service.azure.accounts(descriptor["subscription"])):
-                    raise ValueError("Select an HNS-enabled account in the current tenant and subscription")
-                if not any(row["name"] == descriptor["filesystem"] for row in root_service.azure.filesystems(descriptor["account"], descriptor["subscription"])):
-                    raise ValueError("Select an accessible filesystem")
-            if draft["videos"] and descriptor != draft["source"] and request.form.get("confirm_source") != "yes":
-                raise ValueError("Confirm changing the source and clearing selected footage")
-            root_service.update_draft(identity, {"source": descriptor})
-            return "footage"
         if action == "selection":
             mode = request.form.get("mode")
             if mode == "individual":
@@ -609,6 +729,13 @@ def create_app(root_service: PortalService) -> Flask:
             abort(400, "Confirm deletion of the selected package artifacts")
         service.delete_package(identity)
         flash("Selected package artifacts deleted. Source footage, reports, history, and recovery evidence retained.")
+        return redirect(url_for("packages"))
+
+    @app.post("/packages/drafts/<identity>/delete-local")
+    def delete_legacy_draft(identity):
+        if request.form.get("confirm") != "yes":
+            raise ValueError("Confirm deleting only legacy local metadata")
+        root_service.delete_legacy_draft(identity)
         return redirect(url_for("packages"))
 
     @app.route("/profiles", methods=["GET", "POST"])
@@ -783,7 +910,6 @@ def main() -> None:
     from waitress import serve
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-root", type=Path, default=Path(os.environ.get("PC_PORTAL_SOURCE_ROOT", "samples")))
     parser.add_argument("--models-root", type=Path, default=Path(os.environ.get("PC_PORTAL_MODELS_ROOT", "offline-models")))
     parser.add_argument("--state-dir", type=Path, default=Path(os.environ.get("PC_PORTAL_STATE_DIR", ".people-counter-portal")))
     parser.add_argument("--output-root", type=Path, default=Path(os.environ["PC_PORTAL_OUTPUT_ROOT"]) if os.environ.get("PC_PORTAL_OUTPUT_ROOT") else None)
@@ -797,11 +923,15 @@ def main() -> None:
     parser.add_argument("--allow-cloud", action="store_true", default=os.environ.get("PC_PORTAL_ALLOW_CLOUD") == "1")
     args = parser.parse_args()
     os.umask(0o077)
-    service = PortalService(
-        args.source_root, args.models_root, args.state_dir,
+    service = PortalService.from_environment(
+        args.models_root, args.state_dir,
         allow_cloud=args.allow_cloud, output_root=args.output_root,
     )
     with FileLock(service.state / "server.lock", timeout=0):
+        def exit_on_signal(signum, frame):
+            raise SystemExit(0)
+
+        previous_handler = signal.signal(signal.SIGTERM, exit_on_signal)
         stop = threading.Event()
         worker = threading.Thread(target=service.work, args=(stop,), daemon=True)
         worker.start()
@@ -810,7 +940,10 @@ def main() -> None:
             serve(create_app(service), host=args.host, port=args.port, threads=4)
         finally:
             stop.set()
+            if service._azure is not None:
+                service.azure.close()
             worker.join(timeout=5)
+            signal.signal(signal.SIGTERM, previous_handler)
 
 
 if __name__ == "__main__":

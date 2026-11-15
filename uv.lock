@@ -3520,6 +3520,8 @@ local-spark = [
 ]
 portal = [
     { name = "av" },
+    { name = "azure-identity" },
+    { name = "azure-storage-file-datalake" },
     { name = "filelock" },
     { name = "flask" },
     { name = "waitress" },
@@ -3544,7 +3546,9 @@ ui = [
 [package.metadata]
 requires-dist = [
     { name = "av", marker = "extra == 'portal'", specifier = ">=18.1,<19" },
+    { name = "azure-identity", marker = "extra == 'portal'", specifier = ">=1.17.0,<2" },
     { name = "azure-identity", marker = "extra == 'publisher'", specifier = ">=1.17.0,<2" },
+    { name = "azure-storage-file-datalake", marker = "extra == 'portal'", specifier = ">=12.16.0,<13" },
     { name = "azure-storage-file-datalake", marker = "extra == 'publisher'", specifier = ">=12.16.0,<13" },
     { name = "delta-spark", marker = "extra == 'local-spark'", specifier = "==4.2.0" },
     { name = "deltalake", marker = "extra == 'demo'", specifier = ">=1,<2" },

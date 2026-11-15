@@ -81,7 +81,7 @@ class AzureCliResourceTokenProvider:
         if self.credential is not None:
             token = self.credential.get_token(scope).token
             if not token:
-                raise FabricApiError("Azure CLI returned an empty access token")
+                raise FabricApiError("Runtime credentials returned an empty access token")
             return token
         try:
             process = subprocess.run(

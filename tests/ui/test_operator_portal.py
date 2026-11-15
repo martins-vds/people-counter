@@ -13,6 +13,21 @@ from playwright.sync_api import expect
 pytestmark = pytest.mark.ui
 
 
+def test_runtime_identity_has_no_portal_login_and_preserves_edits(page, portal):
+    page.set_viewport_size({"width": 320, "height": 844})
+    page.goto(portal.url + "/footage")
+    field = page.get_by_label("Filter files by name", exact=True)
+    field.fill("Unsaved selection")
+    popup = page.get_by_label("Azure execution identity", exact=True)
+    popup.locator("summary").click()
+    expect(popup.get_by_text("DefaultAzureCredential", exact=False)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    expect(popup.get_by_role("button", name="Sign in with Azure CLI")).to_have_count(0)
+    popup.get_by_role("button", name="Refresh execution identity").click()
+    expect(field).to_have_value("Unsaved selection")
+    assert page.request.get(portal.url + "/identity/login").status == 404
+
+
 @pytest.mark.parametrize("width", [320, 390])
 def test_identity_popup_wraps_and_keeps_keyboard_focus_visible_on_mobile(page, portal, monkeypatch, width):
     page.set_viewport_size({"width": width, "height": 844})
@@ -22,13 +37,13 @@ def test_identity_popup_wraps_and_keeps_keyboard_focus_visible_on_mobile(page, p
         "name": "firstname.lastname@companytenant.onmicrosoft.com (display name unavailable)",
     })
     page.goto(portal.url + "/packages")
-    popup = page.get_by_label("Azure CLI identity", exact=True)
+    popup = page.get_by_label("Azure execution identity", exact=True)
     expect(popup.locator("[data-identity-name]")).to_contain_text("display name unavailable")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     popup.locator("summary").click()
     expect(popup.get_by_text("firstname.lastname@companytenant.onmicrosoft.com", exact=True)).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    refresh = popup.get_by_role("button", name="Refresh Azure CLI identity")
+    refresh = popup.get_by_role("button", name="Refresh execution identity")
     refresh.focus()
     page.keyboard.press("Tab")
     expect(popup).not_to_have_attribute("open", "")
@@ -57,8 +72,7 @@ def test_package_first_flow_selects_exact_footage_and_displays_cli_identity(page
     page.get_by_role("button", name="New package", exact=True).click()
     dialog = page.get_by_role("dialog", name="New package", exact=True)
     dialog.get_by_label("Package name", exact=True).fill("Selected morning")
-    dialog.get_by_role("button", name="Choose source", exact=True).click()
-    page.get_by_role("button", name="Save source and choose footage", exact=True).click()
+    dialog.get_by_role("button", name="Choose footage", exact=True).click()
     page.get_by_role("link", name="lobby/", exact=True).click()
     page.get_by_label("Select clip.mp4", exact=True).check()
     page.get_by_role("button", name="Save selection and assign cameras", exact=True).click()
@@ -108,9 +122,13 @@ def test_adls_package_flow_streams_original_bytes_without_local_video_copies(pag
     client.get_file_system_client.return_value = filesystem
     monkeypatch.setattr("azure.storage.filedatalake.DataLakeServiceClient", lambda *args, **kwargs: client)
     azure = portal.service.azure
-    azure.subscriptions = lambda: [{"id": "test-subscription", "name": "Test subscription"}]
-    azure.accounts = lambda subscription: [{"name": "sourceaccount"}]
-    azure.filesystems = lambda account, subscription: [{"name": "recordings"}]
+    from people_counter.portal_sources import AdlsFootageSource
+    portal.service.source = AdlsFootageSource(
+        {"kind": "adls", "account": "sourceaccount", "filesystem": "recordings", "root": ""},
+        azure, portal.service.store,
+    )
+    portal.service.local_source = None
+    portal.service.store.put("source", portal.service.source.identity, portal.service.source.descriptor)
     location = portal.service.store.add_location("North")
     camera = portal.service.store.add_camera("Entrance", location)
     portal.service.assign_footage(camera, ["lobby/clip.mp4"])
@@ -122,15 +140,7 @@ def test_adls_package_flow_streams_original_bytes_without_local_video_copies(pag
     page.get_by_role("button", name="New package", exact=True).click()
     dialog = page.get_by_role("dialog", name="New package", exact=True)
     dialog.get_by_label("Package name", exact=True).fill("ADLS morning")
-    dialog.get_by_role("button", name="Choose source", exact=True).click()
-    page.get_by_label("Footage source", exact=True).select_option("adls")
-    page.get_by_role("button", name="Browse source options", exact=True).click()
-    page.get_by_label("Subscription", exact=True).select_option("test-subscription")
-    page.get_by_role("button", name="Browse source options", exact=True).click()
-    page.get_by_label("Storage account", exact=True).select_option("sourceaccount")
-    page.get_by_role("button", name="Browse source options", exact=True).click()
-    page.get_by_label("Filesystem / container", exact=True).select_option("recordings")
-    page.get_by_role("button", name="Save source and choose footage", exact=True).click()
+    dialog.get_by_role("button", name="Choose footage", exact=True).click()
     assert downloads == []
     page.get_by_label("Select clip.mp4", exact=True).check()
     page.get_by_role("button", name="Save selection and assign cameras", exact=True).click()

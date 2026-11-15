@@ -4,41 +4,48 @@ The portal is a server-rendered Python application, not a SPA. It reuses the
 camera catalog, manifest package, profile, publisher, and explicit-backfill
 implementations. It does not run inference locally or start Spark.
 
-## Start with the current Azure CLI user
+## Configure ADLS and runtime credentials
 
-For ADLS sources and current-user Azure authentication, run the portal on the
-same host and under the same OS user as Azure CLI. Install `uv`, Azure CLI,
-FFmpeg/ffprobe, and the OpenCV system libraries, then:
+The portal has one environment-configured ADLS Gen2 source. It does not browse
+local footage folders or discover subscriptions/accounts. Configure an existing
+account, filesystem and optional allowed root before starting:
 
 ```bash
 uv sync --extra portal --extra publisher --extra demo
-az login
-uv run pc-admin --source-root /absolute/path/to/footage --port 8088
+export PC_PORTAL_ADLS_ACCOUNT_URL=https://youraccount.dfs.core.windows.net
+export PC_PORTAL_ADLS_FILESYSTEM=videos
+export PC_PORTAL_ADLS_ROOT=intake
+export PC_PORTAL_MAX_UPLOAD_BYTES=5368709120
+uv run pc-admin --port 8088
 ```
 
 Add `--allow-cloud` only when publication/submission should be enabled.
-ADLS read access requires sign-in independently of this cloud-write gate.
-Local preparation remains available when Azure CLI is missing or signed out.
+ADLS intake writes are explicitly requested file-management actions; the cloud
+gate still controls publication/submission, not uploads or native storage moves.
+Read operations require data-plane read/list access; uploads, folder creation,
+rename and move require appropriate data-plane RBAC/ACL permissions and network
+access. Missing configuration fails at startup; unavailable credentials and
+permission failures are shown as errors, never empty successful listings.
 ADLS bounded native decoding currently requires a fork-capable host; unsupported
 hosts report that limitation explicitly. Linux is the supported host path.
 
-The header shows the Azure CLI execution user, initials, and tenant on every
-page, including local-source pages. Graph display-name failures are explicit;
-the verified CLI account is still identified. Run `az login` externally and use
-**Refresh Azure CLI identity** afterward. The portal does not run login/logout
-or change the global CLI subscription. A service-principal session is not
-accepted for this user-only workflow. Environment secrets and managed identities
-cannot override the portal's explicit CLI credentials.
-Local pages render cached identity immediately and update the header in the
-background, so CLI/Graph latency does not delay local navigation. Refresh stays
-on the current page and preserves unsaved form values. The identity popup closes
-on Escape or when keyboard focus leaves it; long account names wrap on mobile.
-Approval, execution, resume, and token acquisition verify the CLI identity
-freshly. Individual Storage requests reuse that verified identity only while
-the CLI profile/token-cache file state and token lifetime remain unchanged.
-Sign-in, sign-out, subscription changes, and Refresh invalidate those checks.
-If CLI state cannot be monitored, requests fall back to fresh CLI verification
-rather than trusting a cached identity.
+The application uses one shared `DefaultAzureCredential` owner and native Azure
+SDK clients. Configure standard Azure Identity environment, workload identity,
+managed identity or development credentials in the runtime. SDK-managed
+`AzureCliCredential` fallback is allowed, but the application does not issue CLI
+commands, launch device-code login, or change a CLI subscription.
+
+The header shows the execution principal and tenant, with user initials only for
+a resolved user. Application/workload identities are supported. Unavailable
+identity details are explicit; they never fabricate a signed-in user. Credentials
+are configured outside the portal; there is no Sign-in button.
+
+Metadata pages render the cached identity immediately and refresh it in the
+background. **Refresh execution identity** preserves unsaved form values.
+The popup closes on Escape or when focus leaves; long names wrap on mobile.
+Queued actions retain token-free reviewed principal/tenant snapshots. SDK token
+refresh cannot silently switch execution principal; changed credentials require
+fresh review. Tokens never enter forms, URLs, logs or persistent package metadata.
 
 Keep the HTTP listener on loopback or private Codespaces forwarding. The user
 badge identifies Azure execution credentials, not the browser visitor; this
@@ -70,26 +77,29 @@ dependencies, FFmpeg, Azure CLI, and the checksum-verified Tailwind CLI.
 If VS Code does not expose a native ZIP save dialog, use a standard browser for
 downloads; the download endpoint and archive contents are covered by Chromium E2E.
 
-By default, the portal browses `samples/`. The default model mount is empty:
+The default model mount is empty:
 models are not needed to browse footage, calibrate cameras, or generate packages.
-Git LFS sample pointers are not playable videos; fetch the sample clips or mount
-your own footage.
-
-To select local folders, add these values to `.env` before starting. Use
+Upload videos from your computer to the chosen ADLS folder before selecting them
+for a package. To configure the portal, add these values to `.env`. Use
 [.env.portal.example](../.env.portal.example) as a reference; **merge with an
 existing `.env` rather than overwriting it**.
 
 ```dotenv
-PC_PORTAL_FOOTAGE_DIR=/absolute/path/to/footage
+PC_PORTAL_ADLS_ACCOUNT_URL=https://youraccount.dfs.core.windows.net
+PC_PORTAL_ADLS_FILESYSTEM=videos
+PC_PORTAL_ADLS_ROOT=intake
+PC_PORTAL_MAX_UPLOAD_BYTES=5368709120
 PC_PORTAL_MODELS_DIR=/absolute/path/to/approved-models
 PC_PORTAL_PORT=8088
 PC_PORTAL_ALLOW_CLOUD=0
 ```
 
-Both folders must already exist. Compose mounts footage and models read-only
-at `/data/videos` and `/data/models`. The browser's optional folder field is relative
-to the allowed footage root; it cannot browse the rest of the host filesystem.
-Portal packages use the logical source prefix `videos/`.
+The account/filesystem must already exist. Paths are confined to the configured
+ADLS root; an empty root allows the filesystem root. The endpoint currently uses
+the public Azure `dfs.core.windows.net` domain. Compose mounts models read-only
+at `/data/models`; there is no local footage mount. Standard Azure Identity
+variables are forwarded to the container. Keep secrets outside source control;
+a workload token file must be mounted separately if that identity is used.
 
 Package outputs are separate from source footage. By default they live in
 `portal-state` at `/var/lib/people-counter/portal/packages`. Administrators can set
@@ -105,13 +115,64 @@ escape, and existing revision destinations are rejected. Each queued preparation
 retains its original destination even if the configured default changes.
 Existing job-local packages stay where they are and remain accessible.
 
-`./scripts/start-portal.sh` retains its existing Compose behavior. Docker has an
-isolated Azure CLI configuration in `portal-azure`; it does **not** reuse the
-launching host user's session. Use the host-run path above for current-user
-identity reuse. Credentials are not copied or host-mounted into Docker.
+`./scripts/start-portal.sh` retains its Compose behavior. Docker does not
+automatically reuse host credentials. Its retained `portal-azure` volume can
+serve the SDK's development credential fallback, but credentials are not copied
+or host-mounted by the application. Configure an identity that resolves in the
+actual runtime.
 
-The package-first workflow supports a local source and a read-only ADLS Gen2
-source. The legacy local Footage library remains available separately.
+## File explorer and destination-first uploads
+
+The explorer lists all entries with pagination; non-video files are read-only.
+File actions support the existing AVI, MKV, MOV and MP4 formats. Folder creation
+and native folder/file moves are supported. Folder trees containing unsupported
+files or protected references cannot be moved, and directory trees are never
+merged or replaced.
+
+1. Browse to a destination, or enter a folder within the allowed root.
+2. Select **Confirm destination** before choosing local videos.
+3. Choose multiple videos, then **Upload selected videos**.
+4. Review per-file progress through transfer and full-byte verification.
+5. Refresh the folder and explicitly select uploaded/existing ADLS videos for
+   the package. Uploading does not create, select, publish or process a package.
+
+The default per-file limit is **5 GiB** (`5368709120` bytes), configurable with
+`PC_PORTAL_MAX_UPLOAD_BYTES`. Existing ADLS footage/downloads are not limited by
+this upload setting. Raw chunks are bounded; full videos are not retained in
+portal memory or on local disk. Verification computes SHA-256 from all original
+ADLS bytes and may incur additional transfer costs. An ETag is a version
+precondition, not a checksum. Generation independently verifies current content.
+
+Successful files remain uploaded when another file fails. **Retry** restarts only
+the failed file, at its original destination; partial-byte resume is not offered.
+Cancel stops an unfinished transfer and cleans only owned staging paths. Leaving
+the page stops unfinished transfers; completed files and queued verification jobs
+remain available. Transfer progress reaching 100% is not verification success.
+
+File replacement needs explicit, version-bound confirmation. Both source and
+destination references are checked. Generated/published packages and active jobs
+protect their footage; saved evidence is never rewritten. Editable draft paths
+and camera ownership follow successful moves. Replacement invalidates old
+per-recording overrides and requires fresh footage review.
+
+Bulk actions apply to checked items on the displayed page. Bulk downloads stream
+a ZIP with safe relative paths. Completed bulk mutations remain completed if a
+later item fails; reported outcomes are not an atomic rollback guarantee.
+Interrupted remote/metadata updates require reconciliation before conflicting
+actions become available. There is no general ADLS delete action.
+Moves rejected before a remote request, or definitively rejected by Azure, can
+be cancelled or reconciled to release unattempted paths. Completed bulk items
+remain completed. Unknown remote outcomes remain reserved.
+Cancellation stops remaining move items before their remote requests. Moves
+retain only previews bound to the reviewed source version; stale previews are
+invalidated.
+
+Legacy local-source drafts remain read-only history. Their confirmation-based
+metadata cleanup removes the selected draft and unshared footage-specific rows,
+not local videos, independent locations/cameras, or job/audit history. Active
+local recovery jobs block cleanup. Existing metadata package-artifact deletion
+retains its existing safeguards. No local footage is uploaded or rebound by name
+automatically.
 
 Stop without deleting state:
 
@@ -291,36 +352,28 @@ under **Source configuration**. There are no upload, rename, or delete actions.
 
 Start on **Packages** and choose **New package**. Give the draft a name, then:
 
-1. **Source:** choose Local folder or ADLS Gen2. ADLS requires a valid Azure CLI
-   user session. Browse subscriptions in the current tenant, HNS-enabled storage
-   accounts, and filesystems; optionally restrict the source root folder.
-   Subscription choices target individual requests without changing CLI defaults.
-2. **Footage:** explicitly select individual recordings across folders, or choose
+1. **Footage:** explicitly select individual ADLS recordings across folders, or choose
    the current folder recursively. Save checkbox changes before navigating.
    Recursive selection freezes the current file list; later additions are not
    included without explicitly refreshing selection. Both modes enforce 10,000
    videos without truncation. ADLS browsing is shallow and paged.
-3. **Cameras and readiness:** associate selected recordings with existing cameras.
+2. **Cameras and readiness:** associate selected recordings with existing cameras.
    Camera selection determines location. Known ownership is pre-filled.
    Assignments are persistent and require an explicit save; reassignment retains
    capture timestamps and requires a keep/clear decision for video-specific lines.
    **Review footage** and camera calibration return to the saved package draft.
-4. **Generate:** review the selected count/bytes and output destination.
+3. **Generate:** review the selected count/bytes and output destination.
    Generation freezes source observations, camera rules, ownership, and exceptions
    before queuing. It probes/validates footage and computes a complete SHA-256.
    Failed checks produce job errors/rejection reports, never a successful package.
-5. **Publish:** use the existing completed-revision cloud review, target/profile
+4. **Publish:** use the existing completed-revision cloud review, target/profile
    selection, and explicit approval. Generation itself never uploads, submits
    Fabric work, or runs inference.
 
-Drafts survive navigation and portal restarts. Source selection remains editable
-when an ADLS session expires, so the operator can switch back to local footage
-without reopening the old remote source. Changing a source requires
-confirmation and resets the folder, selection, and mode to individual selection;
-it never scans the new root automatically. Other drafts, source-qualified
-ownership, and generated revisions are unaffected. The local root is bound to
-portal state: restore that root or choose a separate state directory rather than
-silently reinterpreting historical local paths.
+Drafts survive navigation and portal restarts. The configured ADLS source is
+fixed, not an editable step. Other-source drafts are read-only history; changing
+environment configuration never reinterprets their footage paths. Source-qualified
+ownership and generated revisions remain intact.
 
 Locations/cameras are independent of source folders. Use **Locations** and
 **Add location** to add a display name
@@ -547,7 +600,7 @@ and final manifests. Preparation, validation, upload, and retries can each read
 the full video, with associated transfer costs. Source access and unchanged bytes
 must remain available for later publication. A metadata ZIP is not a video backup.
 Publication rejects staging paths that would rename or overwrite selected ADLS
-source footage. Unchanged requests do not repeatedly spawn Azure CLI.
+source footage. Token acquisition and refresh use the shared SDK credential owner.
 Individual selection saves inspect only newly selected recordings and retain
 existing source-version observations. To adopt a changed recording, explicitly
 remove and reselect it, or refresh a recursive folder selection.
@@ -610,15 +663,13 @@ If any calibration value is supplied, all six are required and validated.
 ## Enable cloud actions deliberately
 
 Cloud actions are disabled by default, and the server rejects forged requests
-even if a button is bypassed. No Azure credentials are needed for local work.
+even if a button is bypassed. Independent metadata/history screens do not require
+storage access, but ADLS operations do.
 
-When ready, authenticate **inside this container**, without copying secrets
-into the repository or using the host's Azure cache:
-
-```bash
-docker compose --profile portal exec portal az login --use-device-code
-docker compose --profile portal exec portal az account show
-```
+When ready, configure credentials that `DefaultAzureCredential` resolves inside
+the runtime. Do not copy secrets into the repository or assume host credentials
+are available inside Docker. Use **Refresh execution identity** to inspect the
+actual user or workload principal; the portal does not initiate authentication.
 
 Review the identity/tenant and deployment, set `PC_PORTAL_ALLOW_CLOUD=1` in `.env`,
 then apply the change:
@@ -665,8 +716,8 @@ Without Docker:
 
 ```bash
 uv sync --extra portal --extra publisher --extra demo
-uv run --no-sync pc-admin --source-root /path/to/footage \
-  --models-root /path/to/models --state-dir .people-counter-portal
+# Set the required PC_PORTAL_ADLS_* environment variables first.
+uv run --no-sync pc-admin --models-root /path/to/models --state-dir .people-counter-portal
 ```
 
 Run Playwright with synthetic footage and **fake cloud adapters**, not Azure

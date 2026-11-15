@@ -17,7 +17,7 @@ if (identityDisclosure) {
   const updateIdentity = async (url, options) => {
     const current = ++generation;
     identityDisclosure.setAttribute("aria-busy", "true");
-    message.textContent = "Checking Azure CLI identity...";
+    message.textContent = "Checking Azure execution identity...";
     try {
       const response = options ? await fetch(url, options) : await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -25,7 +25,7 @@ if (identityDisclosure) {
       if (current !== generation) return;
       displayIdentity(identity);
     } catch (error) {
-      if (current === generation) message.textContent = `Unable to refresh Azure CLI identity: ${error.message}. Retry with Refresh.`;
+      if (current === generation) message.textContent = `Unable to refresh Azure execution identity: ${error.message}. Retry with Refresh.`;
     } finally {
       if (current === generation) identityDisclosure.setAttribute("aria-busy", "false");
     }
