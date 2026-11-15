@@ -477,11 +477,12 @@ def test_oidc_assertion_errors_identify_the_failing_exchange(monkeypatch, payloa
 
 @pytest.mark.parametrize("http_error", [False, True])
 def test_oidc_assertion_network_failure_preserves_cause_and_safe_message(monkeypatch, http_error):
+    from email.message import Message
     from io import BytesIO
     from urllib.error import HTTPError
 
     body = BytesIO(b"private failure detail")
-    failure = HTTPError("https://vstoken.actions.githubusercontent.com/oidc", 503, "failed", {}, body) \
+    failure = HTTPError("https://vstoken.actions.githubusercontent.com/oidc", 503, "failed", Message(), body) \
         if http_error else OSError("private failure detail")
     def unavailable(*args, **kwargs):
         raise failure

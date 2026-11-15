@@ -370,16 +370,41 @@ def test_urllib_transport_does_not_follow_authenticated_redirects():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with pytest.raises(FabricRestError, match="redirect"):
+        with pytest.raises(FabricRestError) as error:
             UrllibTransport().request(
                 "GET", f"http://127.0.0.1:{server.server_port}/initial",
                 headers={"Authorization": "Bearer synthetic-token"}, body=None, timeout=5,
             )
+        assert str(error.value) == "Fabric HTTP redirects are not permitted"
         assert paths == ["/initial"]
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_controller_preserves_default_json_content_type_and_bodyless_get():
+    transport = _Transport([HTTPResponse(200, {}, b"{}"), HTTPResponse(200, {}, b"{}")])
+    controller = FabricRESTController(_TokenProvider(), workspace_id=WORKSPACE_ID, transport=transport)
+    controller._request("POST", "/items", value={"name": "sample"})
+    controller._request("GET", "/items")
+    assert transport.requests[0]["headers"] == {
+        "Accept": "application/json", "Authorization": "Bearer secret-token",
+        "Content-Type": "application/json",
+    }
+    assert transport.requests[0]["body"] == b'{"name":"sample"}'
+    assert transport.requests[1]["body"] is None
+    assert transport.requests[1]["headers"] == {
+        "Accept": "application/json", "Authorization": "Bearer secret-token",
+    }
+
+
+def test_controller_bounds_error_detail_before_redaction():
+    transport = _Transport([HTTPResponse(500, {}, b"x" * 2000 + b"NOT-FOR-DISPLAY")])
+    controller = FabricRESTController(_TokenProvider(), workspace_id=WORKSPACE_ID, transport=transport)
+    with pytest.raises(FabricRestError) as error:
+        controller._request("GET", "/items")
+    assert str(error.value) == "Fabric HTTP 500: " + "x" * 2000
 
 
 def test_lro_polls_and_reads_resource_location() -> None:
