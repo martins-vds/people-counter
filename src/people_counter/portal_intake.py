@@ -518,7 +518,7 @@ class PortalIntake:
 
     def _metadata(self, db: Any, old: str, new: str, observations: dict[str, Any], replacement: bool,
                   source_observations: dict[str, Any]) -> None:
-        assignment, logical = self.source.assignment_prefix, self.source.logical_prefix
+        logical = self.source.logical_prefix
         if replacement:
             db.execute("DELETE FROM entries WHERE kind='exception' AND id=?", (logical + new,))
             for row in db.execute("SELECT id,data FROM entries WHERE kind='source_preview'").fetchall():
@@ -529,49 +529,58 @@ class PortalIntake:
                 "message": "Recording replaced; review calibration and capture-time settings before generating.",
             })
         for row in db.execute("SELECT kind,id,data FROM entries WHERE kind IN ('footage','exception','camera','source_preview','source_review','draft')").fetchall():
-            kind, identity = row["kind"], row["id"]
-            data = json.loads(row["data"])
-            new_id = identity
-            if kind == "footage" and identity.startswith(assignment):
-                new_id = assignment + _rewrite(identity[len(assignment):], old, new)
-                if new_id == identity:
-                    continue
-            elif kind in {"exception", "source_review"} and identity.startswith(logical):
-                new_id = logical + _rewrite(identity[len(logical):], old, new)
-                for key in ("video", "video_relative_path"):
-                    if isinstance(data.get(key), str):
-                        data[key] = _rewrite(data[key], logical + old, logical + new)
-            elif kind == "camera" and data.get("video", "").startswith(assignment):
-                data["video"] = assignment + _rewrite(data["video"][len(assignment):], old, new)
-                data["folder"] = _rewrite(data.get("folder", ""), old, new)
-                catalog = data.get("catalog", {})
-                for key in ("video_relative_path", "video_prefix", "source_path_prefix"):
-                    if isinstance(catalog.get(key), str):
-                        catalog[key] = _rewrite(catalog[key], logical + old, logical + new)
-            elif kind == "source_preview" and data.get("video", "").startswith(logical):
-                old_path = data["video"][len(logical):]
-                data["video"] = _rewrite(data["video"], logical + old, logical + new)
-                path = data["video"][len(logical):]
-                if path in observations:
-                    if data.get("observations") != source_observations.get(old_path):
-                        db.execute("DELETE FROM entries WHERE kind='source_preview' AND id=?", (identity,))
-                        continue
-                    data["observations"] = observations[path]
-            elif kind == "draft" and data.get("source") == self.source.descriptor:
-                videos = data.get("videos", [])
-                data["videos"] = list(dict.fromkeys(_rewrite(video, old, new) for video in videos))
-                data["folder"] = _rewrite(data.get("folder", ""), old, new)
-                data["observations"] = {_rewrite(path, old, new): value for path, value in data.get("observations", {}).items()}
-                for path in data["videos"]:
-                    if path in observations:
-                        data["observations"][path] = observations[path]
-                if replacement and new in data["videos"]:
-                    data["review_required"] = True
-            else:
-                continue
-            if new_id != identity:
-                db.execute("DELETE FROM entries WHERE kind=? AND id=?", (kind, identity))
-            self._write(db, kind, new_id, data)
+            self._move_reference(db, row, old, new, observations, replacement, source_observations)
+
+    def _move_reference(self, db: Any, row: Any, old: str, new: str, observations: dict[str, Any],
+                        replacement: bool, source_observations: dict[str, Any]) -> None:
+        assignment, logical = self.source.assignment_prefix, self.source.logical_prefix
+        kind, identity = row["kind"], row["id"]
+        data = json.loads(row["data"])
+        new_id = identity
+        if kind == "footage" and identity.startswith(assignment):
+            new_id = assignment + _rewrite(identity[len(assignment):], old, new)
+            if new_id == identity:
+                return
+        elif kind in {"exception", "source_review"} and identity.startswith(logical):
+            new_id = logical + _rewrite(identity[len(logical):], old, new)
+            for key in ("video", "video_relative_path"):
+                if isinstance(data.get(key), str):
+                    data[key] = _rewrite(data[key], logical + old, logical + new)
+        elif kind == "camera" and data.get("video", "").startswith(assignment):
+            data["video"] = assignment + _rewrite(data["video"][len(assignment):], old, new)
+            data["folder"] = _rewrite(data.get("folder", ""), old, new)
+            catalog = data.get("catalog", {})
+            for key in ("video_relative_path", "video_prefix", "source_path_prefix"):
+                if isinstance(catalog.get(key), str):
+                    catalog[key] = _rewrite(catalog[key], logical + old, logical + new)
+        elif kind == "source_preview" and data.get("video", "").startswith(logical):
+            old_path = data["video"][len(logical):]
+            data["video"] = _rewrite(data["video"], logical + old, logical + new)
+            path = data["video"][len(logical):]
+            if path in observations:
+                if data.get("observations") != source_observations.get(old_path):
+                    db.execute("DELETE FROM entries WHERE kind='source_preview' AND id=?", (identity,))
+                    return
+                data["observations"] = observations[path]
+        elif kind == "draft" and data.get("source") == self.source.descriptor:
+            self._move_draft(data, old, new, observations, replacement)
+        else:
+            return
+        if new_id != identity:
+            db.execute("DELETE FROM entries WHERE kind=? AND id=?", (kind, identity))
+        self._write(db, kind, new_id, data)
+
+    @staticmethod
+    def _move_draft(data: dict[str, Any], old: str, new: str, observations: dict[str, Any], replacement: bool) -> None:
+        videos = data.get("videos", [])
+        data["videos"] = list(dict.fromkeys(_rewrite(video, old, new) for video in videos))
+        data["folder"] = _rewrite(data.get("folder", ""), old, new)
+        data["observations"] = {_rewrite(path, old, new): value for path, value in data.get("observations", {}).items()}
+        for path in data["videos"]:
+            if path in observations:
+                data["observations"][path] = observations[path]
+        if replacement and new in data["videos"]:
+            data["review_required"] = True
 
     def _owned_stage(self, path: str, identity: str | None = None) -> bool:
         properties = self._properties(path)

@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 from azure.core import MatchConditions
-from azure.core.exceptions import ResourceModifiedError, ResourceNotFoundError
+from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
 
 from people_counter.portal_intake import UPLOAD_CHUNK_BYTES, PortalIntake
 from people_counter.portal_service import PortalStore
@@ -206,6 +206,7 @@ def test_move_rejected_before_remote_request_releases_paths_after_reconciliation
     rejected = intake.complete(operation["id"])
     assert rejected["state"] == "recovery"
     assert rejected["results"][0]["state"] == "pending"
+    assert rejected["message"] == "Intake incomplete; paths remain reserved: Move subtree changed after preflight"
     assert intake.source.client.calls == []
     assert intake.reconcile(operation["id"])["state"] == "cancelled"
     intake.assert_available(["clip.mp4", "renamed.mp4"])
@@ -233,8 +234,9 @@ def test_unknown_remote_move_outcome_keeps_reservations(intake, monkeypatch):
     operation = intake.start_move(["clip.mp4"], "", rename="renamed.mp4")
     monkeypatch.setattr(File, "rename_file", Mock(side_effect=RuntimeError("Remote response lost")))
     assert intake.complete(operation["id"])["results"][0]["state"] == "mutating"
-    with pytest.raises(ValueError, match="reconciliation"):
+    with pytest.raises(ValueError) as error:
         intake.cancel(operation["id"])
+    assert str(error.value) == "Remote finalization may have started; operation requires reconciliation"
     with pytest.raises(ValueError, match="reserved"):
         intake.assert_available(["clip.mp4"])
 
@@ -260,6 +262,9 @@ def test_worker_honors_move_cancellation_between_items(intake, monkeypatch, afte
         monkeypatch.setattr(intake, "_complete_move", move)
     result = intake.complete(operation["id"])
     assert result["state"] == "cancelled"
+    assert result["message"] == "Unattempted or rejected moves cancelled; completed items retained"
+    if after_first:
+        assert result["current_item"] == 0
     assert [row["state"] for row in result["results"]] == (
         ["completed", "pending"] if after_first else ["pending", "pending"]
     )
@@ -289,7 +294,10 @@ def test_upload_chunk_bounds_complete_and_cancel_ownership(intake):
             intake.append_upload(operation["id"], 0, data)
     with pytest.raises(ValueError):
         intake.ready_upload(operation["id"])
-    assert intake.cancel(operation["id"])["state"] == "cancelled"
+    cancelled = intake.cancel(operation["id"])
+    assert cancelled["state"] == "cancelled"
+    assert cancelled["message"] == "Upload cancelled; owned staging removed"
+    assert operation["id"] not in intake._digests
     assert "root/" + operation["stage"] not in intake.source.client.files
     with pytest.raises(ValueError):
         intake.record("../foreign")
@@ -462,6 +470,10 @@ def test_cancel_during_each_verification_pass(intake, monkeypatch):
                 cancelled = intake.cancel(operation["id"])
                 cancellations.append(cancelled)
                 assert cancelled["state"] in {"cancelled", "recovery"}
+                assert cancelled["message"] == (
+                    "Cancellation requested after finalization began; destination may exist. Paths remain reserved."
+                    if final_pass else "Upload cancelled; owned staging removed"
+                )
             yield b"hello"
 
         monkeypatch.setattr("people_counter.portal_intake.complete_chunks", chunks)
@@ -469,6 +481,177 @@ def test_cancel_during_each_verification_pass(intake, monkeypatch):
         assert result["state"] == ("recovery" if final_pass else "cancelled")
         assert "verified" not in result
         assert len(cancellations) == 1
+
+
+@pytest.mark.parametrize("stage_exists", [False, True])
+def test_cancel_persists_intent_before_storage_and_releases_only_its_digest(intake, monkeypatch, stage_exists):
+    operation = intake.start_upload("", "clip.mp4", 5)
+    other = intake.start_upload("", "other.mp4", 5)
+    if not stage_exists:
+        del intake.source.client.files["root/" + operation["stage"]]
+    real_properties = intake._properties
+    def properties(path):
+        assert intake.record(operation["id"])["state"] == "cancelling"
+        return real_properties(path)
+    monkeypatch.setattr(intake, "_properties", properties)
+    result = intake.cancel(operation["id"])
+    assert result["state"] == "cancelled"
+    assert result["message"] == "Upload cancelled; owned staging removed"
+    assert operation["id"] not in intake._digests
+    assert other["id"] in intake._digests
+    assert "root/" + operation["stage"] not in intake.source.client.files
+    assert "root/" + other["stage"] in intake.source.client.files
+    monkeypatch.setattr(intake, "_properties", Mock(side_effect=AssertionError("Terminal operation accessed storage")))
+    assert intake.cancel(operation["id"]) == result
+
+
+def test_cancel_refuses_stage_owned_by_a_different_intake(intake):
+    first = intake.start_upload("", "first.mp4", 5)
+    second = intake.start_upload("", "second.mp4", 5)
+    second["stage"] = first["stage"]
+    intake.store.put("intake", second["id"], second)
+    result = intake.cancel(second["id"])
+    assert result["state"] == "recovery"
+    assert result["message"] == "Staging ownership changed; refusing deletion"
+    assert "root/" + first["stage"] in intake.source.client.files
+
+
+def test_cancel_refuses_non_upload_remote_intents(intake):
+    operation = intake._new("folder", path="folder", reservations=["folder"], state="mutating")
+    intake.store.put("intake", operation["id"], operation)
+    with pytest.raises(ValueError) as error:
+        intake.cancel(operation["id"])
+    assert str(error.value) == "Remote finalization may have started; operation requires reconciliation"
+    assert intake.record(operation["id"])["state"] == "mutating"
+
+
+def test_cancel_uses_native_version_conditions_and_disables_delete_retry(intake):
+    from azure.core.exceptions import ServiceRequestError
+    from azure.core.pipeline.transport import HttpResponse, HttpTransport
+    from azure.storage.filedatalake import ExponentialRetry, FileSystemClient
+    operation = intake.start_upload("", "clip.mp4", 5)
+
+    class Response(HttpResponse):
+        def __init__(self, request):
+            super().__init__(request, None)
+            self.status_code = 200
+            self.headers = {
+                "ETag": '"reviewed-stage"', "Content-Length": "0",
+                "x-ms-meta-pc_intake": operation["id"], "x-ms-meta-pc_source": intake.source.identity,
+            }
+            self.reason = "OK"
+            self.content_type = None
+
+        def body(self):
+            return b""
+
+    class Transport(HttpTransport):
+        deletes = []
+
+        def open(self):
+            pass
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def send(self, request, **kwargs):
+            assert request.url.split("?", 1)[0].endswith("/root/" + operation["stage"])
+            if request.method == "DELETE":
+                self.deletes.append(request)
+                raise ServiceRequestError("Delete response lost")
+            return Response(request)
+
+    transport = Transport()
+    intake.source._client = FileSystemClient(
+        "https://testing.dfs.core.windows.net", "videos", credential=None, transport=transport,
+        retry_policy=ExponentialRetry(initial_backoff=0, increment_base=0, random_jitter_range=0),
+    )
+    result = intake.cancel(operation["id"])
+    assert result["state"] == "recovery"
+    assert result["message"] == "Delete response lost"
+    assert len(transport.deletes) == 1
+    assert transport.deletes[0].headers["If-Match"] == '"reviewed-stage"'
+    with pytest.raises(ValueError, match="reserved"):
+        intake.assert_available(["clip.mp4"])
+
+
+@pytest.mark.parametrize("defect", ["stage-present", "target-missing", "foreign-intake", "foreign-source"])
+def test_reconcile_rejects_unresolved_upload_without_changing_durable_state(intake, monkeypatch, defect):
+    operation = intake.start_upload("", "clip.mp4", 5)
+    intake.append_upload(operation["id"], 0, b"hello")
+    intake.ready_upload(operation["id"])
+    real_hash = intake._hash
+    def interrupt(record, path):
+        if path == record["path"]:
+            raise RuntimeError("Interrupted")
+        return real_hash(record, path)
+    monkeypatch.setattr(intake, "_hash", interrupt)
+    assert intake.complete(operation["id"])["state"] == "recovery"
+    cloud = intake.source.client
+    if defect == "stage-present":
+        put_video(intake, operation["stage"])
+    elif defect == "target-missing":
+        del cloud.files["root/clip.mp4"]
+    elif defect == "foreign-intake":
+        cloud.files["root/clip.mp4"]["metadata"]["pc_intake"] = "b" * 32
+    else:
+        cloud.files["root/clip.mp4"]["metadata"]["pc_source"] = "another-source"
+    before = intake.record(operation["id"])
+    with pytest.raises(ValueError) as error:
+        intake.reconcile(operation["id"])
+    assert str(error.value) == "Upload outcome is unresolved; staging/destination ownership must be verified first"
+    assert intake.record(operation["id"]) == before
+
+
+def test_reconciliation_requires_recovery_and_does_not_touch_other_sessions(intake):
+    selected = intake.start_upload("", "selected.mp4", 5)
+    unrelated = intake.start_upload("", "other.mp4", 5)
+    with pytest.raises(ValueError) as error:
+        intake.reconcile(selected["id"])
+    assert str(error.value) == "Select an operation requiring recovery"
+    selected.update(state="recovery")
+    intake.store.put("intake", selected["id"], selected)
+    assert intake.reconcile(selected["id"])["state"] == "cancelled"
+    assert intake.record(unrelated["id"])["state"] == "uploading"
+    assert "root/" + unrelated["stage"] in intake.source.client.files
+
+
+def test_reconciliation_of_verified_upload_commits_without_rechecking_stage_ownership(intake, monkeypatch):
+    operation = intake.start_upload("", "clip.mp4", 5)
+    intake.append_upload(operation["id"], 0, b"hello")
+    intake.ready_upload(operation["id"])
+    real_commit = intake._commit_item
+    monkeypatch.setattr(intake, "_commit_item", Mock(side_effect=RuntimeError("Metadata unavailable")))
+    interrupted = intake.complete(operation["id"])
+    assert interrupted["finalized"] is True
+    monkeypatch.setattr(intake, "_commit_item", real_commit)
+    intake.source.client.files["root/clip.mp4"]["metadata"] = {}
+    assert intake.reconcile(operation["id"])["state"] == "completed"
+
+
+def test_reconcile_preserves_upload_verification_failure_diagnostics(intake, monkeypatch):
+    operation = intake.start_upload("", "clip.mp4", 5)
+    intake.append_upload(operation["id"], 0, b"hello")
+    intake.ready_upload(operation["id"])
+    real_hash = intake._hash
+    def interrupted(record, path):
+        if path == record["path"]:
+            raise ValueError("Storage temporarily unavailable")
+        return real_hash(record, path)
+    monkeypatch.setattr(intake, "_hash", interrupted)
+    assert intake.complete(operation["id"])["state"] == "recovery"
+    result = intake.reconcile(operation["id"])
+    assert result["state"] == "recovery"
+    assert result["message"] == "Recovery incomplete: Storage temporarily unavailable"
+    assert "finalized" not in result
+    with pytest.raises(ValueError, match="reserved"):
+        intake.assert_available(["clip.mp4"])
 
 
 def test_interrupted_active_job_protects_destination(intake):
@@ -512,6 +695,128 @@ def test_folder_move_ownership_drafts_and_catalog_prefix(intake):
     assert store.entries("draft")[0]["folder"] == "new"
     assert store.entries("camera")[0]["catalog"]["source_path_prefix"] == source.logical_prefix + "new/"
     assert store.entries("footage")[0]["id"] == source.assignment_prefix + "new/x.mp4"
+
+
+def test_folder_move_updates_all_editable_references_and_skips_unrelated_rows(intake):
+    intake.create_folder("old")
+    put_video(intake, "old/clip.mp4")
+    put_video(intake, "other.mp4")
+    source, store = intake.source, intake.store
+    logical, assignment = source.logical_prefix, source.assignment_prefix
+    before = source.properties("old/clip.mp4")
+    store.put("footage", assignment + "before.mp4", {"camera_id": "unrelated"})
+    store.put("footage", "legacy/old/clip.mp4", {"camera_id": "legacy"})
+    store.put("footage", assignment + "old/clip.mp4", {"camera_id": "camera"})
+    for kind in ("exception", "source_review"):
+        store.put(kind, logical + "old/clip.mp4", {
+            "video": logical + "old/clip.mp4", "video_relative_path": logical + "old/clip.mp4", "required": True,
+        })
+        store.put(kind, "other-source/old/clip.mp4", {"video": "other-source/old/clip.mp4"})
+    calibration = {
+        "video": assignment + "old/clip.mp4", "folder": "old", "catalog": {
+            "video_relative_path": logical + "old/clip.mp4", "video_prefix": logical + "old/",
+            "source_path_prefix": logical + "old/", "camera_id": "camera",
+        },
+    }
+    with store.connection() as db:
+        for identity, data in {
+            "calibration": calibration, "other": {"video": "legacy/old/clip.mp4", "folder": "old"},
+            "empty": {}, "minimal": {"video": assignment + "old/clip.mp4"},
+        }.items():
+            db.execute("INSERT INTO entries VALUES ('camera',?,?)", (identity, json.dumps(data)))
+    store.put("source_preview", "a-stale", {"video": logical + "old/clip.mp4", "observations": {}})
+    store.put("source_preview", "b-current", {"video": logical + "old/clip.mp4", "observations": before})
+    store.put("source_preview", "c-empty", {})
+    store.put("source_preview", "d-unrelated", {"video": logical + "other.mp4", "observations": before})
+    store.put("draft", "selection", {
+        "source": source.descriptor, "videos": ["old/clip.mp4", "old/clip.mp4", "other.mp4"],
+        "folder": "old", "observations": {"old/clip.mp4": before, "other.mp4": {"etag": "other", "size": 7}},
+    })
+    store.put("draft", "empty", {"source": source.descriptor})
+    store.put("draft", "legacy", {"source": {"kind": "local"}, "videos": ["old/clip.mp4"]})
+    operation = intake.start_move(["old"], "", rename="new")
+    assert intake.complete(operation["id"])["state"] == "completed"
+    assert store.entries("footage") == [
+        {"id": assignment + "before.mp4", "camera_id": "unrelated"},
+        {"id": assignment + "new/clip.mp4", "camera_id": "camera"},
+        {"id": "legacy/old/clip.mp4", "camera_id": "legacy"},
+    ]
+    for kind in ("exception", "source_review"):
+        assert store.entries(kind) == [
+            {"id": logical + "new/clip.mp4", "video": logical + "new/clip.mp4",
+             "video_relative_path": logical + "new/clip.mp4", "required": True},
+            {"id": "other-source/old/clip.mp4", "video": "other-source/old/clip.mp4"},
+        ]
+    cameras = {row.pop("id"): row for row in store.entries("camera")}
+    assert cameras["calibration"] == {
+        "video": assignment + "new/clip.mp4", "folder": "new", "catalog": {
+            "video_relative_path": logical + "new/clip.mp4", "video_prefix": logical + "new/",
+            "source_path_prefix": logical + "new/", "camera_id": "camera",
+        },
+    }
+    assert cameras["minimal"] == {"video": assignment + "new/clip.mp4", "folder": ""}
+    assert cameras["empty"] == {}
+    assert cameras["other"] == {"video": "legacy/old/clip.mp4", "folder": "old"}
+    assert store.entries("source_preview") == [
+        {"id": "b-current", "video": logical + "new/clip.mp4", "observations": before},
+        {"id": "c-empty"}, {"id": "d-unrelated", "video": logical + "other.mp4", "observations": before},
+    ]
+    drafts = {row.pop("id"): row for row in store.entries("draft")}
+    assert drafts["selection"] == {
+        "source": source.descriptor, "videos": ["new/clip.mp4", "other.mp4"], "folder": "new",
+        "observations": {"new/clip.mp4": before, "other.mp4": {"etag": "other", "size": 7}},
+    }
+    assert drafts["empty"] == {"source": source.descriptor, "videos": [], "folder": "", "observations": {}}
+    assert drafts["legacy"] == {"source": {"kind": "local"}, "videos": ["old/clip.mp4"]}
+
+
+def test_file_move_keeps_current_preview_bound_to_the_destination_version(intake, monkeypatch):
+    put_video(intake, "old.mp4")
+    source = intake.source
+    intake.store.put("source_preview", "approved", {
+        "video": source.logical_prefix + "old.mp4", "observations": source.properties("old.mp4"),
+    })
+    real_rename = File.rename_file
+    def rename(self, target, **kwargs):
+        result = real_rename(self, target, **kwargs)
+        self.cloud.files[result.path]["etag"] = "renamed-version"
+        kwargs["raw_response_hook"](SimpleNamespace(http_response=SimpleNamespace(
+            status_code=201, headers={"ETag": "renamed-version"},
+        )))
+        return result
+    monkeypatch.setattr(File, "rename_file", rename)
+    operation = intake.start_move(["old.mp4"], "", rename="new.mp4")
+    assert intake.complete(operation["id"])["state"] == "completed"
+    assert intake.store.entries("source_preview") == [{
+        "id": "approved", "video": source.logical_prefix + "new.mp4",
+        "observations": {"size": 5, "etag": "renamed-version"},
+    }]
+
+
+def test_replacement_invalidates_destination_preview_and_marks_only_selected_drafts(intake):
+    put_video(intake, "old.mp4")
+    put_video(intake, "new.mp4", b"before")
+    source, store = intake.source, intake.store
+    store.put("source_preview", "destination", {
+        "video": source.logical_prefix + "new.mp4", "observations": source.properties("new.mp4"),
+    })
+    store.put("source_preview", "legacy-destination", {"video": source.logical_prefix + "new.mp4"})
+    store.put("source_preview", "unrelated", {"video": source.logical_prefix + "other.mp4"})
+    store.put("draft", "selected", {"source": source.descriptor, "videos": ["old.mp4"],
+                                   "observations": {"old.mp4": {"etag": "stale", "size": 1}}})
+    store.put("draft", "unselected", {"source": source.descriptor, "videos": ["other.mp4"]})
+    operation = intake.start_move(["old.mp4"], "", rename="new.mp4", replacements={"new.mp4": "reviewed"})
+    assert intake.complete(operation["id"])["state"] == "completed"
+    assert store.entries("source_preview") == [{"id": "unrelated", "video": source.logical_prefix + "other.mp4"}]
+    assert store.entries("source_review") == [{
+        "id": source.logical_prefix + "new.mp4", "video": source.logical_prefix + "new.mp4",
+        "observations": {"size": 5, "etag": "reviewed"}, "required": True,
+        "message": "Recording replaced; review calibration and capture-time settings before generating.",
+    }]
+    drafts = {row["id"]: row for row in store.entries("draft")}
+    assert drafts["selected"]["review_required"] is True
+    assert drafts["selected"]["observations"] == {"new.mp4": {"size": 5, "etag": "reviewed"}}
+    assert "review_required" not in drafts["unselected"]
 
 
 def test_move_migrates_per_file_overrides_previews_and_preserves_other_sources(intake):
@@ -601,7 +906,89 @@ def test_native_move_success_response_with_source_remaining_is_ambiguous(intake,
     monkeypatch.setattr(intake, "_rename", partial)
     result = intake.complete(operation["id"])
     assert result["state"] == "recovery"
-    assert "source" in result["message"].lower()
+    assert result["message"] == (
+        "Intake incomplete; paths remain reserved: "
+        "Native move left the source present; remote completion is uncertain"
+    )
+
+
+@pytest.mark.parametrize("change", ["missing", "file", "new-video"])
+def test_move_rejects_changed_folder_before_any_native_request(intake, change):
+    intake.create_folder("old")
+    put_video(intake, "old/clip.mp4")
+    operation = intake.start_move(["old"], "", rename="new")
+    if change == "missing":
+        del intake.source.client.files["root/old"]
+    elif change == "file":
+        intake.source.client.files["root/old"]["metadata"] = {}
+    else:
+        put_video(intake, "old/extra.mp4")
+    result = intake.complete(operation["id"])
+    assert result["state"] == "recovery"
+    assert result["results"][0]["state"] == "pending"
+    assert result["message"] == "Intake incomplete; paths remain reserved: Move subtree changed after preflight"
+    assert intake.source.client.calls == []
+
+
+@pytest.mark.parametrize("error_type", [ResourceModifiedError, ResourceExistsError, ResourceNotFoundError])
+def test_definitive_native_move_rejection_is_cancelable_without_retry(intake, monkeypatch, error_type):
+    put_video(intake, "old.mp4")
+    operation = intake.start_move(["old.mp4"], "", rename="new.mp4")
+    rename = Mock(side_effect=error_type("Azure rejected move"))
+    monkeypatch.setattr(File, "rename_file", rename)
+    result = intake.complete(operation["id"])
+    assert result["state"] == "recovery"
+    assert result["results"][0]["state"] == "rejected"
+    assert result["message"] == "Intake incomplete; paths remain reserved: Azure rejected move"
+    assert rename.call_count == 1
+    assert intake.cancel(operation["id"])["state"] == "cancelled"
+    assert "root/old.mp4" in intake.source.client.files
+    assert "root/new.mp4" not in intake.source.client.files
+
+
+@pytest.mark.parametrize("change,message", [
+    ("missing", "Native move destination is missing or has a different resource type"),
+    ("directory", "Native move destination is missing or has a different resource type"),
+    ("version", "Moved destination changed after native rename"),
+])
+def test_native_file_move_postconditions_preserve_recovery_and_old_metadata(intake, monkeypatch, change, message):
+    put_video(intake, "old.mp4")
+    intake.store.put("footage", intake.source.assignment_prefix + "old.mp4", {"camera_id": "camera"})
+    operation = intake.start_move(["old.mp4"], "", rename="new.mp4")
+    real = File.rename_file
+    def rename(self, target, **kwargs):
+        result = real(self, target, **kwargs)
+        if change == "missing":
+            del self.cloud.files[result.path]
+        elif change == "directory":
+            self.cloud.files[result.path]["metadata"] = {"hdi_isfolder": "true"}
+        else:
+            self.cloud.files[result.path]["etag"] = "changed"
+        return result
+    monkeypatch.setattr(File, "rename_file", rename)
+    result = intake.complete(operation["id"])
+    assert result["state"] == "recovery"
+    assert result["message"] == "Intake incomplete; paths remain reserved: " + message
+    assert result["results"][0]["state"] == "mutating"
+    assert intake.store.entries("footage")[0]["id"] == intake.source.assignment_prefix + "old.mp4"
+
+
+def test_moved_subtree_version_drift_requires_rereview(intake, monkeypatch):
+    intake.create_folder("old")
+    put_video(intake, "old/clip.mp4")
+    operation = intake.start_move(["old"], "", rename="new")
+    real = File.rename_directory
+    def rename(self, target, **kwargs):
+        result = real(self, target, **kwargs)
+        self.cloud.files[result.path + "/clip.mp4"]["etag"] = "changed"
+        return result
+    monkeypatch.setattr(File, "rename_directory", rename)
+    result = intake.complete(operation["id"])
+    assert result["state"] == "recovery"
+    assert result["message"] == (
+        "Intake incomplete; paths remain reserved: "
+        "Moved subtree versions changed; explicit footage re-review is required"
+    )
 
 
 def test_remote_done_journal_recovery_commits_metadata_but_rejects_changed_target(intake, monkeypatch):
