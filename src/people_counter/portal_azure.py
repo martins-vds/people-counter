@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import math
+import os
 import time
 from collections.abc import Callable
 from threading import Lock
@@ -68,6 +69,39 @@ def _same_identity(expected: dict, actual: dict) -> None:
         raise PortalAzureError("identity_changed")
 
 
+def _runtime_credential() -> TokenCredential:
+    from azure.identity import (
+        CertificateCredential,
+        DefaultAzureCredential,
+        EnvironmentCredential,
+        ManagedIdentityCredential,
+        WorkloadIdentityCredential,
+    )
+
+    client_secret = os.getenv("AZURE_CLIENT_SECRET")
+    certificate_path = os.getenv("AZURE_CLIENT_CERTIFICATE_PATH")
+    if client_secret or certificate_path:
+        if certificate_path and client_secret == "":
+            return CertificateCredential(
+                tenant_id=os.getenv("AZURE_TENANT_ID") or "",
+                client_id=os.getenv("AZURE_CLIENT_ID") or "",
+                certificate_path=certificate_path,
+                password=os.getenv("AZURE_CLIENT_CERTIFICATE_PASSWORD") or None,
+                send_certificate_chain=(os.getenv("AZURE_CLIENT_SEND_CERTIFICATE_CHAIN") or "").lower() == "true",
+            )
+        return EnvironmentCredential()
+    if os.getenv("AZURE_FEDERATED_TOKEN_FILE"):
+        return WorkloadIdentityCredential()
+    if os.getenv("WEBSITE_HOSTNAME"):
+        client_id = os.getenv("AZURE_CLIENT_ID")
+        return ManagedIdentityCredential(client_id=client_id) if client_id else ManagedIdentityCredential()
+    return DefaultAzureCredential(
+        exclude_environment_credential=True,
+        exclude_workload_identity_credential=True,
+        managed_identity_client_id=os.getenv("AZURE_CLIENT_ID") or None,
+    )
+
+
 class _GuardedCredential:
     def __init__(self, session: PortalAzureSession, snapshot: dict):
         self._session = session
@@ -93,7 +127,7 @@ class _GuardedCredential:
 
 
 class PortalAzureSession:
-    """One DefaultAzureCredential (or injected TokenCredential) owns all tokens.
+    """One runtime-selected SDK credential (or injected credential) owns all tokens.
 
     ``user_id`` is the legacy snapshot field for the principal object ID, for
     both users and workloads. Subscription is accepted by ``credential`` only
@@ -130,8 +164,7 @@ class PortalAzureSession:
             if self._credential is None:
                 factory = self._credential_factory
                 if factory is None:
-                    from azure.identity import DefaultAzureCredential
-                    factory = DefaultAzureCredential
+                    factory = _runtime_credential
                 self._credential = factory()
             return self._credential
 

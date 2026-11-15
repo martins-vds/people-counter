@@ -62,8 +62,11 @@ Configure the ADLS account/filesystem/root environment variables first; models
 are mounted read-only, state persists in named volumes, and cloud
 actions are disabled by default. See the [operator portal guide](docs/operator-portal.md)
 for ADLS configuration, runtime credentials, recovery, and Playwright/CI tests.
-The portal uses native Azure SDK clients and `DefaultAzureCredential`; SDK-managed
-CLI credential fallback is allowed, but the app issues no CLI commands or login.
+The portal uses native Azure SDK clients. Explicit service-principal environment
+settings or a federated token file take precedence. Otherwise, `WEBSITE_HOSTNAME`
+selects managed identity (`AZURE_CLIENT_ID` for user-assigned, otherwise
+system-assigned); locally it uses `DefaultAzureCredential`. SDK-managed CLI
+credential fallback is allowed locally, but the app issues no CLI commands or login.
 Docker does not automatically reuse host credentials. Packages is the landing page:
 choose **New package**, select ADLS footage, associate cameras, generate,
 then explicitly publish. Remote previews use bounded range reads; complete content

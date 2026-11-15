@@ -29,11 +29,61 @@ permission failures are shown as errors, never empty successful listings.
 ADLS bounded native decoding currently requires a fork-capable host; unsupported
 hosts report that limitation explicitly. Linux is the supported host path.
 
-The application uses one shared `DefaultAzureCredential` owner and native Azure
-SDK clients. Configure standard Azure Identity environment, workload identity,
-managed identity or development credentials in the runtime. SDK-managed
-`AzureCliCredential` fallback is allowed, but the application does not issue CLI
-commands, launch device-code login, or change a CLI subscription.
+The application uses one shared native SDK credential owner, with the environment
+credential and workload identity precedence documented by
+[DefaultAzureCredential](https://learn.microsoft.com/python/api/azure-identity/azure.identity.defaultazurecredential):
+
+1. A nonempty `AZURE_CLIENT_SECRET` or `AZURE_CLIENT_CERTIFICATE_PATH` selects
+   [EnvironmentCredential](https://learn.microsoft.com/python/api/azure-identity/azure.identity.environmentcredential).
+   Set `AZURE_TENANT_ID` and `AZURE_CLIENT_ID` as well. The SDK prefers a client
+   secret over a certificate if both are configured.
+2. A nonempty `AZURE_FEDERATED_TOKEN_FILE` selects
+   [WorkloadIdentityCredential](https://learn.microsoft.com/python/api/azure-identity/azure.identity.workloadidentitycredential).
+   Set `AZURE_TENANT_ID` and `AZURE_CLIENT_ID` and configure the federated identity
+   trust for the token's issuer, subject and audience.
+3. Otherwise, Azure hosting or local development determines the credential.
+
+These explicitly configured identities take precedence even on an Azure host.
+Incomplete configuration or authentication failures are surfaced; the portal
+does not silently switch to a different credential.
+
+For certificates, use `AZURE_CLIENT_CERTIFICATE_PATH` for a PEM or PKCS12 file
+containing the private key. Set `AZURE_CLIENT_CERTIFICATE_PASSWORD` only for an
+encrypted file. Set `AZURE_CLIENT_SEND_CERTIFICATE_CHAIN=True` only when Subject
+Name/Issuer authentication requires the public chain; otherwise leave it unset.
+`AZURE_AUTHORITY_HOST` optionally selects the Microsoft Entra authority and
+defaults to Azure Public Cloud. Compose forwards these names from the shell or the
+selected `--env-file`, using empty strings when optional variables are unavailable.
+The portal prevents empty defaults from becoming an incomplete SDK environment
+credential. Explicit service-principal/workload credentials are selected before
+the local default chain, which excludes those already-handled credential types.
+For certificates with an empty client-secret default, the portal uses the native
+`CertificateCredential` with the same documented environment settings and treats
+empty optional password/chain values as disabled.
+
+Certificate and
+federated-token paths must refer to files inside the container. Mount those files
+read-only with a Compose override or your hosting service's secret mounts; setting
+an environment variable does not mount a host file or copy a private key.
+Use the commented authentication options in `.env.portal.example`; never commit
+an env file containing credentials.
+
+Following the
+[Microsoft Learn managed-identity example](https://learn.microsoft.com/azure/developer/python/sdk/authentication/system-assigned-managed-identity),
+a nonempty `WEBSITE_HOSTNAME` selects Azure-hosted authentication:
+`ManagedIdentityCredential(client_id=AZURE_CLIENT_ID)` when `AZURE_CLIENT_ID` is
+nonempty, otherwise `ManagedIdentityCredential()` for the system-assigned identity.
+Azure-hosted authentication does not fall back to a local credential if it fails.
+Without explicit environment/workload settings, when `WEBSITE_HOSTNAME` is absent
+or empty, the portal uses `DefaultAzureCredential` for local development.
+SDK-managed `AzureCliCredential` fallback is allowed locally, but
+the application does not issue CLI commands, launch device-code login, or change
+a CLI subscription.
+
+`WEBSITE_HOSTNAME` is an App Service hosting marker, not universal Azure detection.
+For another Azure hosting service, explicitly supply a nonempty marker to use this
+managed-identity selection. Leave it unset locally. Configure and grant access to
+the selected managed identity on the hosting resource before starting the portal.
 
 The header shows the execution principal and tenant, with user initials only for
 a resolved user. Application/workload identities are supported. Unavailable
@@ -666,8 +716,8 @@ Cloud actions are disabled by default, and the server rejects forged requests
 even if a button is bypassed. Independent metadata/history screens do not require
 storage access, but ADLS operations do.
 
-When ready, configure credentials that `DefaultAzureCredential` resolves inside
-the runtime. Do not copy secrets into the repository or assume host credentials
+When ready, configure the selected managed identity in Azure or credentials that
+`DefaultAzureCredential` resolves locally. Do not copy secrets into the repository or assume host credentials
 are available inside Docker. Use **Refresh execution identity** to inspect the
 actual user or workload principal; the portal does not initiate authentication.
 

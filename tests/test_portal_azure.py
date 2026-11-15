@@ -10,8 +10,12 @@ from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 from azure.core.pipeline import Pipeline, PipelineContext, PipelineRequest
 from azure.core.pipeline.policies import BearerTokenCredentialPolicy
 from azure.core.pipeline.transport import HttpRequest, HttpResponse, HttpTransport
+from azure.identity import EnvironmentCredential as SdkEnvironmentCredential
+from azure.identity import DefaultAzureCredential as SdkDefaultAzureCredential
+from azure.identity import WorkloadIdentityCredential as SdkWorkloadIdentityCredential
 
 from people_counter.portal_azure import PortalAzureError, PortalAzureSession
+from people_counter.portal_azure import _runtime_credential
 
 SCOPE = "https://storage.azure.com/.default"
 
@@ -55,17 +59,199 @@ def sdk():
 
 @pytest.fixture(autouse=True)
 def no_live_credentials(monkeypatch):
-    def unavailable():
+    def unavailable(*args, **kwargs):
         pytest.fail("Tests must inject a fake SDK credential")
 
+    for name in (
+        "WEBSITE_HOSTNAME", "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET",
+        "AZURE_CLIENT_CERTIFICATE_PATH", "AZURE_CLIENT_CERTIFICATE_PASSWORD",
+        "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN", "AZURE_FEDERATED_TOKEN_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("azure.identity.DefaultAzureCredential", unavailable)
+    monkeypatch.setattr("azure.identity.ManagedIdentityCredential", unavailable)
+    monkeypatch.setattr("azure.identity.EnvironmentCredential", unavailable)
+    monkeypatch.setattr("azure.identity.WorkloadIdentityCredential", unavailable)
+    monkeypatch.setattr("azure.identity.CertificateCredential", unavailable)
+
+
+def test_compose_empty_defaults_allow_native_local_credential_construction(monkeypatch):
+    for name in (
+        "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET",
+        "AZURE_CLIENT_CERTIFICATE_PATH", "AZURE_CLIENT_CERTIFICATE_PASSWORD",
+        "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN", "AZURE_FEDERATED_TOKEN_FILE",
+    ):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", SdkDefaultAzureCredential)
+    credential = _runtime_credential()
+    assert isinstance(credential, SdkDefaultAzureCredential)
+    credential.close()
+
+
+@pytest.mark.parametrize("password,chain,expected_password,expected_chain", [
+    ("", "", None, False), ("test-only-password", "True", "test-only-password", True),
+    ("", "False", None, False),
+])
+def test_compose_empty_secret_keeps_certificate_authentication(monkeypatch, sdk, password, chain, expected_password, expected_chain):
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-1")
+    monkeypatch.setenv("AZURE_CLIENT_ID", "application-client")
+    monkeypatch.setenv("AZURE_CLIENT_SECRET", "")
+    monkeypatch.setenv("AZURE_CLIENT_CERTIFICATE_PATH", "/run/secrets/client.pem")
+    monkeypatch.setenv("AZURE_CLIENT_CERTIFICATE_PASSWORD", password)
+    monkeypatch.setenv("AZURE_CLIENT_SEND_CERTIFICATE_CHAIN", chain)
+    constructors = []
+    def certificate(**kwargs):
+        constructors.append(kwargs)
+        return sdk
+    monkeypatch.setattr("azure.identity.CertificateCredential", certificate)
+    assert PortalAzureSession().require_identity()["user_id"] == "principal-1"
+    assert constructors == [{
+        "tenant_id": "tenant-1", "client_id": "application-client",
+        "certificate_path": "/run/secrets/client.pem", "password": expected_password,
+        "send_certificate_chain": expected_chain,
+    }]
+
+
+@pytest.mark.parametrize("hostname", [None, "portal.azurewebsites.net"])
+@pytest.mark.parametrize("configuration,expected", [
+    ({"AZURE_CLIENT_SECRET": "test-only-secret"}, "environment"),
+    ({"AZURE_CLIENT_CERTIFICATE_PATH": "/run/secrets/azure/client.pem"}, "environment"),
+    ({"AZURE_FEDERATED_TOKEN_FILE": "/run/secrets/azure/token"}, "workload"),
+    ({"AZURE_CLIENT_SECRET": "test-only-secret", "AZURE_FEDERATED_TOKEN_FILE": "/run/secrets/azure/token"}, "environment"),
+    ({"AZURE_CLIENT_CERTIFICATE_PATH": "/run/secrets/azure/client.pem",
+      "AZURE_FEDERATED_TOKEN_FILE": "/run/secrets/azure/token"}, "environment"),
+])
+def test_explicit_environment_identity_precedes_host_credentials(monkeypatch, sdk, hostname, configuration, expected):
+    if hostname:
+        monkeypatch.setenv("WEBSITE_HOSTNAME", hostname)
+    monkeypatch.setenv("AZURE_CLIENT_ID", "application-client")
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-1")
+    for name, value in configuration.items():
+        monkeypatch.setenv(name, value)
+    constructors = []
+    def environment():
+        constructors.append("environment")
+        return sdk
+    def workload():
+        constructors.append("workload")
+        return sdk
+    monkeypatch.setattr("azure.identity.EnvironmentCredential", environment)
+    monkeypatch.setattr("azure.identity.WorkloadIdentityCredential", workload)
+    sdk.result = token(upn=None, idtyp="app", appid="application-client")
+    session = PortalAzureSession()
+    assert constructors == []
+    identity = session.require_identity()
+    assert identity["principal_type"] == "app"
+    assert identity["account"] == "application-client"
+    assert constructors == [expected]
+    assert session.credential(identity).get_token(SCOPE) == sdk.result
+    session.close()
+    assert constructors == [expected]
+    assert sdk.close_calls == 1
+
+
+@pytest.mark.parametrize("setting,credential_name", [
+    ("AZURE_CLIENT_SECRET", "EnvironmentCredential"),
+    ("AZURE_CLIENT_CERTIFICATE_PATH", "EnvironmentCredential"),
+    ("AZURE_FEDERATED_TOKEN_FILE", "WorkloadIdentityCredential"),
+])
+def test_explicit_environment_authentication_failure_never_changes_identity(monkeypatch, sdk, setting, credential_name):
+    monkeypatch.setenv("WEBSITE_HOSTNAME", "portal.azurewebsites.net")
+    monkeypatch.setenv(setting, "test-only-setting")
+    sdk.error = ClientAuthenticationError("Test credential rejected")
+    monkeypatch.setattr(f"azure.identity.{credential_name}", lambda: sdk)
+    session = PortalAzureSession()
+    with pytest.raises(PortalAzureError) as error:
+        session.require_identity()
+    assert error.value.code == "azure_error"
+    assert not session.cached_status()["signed_in"]
+
+
+@pytest.mark.parametrize("credential_name,setting,native_credential", [
+    ("EnvironmentCredential", "AZURE_CLIENT_SECRET", SdkEnvironmentCredential),
+    ("WorkloadIdentityCredential", "AZURE_FEDERATED_TOKEN_FILE", SdkWorkloadIdentityCredential),
+])
+def test_explicit_incomplete_environment_configuration_surfaces_sdk_error(monkeypatch, credential_name, setting, native_credential):
+    monkeypatch.setenv(setting, "test-only-setting")
+    monkeypatch.setattr(f"azure.identity.{credential_name}", native_credential)
+    with pytest.raises(PortalAzureError) as error:
+        PortalAzureSession().require_identity()
+    assert error.value.code == "azure_error"
+
+
+def test_empty_environment_selectors_preserve_managed_identity_selection(monkeypatch, sdk):
+    monkeypatch.setenv("WEBSITE_HOSTNAME", "portal.azurewebsites.net")
+    for name in ("AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PATH", "AZURE_FEDERATED_TOKEN_FILE"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setattr("azure.identity.ManagedIdentityCredential", lambda: sdk)
+    assert PortalAzureSession().require_identity()["user_id"] == "principal-1"
+
+
+@pytest.mark.parametrize("hostname,client_id,kind,options", [
+    ("portal.azurewebsites.net", "user-assigned-client", "managed", {"client_id": "user-assigned-client"}),
+    ("portal.azurewebsites.net", None, "managed", {}),
+    ("portal.azurewebsites.net", "", "managed", {}),
+    (None, "local-app-client", "default", {}),
+    (None, None, "default", {}),
+    ("", "local-app-client", "default", {}),
+])
+def test_runtime_selects_managed_identity_only_when_azure_hosted(monkeypatch, sdk, hostname, client_id, kind, options):
+    if hostname is not None:
+        monkeypatch.setenv("WEBSITE_HOSTNAME", hostname)
+    if client_id is not None:
+        monkeypatch.setenv("AZURE_CLIENT_ID", client_id)
+    constructors = []
+    def managed(**kwargs):
+        constructors.append(("managed", kwargs))
+        return sdk
+    def default(**kwargs):
+        constructors.append(("default", kwargs))
+        return sdk
+    monkeypatch.setattr("azure.identity.ManagedIdentityCredential", managed)
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", default)
+    session = PortalAzureSession()
+    assert constructors == []
+    identity = session.require_identity()
+    if kind == "default":
+        options = {
+            "exclude_environment_credential": True, "exclude_workload_identity_credential": True,
+            "managed_identity_client_id": client_id or None,
+        }
+    assert constructors == [(kind, options)]
+    session.credential(identity).get_token(SCOPE)
+    assert constructors == [(kind, options)]
+    session.close()
+    assert sdk.close_calls == 1
+
+
+def test_azure_managed_identity_failure_never_falls_back_to_local_credentials(monkeypatch, sdk):
+    monkeypatch.setenv("WEBSITE_HOSTNAME", "portal.azurewebsites.net")
+    monkeypatch.setenv("AZURE_CLIENT_ID", "user-assigned-client")
+    sdk.error = ClientAuthenticationError("Managed identity endpoint unavailable")
+    monkeypatch.setattr("azure.identity.ManagedIdentityCredential", lambda **kwargs: sdk)
+    session = PortalAzureSession()
+    with pytest.raises(PortalAzureError) as error:
+        session.require_identity()
+    assert error.value.code == "azure_error"
+    assert not session.cached_status()["signed_in"]
+
+
+def test_explicit_credential_and_factory_override_runtime_detection(monkeypatch, sdk):
+    monkeypatch.setenv("WEBSITE_HOSTNAME", "portal.azurewebsites.net")
+    monkeypatch.setenv("AZURE_CLIENT_ID", "user-assigned-client")
+    injected = PortalAzureSession(credential=sdk)
+    assert injected.require_identity()["user_id"] == "principal-1"
+    factory_calls = []
+    configured = PortalAzureSession(credential_factory=lambda: factory_calls.append(True) or sdk)
+    assert configured.require_identity()["user_id"] == "principal-1"
+    assert factory_calls == [True]
 
 
 def test_default_credential_is_single_native_owner(monkeypatch, sdk):
     factories = []
     monkeypatch.setattr(
         "azure.identity.DefaultAzureCredential",
-        lambda: factories.append(True) or sdk,
+        lambda **kwargs: factories.append(True) or sdk,
     )
     session = PortalAzureSession()
     assert factories == []
