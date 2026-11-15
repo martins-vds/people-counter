@@ -8,6 +8,8 @@ it safely.
 - Pyright checks changed production and utility files using the locked uv
   environment's interpreter, including its installed optional dependencies.
 - Pytest runs the non-Compose suite with branch coverage and CRAP results.
+  It excludes `tests/ui` during collection so this job does not need Playwright.
+  The separate portal UI job installs Playwright and runs the browser tests.
   The combined statement-and-branch coverage must be at least 95% across the
   complete `people_counter` package and the Python CRAP checker; unimported
   modules remain in the denominator.
@@ -36,7 +38,12 @@ it safely.
   every workflow, including deployment and drift workflows.
 - shell regression tests for SDK version preparation and rollback, release
   source ancestry, version validation, tag conflicts, draft recovery, and
-  idempotent publication.
+  idempotent publication. The workflow installs Python 3.13 before these tests
+  create their offline lockfile fixtures.
+
+The portal Compose smoke test supplies a placeholder ADLS endpoint and
+filesystem with cloud access disabled. Startup and health checks do not require
+Azure credentials or a live storage account.
 
 ## Reproduce coverage locally
 
@@ -44,7 +51,7 @@ Use the installed development environment, including the optional dependencies
 used by CI and Java 21 for the real local Spark/Delta tests:
 
 ```bash
-uv run --no-sync pytest tests -m "not compose" \
+uv run --no-sync pytest tests --ignore=tests/ui -m "not compose" \
   --cov=people_counter --cov=scripts.check_python_crap \
   --cov-branch --cov-precision=2 --cov-fail-under=95 --crap \
   --cov-report=json:evidence/python-tests/coverage.json
