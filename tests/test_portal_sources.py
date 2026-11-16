@@ -3,6 +3,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from azure.core.exceptions import AzureError, HttpResponseError, ServiceRequestError, ServiceResponseError
+from azure.core.pipeline.policies import SansIOHTTPPolicy
+from azure.core.pipeline.transport import HttpResponse, HttpTransport
 from azure.storage.filedatalake import DataLakeServiceClient as NativeServiceClient
 
 from people_counter.portal_sources import AdlsFootageSource, SelectedFootageInput, source_identity
@@ -45,6 +48,121 @@ def test_adls_source_lazily_uses_sdk_credentials_and_original_paths(source):
     assert factory.call_args.kwargs["credential"] is azure.credential.return_value
     filesystem.get_file_client.assert_called_with("entrance/day/clip.mp4")
     filesystem.get_file_client.return_value.download_file.assert_not_called()
+
+
+@pytest.fixture
+def metadata_sdk(source, monkeypatch):
+    class Response(HttpResponse):
+        def __init__(self, request, status):
+            super().__init__(request, None)
+            self.status_code = status
+            self.reason = "OK" if status == 200 else "Storage failure"
+            self.content_type = "application/xml"
+            self.headers = {
+                "Content-Length": "7", "ETag": '"version"',
+                "Last-Modified": "Fri, 03 Apr 2026 12:30:00 GMT",
+                "x-ms-request-id": "metadata-request-123",
+            }
+            if status != 200:
+                self.headers["x-ms-error-code"] = "ServerBusy" if status == 503 else "AuthorizationPermissionMismatch"
+
+        def body(self):
+            return b"<Error><Message>PRIVATE_RESPONSE_SECRET</Message></Error>"
+
+    class Transport(HttpTransport):
+        status = 200
+        error = None
+
+        def __init__(self):
+            self.calls = []
+            self.sleeps = []
+
+        def open(self):
+            pass
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+        def send(self, request, **kwargs):
+            self.calls.append((request, kwargs))
+            if self.error is not None:
+                raise self.error
+            return Response(request, self.status)
+
+    adapter, _, azure, _ = source
+    transport = Transport()
+
+    def fail_backoff(*args, **kwargs):
+        transport.sleeps.append("backoff")
+        raise AssertionError("Metadata reads must not enter retry backoff")
+
+    monkeypatch.setattr("azure.storage.filedatalake._shared.policies.StorageRetryPolicy.sleep", fail_backoff)
+    monkeypatch.setattr("azure.storage.blob._shared.policies.StorageRetryPolicy.sleep", fail_backoff)
+    azure.credential.return_value = None
+    azure.policy.return_value = SansIOHTTPPolicy()
+    monkeypatch.setattr(
+        "azure.storage.filedatalake.DataLakeServiceClient",
+        lambda *args, **kwargs: NativeServiceClient(*args, transport=transport, **kwargs),
+    )
+    yield adapter, transport
+    adapter.reset()
+
+
+def test_native_metadata_read_preserves_result_and_bounded_transport_timeouts(metadata_sdk):
+    adapter, transport = metadata_sdk
+    assert adapter.properties("day/clip.mp4") == {"size": 7, "etag": '"version"'}
+    assert len(transport.calls) == 1
+    request, options = transport.calls[0]
+    assert request.method == "HEAD"
+    assert request.url.endswith("/recordings/entrance/day/clip.mp4")
+    assert options["connection_timeout"] == options["read_timeout"] == 10
+    assert transport.sleeps == []
+
+
+@pytest.mark.parametrize("failure", [503, 403, "connect", "read"])
+def test_native_metadata_failures_do_not_retry_and_surface_safe_storage_details(
+    metadata_sdk, caplog, failure,
+):
+    adapter, transport = metadata_sdk
+    if isinstance(failure, int):
+        transport.status = failure
+    else:
+        kind = ServiceRequestError if failure == "connect" else ServiceResponseError
+        transport.error = kind("PRIVATE_TRANSPORT_SECRET")
+    with pytest.raises(ValueError) as raised:
+        adapter.properties("day/clip.mp4")
+    detail = str(raised.value)
+    assert "day/clip.mp4" in detail
+    assert isinstance(raised.value.__cause__, AzureError)
+    assert type(raised.value.__cause__).__name__ in detail
+    if isinstance(failure, int):
+        assert f"HTTP {failure}" in detail
+        assert ("ServerBusy" if failure == 503 else "AuthorizationPermissionMismatch") in detail
+        assert "metadata-request-123" in detail
+    assert detail in caplog.text
+    assert "PRIVATE_" not in detail + caplog.text
+    assert len(transport.calls) == 1
+    assert transport.sleeps == []
+
+
+def test_metadata_error_uses_sdk_code_when_response_headers_are_unavailable(source, caplog):
+    from azure.storage.blob import StorageErrorCode
+
+    adapter, filesystem, _, _ = source
+    error = HttpResponseError("PRIVATE_RESPONSE_SECRET")
+    error.error_code = StorageErrorCode.SERVER_BUSY
+    filesystem.get_file_client.return_value.get_file_properties.side_effect = error
+    with pytest.raises(ValueError) as raised:
+        adapter.properties("day/clip.mp4")
+    assert "code ServerBusy" in str(raised.value)
+    assert raised.value.__cause__ is error
+    assert "PRIVATE_" not in str(raised.value) + caplog.text
 
 
 def test_source_reset_closes_owner_not_borrowed_children_or_credential(source):

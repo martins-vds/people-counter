@@ -104,7 +104,7 @@ class AdlsFootageSource:
             self._resources = resources.pop_all()
             return client
 
-    def _call(self, function: Any, *args: Any, **kwargs: Any) -> Any:
+    def _call(self, function: Any, *args: Any, operation: str = "ADLS access", **kwargs: Any) -> Any:
         from azure.core.exceptions import AzureError
 
         with self._client_lock:
@@ -112,11 +112,23 @@ class AdlsFootageSource:
                 self.assert_identity()
                 return function(*args, **kwargs)
             except AzureError as error:
-                logging.getLogger(__name__).warning("ADLS source operation failed: %s", type(error).__name__)
-                raise ValueError(
-                    f"ADLS access failed ({type(error).__name__}). Check runtime credentials, "
-                    "Storage Blob data/ACL permissions, and storage network access."
-                ) from error
+                details = [type(error).__name__]
+                status = getattr(error, "status_code", None)
+                if status is not None:
+                    details.append(f"HTTP {status}")
+                headers = getattr(getattr(error, "response", None), "headers", {})
+                code = headers.get("x-ms-error-code") or getattr(error, "error_code", None)
+                if code:
+                    details.append(f"code {getattr(code, 'value', code)}")
+                request_id = headers.get("x-ms-request-id")
+                if request_id:
+                    details.append(f"request ID {request_id}")
+                message = (
+                    f"{operation} failed ({'; '.join(details)}). Check runtime credentials, "
+                    "Storage Blob data/ACL permissions, and storage service/network availability."
+                )
+                logging.getLogger(__name__).warning("%s", message)
+                raise ValueError(message) from error
 
     def assert_identity(self) -> None:
         if self.execution_identity is not None:
@@ -153,7 +165,12 @@ class AdlsFootageSource:
 
     def properties(self, video: str) -> dict[str, Any]:
         with self.lease():
-            value = self._call(self.file_client(video).get_file_properties)
+            value = self._call(
+                self.file_client(video).get_file_properties,
+                operation=f"ADLS metadata read for {video!r}",
+                retry_total=0, retry_connect=0, retry_read=0, retry_status=0,
+                connection_timeout=10, read_timeout=10,
+            )
             return {"size": int(value.size), "etag": str(value.etag)}
 
     def frame(self, video: str, seconds: float = 0) -> tuple[bytes, int, int]:

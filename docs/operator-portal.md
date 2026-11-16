@@ -217,6 +217,15 @@ cancel cycle, publication into the approved target prefixes, and submission/
 monitoring against the selected target. Allow role-assignment propagation before
 retrying 403s; refresh the execution identity and re-review affected jobs.
 
+Interactive ADLS metadata reads disable Storage SDK retries and use explicit
+10-second connection and read timeouts. These are per-network-operation limits,
+not a 10-second deadline for an entire batch or Azure credential acquisition.
+Failures identify the video, exception type, HTTP status, storage error code and
+request ID when available. The same safe details are logged without raw SDK
+response bodies or credential material. Resolve the reported storage condition
+before retrying; assignment validation still completes before ownership changes
+are committed.
+
 Permission references (Microsoft Learn):
 [ADLS RBAC and ACL evaluation](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-access-control-model),
 [ADLS ACL operations/inheritance](https://learn.microsoft.com/azure/storage/blobs/data-lake-storage-access-control),
