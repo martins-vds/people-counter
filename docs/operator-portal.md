@@ -296,11 +296,14 @@ with a Compose override; changing the environment variable alone does not create
 host mount or make the read-only container filesystem writable. Never use a directory
 inside the footage root or a parent containing that root.
 
-The package dialog accepts a destination **relative to the output root**. Named
-revisions use `<destination>/<generated-package-name>/vN/`. Traversal, symlink
-escape, and existing revision destinations are rejected. Each queued preparation
-retains its original destination even if the configured default changes.
-Existing job-local packages stay where they are and remain accessible.
+Operators do not choose or manage output folders. New drafts allocate named
+revisions automatically under `<generated-package-name>/vN/` in application-managed
+storage. Completed jobs show **Package ready to download** and a prominent
+**Download manifest package ZIP** action. Package history also offers
+**Download package ZIP**, which saves a copy to the operator's computer.
+Existing jobs and legacy destinations retain their saved locations and remain
+accessible; no package migration is required. Traversal, symlink escape, and
+overwriting an existing revision remain prohibited.
 
 `./scripts/start-portal.sh` retains its Compose behavior. Docker does not
 automatically reuse host credentials. Its retained `portal-azure` volume can
@@ -598,7 +601,9 @@ Start on **Packages** and choose **New package**. Give the draft a name, then:
    **Review footage** and camera calibration return to the saved package draft.
    Both pages open before ADLS preview/probe work starts; checks load in the
    background with a retry action on failure. Navigation remains available.
-3. **Generate:** review the selected count/bytes and output destination.
+3. **Generate:** review the selected count/bytes, then generate the package.
+   The app manages storage automatically; no output destination is required.
+   Download the ZIP from the completed job or package history.
    Generation freezes source observations, camera rules, ownership, and exceptions
    before queuing. It probes/validates footage and computes a complete SHA-256.
    Failed checks produce job errors/rejection reports, never a successful package.
@@ -694,7 +699,7 @@ are not exported as fabricated camera-catalog rows.
    Legacy calibration links redirect to the appropriate separated screen.
    Camera defaults are not changed. A camera configuration must still cover the video.
 5. **Packages:** choose **Generate manifest package**, enter a package name,
-   and review its source folder and optional relative output destination.
+   and review its source folder. The app manages output storage automatically.
    Reuse a name to allocate the next integer revision. Failed attempts retain
    their numbers; existing revisions and their saved inputs are not overwritten.
    Preparation snapshots metadata and footage ownership before queuing the job,
@@ -702,8 +707,8 @@ are not exported as fabricated camera-catalog rows.
    This is an **offline preparation job only**: it does not upload footage,
    publish to cloud storage, submit Fabric work, or run inference. Cloud actions
    remain separate and require approval.
-   Package history shows revision, status, destination, schema version, and
-   links to reports and cloud selection. Historical packages remain ungrouped.
+   Package history shows revision, status, schema version, ZIP availability, and
+   links to downloads, reports and cloud selection. Historical packages remain ungrouped.
    Rerunning a retained revision creates a new cloud job and validates unchanged
    source bytes, rather than modifying the package or resuming an old run.
    **Delete artifacts** requires explicit confirmation. Active/interrupted work

@@ -367,6 +367,7 @@ def calibrate_camera(page, portal, *, camera_id="camera-17", location="north-ent
 def prepare_package(page, portal):
     page.goto(portal.url + "/packages?folder=lobby")
     expect(page.get_by_role("dialog", name="Generate a package", exact=True)).to_be_visible()
+    expect(page.get_by_role("dialog", name="Generate a package", exact=True).locator('[name="destination"]')).to_have_count(0)
     expect(page.get_by_label("Folder within source root", exact=True)).to_have_value("lobby")
     page.get_by_role("dialog", name="Generate a package", exact=True).get_by_label("Package name", exact=True).fill("Morning footage")
     page.get_by_role("dialog", name="Generate a package", exact=True).get_by_role("button", name="Generate manifest package", exact=True).click()
@@ -586,8 +587,10 @@ def test_draw_camera_line_prepare_and_download_metadata_only_package(page, porta
     page.set_viewport_size(viewport)
     calibrate_camera(page, portal)
     identity = prepare_package(page, portal)
+    expect(page.get_by_role("heading", name="Package ready to download", exact=True)).to_be_visible()
+    assert portal.service.package_dir(identity).is_relative_to(portal.service.state / "packages")
     with page.expect_download() as downloaded:
-        page.get_by_role("link", name="Download manifest package ZIP").click()
+        page.locator(".page-actions").get_by_role("link", name="Download manifest package ZIP").click()
     archive = tmp_path / "package.zip"
     downloaded.value.save_as(archive)
     with zipfile.ZipFile(archive) as package:
@@ -600,6 +603,13 @@ def test_draw_camera_line_prepare_and_download_metadata_only_package(page, porta
         assert not any(name.endswith(".mp4") for name in package.namelist())
     assert portal.service.store.job(identity)["status"] == "SUCCEEDED"
     assert portal.calls == []
+    page.goto(portal.url + "/packages")
+    expect(page.get_by_role("columnheader", name="Destination", exact=True)).to_have_count(0)
+    expect(page.get_by_role("columnheader", name="Package file", exact=True)).to_be_visible()
+    with page.expect_download() as history_download:
+        page.get_by_role("link", name="Download package ZIP", exact=True).click()
+    with open(history_download.value.path(), "rb") as handle:
+        assert handle.read() == archive.read_bytes()
 
 
 def test_per_video_exception_preserves_camera_defaults_and_original_timestamp(page, portal):

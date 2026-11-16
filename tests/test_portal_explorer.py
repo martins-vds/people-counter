@@ -42,6 +42,18 @@ def test_explorer_is_fixed_adls_and_new_packages_skip_source_selection(explorer)
     assert client.get("/identity/login").status_code == 404
 
 
+def test_generate_step_uses_managed_storage_without_operator_path_controls(explorer):
+    app, service = explorer
+    draft = service.new_draft("Morning")
+    response = app.test_client().get(f"/packages/drafts/{draft['id']}?step=generate")
+    assert response.status_code == 200
+    assert 'name="destination"' not in response.text
+    assert "Save output destination" not in response.text
+    assert str(service.output_root) not in response.text
+    assert "application-managed storage" in response.text
+    assert "download the ZIP to your computer" in response.text
+
+
 def test_draft_explorer_has_folder_selection_breadcrumbs_and_storage_dialog(explorer):
     app, service = explorer
     service._intake.page.return_value = ([

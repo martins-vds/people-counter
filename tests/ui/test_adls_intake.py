@@ -1,4 +1,5 @@
 import hashlib
+import zipfile
 import pytest
 from playwright.sync_api import expect
 
@@ -320,6 +321,14 @@ def test_current_folder_upload_hash_move_download_and_package_flow(page, portal,
     page.get_by_label("Select renamed.mp4", exact=True).check()
     page.get_by_role("button", name="Save selection and assign cameras", exact=True).click()
     page.get_by_role("link", name="Review generation", exact=True).click()
+    expect(page.locator('[name="destination"]')).to_have_count(0)
+    expect(page.get_by_text("application-managed storage", exact=False)).to_be_visible()
     page.get_by_role("button", name="Generate manifest package", exact=True).click()
     expect(page.locator("[data-job-status]")).to_have_text("SUCCEEDED", timeout=30000)
+    expect(page.get_by_role("heading", name="Package ready to download", exact=True)).to_be_visible()
+    with page.expect_download() as package_download:
+        page.locator(".page-actions").get_by_role("link", name="Download manifest package ZIP", exact=True).click()
+    with zipfile.ZipFile(package_download.value.path()) as package:
+        assert "manifest-package.json" in package.namelist()
+        assert not any(name.endswith(".mp4") for name in package.namelist())
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")

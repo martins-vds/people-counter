@@ -121,6 +121,14 @@ def test_root_and_health_need_no_cloud_access(app):
     assert b"Manifest packages" in response.data
 
 
+def test_package_dialog_uses_managed_storage_without_operator_path_controls(app, service):
+    response = app.test_client().get("/packages")
+    assert response.status_code == 200
+    assert 'name="destination"' not in response.text
+    assert str(service.output_root) not in response.text
+    assert "application-managed storage" in response.text
+
+
 def test_local_pages_do_not_wait_for_identity_lookup(app, service):
     cached = FakePortalAzure().status()
     service._azure = SimpleNamespace(

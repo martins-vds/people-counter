@@ -73,8 +73,8 @@
 <section class="card"><div class="card-header"><h2>Generate package revision</h2></div><div class="card-body">
 <p>{{ draft.videos|length }} recordings, {{ selected_bytes|filesizeformat(true) }}. Saved ownership, camera rules, and recording exceptions will be frozen before queuing.</p>
 {% if draft.source.kind == 'adls' %}<div class="alert alert-info"><p>Generation streams every original byte for SHA-256. Videos are not normally retained locally. Publication re-reads ADLS and requires unchanged source bytes, access, and network availability. Reading may incur transfer costs.</p></div>{% endif %}
-<form method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="destination"><div class="field"><label for="draft-destination">Destination within output root (optional)</label><input id="draft-destination" name="destination" value="{{ draft.destination }}"><p class="help">Output root: {{ output_root }}. Source footage is never an output destination.</p></div><button class="btn-secondary">Save output destination</button></form>
-<p>Saved destination: {{ draft.destination or 'Output root' }}. Failed revisions keep their numbers; generated packages contain metadata only.</p>
+<p>The app saves each revision automatically in application-managed storage. When generation finishes, download the ZIP to your computer from the completed job or package history.</p>
+<p class="help">Revision numbers are assigned automatically. Failed attempts keep their numbers, and existing revisions are never overwritten. Packages contain metadata only; source videos remain unchanged.</p>
 <form method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="generate"><button {% if not draft.videos %}disabled{% endif %}>Generate manifest package</button></form>
 <p>Generation does not publish footage or run inference. After checks pass, select the completed revision for the existing cloud review and approval flow.</p>
 </div></section>
