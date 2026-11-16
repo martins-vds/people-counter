@@ -1,0 +1,28 @@
+{% from "components.html" import icon, form_dialog %}
+<section id="intake-explorer" data-upload-url="{{ url_for('intake_upload') }}" data-review-url="{{ url_for('intake_review') }}" data-move-url="{{ url_for('intake_move') }}" data-folder-url="{{ url_for('intake_folder') }}" data-status-url="{{ url_for('intake_status', identity='OPERATION') }}" data-download-url="{{ url_for('intake_download') }}" data-max-upload-bytes="{{ max_upload_bytes }}">
+  {% call form_dialog('intake-upload', 'Upload videos', 'Upload to the folder currently displayed in the file list. Uploading does not select recordings for a package. Save selection before refreshing.', wide=true) %}
+  <div class="card-body">
+    <form data-upload-form data-upload-folder="{{ folder }}" class="space-y-5">
+      <input type="hidden" name="csrf" value="{{ session.csrf }}">
+      <p data-upload-destination>Uploading to: <strong>{{ folder or 'Source root' }}</strong></p>
+      <p class="help">To upload elsewhere, close this dialog and browse to that folder first.</p>
+      <div class="field"><label for="upload-files">Choose local videos</label><input id="upload-files" type="file" multiple accept="{{ upload_extensions }}" disabled></div>
+      <button type="submit" data-upload-start disabled>Upload selected videos</button>
+    </form>
+    <p data-intake-message role="status" aria-live="polite"></p>
+    <ul data-upload-results></ul>
+    <p class="help">{{ max_upload_bytes|filesizeformat(true) }} per file. Files are streamed to ADLS before package selection. Verification reads every original byte for SHA-256 and may incur storage transfer costs. Leaving this page stops unfinished transfers; completed files and queued verification jobs remain.</p>
+  </div>
+  {% endcall %}
+  <dialog data-intake-dialog aria-labelledby="intake-dialog-title" class="portal-dialog">
+    <section class="card">
+    <div class="card-header dialog-header"><h2 id="intake-dialog-title">Storage action</h2><button type="button" class="btn-secondary shrink-0" data-intake-dialog-cancel aria-label="Close dialog">{{ icon('close') }}</button></div>
+    <form data-intake-dialog-form class="card-body">
+      <p data-intake-dialog-detail></p>
+      <div class="field" data-intake-dialog-field><label for="intake-dialog-value">Folder or new name</label><input id="intake-dialog-value" name="value"></div>
+      <label class="check" data-intake-confirm-field hidden><input type="checkbox" name="confirm">I approve replacing this exact destination version. Old recording overrides will be invalidated.</label>
+      <button>Confirm</button>
+    </form>
+    </section>
+  </dialog>
+</section>

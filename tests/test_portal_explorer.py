@@ -1,9 +1,13 @@
+import re
+from html import unescape
 from types import SimpleNamespace
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from people_counter.operator_portal import create_app
+from people_counter.manifest import VideoMetadata
 from people_counter.portal_service import PortalService
 from people_counter.portal_sources import AdlsFootageSource
 from tests.test_operator_portal import FakePortalAzure, csrf
@@ -36,6 +40,86 @@ def test_explorer_is_fixed_adls_and_new_packages_skip_source_selection(explorer)
     assert "step=footage" in response.location
     assert service.store.entries("draft")[0]["source"] == service.source.descriptor
     assert client.get("/identity/login").status_code == 404
+
+
+def test_draft_explorer_has_folder_selection_breadcrumbs_and_storage_dialog(explorer):
+    app, service = explorer
+    service._intake.page.return_value = ([
+        {"name": "day", "path": "north/day", "directory": True, "video": False,
+         "size_bytes": None, "modified_utc": "", "blocked": False, "error": None},
+    ], None)
+    draft = service.new_draft("Morning")
+    response = app.test_client().get(f"/packages/drafts/{draft['id']}?folder=north")
+    html = response.text
+    assert response.status_code == 200
+    assert 'aria-label="Folder path"' in html
+    assert 'aria-current="page">north' in html
+    assert 'data-package-folder' in html and 'value="north/day"' in html
+    assert 'id="intake-upload"' in html and 'data-upload-form' in html
+    assert "Manage videos" not in html
+    table = html.index('aria-label="Source recordings"')
+    for action in ("create", "move", "rename", "download"):
+        position = html.index(f'data-intake-action="{action}"')
+        assert position < table
+        assert html.rfind("<dialog", 0, position) < html.rfind("</dialog", 0, position) or "<dialog" not in html[:position]
+    assert 'data-upload-folder="north"' in html
+    assert 'data-upload-destination>Uploading to: <strong>north</strong>' in html
+    assert 'id="upload-destination"' not in html
+    assert "Confirm destination" not in html
+    assert 'data-dialog-close aria-label="Close dialog"' in html
+    assert ">Close</button>" not in html
+    assert "Parent folder" not in html
+
+
+@pytest.mark.parametrize("view", ["review", "calibration"])
+def test_remote_media_pages_return_before_media_checks_and_keep_context(explorer, view):
+    app, service = explorer
+    location = service.store.add_location("North")
+    camera = service.store.add_camera("Entrance", location)
+    service.store.put("footage", service.video_key("clip.mp4"), {"camera_id": camera})
+    draft = service.new_draft("Morning")
+    service.source.properties = Mock(return_value={"size": 10, "etag": '"version"'})
+    service.footage_readiness = Mock(side_effect=RuntimeError("Media check must run separately"))
+    url = "/review" if view == "review" else f"/cameras/{camera}/calibrate"
+    response = app.test_client().get(url, query_string={"video": "clip.mp4", "draft": draft["id"], "seconds": "2"})
+    assert response.status_code == 200
+    assert 'data-media-url=' in response.text
+    assert "media=1" in response.text and draft["id"] in response.text and "seconds=2" in response.text
+    assert "Loading footage" in response.text and "Return to package draft" in response.text
+    title = "Review footage" if view == "review" else "Calibrate camera"
+    description = "clip.mp4" if view == "review" else "Entrance"
+    assert f"<h1>{title}</h1>" in response.text
+    assert f'class="page-description">{description}</p>' in response.text
+    back = re.search(r'href="([^"]+)">Back to footage</a>', response.text)
+    assert back is not None
+    back_url = urlsplit(unescape(back[1]))
+    assert back_url.path == ("/footage" if view == "review" else f"/cameras/{camera}/footage")
+    assert parse_qs(back_url.query)["draft"] == [draft["id"]]
+    service.footage_readiness.assert_not_called()
+    service.source.properties.assert_not_called()
+    del service.footage_readiness
+    service.media_metadata = Mock(return_value=VideoMetadata(320, 180, 5))
+    response = app.test_client().get(url, query_string={
+        "video": "clip.mp4", "draft": draft["id"], "seconds": "2", "media": "1",
+    })
+    assert response.status_code == 200
+    assert 'data-media-content' in response.text and 'data-media-url=' not in response.text
+    assert 'id="line-canvas"' in response.text and 'width="320"' in response.text
+    assert 'seconds=2' in response.text
+    service.media_metadata.assert_called_once_with("clip.mp4")
+
+
+def test_draft_camera_actions_target_one_recording_or_an_explicit_batch(explorer):
+    app, service = explorer
+    draft = service.new_draft("Morning")
+    service.store.put("draft", draft["id"], {**draft, "videos": ["clip.mp4", "other.mp4"]})
+    response = app.test_client().get(f"/packages/drafts/{draft['id']}?step=cameras")
+    assert response.status_code == 200
+    assert 'data-assignment-video="clip.mp4"' in response.text
+    assert 'data-assignment-video="other.mp4"' in response.text
+    assert 'data-assignment-batch' in response.text
+    assert 'id="package-assignment"' in response.text
+    assert 'data-assignment-form' in response.text
 
 
 def test_upload_chunks_need_header_csrf_and_never_parse_multipart(explorer):

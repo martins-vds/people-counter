@@ -299,7 +299,18 @@ serve the SDK's development credential fallback, but credentials are not copied
 or host-mounted by the application. Configure an identity that resolves in the
 actual runtime.
 
-## File explorer and destination-first uploads
+## File explorer and current-folder uploads
+
+Growing portal tables show ten rows at a time, with **Previous page**, **Next page**
+and a row range above the table. Pagination applies to the rows loaded in the
+current view; existing ADLS continuation links and server-side report pages remain
+available to load more records. Changing a table page retains checkbox choices.
+Save footage changes before navigating to another folder or server-side page.
+Storage actions and camera-assignment batches use only checked rows on the
+displayed table page, never hidden checked rows from another page.
+Package **Save selection**, **Save selection and assign cameras**, and
+**Review generation** actions stay above their tables so the next step is visible
+before the operator scrolls through records.
 
 The explorer lists all entries with pagination; non-video files are read-only.
 File actions support the existing AVI, MKV, MOV and MP4 formats. Folder creation
@@ -307,8 +318,11 @@ and native folder/file moves are supported. Folder trees containing unsupported
 files or protected references cannot be moved, and directory trees are never
 merged or replaced.
 
-1. Browse to a destination, or enter a folder within the allowed root.
-2. Select **Confirm destination** before choosing local videos.
+1. Browse to the destination folder and select **Upload videos** above the file list.
+2. The dialog shows the upload folder as information. Choose local videos directly;
+   no destination entry or confirmation is needed. To upload elsewhere, close the
+   dialog and browse to that folder first. Server-side destination validation and
+   explicit confirmation before replacing an existing file still apply.
 3. Choose multiple videos, then **Upload selected videos**.
 4. Review per-file progress through transfer and full-byte verification.
 5. Refresh the folder and explicitly select uploaded/existing ADLS videos for
@@ -539,15 +553,42 @@ under **Source configuration**. There are no upload, rename, or delete actions.
 Start on **Packages** and choose **New package**. Give the draft a name, then:
 
 1. **Footage:** explicitly select individual ADLS recordings across folders, or choose
-   the current folder recursively. Save checkbox changes before navigating.
+   a folder checkbox to enable recursive selection automatically. Folder names
+   open folders; the breadcrumb returns to any ancestor. **Select all** and
+   **Unselect all** affect only selectable videos on the displayed page, not
+   folders or other pages, and switch to individual selection. The selection
+   count updates immediately. Recursive mode remains under the collapsed
+   **Selection options** control and becomes active when a folder is checked.
+   **Upload videos** opens
+   an upload-only dialog for the current folder. **Create folder**, **Move selected**,
+   **Rename selected**, and **Download selected** sit directly above the files
+   table, outside dialogs. Dialogs have an X button labelled **Close dialog**.
+   Storage dialogs are centered. The refresh icon retains the current folder
+   and is labelled **Refresh folder** for assistive technology. Rename requires
+   exactly one selected item; invalid-selection feedback appears at the toolbar.
+   Uploads do not automatically select footage. Save checkbox changes before
+   navigating or refreshing.
    Recursive selection freezes the current file list; later additions are not
    included without explicitly refreshing selection. Both modes enforce 10,000
    videos without truncation. ADLS browsing is shallow and paged.
 2. **Cameras and readiness:** associate selected recordings with existing cameras.
-   Camera selection determines location. Known ownership is pre-filled.
+   Use a recording's **Assign camera** action, or use **Select all** / **Unselect all**
+   for the displayed page before choosing **Assign selected recordings**.
+   The page shows the current selection count. The dialog lists exactly which recordings
+   will change and starts with a fresh camera choice. Saving clears the batch
+   selection. Camera selection determines location. Known ownership is shown.
    Assignments are persistent and require an explicit save; reassignment retains
    capture timestamps and requires a keep/clear decision for video-specific lines.
+   Saving in either the assignment dialog or footage library immediately shows an
+   indeterminate progress bar and the recording count while media validation and
+   saving run. The form blocks edits and duplicate submissions, and a pending
+   assignment dialog cannot be dismissed. The request runs without navigating
+   away while pending. Success returns to the assignment page with the existing
+   notice. Server and connection errors stay visible in the form, restore its
+   controls, and advise reviewing current ownership before retrying.
    **Review footage** and camera calibration return to the saved package draft.
+   Both pages open before ADLS preview/probe work starts; checks load in the
+   background with a retry action on failure. Navigation remains available.
 3. **Generate:** review the selected count/bytes and output destination.
    Generation freezes source observations, camera rules, ownership, and exceptions
    before queuing. It probes/validates footage and computes a complete SHA-256.

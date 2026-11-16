@@ -1409,6 +1409,42 @@ class ManifestPublisherTests(unittest.TestCase):
         self.assertIsNone(run.call_args.kwargs["storage"])
         self.assertTrue(run.call_args.args[0].dry_run)
 
+    def test_prepare_main_reports_manifest_error_without_traceback(self):
+        message = (
+            "Video inventory references a file outside the discovered partition: "
+            "staging/missing.mp4"
+        )
+        with (
+            patch(
+                "people_counter.manifest_publisher.run_publisher",
+                side_effect=ManifestPublisherError(message),
+            ),
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            exit_code = prepare_main([
+                "--catalog", str(self.catalog_path),
+                "--video-root", str(self.root),
+                "--output-dir", str(self.root / "prepared-output"),
+            ])
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(errors.getvalue(), f"prepare-manifests: error: {message}\n")
+        self.assertEqual(output.getvalue(), "")
+
+    def test_prepare_main_preserves_unexpected_errors(self):
+        with (
+            patch(
+                "people_counter.manifest_publisher.run_publisher",
+                side_effect=RuntimeError("unexpected failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "unexpected failure"),
+        ):
+            prepare_main([
+                "--catalog", str(self.catalog_path),
+                "--video-root", str(self.root),
+                "--output-dir", str(self.root / "prepared-output"),
+            ])
+
     def test_publish_main_validates_then_builds_azure_storage(self):
         summary = PublishSummary(rejected=1)
         validated_package = MagicMock()

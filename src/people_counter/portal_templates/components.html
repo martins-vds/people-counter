@@ -11,6 +11,8 @@
 {% elif name == 'arrow' %}<path d="M5 12h14m-5-5 5 5-5 5"/>
 {% elif name == 'lock' %}<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>
 {% elif name == 'check' %}<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>
+{% elif name == 'close' %}<path d="m6 6 12 12M6 18 18 6"/>
+{% elif name == 'refresh' %}<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17"/>
 {% else %}<circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/>{% endif %}
 </svg>
 {%- endmacro %}
@@ -91,10 +93,23 @@
 <noscript><p class="alert alert-warning">Enable JavaScript to open action forms.</p></noscript>
 <dialog id="{{ identity }}" class="portal-dialog{% if wide %} portal-dialog-wide{% endif %}" data-form-dialog {% if auto_open %}data-auto-open="true"{% endif %} aria-labelledby="{{ identity }}-title" aria-describedby="{{ identity }}-description">
   <section class="card">
-    <div class="card-header"><div><h2 id="{{ identity }}-title">{{ title }}</h2><p class="card-description" id="{{ identity }}-description">{{ description }}</p></div><button type="button" class="btn-secondary btn-sm" data-dialog-close aria-label="Close dialog">Close</button></div>
+    <div class="card-header dialog-header"><div><h2 id="{{ identity }}-title">{{ title }}</h2><p class="card-description" id="{{ identity }}-description">{{ description }}</p></div><button type="button" class="btn-secondary shrink-0" data-dialog-close aria-label="Close dialog">{{ icon('close') }}</button></div>
     {{ caller() }}
   </section>
 </dialog>
+{%- endmacro %}
+
+{% macro intake_actions(refresh_url) -%}
+<div class="flex flex-wrap items-center gap-2" data-intake-toolbar role="group" aria-label="File actions">
+  {{ dialog_button('intake-upload', 'Upload videos', 'cloud') }}
+  <button type="button" class="btn-secondary" data-intake-action="create">Create folder</button>
+  <button type="button" class="btn-secondary" data-intake-action="move">Move selected</button>
+  <button type="button" class="btn-secondary" data-intake-action="rename">Rename selected</button>
+  <button type="button" class="btn-secondary" data-intake-action="download">Download selected</button>
+  <a class="btn btn-secondary" href="{{ refresh_url }}" aria-label="Refresh folder" title="Refresh folder">{{ icon('refresh') }}</a>
+  <p class="w-full text-sm text-slate-700" data-intake-message role="status" aria-live="polite"></p>
+</div>
+<p class="help">Bulk actions apply to checked items on this page. Renaming requires one item. Prepared/published footage and active-job references are protected. Folder trees are not merged or replaced.</p>
 {%- endmacro %}
 
 {% macro stat(label, value, note, glyph='jobs') -%}

@@ -11,6 +11,7 @@
 {% call heading('Review footage', video, 'Footage') %}
 <a class="btn btn-secondary" href="{{ url_for('footage', folder=return_folder, q=query, kind=kind) }}">&larr; Back to footage</a>
 {% endcall %}
+<div data-media-content class="section-stack">
 <div class="workflow-note"><p>Camera defaults apply unless this video has an exception. Each section saves independently. Prepare a new package after changes.</p></div>
 {% if remote_source %}
 <details class="card"><summary class="px-5 py-4">ADLS preview limits and full-download fallback</summary><div class="card-body"><p>Normal preview/probe reads are limited to 64 MiB transferred, 16 MiB cached in memory, and 30 seconds. Some video layouts cannot be decoded within these limits. No complete file is silently downloaded.</p><a class="btn btn-secondary" href="{{ url_for('full_preview',video=video) }}">Review and approve a full preview download</a></div></details>
@@ -70,5 +71,6 @@
       {% if config_id %}<p>{{ camera_values.effective_from_utc }} to {{ camera_values.effective_to_utc or 'no end date' }}</p><a class="btn btn-secondary" href="{{ url_for('camera_metadata', camera_id=camera_values.camera_id, config_id=config_id) }}">Edit camera recording rules</a>{% else %}<p>Save a camera counting line to establish a configuration, then edit its recording rules separately.</p>{% endif %}
     </div>
   </section>
+</div>
 </div>
 {% endblock %}

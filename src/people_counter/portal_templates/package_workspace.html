@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "components.html" import heading, icon %}
+{% from "components.html" import heading, icon, form_dialog, intake_actions %}
 {% block title %}New package - {{ draft.name }}{% endblock %}
 {% block content %}
 {% call heading(draft.name, 'Select footage, associate existing cameras, and generate an immutable package revision.', 'Package draft') %}<a class="btn btn-secondary" href="{{ url_for('packages') }}">Package history</a>{% endcall %}
@@ -11,35 +11,63 @@
 <p class="workflow-note">{{ source.label }}. {{ draft.videos|length }} selected recordings, {{ selected_bytes|filesizeformat(true) }}. Draft changes are saved locally.</p>
 {% if step == 'footage' %}
 <section class="card"><div class="card-header"><h2>Select recordings</h2></div><div class="card-body">
-<p>Current folder: {{ folder or 'Source root' }}. Selecting a folder recursively freezes its current recordings; it does not include later additions.</p>
-{% if draft.source.kind == 'adls' %}<p><a href="{{ url_for('footage', folder=folder, draft=draft.id) }}">Upload or manage videos in this ADLS folder</a>. Uploading does not automatically select recordings for this package.</p>{% endif %}
-{% if folder %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder.rsplit('/',1)[0] if '/' in folder else '') }}">Parent folder</a>{% endif %}
-<form method="post">
-<input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="selection"><input type="hidden" name="folder" value="{{ folder }}">
-<fieldset><legend>Selection mode</legend><label class="check"><input type="radio" name="mode" value="individual" {% if draft.mode == 'individual' %}checked{% endif %}>Select individual videos across folders</label><label class="check"><input type="radio" name="mode" value="recursive" {% if draft.mode == 'recursive' %}checked{% endif %}>Include all supported videos in this folder recursively</label></fieldset>
-<div class="table-wrap"><table aria-label="Source recordings"><thead><tr><th>Select</th><th>Name</th><th>Size</th><th>Modified (UTC)</th></tr></thead><tbody>
-{% for entry in entries %}<tr><td>{% if entry.video and not entry.blocked and not entry.error %}<input type="hidden" name="visible" value="{{ entry.path }}"><input type="checkbox" name="videos" value="{{ entry.path }}" aria-label="Select {{ entry.name }}" {% if entry.path in draft.videos %}checked{% endif %}>{% endif %}</td><td>{% if entry.directory %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=entry.path) }}">{{ entry.name }}/</a>{% else %}{{ entry.name }}{% endif %}{% if entry.error %}<p role="alert">{{ entry.error }}</p>{% endif %}</td><td>{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else 'Not available' }}</td><td>{{ entry.modified_utc or 'Not available' }}</td></tr>{% else %}<tr><td colspan="4">This folder is empty. Choose another folder.</td></tr>{% endfor %}
-</tbody></table></div>
+<p>Select a folder to enable recursive selection, or choose individual videos. Saving freezes the current recordings; it does not include later additions.</p>
+<nav aria-label="Folder path"><ol class="flex flex-wrap items-center gap-2">
+<li><a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder='') }}" {% if not folder %}aria-current="page"{% endif %}>Source root</a></li>
+{% for crumb in breadcrumbs %}<li><span aria-hidden="true">/</span> {% if loop.last %}<span aria-current="page">{{ crumb.name }}</span>{% else %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=crumb.path) }}">{{ crumb.name }}</a>{% endif %}</li>{% endfor %}
+</ol></nav>
+<form method="post" data-package-selection>
+<input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="selection"><input type="hidden" name="folder" value="{{ folder }}" data-current-folder="{{ folder }}">
 <div class="flex flex-wrap gap-2"><button class="btn-secondary" name="next_step" value="footage">Save selection</button><button name="next_step" value="cameras">Save selection and assign cameras</button></div>
+<div class="flex flex-wrap items-start gap-2">
+<button type="button" class="btn-secondary" data-select-videos="all" aria-label="Select all videos on this page" disabled>Select all</button>
+<button type="button" class="btn-secondary" data-select-videos="none" aria-label="Unselect all videos on this page" disabled>Unselect all</button>
+<details class="technical-details" data-selection-options><summary>Selection options</summary>
+<fieldset class="space-y-3 p-4"><legend class="sr-only">Selection mode</legend><label class="check"><input type="radio" name="mode" value="individual" {% if draft.mode == 'individual' %}checked{% endif %}>Select individual videos across folders</label><label class="check"><input type="radio" name="mode" value="recursive" {% if draft.mode == 'recursive' %}checked{% endif %}>Include all supported videos in this folder recursively</label></fieldset>
+</details>
+</div>
+<p class="help" data-selection-status role="status">Current folder: {{ folder or 'Source root' }}.</p>
+{% if draft.source.kind == 'adls' %}{{ intake_actions(url_for('package_workspace', identity=draft.id, step='footage', folder=folder)) }}{% endif %}
+<div class="table-wrap"><table aria-label="Source recordings"><thead><tr><th>Select</th><th>Name</th><th>Size</th><th>Modified (UTC)</th></tr></thead><tbody>
+{% for entry in entries %}<tr><td>{% if (entry.video or entry.directory) and not entry.blocked and not entry.error %}{% if entry.video %}<input type="hidden" name="visible" value="{{ entry.path }}">{% endif %}<input type="checkbox" {% if entry.directory %}data-package-folder{% else %}name="videos"{% endif %} data-intake-selection data-directory="{{ 'true' if entry.directory else 'false' }}" value="{{ entry.path }}" aria-label="Select {{ entry.name }}" {% if entry.video and entry.path in draft.videos %}checked{% endif %}>{% endif %}</td><td>{% if entry.directory %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=entry.path) }}">{{ entry.name }}/</a>{% else %}{{ entry.name }}{% endif %}{% if entry.error %}<p role="alert">{{ entry.error }}</p>{% endif %}</td><td>{{ entry.size_bytes|filesizeformat(true) if entry.size_bytes is not none else 'Not available' }}</td><td>{{ entry.modified_utc or 'Not available' }}</td></tr>{% else %}<tr><td colspan="4">This folder is empty. Choose another folder.</td></tr>{% endfor %}
+</tbody></table></div>
 </form>
+{% if draft.source.kind == 'adls' %}
+{% include "intake_controls.html" %}
+{% endif %}
 {% if next_token %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder, continuation=next_token) }}">Next source page</a>{% endif %}
 {% if has_more %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder, page=page+1) }}">Next source page</a>{% endif %}
 {% if page > 1 %}<a href="{{ url_for('package_workspace', identity=draft.id, step='footage', folder=folder, page=page-1) }}">Previous source page</a>{% endif %}
 <p class="help">Save checkbox changes before navigating folders or pages. The package includes only saved selection. Limit: 10,000 recordings.</p>
 </div></section>
 {% elif step == 'cameras' %}
-<section class="card"><div class="card-header"><h2>Associate existing cameras</h2></div><div class="card-body">
+<section class="card" data-camera-association><div class="card-header"><h2>Associate existing cameras</h2></div><div class="card-body">
 <p>Camera selection determines location. Assignment and calibration changes are saved independently of the package. Review each recording to check media, counting line, and recording time.</p>
-<form method="post"><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="assign">
-<div class="field"><label for="package-camera">Assign selected recordings to camera</label><select id="package-camera" name="camera_id" required><option value="">Choose existing camera</option>{% for camera in cameras %}<option value="{{ camera.id }}">{{ camera.location_id }} / {{ camera.display_name }}</option>{% endfor %}</select></div>
-<div class="field"><label for="package-geometry">Existing video lines on reassignment</label><select id="package-geometry" name="geometry_action"><option value="">Choose when a video has its own line</option><option value="keep">Keep video lines</option><option value="clear">Clear video lines and use camera defaults</option></select></div>
+<div class="flex flex-wrap gap-2">
+<button type="button" class="btn-secondary" data-select-videos="all" aria-label="Select all videos on this page" disabled>Select all</button>
+<button type="button" class="btn-secondary" data-select-videos="none" aria-label="Unselect all videos on this page" disabled>Unselect all</button>
+<button type="button" data-dialog-open="package-assignment" data-assignment-batch aria-haspopup="dialog" aria-controls="package-assignment" disabled>Assign selected recordings</button>
+<a class="btn" href="{{ url_for('package_workspace',identity=draft.id,step='generate') }}">Review generation</a>
+</div>
+<p class="help" data-assignment-status role="status" aria-live="polite"></p>
+<p class="help">Assign a recording directly, or select a batch on this page first. The camera picker resets each time; saving clears the selection.</p>
 <div class="table-wrap"><table aria-label="Selected recordings"><thead><tr><th>Select</th><th>Recording</th><th>Camera / readiness</th><th>Action</th></tr></thead><tbody>
-{% for video in selected %}<tr><td><input type="checkbox" name="videos" value="{{ video }}" aria-label="Assign {{ video }}"></td><td>{{ video }}</td><td>{{ assignments.get(video,'Unassigned') }}<p class="help">Full media and recording checks run in Review footage and generation.</p></td><td><a href="{{ url_for('review', video=video) }}">Review footage</a></td></tr>{% else %}<tr><td colspan="4">Select recordings first. <a href="{{ url_for('package_workspace', identity=draft.id, step='footage') }}">Choose footage</a></td></tr>{% endfor %}
-</tbody></table></div><button>Save camera assignments</button></form>
+{% for video in selected %}<tr><td><input type="checkbox" data-assignment-selection value="{{ video }}" aria-label="Select {{ video }} for batch assignment"></td><td>{{ video }}</td><td>{{ assignments.get(video,'Unassigned') }}<p class="help">Full media and recording checks run in Review footage and generation.</p></td><td><div class="flex flex-wrap gap-2"><button type="button" class="btn-secondary btn-sm" data-dialog-open="package-assignment" data-assignment-video="{{ video }}" aria-label="Assign camera to {{ video }}" aria-haspopup="dialog" aria-controls="package-assignment" disabled>Assign camera</button><a class="btn btn-secondary btn-sm" href="{{ url_for('review', video=video) }}">Review footage</a></div></td></tr>{% else %}<tr><td colspan="4">Select recordings first. <a href="{{ url_for('package_workspace', identity=draft.id, step='footage') }}">Choose footage</a></td></tr>{% endfor %}
+</tbody></table></div>
+{% call form_dialog('package-assignment', 'Assign camera', 'Choose the camera for only the recordings listed below.') %}
+<form method="post" class="card-body" data-assignment-form data-assignment-submit data-assignment-next="{{ url_for('package_workspace', identity=draft.id, step='cameras', draft=draft.id) }}"><input type="hidden" name="csrf" value="{{ session.csrf }}"><input type="hidden" name="action" value="assign">
+<p data-assignment-summary></p><div data-assignment-videos></div>
+<div class="field"><label for="package-camera">Camera</label><select id="package-camera" name="camera_id" required><option value="">Choose existing camera</option>{% for camera in cameras %}<option value="{{ camera.id }}">{{ camera.location_id }} / {{ camera.display_name }}</option>{% endfor %}</select></div>
+<div class="field"><label for="package-geometry">Existing video lines on reassignment</label><select id="package-geometry" name="geometry_action"><option value="">Choose when a video has its own line</option><option value="keep">Keep video lines</option><option value="clear">Clear video lines and use camera defaults</option></select></div>
+<button type="submit">Save camera assignments</button></form>
+<div class="mx-5 mb-5 space-y-3 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900" data-assignment-feedback hidden role="status" aria-live="polite">
+  <progress class="w-full" aria-label="Camera assignment progress"></progress>
+  <p data-assignment-message></p>
+</div>
+{% endcall %}
 {% if not cameras %}<p><a href="{{ url_for('locations') }}">Manage locations</a> and <a href="{{ url_for('cameras',create='1') }}">register a camera</a>, then return to this draft.</p>{% endif %}
 {% if page > 1 %}<a href="{{ url_for('package_workspace',identity=draft.id,step='cameras',page=page-1) }}">Previous selected page</a>{% endif %}
 {% if page*100 < draft.videos|length %}<a href="{{ url_for('package_workspace',identity=draft.id,step='cameras',page=page+1) }}">Next selected page</a>{% endif %}
-<a class="btn" href="{{ url_for('package_workspace',identity=draft.id,step='generate') }}">Review generation</a>
 </div></section>
 {% else %}
 <section class="card"><div class="card-header"><h2>Generate package revision</h2></div><div class="card-body">

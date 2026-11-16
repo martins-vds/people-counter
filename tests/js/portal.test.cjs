@@ -28,6 +28,401 @@ test("loads on pages without optional portal controls", () => {
   expect(fetch).not.toHaveBeenCalled();
 });
 
+function packageSelectionPage(extra = "") {
+  document.body.innerHTML = `<form data-package-selection>
+    <input type="hidden" name="folder" value="north" data-current-folder="north">
+    <input type="radio" name="mode" value="individual" checked>
+    <input type="radio" name="mode" value="recursive">
+    <button type="button" data-select-videos="all">Select all</button>
+    <button type="button" data-select-videos="none">Unselect all</button>
+    <input type="checkbox" data-package-folder value="north/day">
+    <input type="checkbox" data-package-folder value="north/night">
+    <input type="checkbox" name="videos" value="north/clip.mp4">
+    ${extra}
+    <p data-selection-status></p>
+  </form>`;
+  loadPortal();
+}
+
+test("selecting a folder enables recursive mode and selecting a video returns to individual mode", () => {
+  packageSelectionPage();
+  const [day, night, video] = document.querySelectorAll('[type="checkbox"]');
+  fireEvent.click(video);
+  expect(video).toBeChecked();
+  fireEvent.click(day);
+  expect(video).not.toBeChecked();
+  expect(document.querySelector('[value="recursive"]')).toBeChecked();
+  expect(document.querySelector('[name="folder"]')).toHaveValue("north/day");
+  fireEvent.click(night);
+  expect(day).not.toBeChecked();
+  expect(document.querySelector('[name="folder"]')).toHaveValue("north/night");
+  fireEvent.click(video);
+  expect(night).not.toBeChecked();
+  expect(document.querySelector('[value="individual"]')).toBeChecked();
+  expect(document.querySelector('[name="folder"]')).toHaveValue("north");
+});
+
+test("unchecking a folder or choosing individual mode exits recursive selection", () => {
+  packageSelectionPage();
+  const folder = document.querySelector("[data-package-folder]");
+  fireEvent.click(folder);
+  fireEvent.click(folder);
+  expect(document.querySelector('[value="individual"]')).toBeChecked();
+  expect(document.querySelector('[name="folder"]')).toHaveValue("north");
+  fireEvent.click(folder);
+  fireEvent.click(document.querySelector('[name="mode"][value="individual"]'));
+  expect(folder).not.toBeChecked();
+  expect(document.querySelector('[name="folder"]')).toHaveValue("north");
+});
+
+test("select all and unselect all affect only enabled videos on this page and update the count", () => {
+  packageSelectionPage(`
+    <input type="checkbox" name="videos" value="north/second.mp4">
+    <input type="checkbox" name="videos" value="north/blocked.mp4" disabled>
+  `);
+  const outside = document.createElement("input");
+  outside.type = "checkbox"; outside.name = "videos"; outside.checked = true;
+  document.body.append(outside);
+  const videos = document.querySelectorAll('[data-package-selection] [name="videos"]:not(:disabled)');
+  expect(screen.getByRole("button", { name: "Unselect all" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+  for (const video of videos) expect(video).toBeChecked();
+  expect(document.querySelector('[value="north/blocked.mp4"]')).not.toBeChecked();
+  expect(screen.getByRole("button", { name: "Select all" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Unselect all" })).toBeEnabled();
+  expect(document.querySelector("[data-selection-status]")).toHaveTextContent("2 of 2 videos selected on this page");
+  fireEvent.click(videos[0]);
+  expect(screen.getByRole("button", { name: "Select all" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Unselect all" })).toBeEnabled();
+  expect(document.querySelector("[data-selection-status]")).toHaveTextContent("1 of 2 videos selected on this page");
+  fireEvent.click(screen.getByRole("button", { name: "Unselect all" }));
+  for (const video of videos) expect(video).not.toBeChecked();
+  expect(outside).toBeChecked();
+  expect(document.querySelector("[data-selection-status]")).toHaveTextContent("0 of 2 videos selected on this page");
+});
+
+test.each(["all", "none"])("bulk %s explicitly exits recursive selection and restores the current folder", action => {
+  packageSelectionPage();
+  const folder = document.querySelector('[data-package-folder]');
+  fireEvent.click(folder);
+  expect(document.querySelector("[data-selection-status]")).toHaveTextContent("north/day recursively");
+  expect(screen.getByRole("button", { name: "Unselect all" })).toBeEnabled();
+  fireEvent.click(document.querySelector(`[data-select-videos="${action}"]`));
+  expect(folder).not.toBeChecked();
+  expect(document.querySelector('[value="individual"]')).toBeChecked();
+  expect(document.querySelector('[name="folder"]')).toHaveValue("north");
+});
+
+test("bulk video selection is disabled when the page has only folders", () => {
+  document.body.innerHTML = `<form data-package-selection>
+    <input name="folder" value="north" data-current-folder="north">
+    <input type="radio" name="mode" value="individual" checked>
+    <input type="radio" name="mode" value="recursive">
+    <button type="button" data-select-videos="all">Select all</button>
+    <button type="button" data-select-videos="none">Unselect all</button>
+    <input type="checkbox" data-package-folder value="north/day">
+    <p data-selection-status></p>
+  </form>`;
+  loadPortal();
+  expect(screen.getByRole("button", { name: "Select all" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Unselect all" })).toBeDisabled();
+});
+
+test("recursive selection at the source root names the scope and can be cleared", () => {
+  packageSelectionPage();
+  const folder = document.querySelector('[name="folder"]');
+  folder.value = "";
+  folder.dataset.currentFolder = "";
+  fireEvent.click(document.querySelector('[name="mode"][value="recursive"]'));
+  expect(document.querySelector("[data-selection-status]")).toHaveTextContent("Source root recursively");
+  expect(screen.getByRole("button", { name: "Unselect all" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Unselect all" }));
+  expect(document.querySelector('[value="individual"]')).toBeChecked();
+});
+
+function tableRows(count, attribute = "data-assignment-selection") {
+  return Array.from({ length: count }, (_, index) => `<tr><td>
+    <input type="checkbox" ${attribute} value="clip-${index}.mp4" aria-label="Select clip ${index}">
+    Recording ${index}</td></tr>`).join("");
+}
+
+test.each([0, 10])("tables with %s rows do not need pagination", count => {
+  document.body.innerHTML = `<div class="table-wrap"><table><tbody>${tableRows(count)}</tbody></table></div>`;
+  loadPortal();
+  expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+});
+
+test("table pagination shows ten rows, preserves checkboxes, and reaches a partial last page", () => {
+  document.body.innerHTML = `<div class="table-wrap"><table id="recordings-table" aria-label="Recordings"><tbody>${tableRows(21)}</tbody></table></div>`;
+  loadPortal();
+  const pager = screen.getByRole("navigation", { name: "Recordings pagination" });
+  const previous = within(pager).getByRole("button", { name: "Previous page" });
+  const next = within(pager).getByRole("button", { name: "Next page" });
+  expect(document.querySelectorAll("tbody > tr:not([hidden])")).toHaveLength(10);
+  expect(previous).toBeDisabled();
+  expect(next).toBeEnabled();
+  expect(next).toHaveAttribute("aria-controls", "recordings-table");
+  expect(pager).toHaveTextContent("1-10 of 21 loaded rows");
+  expect(pager).toHaveTextContent("page 1 of 3");
+  fireEvent.click(previous);
+  expect(pager).toHaveTextContent("1-10 of 21 loaded rows");
+  fireEvent.click(screen.getByLabelText("Select clip 0"));
+  fireEvent.click(next);
+  expect(pager).toHaveTextContent("11-20 of 21 loaded rows");
+  expect(pager).toHaveTextContent("page 2 of 3");
+  expect(previous).toBeEnabled();
+  expect(next).toBeEnabled();
+  expect(screen.getByLabelText("Select clip 0")).not.toBeVisible();
+  fireEvent.click(next);
+  expect(document.querySelectorAll("tbody > tr:not([hidden])")).toHaveLength(1);
+  expect(next).toBeDisabled();
+  fireEvent.click(next);
+  expect(pager).toHaveTextContent("21-21 of 21 loaded rows");
+  fireEvent.click(previous);
+  expect(pager).toHaveTextContent("11-20 of 21 loaded rows");
+  fireEvent.click(previous);
+  expect(screen.getByLabelText("Select clip 0")).toBeChecked();
+  expect(screen.getByLabelText("Select clip 0")).toBeVisible();
+  expect(document.querySelectorAll("tbody > tr")).toHaveLength(21);
+});
+
+test("each table pages independently and uses its section heading as an accessible label", () => {
+  document.body.innerHTML = `<section><h2>Locations</h2><div class="table-wrap"><table><tbody>${tableRows(11)}</tbody></table></div></section>
+    <div class="table-wrap"><table><tbody>${tableRows(12)}</tbody></table></div>`;
+  loadPortal();
+  const locations = screen.getByRole("navigation", { name: "Locations pagination" });
+  fireEvent.click(within(locations).getByRole("button", { name: "Next page" }));
+  expect(locations).toHaveTextContent("11-11 of 11 loaded rows");
+  expect(screen.getByRole("navigation", { name: "Table pagination" })).toHaveTextContent("1-10 of 12 loaded rows");
+  for (const pager of screen.getAllByRole("navigation")) {
+    const tableId = within(pager).getByRole("button", { name: "Next page" }).getAttribute("aria-controls");
+    expect(document.getElementById(tableId)).toHaveProperty("tagName", "TABLE");
+  }
+});
+
+test("footage bulk selection follows the displayed table page without clearing other pages", () => {
+  document.body.innerHTML = `<form data-package-selection>
+    <input name="folder" value="north" data-current-folder="north">
+    <input type="radio" name="mode" value="individual" checked><input type="radio" name="mode" value="recursive">
+    <button type="button" data-select-videos="all">Select all</button>
+    <button type="button" data-select-videos="none">Unselect all</button><p data-selection-status></p>
+    <div class="table-wrap"><table aria-label="Source recordings"><tbody>${tableRows(12, 'name="videos"')}</tbody></table></div>
+  </form>`;
+  loadPortal();
+  fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+  expect(document.querySelectorAll('[name="videos"]:checked')).toHaveLength(10);
+  expect(document.querySelector("[data-selection-status]")).toHaveTextContent("10 checked in this loaded view");
+  const pager = screen.getByRole("navigation", { name: "Source recordings pagination" });
+  fireEvent.click(within(pager).getByRole("button", { name: "Next page" }));
+  expect(document.querySelector("[data-selection-status]")).toHaveTextContent("0 of 2 videos selected on this page");
+  fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+  expect(document.querySelectorAll('[name="videos"]:checked')).toHaveLength(12);
+  expect(document.querySelector("[data-selection-status]")).toHaveTextContent("12 checked in this loaded view");
+  fireEvent.click(screen.getByRole("button", { name: "Unselect all" }));
+  expect(document.querySelectorAll('[name="videos"]:checked')).toHaveLength(10);
+  expect(new FormData(document.querySelector("form")).getAll("videos")).toHaveLength(10);
+});
+
+test("camera association bulk selection and batch assignment apply only to the displayed page", () => {
+  document.body.innerHTML = `<section data-camera-association>
+    <button type="button" data-select-videos="all">Select all</button>
+    <button type="button" data-select-videos="none">Unselect all</button>
+    <p data-assignment-status></p>
+    <input type="checkbox" data-assignment-selection value="blocked.mp4" disabled checked>
+    <button type="button" data-dialog-open="package-assignment" data-assignment-batch>Assign selected</button>
+    <div class="table-wrap"><table aria-label="Selected recordings"><tbody>${tableRows(12)}</tbody></table></div>
+  </section>
+  <dialog id="package-assignment" data-form-dialog><form data-assignment-form>
+    <p data-assignment-summary></p><div data-assignment-videos></div><button type="submit">Save</button>
+  </form></dialog>`;
+  const dialog = document.querySelector("dialog");
+  dialog.showModal = jest.fn();
+  loadPortal();
+  const assign = screen.getByRole("button", { name: "Assign selected" });
+  expect(assign).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Select all" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Unselect all" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+  expect(screen.getByRole("button", { name: "Select all" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Unselect all" })).toBeEnabled();
+  expect(document.querySelector("[data-assignment-status]")).toHaveTextContent("10 of 10 recordings selected on this page");
+  const pager = screen.getByRole("navigation", { name: "Selected recordings pagination" });
+  fireEvent.click(within(pager).getByRole("button", { name: "Next page" }));
+  expect(assign).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Select all" })).toBeEnabled();
+  fireEvent.click(screen.getByLabelText("Select clip 10"));
+  expect(assign).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "Select all" }));
+  fireEvent.click(assign);
+  expect(new FormData(document.querySelector("[data-assignment-form]")).getAll("videos")).toEqual(["clip-10.mp4", "clip-11.mp4"]);
+  fireEvent.click(screen.getByRole("button", { name: "Unselect all" }));
+  expect(document.querySelectorAll("[data-assignment-selection]:checked:not(:disabled)")).toHaveLength(10);
+  expect(assign).toBeDisabled();
+  fireEvent.click(within(pager).getByRole("button", { name: "Previous page" }));
+  expect(assign).toBeEnabled();
+});
+
+test("row assignment ignores checked batch items and each opening resets its camera choice", async () => {
+  document.body.innerHTML = `
+    <input type="checkbox" data-assignment-selection value="first.mp4" checked>
+    <input type="checkbox" data-assignment-selection value="second.mp4">
+    <button data-dialog-open="package-assignment" data-assignment-video="second.mp4">Assign second</button>
+    <button data-dialog-open="package-assignment" data-assignment-batch>Assign selected</button>
+    <dialog id="package-assignment" data-form-dialog>
+      <form data-assignment-form><p data-assignment-summary></p><div data-assignment-videos></div>
+        <select name="camera_id"><option value="">Choose camera</option><option value="camera">Camera</option></select>
+        <button>Save</button>
+      </form><button data-dialog-close>Close</button>
+    </dialog>`;
+  const dialog = document.querySelector("dialog");
+  dialog.showModal = jest.fn(() => { dialog.open = true; });
+  dialog.close = jest.fn(() => { dialog.open = false; fireEvent(dialog, new Event("close")); });
+  loadPortal();
+  const user = userEvent.setup();
+  await user.click(screen.getByText("Assign second"));
+  const form = document.querySelector("[data-assignment-form]");
+  expect(new FormData(form).getAll("videos")).toEqual(["second.mp4"]);
+  await user.selectOptions(form.querySelector("select"), "camera");
+  await user.click(screen.getByText("Close"));
+  await user.click(screen.getByText("Assign selected"));
+  expect(new FormData(form).getAll("videos")).toEqual(["first.mp4"]);
+  expect(form.querySelector("select")).toHaveValue("");
+  expect(document.querySelector("[data-assignment-summary]")).toHaveTextContent("first.mp4");
+});
+
+function assignmentSubmissionPage(dialog = false, action = "") {
+  document.body.innerHTML = `${dialog ? '<dialog open data-form-dialog><button type="button" data-dialog-close>Close</button>' : "<section>"}
+    <form id="assignment" action="${action}" data-assignment-submit data-assignment-next="#assignment-saved">
+      <input name="csrf" value="token"><input name="action" value="assign"><input name="videos" value="first.mp4">
+      <select name="camera_id"><option value="camera" selected>Entrance</option></select>
+      <select name="geometry_action"><option value="keep" selected>Keep video lines</option></select>
+      <button type="submit">Save camera assignments</button>
+    </form>
+    <div data-assignment-feedback hidden role="status"><progress aria-label="Camera assignment progress"></progress><p data-assignment-message></p></div>
+  ${dialog ? "</dialog>" : "</section>"}
+  <input form="assignment" name="videos" value="second.mp4">`;
+  const modal = document.querySelector("dialog");
+  if (modal) modal.close = jest.fn();
+  fetch.mockImplementation(() => new Promise(() => {}));
+  loadPortal();
+  return document.querySelector("form");
+}
+
+test("assignment submission immediately shows the batch size and posts the original fields", () => {
+  const form = assignmentSubmissionPage();
+  expect(fireEvent.submit(form)).toBe(false);
+  expect(screen.getByRole("status")).toBeVisible();
+  expect(screen.getByRole("status")).toHaveTextContent("Assigning camera to 2 recording(s)");
+  expect(screen.getByRole("progressbar", { name: "Camera assignment progress" })).toBeVisible();
+  expect(form).toHaveAttribute("aria-busy", "true");
+  expect(form.inert).toBe(true);
+  expect(screen.getByRole("button", { name: "Assigning..." })).toBeDisabled();
+  const [url, options] = fetch.mock.calls[0];
+  expect(url).toBe(location.href);
+  expect(options.method).toBe("POST");
+  expect(options.redirect).toBe("manual");
+  const payload = options.body;
+  expect(payload.getAll("videos")).toEqual(["first.mp4", "second.mp4"]);
+  expect(payload.get("camera_id")).toBe("camera");
+  expect(payload.get("action")).toBe("assign");
+  expect(payload.get("csrf")).toBe("token");
+  expect(payload.get("geometry_action")).toBe("keep");
+  expect(fireEvent.submit(form)).toBe(false);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+test("footage-library assignment posts to its explicit endpoint", () => {
+  const form = assignmentSubmissionPage(false, "/footage/assign");
+  fireEvent.submit(form);
+  expect(fetch.mock.calls[0][0]).toBe("/footage/assign");
+});
+
+test("confirmed assignment follows its destination without consuming the success notice", async () => {
+  const form = assignmentSubmissionPage();
+  fetch.mockResolvedValue({ type: "opaqueredirect" });
+  fireEvent.submit(form);
+  await waitFor(() => expect(location.hash).toBe("#assignment-saved"));
+  history.replaceState(null, "", "/");
+});
+
+test.each(["server", "network", "unexpected"])("assignment %s failures restore controls and preserve the selection", async mode => {
+  const form = assignmentSubmissionPage(true);
+  if (mode === "network") fetch.mockRejectedValue(new Error("Connection lost"));
+  else fetch.mockResolvedValue({
+    type: "basic", status: mode === "server" ? 400 : 200,
+    text: async () => mode === "server" ? '<div role="alert">Video metadata unavailable</div>' : "<p>Not a completion response</p>",
+  });
+  fireEvent.submit(form);
+  const error = await screen.findByRole("alert");
+  expect(error).toHaveTextContent(mode === "server" ? "Video metadata unavailable" :
+    mode === "network" ? "Connection lost" : "Unexpected assignment response (HTTP 200)");
+  expect(error).toHaveTextContent("Review current camera ownership before retrying.");
+  expect(form).not.toHaveAttribute("aria-busy");
+  expect(form.inert).toBe(false);
+  expect(screen.getByRole("button", { name: "Save camera assignments" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+  expect(new FormData(form).getAll("videos")).toEqual(["first.mp4", "second.mp4"]);
+  expect(error.querySelector("progress")).not.toBeVisible();
+  window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+  expect(error).toBeVisible();
+});
+
+test("assignment feedback does not start when an earlier handler cancels submission", () => {
+  document.body.innerHTML = `<section><form data-assignment-submit>
+    <input name="videos" value="first.mp4"><button type="submit">Save</button>
+  </form><div data-assignment-feedback hidden><p data-assignment-message></p></div></section>`;
+  const form = document.querySelector("form");
+  form.addEventListener("submit", event => event.preventDefault());
+  loadPortal();
+  fireEvent.submit(form);
+  expect(form).not.toHaveAttribute("aria-busy");
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  expect(document.querySelector("[data-assignment-feedback]")).not.toBeVisible();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test("an assignment stays visible while pending and returning to the page restores its controls", () => {
+  const form = assignmentSubmissionPage(true);
+  const dialog = document.querySelector("dialog");
+  window.dispatchEvent(new Event("pageshow"));
+  fireEvent.submit(form);
+  expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+  fireEvent.keyDown(form, { key: "Escape" });
+  const cancel = new Event("cancel", { cancelable: true });
+  expect(dialog.dispatchEvent(cancel)).toBe(false);
+  expect(dialog.close).not.toHaveBeenCalled();
+  window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: false }));
+  expect(form).toHaveAttribute("aria-busy", "true");
+  window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+  expect(form).not.toHaveAttribute("aria-busy");
+  expect(form.inert).toBe(false);
+  expect(screen.getByRole("button", { name: "Save camera assignments" })).toBeEnabled();
+  expect(document.querySelector("[data-assignment-feedback]")).not.toBeVisible();
+  expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+  expect(dialog.dispatchEvent(new Event("cancel", { cancelable: true }))).toBe(true);
+  fireEvent.keyDown(form, { key: "Escape" });
+  expect(dialog.close).toHaveBeenCalledTimes(1);
+});
+
+test("loads media separately without replacing navigation and reports retryable failures", async () => {
+  document.body.innerHTML = `<a href="/packages">Packages</a>
+    <div data-media-content data-media-url="/review?video=clip.mp4&media=1" aria-busy="true">
+      <p data-media-status role="status">Loading footage...</p><button data-media-retry hidden>Retry</button>
+    </div>`;
+  let complete;
+  fetch.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+  loadPortal();
+  expect(fetch).toHaveBeenCalledWith("/review?video=clip.mp4&media=1");
+  expect(screen.getByRole("link", { name: "Packages" })).toHaveAttribute("href", "/packages");
+  complete({ ok: false, status: 503 });
+  expect(await screen.findByRole("alert")).toHaveTextContent("503");
+  fetch.mockResolvedValueOnce({ ok: true, text: async () => '<div data-media-content><p>Footage ready</p></div>' });
+  await userEvent.setup().click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("Footage ready")).toBeVisible();
+  expect(document.querySelector("[data-media-content]")).toHaveAttribute("aria-busy", "false");
+  expect(screen.getByRole("link", { name: "Packages" })).toBeVisible();
+});
+
 const identityStatus = {
   signed_in: true, name: "Alice Example", initials: "AE",
   account: "alice@example.com", tenant_id: "tenant", error: "",

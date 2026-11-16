@@ -9,6 +9,7 @@ import json
 import math
 import re
 import sqlite3
+import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -1839,7 +1840,11 @@ def prepare_main(argv: Sequence[str] | None = None) -> int:
         summary_report_path=output_dir / "summary.json",
         output_dir=output_dir,
     )
-    summary = run_publisher(config, storage=None)
+    try:
+        summary = run_publisher(config, storage=None)
+    except ManifestPublisherError as error:
+        print(f"{parser.prog}: error: {error}", file=sys.stderr)
+        return 1
     print(json.dumps(asdict(summary), sort_keys=True))
     return 2 if summary.rejected else 0
 

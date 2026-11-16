@@ -5,13 +5,14 @@ if (explorer) {
   const form = explorer.querySelector("[data-upload-form]");
   const picker = form.querySelector('input[type="file"]');
   const startButton = form.querySelector("[data-upload-start]");
-  const destination = form.querySelector('[name="folder"]');
-  const message = explorer.querySelector("[data-intake-message]");
+  const chosenFolder = form.dataset.uploadFolder;
+  const showMessage = text => {
+    document.querySelectorAll("[data-intake-message]").forEach(message => { message.textContent = text; });
+  };
   const results = explorer.querySelector("[data-upload-results]");
   const csrf = form.querySelector('[name="csrf"]').value;
   const limit = Number(explorer.dataset.maxUploadBytes);
   const items = [];
-  let chosenFolder = null;
   let busy = false;
   let closed = false;
 
@@ -31,18 +32,16 @@ if (explorer) {
     return request(url, { method: "POST", body, ...options });
   };
   const controls = () => {
-    form.querySelector('button[type="submit"]').disabled = busy;
-    destination.readOnly = busy;
-    picker.disabled = busy || chosenFolder === null;
+    picker.disabled = busy;
     startButton.disabled = busy || !items.some(item => item.state === "pending");
     for (const item of items) item.retry.disabled = busy;
   };
   const withBusy = async task => {
-    if (busy) { message.textContent = "Wait for the current transfer or confirmation."; return; }
+    if (busy) { showMessage("Wait for the current transfer or confirmation."); return; }
     busy = true;
     controls();
     try { await task(); }
-    catch (error) { message.textContent = `Storage action failed: ${error.message}`; }
+    catch (error) { showMessage(`Storage action failed: ${error.message}`); }
     finally { busy = false; controls(); }
   };
   const operationUrl = id => explorer.dataset.statusUrl.replace("OPERATION", encodeURIComponent(id));
@@ -227,29 +226,23 @@ if (explorer) {
     const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
     if (!picker.accept.split(",").includes(extension)) status(item, "invalid", "Unsupported video format.");
     else if (file.size <= 0 || file.size > limit) status(item, "invalid", "File is empty or exceeds the configured per-file upload limit.");
-    else status(item, "pending", "Ready to upload to the confirmed ADLS destination.");
+    else status(item, "pending", "Ready to upload to the current ADLS folder.");
   };
-  form.addEventListener("submit", event => {
-    event.preventDefault();
-    withBusy(async () => {
-      const result = await post(explorer.dataset.destinationUrl, { folder: destination.value });
-      if (typeof result.folder !== "string") throw new Error("Invalid destination response");
-      chosenFolder = result.folder;
-      message.textContent = "Destination confirmed. Choose local videos, then start uploading.";
-    });
-  });
-  destination.addEventListener("input", () => { chosenFolder = null; controls(); });
   picker.addEventListener("change", () => {
     for (const file of picker.files) addFile(file);
     controls();
   });
-  startButton.addEventListener("click", () => withBusy(async () => {
-    for (const item of items.filter(row => row.state === "pending")) {
-      if (closed) break;
-      await runUpload(item);
-    }
-    message.textContent = "Batch finished. Completed files remain in ADLS; retry only failed files. Refresh the folder to select uploaded footage.";
-  }));
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    withBusy(async () => {
+      for (const item of items.filter(row => row.state === "pending")) {
+        if (closed) break;
+        await runUpload(item);
+      }
+      showMessage("Batch finished. Completed files remain in ADLS; retry only failed files. Refresh the folder to select uploaded footage.");
+    });
+  });
+  controls();
 
   const reviewMove = async (nodes, folder, newName) => {
     const reviews = {};
@@ -270,11 +263,12 @@ if (explorer) {
     const reviews = await reviewMove(nodes, folder, rename ? value : "");
     if (reviews === null) return;
     const record = await post(explorer.dataset.moveUrl, { paths, destination: folder, rename: rename ? value : "", replacements: JSON.stringify(reviews), confirm_replace: "yes" });
-    await poll(record.id, () => false, row => { message.textContent = row.message || "Moving selected items..."; });
-    message.textContent = "Move completed. Editable references updated; refresh the folder to view the new paths.";
+    await poll(record.id, () => false, row => { showMessage(row.message || "Moving selected items..."); });
+    showMessage("Move completed. Editable references updated; refresh the folder to view the new paths.");
   };
   const action = async name => {
-    const nodes = Array.from(document.querySelectorAll("[data-intake-selection]:checked"));
+    const nodes = Array.from(document.querySelectorAll("[data-intake-selection]:checked"))
+      .filter(node => !node.closest("tr[hidden]"));
     if (name === "download") {
       if (!nodes.length || nodes.some(node => node.dataset.directory === "true")) throw new Error("Select supported videos for download.");
       const url = new URL(explorer.dataset.downloadUrl, location.origin);
@@ -282,10 +276,10 @@ if (explorer) {
       window.open(url.toString(), "_blank", "noopener");
     } else if (name === "create") {
       const path = await ask("Create folder", "Enter a new folder path within the configured ADLS root.");
-      if (path !== null) { await post(explorer.dataset.folderUrl, { path }); message.textContent = "Folder created. Refresh the folder to view it."; }
+      if (path !== null) { await post(explorer.dataset.folderUrl, { path }); showMessage("Folder created. Refresh the folder to view it."); }
     } else await moveItems(nodes, name === "rename");
   };
-  for (const button of explorer.querySelectorAll("[data-intake-action]")) {
+  for (const button of document.querySelectorAll("[data-intake-action]")) {
     button.addEventListener("click", () => withBusy(() => action(button.dataset.intakeAction)));
   }
   window.addEventListener("beforeunload", event => {
@@ -296,7 +290,7 @@ if (explorer) {
     if (resolveModal) modal.close();
     for (const item of items.filter(row => row.state === "transferring")) {
       if (item.xhr) item.xhr.abort();
-      if (item.id) post(operationUrl(item.id) + "/cancel", {}, { keepalive: true }).catch(error => { message.textContent = `Cannot stop unfinished upload: ${error.message}`; });
+      if (item.id) post(operationUrl(item.id) + "/cancel", {}, { keepalive: true }).catch(error => { showMessage(`Cannot stop unfinished upload: ${error.message}`); });
     }
   });
 }

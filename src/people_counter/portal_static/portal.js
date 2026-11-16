@@ -140,27 +140,219 @@ if (folderNavigation) {
   folderNavigation.querySelectorAll("details[data-folder]").forEach(bindFolder);
 }
 
+document.querySelectorAll(".table-wrap > table").forEach((table, index) => {
+  const rows = Array.from(table.tBodies).flatMap(body => Array.from(body.rows));
+  if (rows.length <= 10) return;
+  if (!table.id) table.id = `portal-table-${index + 1}`;
+  const label = table.getAttribute("aria-label") || table.closest("section")?.querySelector("h2")?.textContent || "Table";
+  const navigation = document.createElement("nav");
+  navigation.className = "table-pagination";
+  navigation.setAttribute("aria-label", `${label} pagination`);
+  const previous = document.createElement("button");
+  previous.textContent = "Previous page";
+  const next = document.createElement("button");
+  next.textContent = "Next page";
+  for (const button of [previous, next]) {
+    button.type = "button";
+    button.className = "btn-secondary btn-sm";
+    button.setAttribute("aria-controls", table.id);
+  }
+  const status = document.createElement("span");
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  navigation.append(previous, status, next);
+  table.parentElement.before(navigation);
+  let page = 0;
+  const pages = Math.ceil(rows.length / 10);
+  const render = () => {
+    const start = page * 10;
+    rows.forEach((row, rowIndex) => { row.hidden = rowIndex < start || rowIndex >= start + 10; });
+    status.textContent = `${start + 1}-${Math.min(start + 10, rows.length)} of ${rows.length} loaded rows; page ${page + 1} of ${pages}`;
+    previous.disabled = page === 0;
+    next.disabled = page === pages - 1;
+    table.dispatchEvent(new Event("portal:page-change", { bubbles: true }));
+  };
+  previous.addEventListener("click", () => { page = Math.max(0, page - 1); render(); });
+  next.addEventListener("click", () => { page = Math.min(pages - 1, page + 1); render(); });
+  render();
+});
+
+const packageSelection = document.querySelector("[data-package-selection]");
+if (packageSelection) {
+  const folder = packageSelection.querySelector('[name="folder"]');
+  const folders = Array.from(packageSelection.querySelectorAll("[data-package-folder]"));
+  const videos = Array.from(packageSelection.querySelectorAll('[name="videos"]:not(:disabled)'));
+  const pageVideos = () => videos.filter(item => !item.closest("tr[hidden]"));
+  const selectAll = packageSelection.querySelector('[data-select-videos="all"]');
+  const unselectAll = packageSelection.querySelector('[data-select-videos="none"]');
+  const status = packageSelection.querySelector("[data-selection-status]");
+  const individualMode = () => {
+    folders.forEach(item => { item.checked = false; });
+    packageSelection.querySelector('[name="mode"][value="individual"]').checked = true;
+    folder.value = folder.dataset.currentFolder;
+  };
+  const updateSelection = () => {
+    const visible = pageVideos();
+    const selected = visible.filter(item => item.checked).length;
+    const recursive = packageSelection.querySelector('[name="mode"][value="recursive"]').checked;
+    selectAll.disabled = !visible.length || (!recursive && selected === visible.length);
+    unselectAll.disabled = !recursive && selected === 0;
+    status.textContent = recursive
+      ? `Include all supported videos in ${folder.value || "Source root"} recursively. Save to freeze this selection.`
+      : `${selected} of ${visible.length} videos selected on this page. ${videos.filter(item => item.checked).length} checked in this loaded view. Save to keep your selection.`;
+  };
+  packageSelection.addEventListener("change", event => {
+    const target = event.target;
+    if (folders.includes(target) && target.checked) {
+      folders.forEach(item => { item.checked = item === target; });
+      packageSelection.querySelectorAll('[name="videos"]').forEach(item => { item.checked = false; });
+      packageSelection.querySelector('[name="mode"][value="recursive"]').checked = true;
+      folder.value = target.value;
+    } else if (target.name === "videos" || target.value === "individual" || folders.includes(target)) {
+      individualMode();
+    }
+    updateSelection();
+  });
+  packageSelection.querySelectorAll("[data-select-videos]").forEach(button => {
+    button.addEventListener("click", () => {
+      pageVideos().forEach(item => { item.checked = button.dataset.selectVideos === "all"; });
+      individualMode();
+      updateSelection();
+    });
+    packageSelection.addEventListener("portal:page-change", updateSelection);
+  });
+  updateSelection();
+}
+
 document.querySelectorAll("dialog[data-form-dialog]").forEach((dialog) => {
   const triggers = document.querySelectorAll(`[data-dialog-open="${dialog.id}"]`);
+  let returnFocus = triggers[0];
   dialog.querySelectorAll("[data-dialog-close]").forEach((button) => {
     button.addEventListener("click", () => dialog.close());
   });
   dialog.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing) {
+    if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing && event.target.closest("dialog") === dialog) {
       event.preventDefault();
-      dialog.close();
+      if (!dialog.querySelector('[data-assignment-submit][aria-busy="true"]')) dialog.close();
     }
+  });
+  dialog.addEventListener("cancel", event => {
+    if (dialog.querySelector('[data-assignment-submit][aria-busy="true"]')) event.preventDefault();
   });
   dialog.addEventListener("close", () => {
     dialog.querySelectorAll("input[name=confirm]").forEach((approval) => { approval.checked = false; });
-    if (triggers.length) triggers[0].focus();
+    if (returnFocus) returnFocus.focus();
   });
   triggers.forEach((trigger) => {
-    trigger.addEventListener("click", () => dialog.showModal());
+    trigger.addEventListener("click", () => {
+      returnFocus = trigger;
+      const form = dialog.querySelector("[data-assignment-form]");
+      if (form) {
+        form.reset();
+        const videos = trigger.hasAttribute("data-assignment-video")
+          ? [trigger.dataset.assignmentVideo]
+          : Array.from(document.querySelectorAll("[data-assignment-selection]:checked:not(:disabled)"))
+            .filter(item => !item.closest("tr[hidden]")).map(item => item.value);
+        const inputs = videos.map(video => {
+          const input = document.createElement("input");
+          input.type = "hidden"; input.name = "videos"; input.value = video;
+          return input;
+        });
+        form.querySelector("[data-assignment-videos]").replaceChildren(...inputs);
+        form.querySelector("[data-assignment-summary]").textContent = videos.length
+          ? `Assign ${videos.length} recording(s): ${videos.join(", ")}`
+          : "Select recordings in the table first.";
+        form.querySelector('button[type="submit"], button:not([type])').disabled = !videos.length;
+      }
+      dialog.showModal();
+    });
     trigger.disabled = false;
   });
   if (dialog.dataset.autoOpen === "true" && triggers.length) dialog.showModal();
 });
+
+document.querySelectorAll("form[data-assignment-submit]").forEach(form => {
+  const button = form.querySelector('button[type="submit"], button:not([type])');
+  const label = button.textContent;
+  const disabled = button.disabled;
+  const feedback = form.parentElement.querySelector("[data-assignment-feedback]");
+  const closeButtons = Array.from(form.closest("dialog")?.querySelectorAll("[data-dialog-close]") || [],
+    control => ({ control, disabled: control.disabled }));
+  const reset = () => {
+    form.removeAttribute("aria-busy");
+    form.inert = false;
+    feedback.hidden = true;
+    button.disabled = disabled;
+    button.textContent = label;
+    closeButtons.forEach(({ control, disabled: wasDisabled }) => { control.disabled = wasDisabled; });
+  };
+  form.addEventListener("submit", async event => {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    if (form.getAttribute("aria-busy") === "true") return;
+    const body = new FormData(form);
+    const count = body.getAll("videos").length;
+    feedback.querySelector("[data-assignment-message]").textContent =
+      `Assigning camera to ${count} recording(s). Checking video metadata and saving associations. This may take a while for ADLS footage. Please wait.`;
+    feedback.hidden = false;
+    feedback.setAttribute("role", "status");
+    feedback.querySelector("progress").hidden = false;
+    form.setAttribute("aria-busy", "true");
+    form.inert = true;
+    button.disabled = true;
+    button.textContent = "Assigning...";
+    closeButtons.forEach(({ control }) => { control.disabled = true; });
+    try {
+      // Following the redirect here would consume the server's success notice.
+      const response = await fetch(form.getAttribute("action") || location.href, { method: "POST", body, redirect: "manual" });
+      if (response.type === "opaqueredirect") {
+        location.assign(form.dataset.assignmentNext);
+        return;
+      }
+      const result = new DOMParser().parseFromString(await response.text(), "text/html");
+      const detail = result.querySelector('[role="alert"]')?.textContent.trim();
+      throw new Error(detail || `Unexpected assignment response (HTTP ${response.status}).`);
+    } catch (error) {
+      reset();
+      feedback.hidden = false;
+      feedback.setAttribute("role", "alert");
+      feedback.querySelector("progress").hidden = true;
+      feedback.querySelector("[data-assignment-message]").textContent =
+        `Could not confirm camera assignment: ${error.message} Review current camera ownership before retrying.`;
+    }
+  });
+  window.addEventListener("pageshow", event => {
+    if (!event.persisted || form.getAttribute("aria-busy") !== "true") return;
+    reset();
+  });
+});
+
+const cameraAssociation = document.querySelector("[data-camera-association]");
+if (cameraAssociation) {
+  const inputs = Array.from(cameraAssociation.querySelectorAll("[data-assignment-selection]:not(:disabled)"));
+  const pageInputs = () => inputs.filter(item => !item.closest("tr[hidden]"));
+  const selectAll = cameraAssociation.querySelector('[data-select-videos="all"]');
+  const unselectAll = cameraAssociation.querySelector('[data-select-videos="none"]');
+  const assign = cameraAssociation.querySelector("[data-assignment-batch]");
+  const update = () => {
+    const visible = pageInputs();
+    const selected = visible.filter(item => item.checked).length;
+    selectAll.disabled = selected === visible.length;
+    unselectAll.disabled = selected === 0;
+    assign.disabled = selected === 0;
+    cameraAssociation.querySelector("[data-assignment-status]").textContent =
+      `${selected} of ${visible.length} recordings selected on this page. Assignment applies only to checked recordings on this page.`;
+  };
+  cameraAssociation.querySelectorAll("[data-select-videos]").forEach(button => {
+    button.addEventListener("click", () => {
+      pageInputs().forEach(item => { item.checked = button.dataset.selectVideos === "all"; });
+      update();
+    });
+  });
+  cameraAssociation.addEventListener("change", update);
+  cameraAssociation.addEventListener("portal:page-change", update);
+  update();
+}
 
 document.querySelectorAll("[data-name-form]").forEach((form) => {
   const name = form.querySelector("[name=display_name]");
@@ -207,155 +399,187 @@ if (scope) {
 }
 
 const lineFieldNames = ["counting_line_x1", "counting_line_y1", "counting_line_x2", "counting_line_y2"];
-const canvas = document.querySelector("#line-canvas");
-if (canvas) {
-  const image = document.querySelector("#preview-image");
-  const context = canvas.getContext("2d");
-  const fields = lineFieldNames.map((name) => document.getElementById(name));
-  const instructions = document.querySelector("#line-instructions");
-  let endpoint = 0;
-  const draw = () => {
-    if (!image.complete || !image.naturalWidth) return;
-    context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    const [x1, y1, x2, y2] = fields.map((field) => Number(field.value));
-    if (![x1, y1, x2, y2].every(Number.isFinite)) return;
-    context.lineWidth = Math.max(2, canvas.width / 250);
-    context.strokeStyle = "#00ffcc";
-    context.fillStyle = "#00ffcc";
-    context.beginPath();
-    context.moveTo(x1, y1);
-    context.lineTo(x2, y2);
-    context.stroke();
-    const angle = Math.atan2(y2 - y1, x2 - x1);
-    const length = Math.max(12, canvas.width / 45);
-    context.beginPath();
-    context.moveTo(x2, y2);
-    context.lineTo(x2 - length * Math.cos(angle - .5), y2 - length * Math.sin(angle - .5));
-    context.lineTo(x2 - length * Math.cos(angle + .5), y2 - length * Math.sin(angle + .5));
-    context.closePath();
-    context.fill();
-  };
-  image.addEventListener("load", () => {
+function initializeFootage() {
+  const canvas = document.querySelector("#line-canvas");
+  if (canvas) {
+    const image = document.querySelector("#preview-image");
+    const context = canvas.getContext("2d");
+    const fields = lineFieldNames.map((name) => document.getElementById(name));
+    const instructions = document.querySelector("#line-instructions");
+    let endpoint = 0;
+    const draw = () => {
+      if (!image.complete || !image.naturalWidth) return;
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      const [x1, y1, x2, y2] = fields.map((field) => Number(field.value));
+      if (![x1, y1, x2, y2].every(Number.isFinite)) return;
+      context.lineWidth = Math.max(2, canvas.width / 250);
+      context.strokeStyle = "#00ffcc";
+      context.fillStyle = "#00ffcc";
+      context.beginPath();
+      context.moveTo(x1, y1);
+      context.lineTo(x2, y2);
+      context.stroke();
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const length = Math.max(12, canvas.width / 45);
+      context.beginPath();
+      context.moveTo(x2, y2);
+      context.lineTo(x2 - length * Math.cos(angle - .5), y2 - length * Math.sin(angle - .5));
+      context.lineTo(x2 - length * Math.cos(angle + .5), y2 - length * Math.sin(angle + .5));
+      context.closePath();
+      context.fill();
+    };
+    image.addEventListener("load", () => {
+      draw();
+      instructions.textContent = "Frame ready. Your current line is preserved; click endpoints or edit coordinates.";
+    });
+    document.querySelector("#preview-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const url = new URL(image.src);
+      url.searchParams.set("seconds", event.currentTarget.querySelector("[name=seconds]").value);
+      instructions.textContent = "Loading preview frame...";
+      image.src = url.toString();
+    });
+    image.addEventListener("error", () => { instructions.textContent = "Frame could not be loaded. Choose an earlier preview time."; });
+    fields.forEach((field) => field.addEventListener("input", draw));
+    document.querySelector("#redraw-line").addEventListener("click", () => {
+      endpoint = 0;
+      instructions.textContent = "Click the first endpoint, then the second.";
+      canvas.focus();
+    });
+    canvas.addEventListener("pointerdown", (event) => {
+      const bounds = canvas.getBoundingClientRect();
+      fields[endpoint * 2].value = Math.max(0, Math.min(canvas.width - 1,
+        Math.round((event.clientX - bounds.left) * canvas.width / bounds.width)));
+      fields[endpoint * 2 + 1].value = Math.max(0, Math.min(canvas.height - 1,
+        Math.round((event.clientY - bounds.top) * canvas.height / bounds.height)));
+      endpoint = 1 - endpoint;
+      instructions.textContent = endpoint ? "Now click the second endpoint." : "Line selected. Review and save the calibration.";
+      draw();
+      canvas.dispatchEvent(new Event("counting-line-change", { bubbles: true }));
+    });
     draw();
-    instructions.textContent = "Frame ready. Your current line is preserved; click endpoints or edit coordinates.";
-  });
-  document.querySelector("#preview-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const url = new URL(image.src);
-    url.searchParams.set("seconds", event.currentTarget.querySelector("[name=seconds]").value);
-    instructions.textContent = "Loading preview frame...";
-    image.src = url.toString();
-  });
-  image.addEventListener("error", () => { instructions.textContent = "Frame could not be loaded. Choose an earlier preview time."; });
-  fields.forEach((field) => field.addEventListener("input", draw));
-  document.querySelector("#redraw-line").addEventListener("click", () => {
-    endpoint = 0;
-    instructions.textContent = "Click the first endpoint, then the second.";
-    canvas.focus();
-  });
-  canvas.addEventListener("pointerdown", (event) => {
-    const bounds = canvas.getBoundingClientRect();
-    fields[endpoint * 2].value = Math.max(0, Math.min(canvas.width - 1,
-      Math.round((event.clientX - bounds.left) * canvas.width / bounds.width)));
-    fields[endpoint * 2 + 1].value = Math.max(0, Math.min(canvas.height - 1,
-      Math.round((event.clientY - bounds.top) * canvas.height / bounds.height)));
-    endpoint = 1 - endpoint;
-    instructions.textContent = endpoint ? "Now click the second endpoint." : "Line selected. Review and save the calibration.";
-    draw();
-    canvas.dispatchEvent(new Event("counting-line-change", { bubbles: true }));
-  });
-  draw();
-}
+  }
 
-const readinessPanel = document.querySelector("#review-readiness");
-if (readinessPanel) {
-  const camera = document.querySelector("#review-camera");
-  const captureTime = document.querySelector("#capture-override");
-  const geometry = document.querySelector("#geometry-action");
-  const coordinates = lineFieldNames.map((name) => document.getElementById(name)).filter(Boolean);
-  const watched = [camera, captureTime, geometry, ...coordinates].filter(Boolean);
-  const initialCaptureTime = captureTime.value;
-  const status = document.querySelector("#readiness-update-status");
-  const results = document.querySelector("#readiness-results");
-  const retry = document.querySelector("#retry-readiness");
-  let lineEdited = false;
-  let generation = 0;
-  let running = false;
-  let timer;
-  let layoutFrozen = false;
-  const freezeLayout = () => {
-    if (layoutFrozen) return;
-    // Keep readiness updates from moving the canvas during endpoint placement.
-    results.style.height = `${results.getBoundingClientRect().height}px`;
-    results.style.overflowY = "auto";
-    status.style.minHeight = `${status.getBoundingClientRect().height}px`;
-    layoutFrozen = true;
-  };
-  const draftBody = () => {
-    const body = new FormData();
-    body.set("csrf", document.querySelector("input[name=csrf]").value);
-    body.set("video", readinessPanel.dataset.video);
-    body.set("camera_id", camera.value);
-    if (geometry) body.set("geometry_action", geometry.value);
-    if (captureTime.value !== initialCaptureTime) body.set("captured_at_utc", captureTime.value);
-    if (lineEdited) {
-      body.set("line_override", "yes");
-      coordinates.forEach((field) => body.set(field.id, field.value));
-    }
-    return body;
-  };
-  const checkReadiness = async () => {
-    if (running) return;
-    const sent = generation;
-    running = true;
-    try {
-      const response = await fetch(readinessPanel.dataset.readinessUrl, { method: "POST", body: draftBody() });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const markup = await response.text();
-      if (sent === generation) {
-        results.innerHTML = markup;
-        results.style.visibility = "visible";
-        results.setAttribute("aria-hidden", "false");
-        readinessPanel.setAttribute("aria-busy", "false");
-        status.textContent = "Readiness updated for unsaved values. Save each section to apply changes.";
+  const readinessPanel = document.querySelector("#review-readiness");
+  if (readinessPanel) {
+    const camera = document.querySelector("#review-camera");
+    const captureTime = document.querySelector("#capture-override");
+    const geometry = document.querySelector("#geometry-action");
+    const coordinates = lineFieldNames.map((name) => document.getElementById(name)).filter(Boolean);
+    const watched = [camera, captureTime, geometry, ...coordinates].filter(Boolean);
+    const initialCaptureTime = captureTime.value;
+    const status = document.querySelector("#readiness-update-status");
+    const results = document.querySelector("#readiness-results");
+    const retry = document.querySelector("#retry-readiness");
+    let lineEdited = false;
+    let generation = 0;
+    let running = false;
+    let timer;
+    let layoutFrozen = false;
+    const freezeLayout = () => {
+      if (layoutFrozen) return;
+      // Keep readiness updates from moving the canvas during endpoint placement.
+      results.style.height = `${results.getBoundingClientRect().height}px`;
+      results.style.overflowY = "auto";
+      status.style.minHeight = `${status.getBoundingClientRect().height}px`;
+      layoutFrozen = true;
+    };
+    const draftBody = () => {
+      const body = new FormData();
+      body.set("csrf", document.querySelector("input[name=csrf]").value);
+      body.set("video", readinessPanel.dataset.video);
+      body.set("camera_id", camera.value);
+      if (geometry) body.set("geometry_action", geometry.value);
+      if (captureTime.value !== initialCaptureTime) body.set("captured_at_utc", captureTime.value);
+      if (lineEdited) {
+        body.set("line_override", "yes");
+        coordinates.forEach((field) => body.set(field.id, field.value));
       }
-    } catch (error) {
-      if (sent === generation) {
-        status.setAttribute("role", "alert");
-        status.textContent = `Readiness could not be checked: ${error.message}. Retry without losing unsaved changes.`;
-        retry.hidden = false;
-        readinessPanel.setAttribute("aria-busy", "false");
+      return body;
+    };
+    const checkReadiness = async () => {
+      if (running) return;
+      const sent = generation;
+      running = true;
+      try {
+        const response = await fetch(readinessPanel.dataset.readinessUrl, { method: "POST", body: draftBody() });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const markup = await response.text();
+        if (sent === generation) {
+          results.innerHTML = markup;
+          results.style.visibility = "visible";
+          results.setAttribute("aria-hidden", "false");
+          readinessPanel.setAttribute("aria-busy", "false");
+          status.textContent = "Readiness updated for unsaved values. Save each section to apply changes.";
+        }
+      } catch (error) {
+        if (sent === generation) {
+          status.setAttribute("role", "alert");
+          status.textContent = `Readiness could not be checked: ${error.message}. Retry without losing unsaved changes.`;
+          retry.hidden = false;
+          readinessPanel.setAttribute("aria-busy", "false");
+        }
+      } finally {
+        running = false;
+        if (sent !== generation) {
+          clearTimeout(timer);
+          timer = setTimeout(checkReadiness, 350);
+        }
       }
-    } finally {
-      running = false;
-      if (sent !== generation) {
-        clearTimeout(timer);
-        timer = setTimeout(checkReadiness, 350);
-      }
-    }
-  };
-  const scheduleCheck = () => {
-    generation += 1;
-    clearTimeout(timer);
-    freezeLayout();
-    results.style.visibility = "hidden";
-    results.setAttribute("aria-hidden", "true");
-    readinessPanel.setAttribute("aria-busy", "true");
-    status.setAttribute("role", "status");
-    status.textContent = "Checking unsaved values...";
+    };
+    const scheduleCheck = () => {
+      generation += 1;
+      clearTimeout(timer);
+      freezeLayout();
+      results.style.visibility = "hidden";
+      results.setAttribute("aria-hidden", "true");
+      readinessPanel.setAttribute("aria-busy", "true");
+      status.setAttribute("role", "status");
+      status.textContent = "Checking unsaved values...";
+      retry.hidden = true;
+      timer = setTimeout(checkReadiness, 350);
+    };
+    const changed = (event) => {
+      const drawn = event.type === "counting-line-change";
+      if (!drawn && !watched.includes(event.target)) return;
+      if (drawn || coordinates.includes(event.target)) lineEdited = true;
+      scheduleCheck();
+    };
+    document.addEventListener("input", changed);
+    document.addEventListener("change", changed);
+    document.addEventListener("counting-line-change", changed);
+    retry.addEventListener("click", scheduleCheck);
+  }
+}
+initializeFootage();
+
+const mediaContent = document.querySelector("[data-media-url]");
+if (mediaContent) {
+  const status = mediaContent.querySelector("[data-media-status]");
+  const retry = mediaContent.querySelector("[data-media-retry]");
+  const loadMedia = async () => {
+    mediaContent.setAttribute("aria-busy", "true");
     retry.hidden = true;
-    timer = setTimeout(checkReadiness, 350);
+    status.setAttribute("role", "status");
+    status.textContent = "Loading footage preview and media checks in the background...";
+    try {
+      const response = await fetch(mediaContent.dataset.mediaUrl);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const page = new DOMParser().parseFromString(await response.text(), "text/html");
+      const content = page.querySelector("[data-media-content]");
+      if (!content) throw new Error("Unexpected footage response");
+      mediaContent.replaceChildren(...content.childNodes);
+      initializeFootage();
+    } catch (error) {
+      status.setAttribute("role", "alert");
+      status.textContent = `Unable to load footage: ${error.message}. Retry or choose another recording.`;
+      retry.hidden = false;
+    } finally {
+      mediaContent.setAttribute("aria-busy", "false");
+    }
   };
-  const changed = (event) => {
-    const drawn = event.type === "counting-line-change";
-    if (!drawn && !watched.includes(event.target)) return;
-    if (drawn || coordinates.includes(event.target)) lineEdited = true;
-    scheduleCheck();
-  };
-  document.addEventListener("input", changed);
-  document.addEventListener("change", changed);
-  document.addEventListener("counting-line-change", changed);
-  retry.addEventListener("click", scheduleCheck);
+  retry.addEventListener("click", loadMedia);
+  loadMedia();
 }
 
 const cloudAction = document.querySelector("#cloud-action");

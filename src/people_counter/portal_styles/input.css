@@ -65,6 +65,8 @@
   .page-actions { @apply flex shrink-0 flex-wrap items-center gap-2; }
   .card { @apply min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xs; }
   .card-header { @apply flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:px-6; }
+  .card-header.dialog-header { @apply flex-row items-start; }
+  .table-pagination { @apply flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-3 text-xs text-slate-600 sm:px-6; }
   .card-body { @apply space-y-5 p-5 sm:p-6; }
   .card-footer { @apply flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/70 px-5 py-4 sm:px-6; }
   .card-description { @apply mt-1 text-sm font-normal text-slate-500; }

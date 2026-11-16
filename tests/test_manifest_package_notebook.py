@@ -1,4 +1,5 @@
 import ast
+import csv
 import io
 import json
 import subprocess
@@ -82,6 +83,7 @@ def test_local_defaults_preserve_sample_workflow(cells, tmp_path, monkeypatch, s
     assert namespace["PACKAGE_DIR"] == tmp_path / "samples/manifest-package-tutorial"
     assert namespace["PARTITION_PREFIX"] == "samples/"
     assert namespace["CHECKPOINT_PATH"] == namespace["PACKAGE_DIR"] / "preparation.sqlite3"
+    (tmp_path / "samples/three_people_walking.mp4").write_bytes(b"video")
     exec(cells["write-catalog"], namespace)
     exec(cells["write-exception-inventory"], namespace)
     assert "samples/" in namespace["CATALOG_PATH"].read_text()
@@ -152,6 +154,14 @@ def test_fabric_generates_identical_tutorial_metadata(
     assert {row["source_path_prefix"] for row in rows} == {"samples/"}
 
 
+def test_missing_tutorial_video_omits_override(cells, fabric_setup, capsys):
+    exec(cells["write-exception-inventory"], fabric_setup)
+    with fabric_setup["EXCEPTION_INVENTORY_PATH"].open(newline="") as handle:
+        assert list(csv.DictReader(handle)) == []
+    assert "Skipping" in capsys.readouterr().out
+    assert not (fabric_setup["VIDEO_ROOT"] / "samples/three_people_walking.mp4").exists()
+
+
 @pytest.mark.parametrize("fabric", [False, True])
 @pytest.mark.parametrize("prefix", ["camera-shortcut/", "footage/custom"])
 def test_custom_prefix_updates_generated_metadata(cells, tmp_path, monkeypatch, fabric, prefix):
@@ -163,6 +173,9 @@ def test_custom_prefix_updates_generated_metadata(cells, tmp_path, monkeypatch, 
     try:
         expected = prefix.rstrip("/") + "/"
         assert namespace["PARTITION_PREFIX"] == expected
+        video = namespace["VIDEO_ROOT"] / expected / "three_people_walking.mp4"
+        video.parent.mkdir(parents=True, exist_ok=True)
+        video.write_bytes(b"video")
         exec(cells["write-catalog"], namespace)
         exec(cells["write-exception-inventory"], namespace)
         with namespace["CATALOG_PATH"].open(newline="") as handle:
@@ -315,3 +328,21 @@ def test_complete_preparation_displays_success_output_and_warnings(cells, tmp_pa
     output = capsys.readouterr()
     assert output.out == '{"complete": true}\n'
     assert output.err == "Preparation warning\n"
+
+
+def test_complete_preparation_shows_manifest_error_without_expanding_traceback(
+    cells, tmp_path, capsys,
+):
+    detail = "ManifestPublisherError: Missing inventory video: staging/missing.mp4"
+    stderr = f"Traceback (most recent call last):\n{detail}\n"
+    namespace = {
+        "subprocess": SimpleNamespace(run=Mock(return_value=subprocess.CompletedProcess(
+            ["prepare"], 1, "", stderr,
+        ))),
+        "sys": sys, "prepare_base": ["prepare"],
+        "EXCEPTION_INVENTORY_PATH": tmp_path / "inventory.csv", "VIDEO_ROOT": tmp_path,
+    }
+    with pytest.raises(RuntimeError) as raised:
+        exec(cells["prepare-complete-package"], namespace)
+    assert str(raised.value) == f"Package preparation failed (exit code 1): {detail}"
+    assert capsys.readouterr().err == stderr

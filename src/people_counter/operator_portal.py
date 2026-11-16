@@ -64,6 +64,15 @@ def _inference_overrides(form: Mapping[str, str]) -> dict[str, int | float]:
     }
 
 
+def _deferred_media_page(service: PortalService, title: str, description: str, back_url: str) -> str | None:
+    if not isinstance(service.source, AdlsFootageSource) or request.args.get("media") == "1":
+        return None
+    return render_template(
+        "media_loading.html", title=title, description=description, back_url=back_url,
+        media_url=url_for(request.endpoint, **{**request.args, **(request.view_args or {}), "media": "1"}),
+    )
+
+
 def create_app(root_service: PortalService) -> Flask:
     public_origin = _codespaces_origin()
     public_address = urlsplit(public_origin) if public_origin else None
@@ -419,6 +428,12 @@ def create_app(root_service: PortalService) -> Flask:
     @app.get("/review")
     def review():
         video = request.args.get("video", "")
+        pending = _deferred_media_page(
+            service, "Review footage", video,
+            url_for("footage", folder=request.args.get("folder", ""), q=request.args.get("q", ""), kind=request.args.get("kind", "videos")),
+        )
+        if pending is not None:
+            return pending
         readiness = service.footage_readiness(video)
         metadata = readiness["metadata"]
         exception = service.video_exception(video)
@@ -504,6 +519,13 @@ def create_app(root_service: PortalService) -> Flask:
         video = request.args.get("video", videos[0] if videos else "")
         if video and video not in videos:
             raise ValueError("Choose reference footage already associated with this camera")
+        if video:
+            pending = _deferred_media_page(
+                service, "Calibrate camera", camera["display_name"],
+                url_for("camera_footage", camera_id=camera_id),
+            )
+            if pending is not None:
+                return pending
         readiness = service.footage_readiness(video) if video else None
         metadata = readiness["metadata"] if readiness else None
         return render_template(
@@ -687,7 +709,13 @@ def create_app(root_service: PortalService) -> Flask:
         selected = draft["videos"][(page - 1) * 100:page * 100]
         return render_template(
             "package_workspace.html", draft=draft, step=step, source=scoped.source,
+            root=scoped.source.label,
             entries=rows, next_token=next_token, folder=folder,
+            breadcrumbs=[
+                {"name": name, "path": Path(*Path(folder).parts[:index + 1]).as_posix()}
+                for index, name in enumerate(Path(folder).parts)
+            ],
+            max_upload_bytes=scoped.max_upload_bytes, upload_extensions=",".join(CONTENT_TYPES),
             has_more=has_more,
             selected=selected, assignments=scoped.footage_assignments(),
             cameras=service.store.entries("camera_identity"), locations=service.store.locations(),

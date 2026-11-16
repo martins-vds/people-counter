@@ -62,16 +62,19 @@ beforeEach(() => {
     abort() { if (this.onabort) this.onabort(); }
   };
   document.body.innerHTML = `
-  <div id="intake-explorer" data-upload-url="/intake/uploads" data-destination-url="/intake/destination" data-review-url="/intake/review"
-    data-move-url="/intake/move" data-folder-url="/intake/folders" data-status-url="/intake/operations/OPERATION"
-    data-download-url="/intake/download" data-max-upload-bytes="5368709120">
-    <form data-upload-form><input name="csrf" value="csrf" type="hidden">
-      <label>ADLS destination folder<input name="folder" value="north"></label><button type="submit">Confirm destination</button>
-      <label>Choose local videos<input type="file" id="upload-files" accept=".mp4,.mov,.mkv,.avi" multiple disabled></label>
-      <button type="button" data-upload-start disabled>Upload selected videos</button>
-    </form><p data-intake-message role="status"></p><ul data-upload-results></ul>
+  <div data-intake-toolbar>
     <button data-intake-action="move">Move selected</button><button data-intake-action="download">Download selected</button>
     <button data-intake-action="rename">Rename selected</button><button data-intake-action="create">Create folder</button>
+    <p data-intake-message role="status"></p>
+  </div>
+  <div id="intake-explorer" data-upload-url="/intake/uploads" data-review-url="/intake/review"
+    data-move-url="/intake/move" data-folder-url="/intake/folders" data-status-url="/intake/operations/OPERATION"
+    data-download-url="/intake/download" data-max-upload-bytes="5368709120">
+    <form data-upload-form data-upload-folder="north"><input name="csrf" value="csrf" type="hidden">
+      <p data-upload-destination>Uploading to: north</p>
+      <label>Choose local videos<input type="file" id="upload-files" accept=".mp4,.mov,.mkv,.avi" multiple disabled></label>
+      <button type="submit" data-upload-start disabled>Upload selected videos</button>
+    </form><ul data-upload-results></ul>
     <dialog data-intake-dialog><form data-intake-dialog-form><h2 id="intake-dialog-title"></h2><p data-intake-dialog-detail></p>
       <div data-intake-dialog-field><label>Folder or new name<input name="value"></label></div>
       <label data-intake-confirm-field hidden><input name="confirm" type="checkbox">I approve replacing this exact destination version</label>
@@ -96,25 +99,44 @@ test("loads without optional intake controls", () => {
   expect(fetch).not.toHaveBeenCalled();
 });
 
-test("changing the destination requires confirmation again and rejects unsupported/empty files", async () => {
+test("the destination is information only and uploads use the browsed folder without confirmation", async () => {
+  const dialogMessage = document.createElement("p");
+  dialogMessage.dataset.intakeMessage = "";
+  document.querySelector("dialog").append(dialogMessage);
+  load();
+  await select(new File(["abc"], "clip.mp4"));
+  expect(screen.getByText("Uploading to: north")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Confirm destination" })).not.toBeInTheDocument();
+  expect(document.querySelector('[data-upload-form] [name="folder"]')).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+  expect(fireEvent.submit(document.querySelector("[data-upload-form]"))).toBe(false);
+  await screen.findByText(/Uploaded. SHA-256:/);
+  const start = fetch.mock.calls.find(([url]) => url.endsWith("/uploads"));
+  expect(start[1].body.get("folder")).toBe("north");
+  expect(dialogMessage).toHaveTextContent("Batch finished.");
+});
+
+test("unsupported and empty files are rejected before uploading", async () => {
   load();
   await select(new File(["x"], "<img>.txt"));
   expect(screen.getByText("Unsupported video format.")).toBeVisible();
   expect(document.querySelector("img")).toBeNull();
-  fireEvent.input(screen.getByLabelText("ADLS destination folder"), { target: { value: "south" } });
-  expect(screen.getByLabelText("Choose local videos")).toBeDisabled();
   await select(new File([], "empty.mp4"));
   expect(screen.getByText(/File is empty/)).toBeVisible();
   expect(screen.getByRole("button", { name: "Upload selected videos" })).toBeDisabled();
 });
 
-test.each([null, [], "north", { folder: 123 }])("invalid destination replies remain errors (%j)", async body => {
+test("server-side destination validation still blocks uploads before any bytes are sent", async () => {
   load();
-  fetch.mockResolvedValue({ ok: true, json: async () => body });
-  fireEvent.submit(document.querySelector("[data-upload-form]"));
-  await screen.findByText(`Storage action failed: ${body && !Array.isArray(body) && typeof body === "object" ?
-    "Invalid destination response" : "Invalid storage response"}`);
-  expect(screen.getByLabelText("Choose local videos")).toBeDisabled();
+  await select(new File(["abc"], "clip.mp4"));
+  const normal = fetch.getMockImplementation();
+  fetch.mockImplementation((url, options) => url.endsWith("/uploads")
+    ? Promise.resolve({ ok: false, status: 403, json: async () => ({ error: "Destination folder is inaccessible" }) })
+    : normal(url, options));
+  fireEvent.click(screen.getByRole("button", { name: "Upload selected videos" }));
+  await screen.findByText("Upload failed: Destination folder is inaccessible");
+  expect(sent).toHaveLength(0);
+  expect(fetch.mock.calls.some(([url]) => url.endsWith("/finish"))).toBe(false);
 });
 
 test.each(["offset", "http", "json"])("chunk %s failures do not claim upload success", async mode => {
@@ -162,7 +184,7 @@ test.each([false, true])("active upload cancellation aborts transfer and surface
   await waitFor(() => expect(active).toBeDefined());
   fireEvent.click(screen.getByRole("button", { name: "Cancel upload" }));
   await screen.findByText(failure ? /Cleanup denied/ : /Upload cancelled/);
-  await waitFor(() => expect(screen.getByRole("button", { name: "Confirm destination" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
   expect(screen.getByRole("button", { name: "Cancel upload" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Retry" })).toBeVisible();
   expect(fetch.mock.calls.some(([url]) => url.endsWith("/upload-one/cancel"))).toBe(true);
@@ -216,11 +238,23 @@ test("bulk download keeps source paths and rejects folders", async () => {
   await waitFor(() => expect(open).toHaveBeenCalled());
   expect(new URL(open.mock.calls[0][0]).searchParams.getAll("video")).toEqual(["north/clip.mp4"]);
   expect(open.mock.calls[0].slice(1)).toEqual(["_blank", "noopener"]);
-  await waitFor(() => expect(screen.getByRole("button", { name: "Confirm destination" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
   box.dataset.directory = "true";
   fireEvent.click(screen.getByRole("button", { name: "Download selected" }));
   await screen.findByText(/Select supported videos/);
   expect(open).toHaveBeenCalledTimes(1);
+});
+
+test("storage actions exclude checked rows hidden on another table page", async () => {
+  document.body.insertAdjacentHTML("beforeend", `<table><tbody>
+    <tr><td><input type="checkbox" data-intake-selection data-directory="false" value="visible.mp4" checked></td></tr>
+    <tr hidden><td><input type="checkbox" data-intake-selection data-directory="false" value="other-page.mp4" checked></td></tr>
+  </tbody></table>`);
+  const open = jest.spyOn(window, "open").mockImplementation(() => null);
+  load();
+  fireEvent.click(screen.getByRole("button", { name: "Download selected" }));
+  await waitFor(() => expect(open).toHaveBeenCalled());
+  expect(new URL(open.mock.calls[0][0]).searchParams.getAll("video")).toEqual(["visible.mp4"]);
 });
 
 test("moving checked files reviews the target and queues server-side move without discarding local edits", async () => {
@@ -236,7 +270,7 @@ test("moving checked files reviews the target and queues server-side move withou
   const move = fetch.mock.calls.find(([url]) => url.endsWith("/move"));
   expect(move[1].body.getAll("paths")).toEqual(["north/clip.mp4"]);
   expect(move[1].body.get("destination")).toBe("archive");
-  expect(screen.getByLabelText("ADLS destination folder")).toHaveValue("north");
+  expect(screen.getByText("Uploading to: north")).toBeVisible();
 });
 
 function checked(path, directory = false) {
@@ -277,7 +311,7 @@ test("renaming one folder queues a native move; multiple selected items are reje
   const move = fetch.mock.calls.find(([url]) => url.endsWith("/move"));
   expect(move[1].body.get("rename")).toBe("south");
   expect(fetch.mock.calls.some(([url]) => url.endsWith("/review"))).toBe(false);
-  await waitFor(() => expect(screen.getByRole("button", { name: "Confirm destination" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
   checked("another", true);
   fireEvent.click(screen.getByRole("button", { name: "Rename selected" }));
   await screen.findByText(/exactly one item/);
@@ -289,7 +323,7 @@ test("cancelling a move or a move replacement makes no move request", async () =
   checked("north/clip.mp4");
   fireEvent.click(screen.getByRole("button", { name: "Move selected" }));
   fireEvent.click(screen.getByRole("button", { name: "Cancel", exact: true }));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Confirm destination" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
   fetch.mockResolvedValue({ ok: true, json: async () => ({ exists: true, path: "archive/clip.mp4", size: 3, confirmation: "review" }) });
   fireEvent.click(screen.getByRole("button", { name: "Move selected" }));
   fireEvent.change(screen.getByLabelText("Folder or new name"), { target: { value: "archive" } });
@@ -352,18 +386,19 @@ test("pending verification polls until completion and stops when the page closes
 });
 
 test("an upload from the allowed root labels its destination without inventing a local source", async () => {
+  document.querySelector("[data-upload-form]").dataset.uploadFolder = "";
   load();
-  screen.getByLabelText("ADLS destination folder").value = "";
   await select(new File(["abc"], "clip.mp4"));
   expect(screen.getByText("clip.mp4 -> allowed root")).toBeVisible();
 });
 
-test("HTTP failures without a server message remain explicit and do not enable selection", async () => {
+test("HTTP failures without a server message remain explicit and send no bytes", async () => {
   load();
+  await select(new File(["abc"], "clip.mp4"));
   fetch.mockResolvedValue({ ok: false, status: 413, json: async () => ({}) });
-  fireEvent.submit(document.querySelector("[data-upload-form]"));
+  fireEvent.click(screen.getByRole("button", { name: "Upload selected videos" }));
   await screen.findByText(/HTTP 413/);
-  expect(screen.getByLabelText("Choose local videos")).toBeDisabled();
+  expect(sent).toHaveLength(0);
 });
 
 test("another bulk action cannot open a second confirmation while one is pending", async () => {
@@ -385,7 +420,7 @@ test("move can target the allowed root; rename still requires a name", async () 
   await screen.findByText(/Move completed/);
   const move = fetch.mock.calls.find(([url]) => url.endsWith("/move"));
   expect(move[1].body.get("destination")).toBe("");
-  await waitFor(() => expect(screen.getByRole("button", { name: "Confirm destination" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Rename selected" }));
   expect(screen.getByLabelText("Folder or new name")).toBeRequired();
   fireEvent.submit(document.querySelector("[data-intake-dialog-form]"));
@@ -422,14 +457,13 @@ test("recovery after cancellation is not reported as a successful cancellation",
 
 function load() { require("../../src/people_counter/portal_static/portal_intake.js"); }
 async function select(file) {
-  fireEvent.submit(document.querySelector("[data-upload-form]"));
-  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
+  expect(screen.getByLabelText("Choose local videos")).toBeEnabled();
   fireEvent.change(screen.getByLabelText("Choose local videos"), { target: { files: [file] } });
 }
 
-test("destination is confirmed before local selection; upload uses bounded raw chunks and reports verified hash", async () => {
+test("local selection is immediately available; upload uses bounded raw chunks and reports verified hash", async () => {
   load();
-  expect(screen.getByLabelText("Choose local videos")).toBeDisabled();
+  expect(screen.getByLabelText("Choose local videos")).toBeEnabled();
   await select(new File([new Uint8Array(8 * 1024 * 1024 + 3)], "clip.mp4"));
   fireEvent.click(screen.getByRole("button", { name: "Upload selected videos" }));
   await screen.findByText(/SHA-256/);
@@ -468,7 +502,7 @@ test("server upload errors are visible and a retry restarts only that file at it
   fireEvent.click(screen.getByRole("button", { name: "Upload selected videos" }));
   await screen.findByText(/Permission denied/);
   await waitFor(() => expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled());
-  screen.getByLabelText("ADLS destination folder").value = "other";
+  document.querySelector("[data-upload-form]").dataset.uploadFolder = "other";
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await screen.findByText(/SHA-256/);
   const starts = fetch.mock.calls.filter(([url]) => url.endsWith("/uploads"));
@@ -519,8 +553,7 @@ test("a mixed batch uploads only pending files and keeps completed files out of 
   fireEvent.change(screen.getByLabelText("Choose local videos"), {
     target: { files: [new File(["bad"], "skip.txt"), new File(["defg"], "second.mov")] },
   });
-  expect(screen.getAllByText("Ready to upload to the confirmed ADLS destination.")).toHaveLength(2);
-  expect(screen.getByText("Destination confirmed. Choose local videos, then start uploading.")).toBeVisible();
+  expect(screen.getAllByText("Ready to upload to the current ADLS folder.")).toHaveLength(2);
   const rows = document.querySelectorAll("[data-upload-results] li");
   expect(rows[1].querySelector("button")).toBeDisabled();
   expect(rows[0].querySelector("p[role=status]")).toHaveTextContent("Ready to upload");
@@ -545,7 +578,7 @@ test("a mixed batch uploads only pending files and keeps completed files out of 
   fireEvent.click(start);
   await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.endsWith("/uploads"))).toHaveLength(3));
   await waitFor(() => expect(screen.getAllByText(`Uploaded. SHA-256: ${"a".repeat(64)}`)).toHaveLength(3));
-  await waitFor(() => expect(screen.getByRole("button", { name: "Confirm destination" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
   expect(start).toBeDisabled();
   expect(sent).toHaveLength(3);
   const leave = new Event("beforeunload", { cancelable: true });
@@ -594,7 +627,7 @@ test("folder dialog preserves focus, resets fields, and prevents native form nav
   expect(confirm).not.toBeChecked();
   window.dispatchEvent(new Event("pagehide"));
   expect(document.querySelector("dialog").open).toBe(false);
-  await waitFor(() => expect(screen.getByRole("button", { name: "Confirm destination" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
   expect(fetch).toHaveBeenCalledTimes(1);
 });
 
@@ -754,7 +787,6 @@ test.each(["cancel", "pagehide"])("%s during staging creation cancels the return
     new Promise(resolve => { resolveStart = resolve; }) : normal(url, options));
   fireEvent.click(screen.getByRole("button", { name: "Upload selected videos" }));
   await waitFor(() => expect(resolveStart).toBeDefined());
-  expect(screen.getByLabelText("ADLS destination folder")).toHaveAttribute("readonly");
   expect(screen.getByLabelText("Choose local videos")).toBeDisabled();
   expect(screen.getByText("Retry", { selector: "button" })).toBeDisabled();
   if (kind === "cancel") fireEvent.click(screen.getByRole("button", { name: "Cancel upload" }));
@@ -780,10 +812,13 @@ test("page closure while reviewing a batch stops later files and closes replacem
   window.dispatchEvent(new Event("pagehide"));
   review({ ok: true, json: async () => ({ exists: true, path: "north/first.mp4", size: 3, confirmation: "signed" }) });
   await screen.findByText("Upload cancelled.");
-  await waitFor(() => expect(screen.getByRole("button", { name: "Confirm destination" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("Choose local videos")).toBeEnabled());
   expect(document.querySelector("dialog").open).toBe(false);
   expect(fetch.mock.calls.filter(([url]) => url.endsWith("/review"))).toHaveLength(1);
   expect(fetch.mock.calls.filter(([url]) => url.endsWith("/uploads"))).toHaveLength(0);
+  expect(document.querySelectorAll("[data-upload-results] li")[1]).toHaveTextContent(
+    "Ready to upload to the current ADLS folder.",
+  );
 });
 
 test.each(["missing-confirmation", "creation-recovery", "bad-status"])("%s remains an explicit protocol error", async mode => {

@@ -420,6 +420,10 @@ bytes before creating final manifests with destination URIs and ETags. See the
 for the complete CSV schema, Azure identity requirements, retry behavior, and
 backfill registration procedure.
 
+Preparation exits with code `0` on success, `2` when videos are rejected, and
+`1` for manifest errors such as inventory entries for missing videos. Manifest
+errors are printed to stderr with the affected path instead of a Python traceback.
+
 ### Build CPU or GPU deployment bundles
 
 The [bundle generator](scripts/build_sdk_bundle.py) builds the SDK wheel,

@@ -5,6 +5,7 @@
 {% call heading('Recalibrate camera' if configs else 'Calibrate camera', camera.display_name ~ ' (' ~ camera.id ~ ')', 'Camera calibration') %}
 <a class="btn btn-secondary" href="{{ url_for('camera_footage', camera_id=camera.id) }}">&larr; Camera footage</a>
 {% endcall %}
+<div data-media-content class="section-stack">
 <div class="workflow-note"><p>The camera and location are fixed. Reference footage supplies a frame only. Saving replaces this camera line for future packages; it never changes footage ownership, capture times, or video exceptions.</p></div>
 <section class="card"><div class="card-body">
   {% if not videos %}<p>Assign valid footage to this camera before calibrating it.</p><a class="btn" href="{{ url_for('footage') }}">Assign footage</a>
@@ -27,4 +28,5 @@
   {% else %}<div class="alert alert-warning" role="alert"><div>{% for issue in readiness.issues if issue.scope == 'assignment' %}<p>{{ issue.message }} {{ issue.action }}</p>{% endfor %}<p>Choose another associated reference or repair the video.</p></div></div>{% endif %}
   {% endif %}
 </div></section>
+</div>
 {% endblock %}

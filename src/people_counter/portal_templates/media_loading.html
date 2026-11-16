@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% from "components.html" import heading %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+{% call heading(title, description, 'Footage') %}<a class="btn btn-secondary" href="{{ back_url }}">Back to footage</a>{% endcall %}
+<div class="section-stack" data-media-content data-media-url="{{ media_url }}" aria-busy="true">
+<section class="card"><div class="card-body">
+  <p data-media-status role="status">Loading footage preview and media checks in the background. You can navigate away at any time.</p>
+  <button type="button" class="btn-secondary" data-media-retry hidden>Retry loading footage</button>
+  <noscript><a href="{{ media_url }}">Load footage checks and preview</a> (JavaScript is disabled).</noscript>
+</div></section>
+</div>
+{% endblock %}
