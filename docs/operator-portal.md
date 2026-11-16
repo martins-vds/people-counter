@@ -220,6 +220,9 @@ retrying 403s; refresh the execution identity and re-review affected jobs.
 Interactive ADLS metadata reads disable Storage SDK retries and use explicit
 10-second connection and read timeouts. These are per-network-operation limits,
 not a 10-second deadline for an entire batch or Azure credential acquisition.
+Remote probe/frame workers use process-local Storage HTTP pools: forked decoders
+never use or close the portal process's pooled Storage TLS connections. Identity guards,
+ETag pinning and preview byte/time limits still apply to decoder reads.
 Failures identify the video, exception type, HTTP status, storage error code and
 request ID when available. The same safe details are logged without raw SDK
 response bodies or credential material. Resolve the reported storage condition

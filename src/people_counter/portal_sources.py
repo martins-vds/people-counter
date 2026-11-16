@@ -89,6 +89,7 @@ class AdlsFootageSource:
 
     def _open(self) -> Any:
         from azure.storage.filedatalake import DataLakeServiceClient
+        from people_counter.portal_transport import ProcessLocalTransport
 
         self.execution_identity = self.azure.require_identity()
         credential = self.azure.credential(self.execution_identity)
@@ -97,6 +98,7 @@ class AdlsFootageSource:
                 f"https://{self.account}.dfs.core.windows.net", credential=credential,
                 max_single_get_size=8 * 1024 * 1024, max_chunk_get_size=8 * 1024 * 1024,
                 connection_timeout=10, read_timeout=10,
+                transport=ProcessLocalTransport(connection_timeout=10, read_timeout=10),
                 _additional_pipeline_policies=[self.azure.policy(self.execution_identity)],
             )
             resources.callback(service.close)
