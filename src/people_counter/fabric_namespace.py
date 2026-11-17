@@ -37,7 +37,7 @@ BENCHMARK_TABLE_PREFIX = "pc_ca_benchmark_v1_"
 BENCHMARK_FILES_ROOT = "Files/_benchmark/people-counter/sjd/v1/"
 PRODUCTION_SHADOW_TABLE_PREFIX = "pc_ca_prod_shadow_v1_"
 PRODUCTION_SHADOW_FILES_ROOT = "Files/_shadow/people-counter/sjd/v1/"
-PRODUCTION_TABLE_PREFIX = "people_counter_ca_"
+PRODUCTION_TABLE_PREFIX = "people_counter_sjd_"
 PRODUCTION_FILES_ROOT = "Files/people-counter/sjd/v1/"
 LEGACY_TABLE_PREFIX = "people_counter_"
 

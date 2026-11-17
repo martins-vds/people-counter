@@ -75,7 +75,7 @@ def test_namespace_literals_are_the_reviewed_contract() -> None:
         "pc_ca_prod_shadow_v1_",
         "Files/_shadow/people-counter/sjd/v1/",
     )
-    assert PRODUCTION_TABLE_PREFIX == "people_counter_ca_"
+    assert PRODUCTION_TABLE_PREFIX == "people_counter_sjd_"
 
 
 def test_default_and_legacy_constructor_preserve_canary_semantics() -> None:

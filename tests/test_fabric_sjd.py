@@ -55,7 +55,7 @@ def test_stable_config_is_fixed_and_contains_no_candidate_or_shadow_tables() -> 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("table_prefix", "people_counter_ca_"),
+        ("table_prefix", "pc_ca_canary_v1_"),
         ("stable_production", False),
     ],
 )
