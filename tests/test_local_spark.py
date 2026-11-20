@@ -107,6 +107,33 @@ def test_local_processing_rejects_manifest_staging_mismatch_before_spark(tmp_pat
 
 
 class LocalSparkTests(unittest.TestCase):
+    def test_verified_video_copies_spark_file_into_bounded_content_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_root = Path(temporary) / "source"
+            source_root.mkdir()
+            content = b"video"
+            digest = hashlib.sha256(content).hexdigest()
+            (source_root / digest).write_bytes(content)
+            spark_root = Path(temporary) / "spark"
+            spark_files = SimpleNamespace(
+                get=lambda name: str(source_root / name),
+                getRootDirectory=lambda: str(spark_root),
+            )
+            work = {
+                "resolver_backend": "FABRIC_FALLBACK",
+                "spark_localized_video_name": digest,
+                "source_sha256": digest,
+            }
+            with patch.dict(
+                "sys.modules",
+                {"pyspark": SimpleNamespace(SparkFiles=spark_files)},
+            ):
+                first = _verified_video(work)
+                second = _verified_video(work)
+            self.assertEqual(first, spark_root / "content-addressed" / digest)
+            self.assertEqual(second, first)
+            self.assertEqual(first.read_bytes(), content)
+
     def test_localized_models_are_confined_copied_verified_and_reused(self):
         with tempfile.TemporaryDirectory() as temporary:
             source_root = Path(temporary) / "source"

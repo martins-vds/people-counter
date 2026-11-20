@@ -10,6 +10,7 @@ import os
 import platform
 import socket
 import subprocess
+import threading
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from people_counter.fabric_input_resolver import (
     resolve_direct_mounted_path,
     stream_sha256,
 )
+from people_counter.fabric_source_cache import LocalizedSourceCache, SourceCacheError
 from people_counter.models import RunResult
 from people_counter.inference_profiles import validate_profile
 
@@ -34,6 +36,10 @@ from people_counter.inference_profiles import validate_profile
 ProcessorMode = Literal["probe", "sdk"]
 MANIFEST_VERSION = 1
 MAX_VIDEOS_PER_PARTITION = 2
+_FALLBACK_CACHE_MAX_ENTRIES = 256
+_FALLBACK_CACHE_MAX_TOTAL_BYTES = 16 * 1024**3
+_FALLBACK_CACHES: dict[Path, LocalizedSourceCache] = {}
+_FALLBACK_CACHES_LOCK = threading.Lock()
 
 
 class ManifestValidationError(ValueError):
@@ -607,23 +613,66 @@ def _verified_video(work: Mapping[str, Any]) -> Path:
         localized = work.get("spark_localized_video_name")
         if localized is None:
             video = Path(_required_text(work, "source_video"))
-        else:
+        elif work.get("source_sha256") is None:
             from pyspark import SparkFiles
 
-            video = Path(
-                SparkFiles.get(_required_text(work, "spark_localized_video_name"))
+            video = Path(SparkFiles.get(str(localized)))
+        else:
+            video = _verified_spark_file(
+                _required_text(work, "spark_localized_video_name"),
+                _required_text(work, "source_sha256"),
             )
     expected = work.get("source_sha256")
     if expected is None:
         return video
     if not isinstance(expected, str) or len(expected) != 64:
         raise ValueError("source_sha256 must be a SHA-256 digest")
+    if work.get("resolver_backend") != "FABRIC_DIRECT" and work.get(
+        "spark_localized_video_name"
+    ) is not None:
+        return video
     actual, _ = stream_sha256(video)
     if actual != expected:
         raise ValueError(
             f"source SHA-256 mismatch for {video}: expected {expected}, got {actual}"
         )
     return video
+
+
+def _verified_spark_file(localized_name: str, expected_sha256: str) -> Path:
+    """Admit a SparkFile into this executor process's bounded local cache."""
+    from pyspark import SparkFiles
+
+    source = Path(SparkFiles.get(localized_name))
+    size_bytes = source.stat().st_size
+    get_root = getattr(SparkFiles, "getRootDirectory", None)
+    if get_root is None:
+        actual, _ = stream_sha256(source)
+        if actual != expected_sha256:
+            raise ValueError(
+                f"localized Spark file SHA-256 mismatch for {localized_name}"
+            )
+        return source
+    root = Path(get_root()) / "content-addressed"
+    with _FALLBACK_CACHES_LOCK:
+        cache = _FALLBACK_CACHES.get(root)
+        if cache is None:
+            cache = LocalizedSourceCache(
+                root,
+                max_entries=_FALLBACK_CACHE_MAX_ENTRIES,
+                max_total_bytes=_FALLBACK_CACHE_MAX_TOTAL_BYTES,
+            )
+            _FALLBACK_CACHES[root] = cache
+    try:
+        return cache.get_or_stage(
+            expected_sha256,
+            size_bytes=size_bytes,
+            stager=lambda destination: link_or_stream_copy(source, destination),
+        ).path
+    except SourceCacheError as error:
+        raise ValueError(
+            f"localized Spark file SHA-256 mismatch for {localized_name}"
+        ) from error
 
 
 def _localized_models_dir(work: Mapping[str, Any]) -> Path | None:
@@ -663,8 +712,10 @@ def _localized_models_dir(work: Mapping[str, Any]) -> Path | None:
             or not isinstance(metadata, Mapping)
         ):
             raise ValueError("invalid localized model mapping")
-        source = Path(SparkFiles.get(_required_text(metadata, "localized_name")))
         expected = _required_text(metadata, "sha256")
+        source = _verified_spark_file(
+            _required_text(metadata, "localized_name"), expected
+        )
         destination = root / relative
         if not destination.exists():
             link_or_stream_copy(source, destination)

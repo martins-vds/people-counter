@@ -12,6 +12,7 @@ import importlib.metadata
 import json
 import math
 import os
+import shutil
 import socket
 import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -943,7 +944,42 @@ class ExecutionHarness(Protocol):
         plan: ExecutionPlan,
         profile: ExecutionProfile,
         mode: Mode,
-    ) -> list[dict[str, Any]]: ...
+    ) -> Iterable[Mapping[str, Any]]: ...
+
+
+@dataclass(frozen=True)
+class ExecutionRecords:
+    """Repeatable, driver-bounded process output.
+
+    The factory must be cheap to reopen and return records in the same stable
+    order.  Spark-backed callers can also attach a Delta frame so attempt
+    persistence can copy it without collecting Python dictionaries.
+    """
+
+    factory: Callable[[], Iterable[Mapping[str, Any]]]
+    record_count: int | None = None
+    delta_frame: Any | None = None
+
+    def __iter__(self):
+        return iter(self.factory())
+
+    def __len__(self) -> int:
+        if self.record_count is None:
+            raise TypeError("streaming execution records have no known cardinality")
+        return self.record_count
+
+    def __getitem__(self, index: int | slice) -> Any:
+        if type(index) is int and index >= 0:
+            for current, record in enumerate(self):
+                if current == index:
+                    return record
+            raise IndexError(index)
+        if isinstance(index, slice):
+            if index.start is None or index.start < 0 or index.stop is None:
+                raise IndexError("streaming execution records require a bounded slice")
+            values = list(self)[index]
+            return values
+        raise IndexError(index)
 
 
 class DirectExecutionHarness:
@@ -1314,6 +1350,10 @@ _DELTA_STAGE_COLUMNS = (
     "attempt_number",
     "record_ordinal",
     "record_json",
+    "work_id",
+    "attempt_id",
+    "record_type",
+    "record_sequence",
     "record_count",
     "work_ids_json",
     "content_sha256",
@@ -1322,6 +1362,8 @@ _DELTA_STAGE_COLUMNS = (
 _DELTA_STAGE_SCHEMA = (
     "row_kind string, physical_partition long, task_attempt_id long, "
     "attempt_number long, record_ordinal long, record_json string, "
+    "work_id string, attempt_id string, record_type string, "
+    "record_sequence long, "
     "record_count long, work_ids_json string, content_sha256 string, "
     "content_size_bytes long"
 )
@@ -1360,6 +1402,10 @@ def execute_sjd_bucket_partition_delta(
             "attempt_number": identity.attempt_number,
             "record_ordinal": ordinal,
             "record_json": _canonical(record),
+            "work_id": record.get("work_id"),
+            "attempt_id": record.get("attempt_id"),
+            "record_type": record.get("record_type"),
+            "record_sequence": record.get("record_sequence"),
             "record_count": None,
             "work_ids_json": None,
             "content_sha256": None,
@@ -1375,6 +1421,10 @@ def execute_sjd_bucket_partition_delta(
             "attempt_number": identity.attempt_number,
             "record_ordinal": None,
             "record_json": None,
+            "work_id": None,
+            "attempt_id": None,
+            "record_type": None,
+            "record_sequence": None,
             "record_count": receipt.record_count,
             "work_ids_json": _canonical(list(receipt.work_ids)),
             "content_sha256": receipt.content_sha256,
@@ -1481,7 +1531,7 @@ def _delta_receipts(frame: Any, maximum_receipts: int) -> list[PartitionStagingR
 def _read_selected_delta_records(
     frame: Any,
     receipts: Sequence[PartitionStagingReceipt],
-) -> list[dict[str, Any]]:
+) -> Iterable[dict[str, Any]]:
     identities = " OR ".join(
         "("
         f"physical_partition = {receipt.physical_partition} AND "
@@ -1498,10 +1548,42 @@ def _read_selected_delta_records(
             "attempt_number",
             "record_ordinal",
             "record_json",
+            "work_id",
+            "attempt_id",
+            "record_type",
+            "record_sequence",
         )
         .orderBy("physical_partition", "record_ordinal")
     )
-    grouped: dict[tuple[int, int, int], list[tuple[int, dict[str, Any]]]] = {}
+    positions = {
+        (
+            receipt.physical_partition,
+            receipt.task_attempt_id,
+            receipt.attempt_number,
+        ): index
+        for index, receipt in enumerate(receipts)
+    }
+    current = 0
+    seen = 0
+    digest = hashlib.sha256(b"[")
+    size = 1
+
+    def finish(receipt: PartitionStagingReceipt) -> None:
+        nonlocal digest, size
+        digest.update(b"]")
+        size += 1
+        if seen != receipt.record_count:
+            raise StagingConflictError(
+                f"partition {receipt.physical_partition} Delta record ordinals differ"
+            )
+        if (
+            size != receipt.content_size_bytes
+            or digest.hexdigest() != receipt.content_sha256
+        ):
+            raise StagingConflictError(
+                f"partition {receipt.physical_partition} Delta content differs"
+            )
+
     rows = selected.toLocalIterator()
     try:
         for raw in rows:
@@ -1517,35 +1599,44 @@ def _read_selected_delta_records(
                 int(row["task_attempt_id"]),
                 int(row["attempt_number"]),
             )
-            grouped.setdefault(identity, []).append((int(row["record_ordinal"]), value))
+            position = positions.get(identity)
+            if position is None:
+                raise StagingConflictError(
+                    "Delta staged record does not match a selected receipt"
+                )
+            if position < current:
+                raise StagingConflictError(
+                    "Delta staged records are not receipt ordered"
+                )
+            while current < position:
+                finish(receipts[current])
+                current += 1
+                seen = 0
+                digest = hashlib.sha256(b"[")
+                size = 1
+            receipt = receipts[current]
+            if int(row["record_ordinal"]) != seen:
+                raise StagingConflictError(
+                    f"partition {receipt.physical_partition} Delta record ordinals differ"
+                )
+            canonical = _canonical(value).encode("utf-8")
+            if seen:
+                digest.update(b",")
+                size += 1
+            digest.update(canonical)
+            size += len(canonical)
+            seen += 1
+            yield value
     finally:
         close = getattr(rows, "close", None)
         if callable(close):
             close()
-    records: list[dict[str, Any]] = []
-    for receipt in receipts:
-        identity = (
-            receipt.physical_partition,
-            receipt.task_attempt_id,
-            receipt.attempt_number,
-        )
-        values = grouped.get(identity, [])
-        if [ordinal for ordinal, _ in values] != list(range(receipt.record_count)):
-            raise StagingConflictError(
-                f"partition {receipt.physical_partition} Delta record ordinals differ"
-            )
-        ordered = [value for _, value in values]
-        content = _canonical(ordered)
-        if (
-            len(content.encode("utf-8")) != receipt.content_size_bytes
-            or hashlib.sha256(content.encode("utf-8")).hexdigest()
-            != receipt.content_sha256
-        ):
-            raise StagingConflictError(
-                f"partition {receipt.physical_partition} Delta content differs"
-            )
-        records.extend(ordered)
-    return records
+    while current < len(receipts):
+        finish(receipts[current])
+        current += 1
+        seen = 0
+        digest = hashlib.sha256(b"[")
+        size = 1
 
 
 class StreamingSparkExecutionHarness:
@@ -1672,13 +1763,48 @@ class StreamingSparkExecutionHarness:
                     "do not match its planned bucket"
                 )
         if frame is not None:
-            return _read_selected_delta_records(frame, selected)
-        records: list[dict[str, Any]] = []
-        for receipt in sorted(selected, key=lambda item: item.physical_partition):
-            records.extend(
-                read_staged_partition_records(Path(self.staging_root), receipt)
+            selected_frame = (
+                frame.where("row_kind = 'record'")
+                .where(
+                    " OR ".join(
+                        "("
+                        f"physical_partition = {receipt.physical_partition} AND "
+                        f"task_attempt_id = {receipt.task_attempt_id} AND "
+                        f"attempt_number = {receipt.attempt_number}"
+                        ")"
+                        for receipt in selected
+                    )
+                )
+                .select(
+                    "physical_partition",
+                    "task_attempt_id",
+                    "attempt_number",
+                    "record_ordinal",
+                    "record_json",
+                    "work_id",
+                    "attempt_id",
+                    "record_type",
+                    "record_sequence",
+                )
+                .orderBy("work_id", "attempt_id", "record_type", "record_sequence")
             )
-        return records
+            return ExecutionRecords(
+                lambda: _read_selected_delta_records(frame, selected),
+                record_count=sum(receipt.record_count for receipt in selected),
+                delta_frame=selected_frame,
+            )
+        receipts = sorted(selected, key=lambda item: item.physical_partition)
+
+        def read_receipts() -> Iterable[dict[str, Any]]:
+            for receipt in receipts:
+                yield from read_staged_partition_records(
+                    Path(self.staging_root), receipt
+                )
+
+        return ExecutionRecords(
+            read_receipts,
+            record_count=sum(receipt.record_count for receipt in receipts),
+        )
 
 
 def _verify_live_spark_settings(spark: Any, profile: ExecutionProfile) -> None:
@@ -1706,12 +1832,16 @@ class AttemptAdapter(Protocol):
         self,
         batch_id: str,
         process_attempt_id: str,
-        records: Sequence[Mapping[str, Any]],
+        records: Iterable[Mapping[str, Any]],
     ) -> Path: ...
 
     def read_records(
         self, batch_id: str, process_attempt_id: str
     ) -> list[dict[str, Any]]: ...
+
+    def iter_records(
+        self, batch_id: str, process_attempt_id: str
+    ) -> Iterable[Mapping[str, Any]]: ...
 
     def create_success(
         self,
@@ -1719,6 +1849,8 @@ class AttemptAdapter(Protocol):
         process_attempt_id: str,
         marker: Mapping[str, Any],
     ) -> None: ...
+
+    def delete_batch(self, batch_id: str) -> None: ...
 
 
 class LocalJsonAttemptAdapter:
@@ -1752,7 +1884,7 @@ class LocalJsonAttemptAdapter:
         self,
         batch_id: str,
         process_attempt_id: str,
-        records: Sequence[Mapping[str, Any]],
+        records: Iterable[Mapping[str, Any]],
     ) -> Path:
         path = self.attempt_path(batch_id, process_attempt_id)
         if path.exists():
@@ -1769,10 +1901,15 @@ class LocalJsonAttemptAdapter:
     def read_records(
         self, batch_id: str, process_attempt_id: str
     ) -> list[dict[str, Any]]:
+        return list(self.iter_records(batch_id, process_attempt_id))
+
+    def iter_records(
+        self, batch_id: str, process_attempt_id: str
+    ) -> Iterable[Mapping[str, Any]]:
         path = self.attempt_path(batch_id, process_attempt_id) / "records.json"
         if not path.is_file():
             raise StagingConflictError(f"attempt records are missing at {path}")
-        return _ordered_records(_read_json(path, expected_type=list))
+        yield from _ordered_records(_read_json(path, expected_type=list))
 
     def create_success(
         self,
@@ -1791,6 +1928,11 @@ class LocalJsonAttemptAdapter:
             if marker_path.read_text(encoding="utf-8") != content:
                 raise ImmutableConflictError("_SUCCESS marker conflicts with this attempt")
 
+    def delete_batch(self, batch_id: str) -> None:
+        path = self.root / f"batch={_path_segment(batch_id)}"
+        if path.exists():
+            shutil.rmtree(path)
+
 
 class SparkDeltaAttemptAdapter:
     """Immutable Delta attempt storage used when the Spark harness is selected."""
@@ -1807,24 +1949,44 @@ class SparkDeltaAttemptAdapter:
     def load_complete(
         self, batch_id: str, process_attempt_id: str
     ) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+        complete = self.load_complete_stream(batch_id, process_attempt_id)
+        if complete is None:
+            return None
+        _, marker = complete
+        return self.read_records(batch_id, process_attempt_id), marker
+
+    def load_complete_stream(
+        self, batch_id: str, process_attempt_id: str
+    ) -> tuple[Iterable[Mapping[str, Any]], dict[str, Any]] | None:
         path = self.attempt_path(batch_id, process_attempt_id)
         marker_path = path / "_SUCCESS"
         if not path.exists():
             return None
         if not marker_path.is_file() or not (path / "_delta_log").is_dir():
             raise StagingConflictError(f"partial Delta attempt staging exists at {path}")
-        rows = self.spark_session.read.format("delta").load(str(path)).collect()
-        records = _ordered_records(
-            [json.loads(row["record_json"]) for row in rows]
-        )
         marker = _read_json(marker_path, expected_type=dict)
-        return records, dict(marker)
+        return (
+            self.record_source(batch_id, process_attempt_id),
+            dict(marker),
+        )
+
+    def record_source(
+        self, batch_id: str, process_attempt_id: str
+    ) -> ExecutionRecords:
+        path = self.attempt_path(batch_id, process_attempt_id)
+        if not (path / "_delta_log").is_dir():
+            raise StagingConflictError(f"attempt Delta records are missing at {path}")
+        frame = self.spark_session.read.format("delta").load(str(path))
+        return ExecutionRecords(
+            lambda: _iter_delta_attempt_records(frame),
+            delta_frame=frame,
+        )
 
     def write_records(
         self,
         batch_id: str,
         process_attempt_id: str,
-        records: Sequence[Mapping[str, Any]],
+        records: Iterable[Mapping[str, Any]],
     ) -> Path:
         path = self.attempt_path(batch_id, process_attempt_id)
         if path.exists():
@@ -1833,6 +1995,8 @@ class SparkDeltaAttemptAdapter:
             {
                 "work_id": str(record["work_id"]),
                 "attempt_id": str(record["attempt_id"]),
+                "record_type": str(record["record_type"]),
+                "record_sequence": int(record["record_sequence"]),
                 "record_json": _canonical(dict(record)),
             }
             for record in records
@@ -1853,10 +2017,14 @@ class SparkDeltaAttemptAdapter:
         path = self.attempt_path(batch_id, process_attempt_id)
         if not (path / "_delta_log").is_dir():
             raise StagingConflictError(f"attempt Delta records are missing at {path}")
-        rows = self.spark_session.read.format("delta").load(str(path)).collect()
-        return _ordered_records(
-            [json.loads(row["record_json"]) for row in rows]
+        return _read_delta_attempt_records(
+            self.spark_session.read.format("delta").load(str(path))
         )
+
+    def iter_records(
+        self, batch_id: str, process_attempt_id: str
+    ) -> Iterable[Mapping[str, Any]]:
+        return iter(self.record_source(batch_id, process_attempt_id))
 
     def create_success(
         self,
@@ -1867,6 +2035,9 @@ class SparkDeltaAttemptAdapter:
         LocalJsonAttemptAdapter(self.root).create_success(
             batch_id, process_attempt_id, marker
         )
+
+    def delete_batch(self, batch_id: str) -> None:
+        LocalJsonAttemptAdapter(self.root).delete_batch(batch_id)
 
 
 class OneLakeDeltaAttemptAdapter:
@@ -1944,6 +2115,15 @@ class OneLakeDeltaAttemptAdapter:
     def load_complete(
         self, batch_id: str, process_attempt_id: str
     ) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+        complete = self.load_complete_stream(batch_id, process_attempt_id)
+        if complete is None:
+            return None
+        _, marker = complete
+        return self.read_records(batch_id, process_attempt_id), marker
+
+    def load_complete_stream(
+        self, batch_id: str, process_attempt_id: str
+    ) -> tuple[Iterable[Mapping[str, Any]], dict[str, Any]] | None:
         path = self.attempt_path(batch_id, process_attempt_id)
         has_delta = self.files.exists(f"{path}/_delta_log")
         has_marker = self.files.exists(f"{path}/_SUCCESS")
@@ -1953,7 +2133,6 @@ class OneLakeDeltaAttemptAdapter:
             raise StagingConflictError(
                 f"partial OneLake Delta attempt staging exists at {path}"
             )
-        records = self.read_records(batch_id, process_attempt_id)
         try:
             marker = json.loads(self.files.read_text(f"{path}/_SUCCESS"))
         except (OSError, json.JSONDecodeError) as error:
@@ -1962,63 +2141,20 @@ class OneLakeDeltaAttemptAdapter:
             ) from error
         if not isinstance(marker, dict):
             raise StagingConflictError("_SUCCESS marker must be an object")
-        return records, marker
-
-    def write_records(
-        self,
-        batch_id: str,
-        process_attempt_id: str,
-        records: Sequence[Mapping[str, Any]],
-    ) -> str:
-        path = self.attempt_path(batch_id, process_attempt_id)
-        if self.files.exists(f"{path}/_delta_log") or self.files.exists(
-            f"{path}/_SUCCESS"
-        ):
-            raise StagingConflictError(
-                f"attempt staging already exists at {path}"
-            )
-        ordered = _ordered_records(records)
-        rows = [
-            {
-                "work_id": _text(record.get("work_id"), "work_id"),
-                "attempt_id": _text(record.get("attempt_id"), "attempt_id"),
-                "record_type": _text(
-                    record.get("record_type"), "record_type"
-                ),
-                "record_sequence": _nonnegative_int(
-                    record.get("record_sequence"), "record_sequence"
-                ),
-                "record_json": _canonical(record),
-            }
-            for record in ordered
-        ]
-        frame = self.spark_session.createDataFrame(rows, schema=self._SCHEMA)
-        spark_path = self.config.abfss_path(path)
-        (
-            frame.write.format("delta")
-            .mode("errorifexists")
-            .option("txnAppId", f"people-counter-sjd:{process_attempt_id}")
-            .option("txnVersion", "0")
-            .save(spark_path)
+        return (
+            self.record_source(batch_id, process_attempt_id),
+            marker,
         )
-        readback = self.read_records(batch_id, process_attempt_id)
-        if [_canonical(record) for record in readback] != [
-            _canonical(record) for record in ordered
-        ]:
-            raise StagingConflictError(
-                "OneLake Delta exact readback/cardinality verification failed"
-            )
-        return path
 
-    def read_records(
+    def record_source(
         self, batch_id: str, process_attempt_id: str
-    ) -> list[dict[str, Any]]:
+    ) -> ExecutionRecords:
         path = self.attempt_path(batch_id, process_attempt_id)
         if not self.files.exists(f"{path}/_delta_log"):
             raise StagingConflictError(
                 f"attempt Delta records are missing at {path}"
             )
-        rows = (
+        frame = (
             self.spark_session.read.format("delta")
             .load(self.config.abfss_path(path))
             .select(
@@ -2028,28 +2164,174 @@ class OneLakeDeltaAttemptAdapter:
                 "record_sequence",
                 "record_json",
             )
-            .collect()
         )
-        records: list[dict[str, Any]] = []
-        for row in rows:
-            try:
-                record = json.loads(row["record_json"])
-            except (TypeError, json.JSONDecodeError) as error:
-                raise StagingConflictError(
-                    "OneLake Delta record_json is invalid"
-                ) from error
-            if (
-                not isinstance(record, dict)
-                or record.get("work_id") != row["work_id"]
-                or record.get("attempt_id") != row["attempt_id"]
-                or record.get("record_type") != row["record_type"]
-                or record.get("record_sequence") != row["record_sequence"]
-            ):
-                raise StagingConflictError(
-                    "OneLake Delta record columns differ from record_json"
-                )
-            records.append(record)
-        return _ordered_records(records)
+        return ExecutionRecords(
+            lambda: _iter_delta_attempt_records(frame, validate_columns=True),
+            delta_frame=frame,
+        )
+
+    def write_records(
+        self,
+        batch_id: str,
+        process_attempt_id: str,
+        records: Iterable[Mapping[str, Any]],
+    ) -> str:
+        path = self.attempt_path(batch_id, process_attempt_id)
+        if self.files.exists(f"{path}/_delta_log") or self.files.exists(
+            f"{path}/_SUCCESS"
+        ):
+            raise StagingConflictError(
+                f"attempt staging already exists at {path}"
+            )
+        delta_frame = getattr(records, "delta_frame", None)
+        if delta_frame is not None:
+            frame = delta_frame.select(
+                "work_id",
+                "attempt_id",
+                "record_type",
+                "record_sequence",
+                "record_json",
+            )
+        else:
+            ordered = _ordered_records(records)
+            rows = [
+                {
+                    "work_id": _text(record.get("work_id"), "work_id"),
+                    "attempt_id": _text(record.get("attempt_id"), "attempt_id"),
+                    "record_type": _text(record.get("record_type"), "record_type"),
+                    "record_sequence": _nonnegative_int(
+                        record.get("record_sequence"), "record_sequence"
+                    ),
+                    "record_json": _canonical(record),
+                }
+                for record in ordered
+            ]
+            frame = self.spark_session.createDataFrame(rows, schema=self._SCHEMA)
+            records = ordered
+        spark_path = self.config.abfss_path(path)
+        (
+            frame.write.format("delta")
+            .mode("errorifexists")
+            .option("txnAppId", f"people-counter-sjd:{process_attempt_id}")
+            .option("txnVersion", "0")
+            .save(spark_path)
+        )
+        expected = (
+            _iter_delta_attempt_records(delta_frame)
+            if delta_frame is not None
+            else iter(records)
+        )
+        readback = self.iter_records(batch_id, process_attempt_id)
+        try:
+            for actual, original in zip(readback, expected, strict=True):
+                if _canonical(actual) != _canonical(original):
+                    raise StagingConflictError(
+                        "OneLake Delta exact readback/cardinality verification failed"
+                    )
+        except ValueError as error:
+            raise StagingConflictError(
+                "OneLake Delta exact readback/cardinality verification failed"
+            ) from error
+        return path
+
+    def publish_records(
+        self,
+        batch_id: str,
+        process_attempt_id: str,
+        records: Iterable[Mapping[str, Any]],
+    ) -> None:
+        """Idempotently copy one immutable attempt into the shared Delta index."""
+        from delta.tables import DeltaTable
+        from pyspark.sql import functions as F
+
+        source = getattr(records, "delta_frame", None)
+        if source is None:
+            source = self.record_source(
+                batch_id, process_attempt_id
+            ).delta_frame
+        incoming = (
+            source.select(
+                "work_id",
+                "attempt_id",
+                "record_type",
+                "record_sequence",
+                "record_json",
+            )
+            .withColumn("batch_id", F.lit(batch_id))
+            .withColumn("process_attempt_id", F.lit(process_attempt_id))
+            .select(
+                "batch_id",
+                "process_attempt_id",
+                "work_id",
+                "attempt_id",
+                "record_type",
+                "record_sequence",
+                "record_json",
+            )
+        )
+        table = self.config.table("committed_records")
+        keys = (
+            "batch_id",
+            "process_attempt_id",
+            "work_id",
+            "attempt_id",
+            "record_type",
+            "record_sequence",
+        )
+        condition = F.expr(
+            " AND ".join(
+                f"target.`{name}` = incoming.`{name}`" for name in keys
+            )
+        )
+        (
+            DeltaTable.forName(self.spark_session, table)
+            .alias("target")
+            .merge(incoming.alias("incoming"), condition)
+            .whenNotMatchedInsertAll()
+            .execute()
+        )
+        self.spark_session.catalog.refreshTable(table)
+        existing = (
+            self.spark_session.table(table)
+            .where(
+                (F.col("batch_id") == batch_id)
+                & (F.col("process_attempt_id") == process_attempt_id)
+            )
+            .select(incoming.columns)
+        )
+        if (
+            incoming.exceptAll(existing).limit(1).first() is not None
+            or existing.exceptAll(incoming).limit(1).first() is not None
+        ):
+            raise StagingConflictError(
+                "committed record publication differs from immutable attempt"
+            )
+
+    def read_records(
+        self, batch_id: str, process_attempt_id: str
+    ) -> list[dict[str, Any]]:
+        path = self.attempt_path(batch_id, process_attempt_id)
+        if not self.files.exists(f"{path}/_delta_log"):
+            raise StagingConflictError(
+                f"attempt Delta records are missing at {path}"
+            )
+        frame = (
+            self.spark_session.read.format("delta")
+            .load(self.config.abfss_path(path))
+            .select(
+                "work_id",
+                "attempt_id",
+                "record_type",
+                "record_sequence",
+                "record_json",
+            )
+        )
+        return _read_delta_attempt_records(frame, validate_columns=True)
+
+    def iter_records(
+        self, batch_id: str, process_attempt_id: str
+    ) -> Iterable[Mapping[str, Any]]:
+        return iter(self.record_source(batch_id, process_attempt_id))
 
     def create_success(
         self,
@@ -2070,6 +2352,11 @@ class OneLakeDeltaAttemptAdapter:
                 )
         if self.files.read_text(path) != content:
             raise StagingConflictError("_SUCCESS exact readback failed")
+
+    def delete_batch(self, batch_id: str) -> None:
+        self.files.delete_tree(
+            f"{self.root}/process/batch={_path_segment(batch_id)}"
+        )
 
 
 class FabricAttemptAdapter(OneLakeDeltaAttemptAdapter):
@@ -2139,11 +2426,85 @@ class _Heartbeat:
 
 
 def validate_staged_records(
-    records: Sequence[Mapping[str, Any]],
+    records: Iterable[Mapping[str, Any]],
     envelope: VerifiedEnvelope,
     plan: ExecutionPlan,
 ) -> dict[str, list[dict[str, Any]]]:
     """Strictly verify membership, terminal cardinality, provenance, and hashes."""
+    return _validate_staged_records(
+        records, envelope, plan, retain_records=True
+    ).grouped
+
+
+@dataclass(frozen=True)
+class _ValidatedRecords:
+    grouped: dict[str, list[dict[str, Any]]]
+    record_count: int
+    records_sha256: str
+    failed_work_ids: tuple[str, ...]
+    outputs: tuple[dict[str, Any], ...]
+
+
+class _DeltaOutputRecords(Sequence[dict[str, Any]]):
+    """Lazy seal provenance backed by the authoritative Delta frame."""
+
+    def __init__(self, frame: Any, work_id: str) -> None:
+        self.frame = frame
+        self.work_id = work_id
+
+    def __iter__(self):
+        literal = "'" + self.work_id.replace("'", "''") + "'"
+        frame = self.frame.where(f"work_id = {literal}")
+        for record in _iter_delta_attempt_records(frame):
+            yield {
+                "executor_identity": record["executor_identity"],
+                "partition_id": record["partition_id"],
+                "task_attempt_id": record["task_attempt_id"],
+                "record_sequence": record["record_sequence"],
+            }
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
+
+    def __getitem__(self, index: int | slice) -> Any:
+        if isinstance(index, slice):
+            values = list(self)[index]
+            return values
+        if type(index) is not int:
+            raise TypeError("provenance index must be an integer or slice")
+        if index < 0:
+            values = list(self)
+            return values[index]
+        for position, value in enumerate(self):
+            if position == index:
+                return value
+        raise IndexError(index)
+
+
+class _CanonicalArrayDigest:
+    def __init__(self) -> None:
+        self._digest = hashlib.sha256(b"[")
+        self.count = 0
+
+    def append(self, value: Mapping[str, Any]) -> None:
+        if self.count:
+            self._digest.update(b",")
+        self._digest.update(_canonical(dict(value)).encode("utf-8"))
+        self.count += 1
+
+    def hexdigest(self) -> str:
+        digest = self._digest.copy()
+        digest.update(b"]")
+        return digest.hexdigest()
+
+
+def _validate_staged_records(
+    records: Iterable[Mapping[str, Any]],
+    envelope: VerifiedEnvelope,
+    plan: ExecutionPlan,
+    *,
+    retain_records: bool,
+) -> _ValidatedRecords:
     expected = {(item.work_id, item.attempt_id): item for item in envelope.items}
     mapping = {
         (planned.item.work_id, planned.item.attempt_id): planned
@@ -2151,10 +2512,36 @@ def validate_staged_records(
         for planned in bucket.items
     }
     by_identity = {identity: [] for identity in expected}
-    logical: set[tuple[str, str, int]] = set()
+    delta_frame = getattr(records, "delta_frame", None)
+    provenance: dict[str, Sequence[dict[str, Any]]] = {
+        item.work_id: (
+            _DeltaOutputRecords(delta_frame, item.work_id)
+            if delta_frame is not None
+            else []
+        )
+        for item in envelope.items
+    }
+    item_digests = {item.work_id: _CanonicalArrayDigest() for item in envelope.items}
+    records_digest = _CanonicalArrayDigest()
+    if delta_frame is not None:
+        duplicate_count = (
+            delta_frame.groupBy("work_id", "attempt_id", "record_sequence")
+            .count()
+            .where("count > 1")
+            .limit(1)
+            .count()
+        )
+        if duplicate_count:
+            raise ProcessValidationError(
+                "duplicate staged logical record in Delta output"
+            )
+    logical: set[tuple[str, str, int]] | None = (
+        None if delta_frame is not None else set()
+    )
     terminal = {identity: 0 for identity in expected}
+    succeeded = {item.work_id: False for item in envelope.items}
     for raw in records:
-        record = dict(raw)
+        record = raw if type(raw) is dict else dict(raw)
         record_type, sequence, payload = _validate_staged_record_schema(record)
         identity = (
             _text(record.get("work_id"), "work_id"),
@@ -2165,9 +2552,12 @@ def validate_staged_records(
         item = expected[identity]
         planned = mapping[identity]
         key = (*identity, sequence)
-        if key in logical:
-            raise ProcessValidationError(f"duplicate staged logical record: {key!r}")
-        logical.add(key)
+        if logical is not None:
+            if key in logical:
+                raise ProcessValidationError(
+                    f"duplicate staged logical record: {key!r}"
+                )
+            logical.add(key)
         checks = {
             "batch_id": envelope.batch_id,
             "process_attempt_id": envelope.execution_attempt_id,
@@ -2203,18 +2593,59 @@ def validate_staged_records(
             raise ProcessValidationError(f"record payload hash mismatch for {identity!r}")
         if record_type in TERMINAL_TYPES:
             terminal[identity] += 1
+            succeeded[record["work_id"]] = record_type == "video_result"
             if (record_type == "error") != (record.get("status") == "FAILED"):
                 raise ProcessValidationError(f"terminal status mismatch for {identity!r}")
-        by_identity[identity].append(record)
+        if retain_records:
+            by_identity[identity].append(record)
+        if delta_frame is None:
+            target = provenance[record["work_id"]]
+            assert isinstance(target, list)
+            target.append(
+                {
+                    "executor_identity": record["executor_identity"],
+                    "partition_id": record["partition_id"],
+                    "task_attempt_id": record["task_attempt_id"],
+                    "record_sequence": record["record_sequence"],
+                }
+            )
+        item_digests[record["work_id"]].append(record)
+        records_digest.append(record)
     invalid = sorted(identity for identity, count in terminal.items() if count != 1)
     if invalid:
         raise ProcessValidationError(
             f"expected exactly one terminal record for {invalid!r}"
         )
-    return {
-        item.work_id: by_identity[(item.work_id, item.attempt_id)]
-        for item in envelope.items
-    }
+    grouped = (
+        {
+            item.work_id: by_identity[(item.work_id, item.attempt_id)]
+            for item in envelope.items
+        }
+        if retain_records
+        else {}
+    )
+    failed = []
+    outputs = []
+    for item in envelope.items:
+        item_provenance = provenance[item.work_id]
+        if not succeeded[item.work_id]:
+            failed.append(item.work_id)
+        outputs.append(
+            {
+                "work_id": item.work_id,
+                "attempt_id": item.attempt_id,
+                "succeeded": succeeded[item.work_id],
+                "output_sha256": item_digests[item.work_id].hexdigest(),
+                "records": item_provenance,
+            }
+        )
+    return _ValidatedRecords(
+        grouped=grouped,
+        record_count=records_digest.count,
+        records_sha256=records_digest.hexdigest(),
+        failed_work_ids=tuple(sorted(failed)),
+        outputs=tuple(outputs),
+    )
 
 
 def _validate_staged_record_schema(
@@ -2402,6 +2833,31 @@ def _verify_marker(
         raise StagingConflictError("complete marker conflicts with staged records")
 
 
+def _success_marker_from_validated(
+    envelope: VerifiedEnvelope,
+    validated: _ValidatedRecords,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "batch_id": envelope.batch_id,
+        "process_attempt_id": envelope.execution_attempt_id,
+        "envelope_sha256": envelope.envelope_sha256,
+        "membership_sha256": envelope.membership_sha256,
+        "record_count": validated.record_count,
+        "records_sha256": validated.records_sha256,
+        "failed_work_ids": list(validated.failed_work_ids),
+    }
+
+
+def _verify_marker_from_validated(
+    marker: Mapping[str, Any],
+    validated: _ValidatedRecords,
+    envelope: VerifiedEnvelope,
+) -> None:
+    if dict(marker) != _success_marker_from_validated(envelope, validated):
+        raise StagingConflictError("complete marker conflicts with staged records")
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     batch_id: str
@@ -2448,11 +2904,9 @@ def _load_process_context(
 
 
 def _committed_plan(
-    records: Sequence[Mapping[str, Any]],
+    records: Iterable[Mapping[str, Any]],
     envelope: VerifiedEnvelope,
 ) -> ExecutionPlan:
-    if not records:
-        raise StagingConflictError("committed batch has no staged records")
     decision_fields: set[tuple[int, int | None, bool]] = set()
     for record in records:
         _validate_staged_record_schema(record)
@@ -2463,6 +2917,8 @@ def _committed_plan(
                 record["duration_only_fallback"],
             )
         )
+    if not decision_fields:
+        raise StagingConflictError("committed batch has no staged records")
     if len(decision_fields) != 1:
         raise StagingConflictError(
             "committed staging has inconsistent concurrency evidence"
@@ -2491,22 +2947,74 @@ def _committed_plan(
     )
 
 
+def _iter_attempt_records(
+    attempts: AttemptAdapter,
+    batch_id: str,
+    process_attempt_id: str,
+) -> Iterable[Mapping[str, Any]]:
+    iterator = getattr(type(attempts), "iter_records", None)
+    custom_reader = "read_records" in type(attempts).__dict__
+    if callable(iterator) and not (
+        custom_reader and "iter_records" not in type(attempts).__dict__
+    ):
+        return iterator(attempts, batch_id, process_attempt_id)
+    return attempts.read_records(batch_id, process_attempt_id)
+
+
+def _attempt_record_source(
+    attempts: AttemptAdapter,
+    batch_id: str,
+    process_attempt_id: str,
+) -> Iterable[Mapping[str, Any]]:
+    source = getattr(type(attempts), "record_source", None)
+    if callable(source):
+        return source(attempts, batch_id, process_attempt_id)
+    return ExecutionRecords(
+        lambda: _iter_attempt_records(attempts, batch_id, process_attempt_id)
+    )
+
+
+def _load_complete_records(
+    attempts: AttemptAdapter,
+    envelope: VerifiedEnvelope,
+) -> tuple[Iterable[Mapping[str, Any]], Mapping[str, Any]] | None:
+    stream_loader = getattr(type(attempts), "load_complete_stream", None)
+    if callable(stream_loader):
+        return stream_loader(
+            attempts, envelope.batch_id, envelope.execution_attempt_id
+        )
+    return attempts.load_complete(
+        envelope.batch_id, envelope.execution_attempt_id
+    )
+
+
+def _publish_attempt_records(
+    attempts: AttemptAdapter,
+    envelope: VerifiedEnvelope,
+    records: Iterable[Mapping[str, Any]],
+) -> None:
+    publish = getattr(attempts, "publish_records", None)
+    if callable(publish):
+        publish(envelope.batch_id, envelope.execution_attempt_id, records)
+
+
 def _resume_committed_process_batch(
     store: ProcessControlStore,
     envelope: VerifiedEnvelope,
     attempts: AttemptAdapter,
 ) -> ProcessResult:
-    complete = attempts.load_complete(
-        envelope.batch_id, envelope.execution_attempt_id
-    )
+    complete = _load_complete_records(attempts, envelope)
     if complete is None:
         raise StagingConflictError("committed batch is missing complete staging")
     records, marker = complete
     plan = _committed_plan(records, envelope)
-    validate_staged_records(records, envelope, plan)
-    _verify_marker(marker, records, envelope)
+    validated = _validate_staged_records(
+        records, envelope, plan, retain_records=False
+    )
+    _verify_marker_from_validated(marker, validated, envelope)
+    _publish_attempt_records(attempts, envelope, records)
     sequences = store.commit_batch(envelope.batch_id)
-    return _process_result(envelope, attempts, records, sequences, True)
+    return _process_result(envelope, attempts, validated, sequences, True)
 
 
 def resume_committed_process_batch(
@@ -2555,7 +3063,7 @@ def run_process_batch(
         lease_expires_at=live.lease_expires_at,
         now=(store.now() if clock is None else clock()),
     )
-    complete = attempts.load_complete(batch_id, envelope.execution_attempt_id)
+    complete = _load_complete_records(attempts, envelope)
     resumed = complete is not None
     if complete is None:
         with _Heartbeat(
@@ -2571,50 +3079,40 @@ def run_process_batch(
             records = harness.execute(envelope, plan, profile, mode)
             heartbeat.raise_if_failed()
             _crash(crash_hook, "after_action")
-            validate_staged_records(records, envelope, plan)
-            attempts.write_records(batch_id, envelope.execution_attempt_id, records)
-            records = attempts.read_records(
-                batch_id, envelope.execution_attempt_id
+            _validate_staged_records(
+                records, envelope, plan, retain_records=False
             )
-            validate_staged_records(records, envelope, plan)
+            attempts.write_records(batch_id, envelope.execution_attempt_id, records)
+            records = _attempt_record_source(
+                attempts, batch_id, envelope.execution_attempt_id
+            )
+            validated = _validate_staged_records(
+                records, envelope, plan, retain_records=False
+            )
             _crash(crash_hook, "after_staging")
             control.assert_fence(envelope)
-            marker = _success_marker(envelope, records)
+            marker = _success_marker_from_validated(envelope, validated)
             attempts.create_success(batch_id, envelope.execution_attempt_id, marker)
             _crash(crash_hook, "after_marker")
     else:
         records, marker = complete
-        validate_staged_records(records, envelope, plan)
-        _verify_marker(marker, records, envelope)
+        validated = _validate_staged_records(
+            records, envelope, plan, retain_records=False
+        )
+        _verify_marker_from_validated(marker, validated, envelope)
     control.assert_fence(envelope)
-    grouped = validate_staged_records(records, envelope, plan)
+    validated = _validate_staged_records(
+        records, envelope, plan, retain_records=False
+    )
+    _publish_attempt_records(attempts, envelope, records)
     staging_path = attempts.attempt_path(batch_id, envelope.execution_attempt_id)
-    outputs = []
-    for item in envelope.items:
-        item_records = grouped[item.work_id]
-        terminal = next(
-            record
-            for record in item_records
-            if record["record_type"] in TERMINAL_TYPES
-        )
-        outputs.append(
-            {
-                "work_id": item.work_id,
-                "attempt_id": item.attempt_id,
-                "succeeded": terminal["record_type"] == "video_result",
-                "output_path": str(staging_path),
-                "output_sha256": _sha256(item_records),
-                "records": [
-                    {
-                        "executor_identity": record["executor_identity"],
-                        "partition_id": record["partition_id"],
-                        "task_attempt_id": record["task_attempt_id"],
-                        "record_sequence": record["record_sequence"],
-                    }
-                    for record in item_records
-                ],
-            }
-        )
+    outputs = [
+        {
+            **output,
+            "output_path": str(staging_path),
+        }
+        for output in validated.outputs
+    ]
     store.seal_batch(
         batch_id,
         outputs,
@@ -2625,13 +3123,13 @@ def run_process_batch(
     control.assert_fence(envelope)
     sequences = store.commit_batch(batch_id)
     _crash(crash_hook, "after_pointer")
-    return _process_result(envelope, attempts, records, sequences, resumed)
+    return _process_result(envelope, attempts, validated, sequences, resumed)
 
 
 def _process_result(
     envelope: VerifiedEnvelope,
     attempts: AttemptAdapter,
-    records: Sequence[Mapping[str, Any]],
+    validated: _ValidatedRecords,
     sequences: tuple[int, ...],
     resumed: bool,
 ) -> ProcessResult:
@@ -2641,14 +3139,8 @@ def _process_result(
         staging_path=attempts.attempt_path(
             envelope.batch_id, envelope.execution_attempt_id
         ),
-        record_count=len(records),
-        failed_work_ids=tuple(
-            sorted(
-                str(record["work_id"])
-                for record in records
-                if record["record_type"] == "error"
-            )
-        ),
+        record_count=validated.record_count,
+        failed_work_ids=validated.failed_work_ids,
         publication_sequences=sequences,
         resumed=resumed,
         driver_package_version=_package_version(),
@@ -2674,17 +3166,68 @@ def _ordered_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
     normalized = [dict(record) for record in records]
     return sorted(
         normalized,
-        key=lambda record: (
-            str(record.get("work_id", "")),
-            str(record.get("attempt_id", "")),
-            str(record.get("record_type", "")),
-            (
-                (0, record["record_sequence"])
-                if type(record.get("record_sequence")) is int
-                else (1, repr(record.get("record_sequence")))
-            ),
+        key=_record_order_key,
+    )
+
+
+def _record_order_key(record: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(record.get("work_id", "")),
+        str(record.get("attempt_id", "")),
+        str(record.get("record_type", "")),
+        (
+            (0, record["record_sequence"])
+            if type(record.get("record_sequence")) is int
+            else (1, repr(record.get("record_sequence")))
         ),
     )
+
+
+def _iter_delta_attempt_records(
+    frame: Any,
+    *,
+    validate_columns: bool = False,
+) -> Iterable[dict[str, Any]]:
+    ordered = frame.orderBy(
+        "work_id", "attempt_id", "record_type", "record_sequence"
+    )
+    rows = ordered.toLocalIterator()
+    try:
+        for raw in rows:
+            row = raw.asDict(recursive=True) if hasattr(raw, "asDict") else dict(raw)
+            try:
+                value = json.loads(row["record_json"])
+            except (TypeError, json.JSONDecodeError) as error:
+                if validate_columns:
+                    raise StagingConflictError(
+                        "OneLake Delta record_json is invalid"
+                    ) from error
+                raise
+            if validate_columns and (
+                not isinstance(value, dict)
+                or value.get("work_id") != row["work_id"]
+                or value.get("attempt_id") != row["attempt_id"]
+                or value.get("record_type") != row["record_type"]
+                or value.get("record_sequence") != row["record_sequence"]
+            ):
+                raise StagingConflictError(
+                    "OneLake Delta record columns differ from record_json"
+                )
+            yield value if type(value) is dict else dict(value)
+    finally:
+        close = getattr(rows, "close", None)
+        if callable(close):
+            close()
+def _read_delta_attempt_records(
+    frame: Any,
+    *,
+    validate_columns: bool = False,
+) -> list[dict[str, Any]]:
+    records = list(
+        _iter_delta_attempt_records(frame, validate_columns=validate_columns)
+    )
+    records.sort(key=_record_order_key)
+    return records
 
 
 def _model_identity(payload: Mapping[str, Any]) -> str:

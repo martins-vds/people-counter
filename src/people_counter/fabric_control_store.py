@@ -22,6 +22,10 @@ from uuid import uuid4
 from people_counter.fabric_namespace import FabricNamespaceConfig
 from people_counter.fabric_control import ControlWriter
 from people_counter.fabric_release_provenance import resolve_installed_package_version
+from people_counter.fabric_retention import (
+    FabricRetentionPolicy,
+    plan_fabric_retention,
+)
 from people_counter.sjd_control import (
     CLAIM_ENVELOPE_VERSION,
     BatchValidationError,
@@ -75,6 +79,11 @@ _SCHEMAS = {
         "records_json string, recovery_outcome string, created_at double, "
         "sealed_at double"
     ),
+    "committed_records": (
+        "batch_id string, process_attempt_id string, work_id string, "
+        "attempt_id string, record_type string, record_sequence long, "
+        "record_json string"
+    ),
     "publications": (
         "publication_sequence long, work_id string, attempt_id string, "
         "batch_id string, output_path string, output_sha256 string, "
@@ -111,6 +120,10 @@ class OneLakeFiles(Protocol):
 
     def create_text(self, path: str, content: str) -> None: ...
 
+    def delete_tree(self, path: str) -> None: ...
+
+    def list_children(self, path: str) -> tuple[str, ...]: ...
+
 
 class NotebookUtilsOneLakeFiles:
     """Small create-only wrapper around the Fabric notebook file API."""
@@ -131,6 +144,18 @@ class NotebookUtilsOneLakeFiles:
         result = self._fs().put(path, content, False)
         if result is False:
             raise OSError(f"OneLake create failed for {path}")
+
+    def delete_tree(self, path: str) -> None:
+        if self.exists(path):
+            self._fs().rm(path, True)
+
+    def list_children(self, path: str) -> tuple[str, ...]:
+        if not self.exists(path):
+            return ()
+        return tuple(
+            str(getattr(entry, "path", ""))
+            for entry in self._fs().ls(path)
+        )
 
 
 class OneLakeEnvelopeWriter:
@@ -280,7 +305,10 @@ class FabricControlStoreImpl:
                 )
             else:
                 frame = self.spark.createDataFrame([], schema=schema)
-            frame.write.format("delta").mode("errorifexists").saveAsTable(name)
+            writer = frame.write.format("delta").mode("errorifexists")
+            if suffix == "committed_records":
+                writer = writer.partitionBy("batch_id")
+            writer.saveAsTable(name)
         rows = self._rows("locks")
         if len(rows) != 1 or rows[0].get("lock_name") != "global":
             raise RuntimeError(
@@ -363,7 +391,7 @@ class FabricControlStoreImpl:
         now = self.now()
 
         def operation() -> tuple[RegisteredWork, ...]:
-            rows = self._rows("work")
+            rows = self._rows_matching("work", {"work_id": tuple(seen)})
             existing_by_id = {row["work_id"]: row for row in rows}
             registered: list[RegisteredWork] = []
             changed = False
@@ -429,11 +457,12 @@ class FabricControlStoreImpl:
                 registered.append(_registered(row))
                 changed = True
             if changed:
-                self._replace("work", rows)
+                self._merge_rows("work", rows)
                 observed = {
                     row["work_id"]: row
-                    for row in self._rows("work")
-                    if row["work_id"] in seen
+                    for row in self._rows_matching(
+                        "work", {"work_id": tuple(seen)}
+                    )
                 }
                 if set(observed) != set(seen):
                     raise ControlError(
@@ -509,16 +538,11 @@ class FabricControlStoreImpl:
 
         def operation() -> ClaimedBatch | None:
             now = self.now()
-            work = self._rows("work")
-            eligible = [
-                row
-                for row in work
-                if row["status"] == "READY"
-                and float(row["available_at"]) <= now
-                and (scope is None or row["work_id"] in scope)
-            ]
+            work = self._eligible_work(now, scope)
+            eligible = list(work)
             blocked = False
             compatible = []
+            blocked_rows = []
             for row in eligible:
                 evaluation = SQLiteControlStore._work_evaluation(row, now, fabric=True)
                 if evaluation["supported"]:
@@ -527,13 +551,16 @@ class FabricControlStoreImpl:
                     encoded = _canonical(evaluation)
                     row.update(status="BLOCKED_INCOMPATIBLE", compatibility_json=encoded, last_error=encoded, updated_at=now)
                     blocked = True
+                    blocked_rows.append(row)
             if blocked:
-                self._replace("work", work)
+                self._merge_rows("work", blocked_rows)
             eligible = compatible
             if maximum_active_batches is not None:
                 active = sum(
                     row["status"] in {"LEASED", "SEALED"}
-                    for row in self._rows("batches")
+                    for row in self._rows_matching(
+                        "batches", {"status": ("LEASED", "SEALED")}
+                    )
                 )
                 if active >= maximum_active_batches:
                     return None
@@ -616,8 +643,7 @@ class FabricControlStoreImpl:
                 ],
             }
             path, digest = self.envelopes.write(batch_id, envelope)
-            batches = self._rows("batches")
-            batches.append(
+            batches = [
                 {
                     "batch_id": batch_id,
                     "owner": owner_id,
@@ -633,9 +659,9 @@ class FabricControlStoreImpl:
                     "sealed_at": None,
                     "committed_at": None,
                 }
-            )
-            members = self._rows("batch_members")
-            attempts = self._rows("attempts")
+            ]
+            members = []
+            attempts = []
             by_work = {str(row["work_id"]): row for row in work}
             for ordinal, claim in enumerate(claims):
                 row = by_work[claim.work_id]
@@ -679,7 +705,10 @@ class FabricControlStoreImpl:
                     }
                 )
             self._replace_many(
-                work=work,
+                work=[
+                    row for row in work
+                    if row["work_id"] in {claim.work_id for claim in claims}
+                ],
                 batches=batches,
                 batch_members=members,
                 attempts=attempts,
@@ -691,7 +720,14 @@ class FabricControlStoreImpl:
         return self.writer.run(operation)
 
     def get_work(self, work_id: str) -> RegisteredWork:
-        return _registered(_require_one(self._rows("work"), "work_id", _text(work_id, "work_id")))
+        identity = _text(work_id, "work_id")
+        return _registered(
+            _require_one(
+                self._rows_matching("work", {"work_id": (identity,)}),
+                "work_id",
+                identity,
+            )
+        )
 
     def recheck_compatibility(
         self, work_ids: Collection[str], *, operator: str, reason: str,
@@ -706,7 +742,7 @@ class FabricControlStoreImpl:
 
         def operation() -> tuple[RegisteredWork, ...]:
             now = self.now()
-            work = self._rows("work")
+            work = self._rows_matching("work", {"work_id": tuple(scope)})
             selected = [_require_one(work, "work_id", identity) for identity in scope]
             for row in selected:
                 if row["status"] != "BLOCKED_INCOMPATIBLE":
@@ -722,7 +758,7 @@ class FabricControlStoreImpl:
                     last_error=None if evaluation["supported"] else encoded,
                     updated_at=now,
                 )
-            self._replace("work", work)
+            self._merge_rows("work", work)
             return tuple(_registered(row) for row in selected)
 
         return self.writer.run(operation)
@@ -730,7 +766,11 @@ class FabricControlStoreImpl:
     def load_claim_envelope_with_digest(
         self, batch_id: str
     ) -> tuple[dict[str, Any], str]:
-        batch = _require_one(self._rows("batches"), "batch_id", batch_id)
+        batch = _require_one(
+            self._rows_matching("batches", {"batch_id": (batch_id,)}),
+            "batch_id",
+            batch_id,
+        )
         digest = str(batch["envelope_sha256"])
         envelope = self.envelopes.read(str(batch["envelope_path"]), digest)
         if envelope.get("batch_id") != batch_id:
@@ -764,8 +804,14 @@ class FabricControlStoreImpl:
                 raise LeaseLostError("heartbeat lost the batch lease")
             expires = max(float(batch["lease_expires_at"]), now + extension)
             batch["lease_expires_at"] = expires
-            attempts = self._rows("attempts")
-            work = self._rows("work")
+            attempts = self._rows_matching(
+                "attempts",
+                {"attempt_id": tuple(item.attempt_id for item in envelope.items)},
+            )
+            work = self._rows_matching(
+                "work",
+                {"work_id": tuple(item.work_id for item in envelope.items)},
+            )
             expected = {item.attempt_id: item for item in envelope.items}
             changed = 0
             for attempt in attempts:
@@ -788,9 +834,7 @@ class FabricControlStoreImpl:
             if changed != len(envelope.items):
                 raise LeaseLostError("heartbeat work cardinality changed")
             self._replace_many(
-                batches=self._rows_with_replacement(
-                    "batches", "batch_id", envelope.batch_id, batch
-                ),
+                batches=[batch],
                 attempts=attempts,
                 work=work,
             )
@@ -809,7 +853,7 @@ class FabricControlStoreImpl:
 
         def operation() -> None:
             now = self.now()
-            batches = self._rows("batches")
+            batches = self._rows_matching("batches", {"batch_id": (batch_id,)})
             batch = _require_one(batches, "batch_id", batch_id)
             if (
                 batch["envelope_sha256"] != envelope_sha256
@@ -818,7 +862,9 @@ class FabricControlStoreImpl:
                 raise BatchValidationError("envelope or membership hash mismatch")
             if batch["status"] == "SEALED":
                 attempts = [
-                    row for row in self._rows("attempts") if row["batch_id"] == batch_id
+                    row for row in self._rows_matching(
+                        "attempts", {"batch_id": (batch_id,)}
+                    )
                 ]
                 observed = {
                     (
@@ -848,7 +894,9 @@ class FabricControlStoreImpl:
             if batch["status"] != "LEASED" or float(batch["lease_expires_at"]) <= now:
                 raise LeaseLostError("batch no longer owns a live lease")
             members = [
-                row for row in self._rows("batch_members") if row["batch_id"] == batch_id
+                row for row in self._rows_matching(
+                    "batch_members", {"batch_id": (batch_id,)}
+                )
             ]
             expected = {(row["work_id"], row["attempt_id"]) for row in members}
             supplied = {(row.get("work_id"), row.get("attempt_id")) for row in normalized}
@@ -856,8 +904,16 @@ class FabricControlStoreImpl:
                 raise BatchValidationError(
                     "sealed output cardinality/membership differs from claim"
                 )
-            attempts = self._rows("attempts")
-            work = {row["work_id"]: row for row in self._rows("work")}
+            attempts = self._rows_matching(
+                "attempts", {"batch_id": (batch_id,)}
+            )
+            work = {
+                row["work_id"]: row
+                for row in self._rows_matching(
+                    "work",
+                    {"work_id": tuple(item["work_id"] for item in normalized)},
+                )
+            }
             by_attempt = {row["attempt_id"]: row for row in attempts}
             for output in normalized:
                 attempt = by_attempt.get(output["attempt_id"])
@@ -885,16 +941,18 @@ class FabricControlStoreImpl:
                 )
             batch["status"] = "SEALED"
             batch["sealed_at"] = now
-            self._replace_many(batches=batches, attempts=attempts)
+            self._replace_many(batches=[batch], attempts=attempts)
 
         self.writer.run(operation)
 
     def commit_batch(self, batch_id: str) -> tuple[int, ...]:
         def operation() -> tuple[int, ...]:
             now = self.now()
-            batches = self._rows("batches")
+            batches = self._rows_matching("batches", {"batch_id": (batch_id,)})
             batch = _require_one(batches, "batch_id", batch_id)
-            publications = self._rows("publications")
+            publications = self._rows_matching(
+                "publications", {"batch_id": (batch_id,)}
+            )
             if batch["status"] == "COMMITTED":
                 return tuple(
                     sorted(
@@ -905,16 +963,18 @@ class FabricControlStoreImpl:
                 )
             if batch["status"] != "SEALED" or float(batch["lease_expires_at"]) <= now:
                 raise LeaseLostError("only a live sealed batch can be committed")
-            attempts = self._rows("attempts")
-            selected = [row for row in attempts if row["batch_id"] == batch_id]
+            attempts = self._rows_matching(
+                "attempts", {"batch_id": (batch_id,)}
+            )
+            selected = attempts
             if len(selected) != int(batch["item_count"]):
                 raise BatchValidationError("attempt cardinality differs from batch")
-            work_rows = self._rows("work")
-            work = {row["work_id"]: row for row in work_rows}
-            next_sequence = max(
-                (int(row["publication_sequence"]) for row in publications),
-                default=0,
+            work_rows = self._rows_matching(
+                "work",
+                {"work_id": tuple(row["work_id"] for row in selected)},
             )
+            work = {row["work_id"]: row for row in work_rows}
+            next_sequence = self._max_publication_sequence()
             sequences: list[int] = []
             for attempt in sorted(selected, key=lambda row: row["work_id"]):
                 row = work[attempt["work_id"]]
@@ -930,7 +990,9 @@ class FabricControlStoreImpl:
                 if bool(attempt["terminal_succeeded"]):
                     next_sequence += 1
                     if publications and next_sequence <= max(
-                        int(item["publication_sequence"]) for item in publications
+                        int(item["publication_sequence"])
+                        for item in publications
+                        if item["publication_sequence"] is not None
                     ):
                         raise LeaseLostError("publication sequence is not monotonic")
                     publications.append(
@@ -965,10 +1027,12 @@ class FabricControlStoreImpl:
             batch["status"] = "COMMITTED"
             batch["committed_at"] = now
             self._replace_many(
-                batches=batches,
+                batches=[batch],
                 attempts=attempts,
                 work=work_rows,
-                publications=publications,
+                publications=[
+                    row for row in publications if row["batch_id"] == batch_id
+                ],
             )
             return tuple(sequences)
 
@@ -989,7 +1053,7 @@ class FabricControlStoreImpl:
         digest = _sha(expected_envelope_sha256, "expected_envelope_sha256")
 
         def operation() -> dict[str, Any]:
-            batches = self._rows("batches")
+            batches = self._rows_matching("batches", {"batch_id": (batch_id,)})
             batch = _require_one(batches, "batch_id", batch_id)
             if batch["owner"] != owner or batch["envelope_sha256"] != digest:
                 raise LeaseLostError("failed-claim recovery owner or envelope differs")
@@ -1007,9 +1071,16 @@ class FabricControlStoreImpl:
             )
             if self.envelopes.files.exists(root + "/_delta_log") or self.envelopes.files.exists(root + "/_SUCCESS"):
                 raise BatchValidationError("failed claim has staged or committed output")
-            work = self._rows("work")
-            attempts = self._rows("attempts")
-            publications = self._rows("publications")
+            work = self._rows_matching(
+                "work", {"work_id": tuple(work_ids)}
+            )
+            attempts = self._rows_matching(
+                "attempts",
+                {"attempt_id": tuple(item.attempt_id for item in envelope.items)},
+            )
+            publications = self._rows_matching(
+                "publications", {"work_id": tuple(work_ids)}
+            )
             if any(row["work_id"] in work_ids for row in publications):
                 raise BatchValidationError("failed claim has published output")
             marker = _canonical({
@@ -1043,7 +1114,7 @@ class FabricControlStoreImpl:
                 })
                 attempt.update({"status": "EXPIRED", "recovery_outcome": "READY"})
             batch["status"] = "EXPIRED"
-            self._replace_many(work=work, attempts=attempts, batches=batches)
+            self._replace_many(work=work, attempts=attempts, batches=[batch])
             return {"batch_id": batch_id, "work_ids": work_ids, "idempotent": False}
 
         return self.writer.run(operation)
@@ -1052,9 +1123,18 @@ class FabricControlStoreImpl:
         timestamp = self.now() if now is None else _finite(now, "now")
 
         def operation() -> RecoveryReport:
-            work = self._rows("work")
-            attempts = self._rows("attempts")
-            batches = self._rows("batches")
+            work = self._expired_work(timestamp)
+            attempts = self._rows_matching(
+                "attempts",
+                {
+                    "attempt_id": tuple(
+                        str(row["lease_attempt_id"])
+                        for row in work
+                        if row["lease_attempt_id"] is not None
+                    )
+                },
+            )
+            batches = self._expired_batches(timestamp)
             retried = dead = 0
             by_attempt = {row["attempt_id"]: row for row in attempts}
             for row in work:
@@ -1119,11 +1199,21 @@ class FabricControlStoreImpl:
             raise BatchValidationError("exact recovery fence must be positive")
 
         def operation() -> dict[str, Any]:
-            work_rows = self._rows("work")
-            batch_rows = self._rows("batches")
-            attempt_rows = self._rows("attempts")
-            member_rows = self._rows("batch_members")
-            publication_rows = self._rows("publications")
+            work_rows = self._rows_matching(
+                "work", {"work_id": (work_id,)}
+            )
+            batch_rows = self._rows_matching(
+                "batches", {"batch_id": (batch_id,)}
+            )
+            attempt_rows = self._rows_matching(
+                "attempts", {"work_id": (work_id,)}
+            )
+            member_rows = self._rows_matching(
+                "batch_members", {"batch_id": (batch_id,)}
+            )
+            publication_rows = self._rows_matching(
+                "publications", {"work_id": (work_id,)}
+            )
             work = _require_one(work_rows, "work_id", work_id)
             batch = _require_one(batch_rows, "batch_id", batch_id)
             attempt = _require_one(attempt_rows, "attempt_id", attempt_id)
@@ -1256,9 +1346,21 @@ class FabricControlStoreImpl:
     def _verify_exact_recovery_readback(
         self, work_id: str, batch_id: str, attempt_id: str,
     ) -> None:
-        work = _require_one(self._rows("work"), "work_id", work_id)
-        batch = _require_one(self._rows("batches"), "batch_id", batch_id)
-        attempt = _require_one(self._rows("attempts"), "attempt_id", attempt_id)
+        work = _require_one(
+            self._rows_matching("work", {"work_id": (work_id,)}),
+            "work_id",
+            work_id,
+        )
+        batch = _require_one(
+            self._rows_matching("batches", {"batch_id": (batch_id,)}),
+            "batch_id",
+            batch_id,
+        )
+        attempt = _require_one(
+            self._rows_matching("attempts", {"attempt_id": (attempt_id,)}),
+            "attempt_id",
+            attempt_id,
+        )
         if (
             work["status"] != "DEAD"
             or work["lease_owner"] is not None
@@ -1323,7 +1425,7 @@ class FabricControlStoreImpl:
 
         def operation() -> ReplayRequest:
             now = self.now()
-            work = self._rows("work")
+            work = self._rows_matching("work", {"work_id": (work_id,)})
             row = _require_one(work, "work_id", work_id)
             if row["status"] == "BLOCKED_INCOMPATIBLE":
                 raise ControlError("blocked work requires explicit compatibility recheck")
@@ -1346,8 +1448,7 @@ class FabricControlStoreImpl:
                     "updated_at": now,
                 }
             )
-            requests = self._rows("replay_requests")
-            requests.append(
+            requests = [
                 {
                     "replay_id": replay_id,
                     "work_id": work_id,
@@ -1356,7 +1457,7 @@ class FabricControlStoreImpl:
                     "generation": generation,
                     "requested_at": now,
                 }
-            )
+            ]
             self._replace_many(work=work, replay_requests=requests)
             return ReplayRequest(
                 replay_id, work_id, operator, reason, generation, now
@@ -1385,7 +1486,9 @@ class FabricControlStoreImpl:
 
         def operation() -> QuarantineReport:
             now = self.now()
-            rows = self._rows("work")
+            rows = self._rows_matching(
+                "work", {"work_id": tuple(expected)}
+            )
             observed = {
                 str(row["work_id"]): row
                 for row in rows
@@ -1425,8 +1528,9 @@ class FabricControlStoreImpl:
             self._replace_many(work=rows)
             readback = {
                 str(row["work_id"]): row["status"]
-                for row in self._rows("work")
-                if row["work_id"] in expected
+                for row in self._rows_matching(
+                    "work", {"work_id": tuple(expected)}
+                )
             }
             if readback != {work_id: "DEAD" for work_id in expected}:
                 raise ControlError("quarantine exact readback failed")
@@ -1443,10 +1547,28 @@ class FabricControlStoreImpl:
 
         def operation() -> list[ReconciliationFinding]:
             detected: dict[str, tuple[str, str, dict[str, Any]]] = {}
-            attempts = {row["attempt_id"]: row for row in self._rows("attempts")}
-            publications = self._rows("publications")
+            work = self._rows("work")
+            committed_attempt_ids = tuple(
+                row["committed_attempt_id"]
+                for row in work
+                if row["committed_attempt_id"] is not None
+            )
+            committed_work_ids = tuple(
+                row["work_id"]
+                for row in work
+                if row["committed_attempt_id"] is not None
+            )
+            attempts = {
+                row["attempt_id"]: row
+                for row in self._rows_matching(
+                    "attempts", {"attempt_id": committed_attempt_ids}
+                )
+            }
+            publications = self._rows_matching(
+                "publications", {"work_id": committed_work_ids}
+            )
             publication_by_work = {row["work_id"]: row for row in publications}
-            for row in self._rows("work"):
+            for row in work:
                 attempt = attempts.get(row["committed_attempt_id"])
                 publication = publication_by_work.get(row["work_id"])
                 if row["committed_attempt_id"] is not None and (
@@ -1495,7 +1617,7 @@ class FabricControlStoreImpl:
             for row in findings_rows:
                 if row["finding_id"] not in active_ids and row["resolved_at"] is None:
                     row["resolved_at"] = timestamp
-            self._replace("reconciliation_findings", findings_rows)
+            self._merge_rows("reconciliation_findings", findings_rows)
             return [
                 ReconciliationFinding(
                     str(row["finding_id"]),
@@ -1512,9 +1634,121 @@ class FabricControlStoreImpl:
 
         return self.writer.run(operation)
 
+    def compact_history(
+        self,
+        *,
+        attempt_store: Any | None = None,
+        policy: FabricRetentionPolicy | None = None,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Age out obsolete unpublished batches without vacuuming Delta history."""
+        selected = policy or FabricRetentionPolicy()
+        cutoff = selected.cutoff(self.now())
+
+        def operation() -> dict[str, Any]:
+            work = self._rows("work")
+            batches = self._rows("batches")
+            attempts = self._rows("attempts")
+            members = self._rows("batch_members")
+            publications = self._rows("publications")
+            findings = self._rows("reconciliation_findings")
+
+            consumer_root = self.config.file_path("consumer-decisions")
+            consumer_prefix = consumer_root + "/"
+            existing_consumers = {
+                path[len(consumer_prefix):].split("/", 1)[0]
+                for path in self.envelopes.files.list_children(consumer_root)
+                if path.startswith(consumer_prefix)
+            }
+            plan = plan_fabric_retention(
+                policy=selected,
+                cutoff=cutoff,
+                work=work,
+                batches=batches,
+                attempts=attempts,
+                publications=publications,
+                findings=findings,
+                existing_consumer_batch_ids=existing_consumers,
+            )
+            control_candidates = plan.control_batches
+            control_batch_ids = [
+                str(batch["batch_id"]) for batch in control_candidates
+            ]
+            consumer_batch_ids = list(plan.consumer_batch_ids)
+            finding_ids = set(plan.finding_ids)
+
+            report: dict[str, Any] = {
+                "cutoff_epoch_seconds": cutoff,
+                "retention_days": selected.retention_days,
+                "control_batch_ids": control_batch_ids,
+                "consumer_batch_ids": consumer_batch_ids,
+                "reconciliation_finding_ids": list(plan.finding_ids),
+                "deleted": {
+                    "batches": 0,
+                    "attempts": 0,
+                    "batch_members": 0,
+                    "reconciliation_findings": 0,
+                },
+                "consumer_evidence": 0,
+                "attempt_staging": 0,
+                "claim_envelopes": 0,
+                "delta_vacuum": False,
+            }
+            if not apply:
+                return report
+            if control_batch_ids and attempt_store is None:
+                raise ValueError("attempt_store is required to apply retention")
+
+            for batch_id in control_batch_ids:
+                attempt_store.delete_batch(batch_id)
+                report["attempt_staging"] += 1
+                batch = next(
+                    item for item in control_candidates
+                    if str(item["batch_id"]) == batch_id
+                )
+                envelope_path = str(batch["envelope_path"])
+                expected_prefix = self.config.file_path("control/claims") + "/"
+                if not envelope_path.startswith(expected_prefix):
+                    raise ControlError("claim envelope is outside retention root")
+                batch_evidence = envelope_path.rsplit("/", 1)[0]
+                self.envelopes.files.delete_tree(batch_evidence)
+                report["claim_envelopes"] += 1
+            for batch_id in consumer_batch_ids:
+                self.envelopes.files.delete_tree(
+                    self.config.file_path(
+                        f"consumer-decisions/{batch_id}"
+                    )
+                )
+                report["consumer_evidence"] += 1
+
+            control_set = set(control_batch_ids)
+            self._delete_rows("batch_members", "batch_id", control_set)
+            self._delete_rows("attempts", "batch_id", control_set)
+            self._delete_rows("batches", "batch_id", control_set)
+            self._delete_rows(
+                "reconciliation_findings", "finding_id", finding_ids
+            )
+            report["deleted"] = {
+                "batches": len(control_set),
+                "attempts": sum(
+                    str(row["batch_id"]) in control_set for row in attempts
+                ),
+                "batch_members": sum(
+                    str(row["batch_id"]) in control_set for row in members
+                ),
+                "reconciliation_findings": len(finding_ids),
+            }
+            return report
+
+        return self.writer.run(operation)
+
     def _verified_process_batch(self, envelope: Any) -> dict[str, Any]:
         batch = _require_one(
-            self._rows("batches"), "batch_id", envelope.batch_id
+            self._rows_matching(
+                "batches", {"batch_id": (envelope.batch_id,)}
+            ),
+            "batch_id",
+            envelope.batch_id,
         )
         if (
             batch["envelope_sha256"] != envelope.envelope_sha256
@@ -1523,10 +1757,17 @@ class FabricControlStoreImpl:
             raise BatchValidationError("authoritative envelope identity changed")
         attempts = [
             row
-            for row in self._rows("attempts")
-            if row["batch_id"] == envelope.batch_id
+            for row in self._rows_matching(
+                "attempts", {"batch_id": (envelope.batch_id,)}
+            )
         ]
-        work = {row["work_id"]: row for row in self._rows("work")}
+        work = {
+            row["work_id"]: row
+            for row in self._rows_matching(
+                "work",
+                {"work_id": tuple(item.work_id for item in envelope.items)},
+            )
+        }
         expected = {
             (item.work_id, item.attempt_id, item.fence, item.payload_sha256)
             for item in envelope.items
@@ -1583,43 +1824,178 @@ class FabricControlStoreImpl:
             for row in self.spark.table(self.tables[suffix]).collect()
         ]
 
+    def _rows_matching(
+        self,
+        suffix: str,
+        matches: Mapping[str, Collection[object]],
+    ) -> list[dict[str, Any]]:
+        normalized = {
+            field: tuple(values)
+            for field, values in matches.items()
+        }
+        if any(not values for values in normalized.values()):
+            return []
+        if not hasattr(self, "spark"):
+            return [
+                row for row in self._rows(suffix)
+                if all(row.get(field) in values for field, values in normalized.items())
+            ]
+        from pyspark.sql import functions as F
+
+        self.spark.catalog.refreshTable(self.tables[suffix])
+        frame = self.spark.table(self.tables[suffix])
+        for field, values in normalized.items():
+            frame = frame.filter(F.col(field).isin(*values))
+        return [row.asDict(recursive=True) for row in frame.collect()]
+
+    def _eligible_work(
+        self,
+        now: float,
+        scope: Collection[str] | None,
+    ) -> list[dict[str, Any]]:
+        if not hasattr(self, "spark"):
+            return [
+                row for row in self._rows("work")
+                if row["status"] == "READY"
+                and float(row["available_at"]) <= now
+                and (scope is None or row["work_id"] in scope)
+            ]
+        from pyspark.sql import functions as F
+
+        self.spark.catalog.refreshTable(self.tables["work"])
+        frame = self.spark.table(self.tables["work"]).filter(
+            (F.col("status") == "READY") & (F.col("available_at") <= F.lit(now))
+        )
+        if scope is not None:
+            if not scope:
+                return []
+            frame = frame.filter(F.col("work_id").isin(*scope))
+        return [row.asDict(recursive=True) for row in frame.collect()]
+
+    def _expired_work(self, timestamp: float) -> list[dict[str, Any]]:
+        if not hasattr(self, "spark"):
+            return [
+                row for row in self._rows("work")
+                if row["status"] == "LEASED"
+                and float(row["lease_expires_at"]) <= timestamp
+            ]
+        from pyspark.sql import functions as F
+
+        self.spark.catalog.refreshTable(self.tables["work"])
+        frame = self.spark.table(self.tables["work"]).filter(
+            (F.col("status") == "LEASED")
+            & (F.col("lease_expires_at") <= F.lit(timestamp))
+        )
+        return [row.asDict(recursive=True) for row in frame.collect()]
+
+    def _expired_batches(self, timestamp: float) -> list[dict[str, Any]]:
+        if not hasattr(self, "spark"):
+            return [
+                row for row in self._rows("batches")
+                if row["status"] in {"LEASED", "SEALED"}
+                and float(row["lease_expires_at"]) <= timestamp
+            ]
+        from pyspark.sql import functions as F
+
+        self.spark.catalog.refreshTable(self.tables["batches"])
+        frame = self.spark.table(self.tables["batches"]).filter(
+            F.col("status").isin("LEASED", "SEALED")
+            & (F.col("lease_expires_at") <= F.lit(timestamp))
+        )
+        return [row.asDict(recursive=True) for row in frame.collect()]
+
+    def _max_publication_sequence(self) -> int:
+        if not hasattr(self, "spark"):
+            return max(
+                (
+                    int(row["publication_sequence"])
+                    for row in self._rows("publications")
+                ),
+                default=0,
+            )
+        from pyspark.sql import functions as F
+
+        self.spark.catalog.refreshTable(self.tables["publications"])
+        value = (
+            self.spark.table(self.tables["publications"])
+            .agg(F.max("publication_sequence").alias("maximum"))
+            .first()
+            .maximum
+        )
+        return int(value or 0)
+
     def _replace_many(self, **tables: list[dict[str, Any]]) -> None:
         for suffix, rows in tables.items():
-            self._replace(suffix, rows)
+            self._merge_rows(suffix, rows)
+
+    def _merge_rows(self, suffix: str, rows: list[dict[str, Any]]) -> None:
+        if not hasattr(self, "spark"):
+            keys = _KEYS[suffix]
+            combined = {tuple(row.get(key) for key in keys): row for row in self._rows(suffix)}
+            combined.update({
+                tuple(row.get(key) for key in keys): row for row in rows
+            })
+            self._replace(suffix, list(combined.values()))
+            return
+        self._replace(suffix, rows)
+
+    def _delete_rows(
+        self, suffix: str, field: str, values: Collection[str]
+    ) -> None:
+        identities = tuple(sorted(values))
+        if not identities:
+            return
+        if not hasattr(self, "spark"):
+            remaining = [
+                row for row in self._rows(suffix)
+                if str(row.get(field)) not in identities
+            ]
+            self._replace(suffix, remaining)
+            return
+        from pyspark.sql import functions as F
+        from delta.tables import DeltaTable
+
+        DeltaTable.forName(self.spark, self.tables[suffix]).delete(
+            F.col(field).isin(*identities)
+        )
+        if self._rows_matching(suffix, {field: identities}):
+            raise ControlError(f"{suffix} retention exact deletion failed")
 
     def _replace(self, suffix: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
         keys = _KEYS[suffix]
         identities = [tuple(row.get(key) for key in keys) for row in rows]
         if len(identities) != len(set(identities)):
             raise BatchValidationError(f"duplicate {suffix} table identity")
         frame = self.spark.createDataFrame(rows, schema=_SCHEMAS[suffix])
-        frame.write.format("delta").mode("overwrite").option(
-            "overwriteSchema", "false"
-        ).saveAsTable(self.tables[suffix])
-        observed = self._rows(suffix)
+        from delta.tables import DeltaTable
+
+        target = DeltaTable.forName(self.spark, self.tables[suffix]).alias("target")
+        source = frame.alias("source")
+        condition = " AND ".join(
+            f"target.{key} <=> source.{key}" for key in keys
+        )
+        (
+            target.merge(source, condition)
+            .whenMatchedUpdateAll()
+            .whenNotMatchedInsertAll()
+            .execute()
+        )
+        observed = self._rows_matching(
+            suffix,
+            {key: tuple(row.get(key) for row in rows) for key in keys},
+        )
+        identity_set = set(identities)
+        observed = [
+            row
+            for row in observed
+            if tuple(row.get(key) for key in keys) in identity_set
+        ]
         if _normalized_rows(observed, keys) != _normalized_rows(rows, keys):
             raise BatchValidationError(
                 f"{suffix} exact readback/cardinality verification failed"
             )
-
-    def _rows_with_replacement(
-        self,
-        suffix: str,
-        key: str,
-        value: object,
-        replacement: Mapping[str, Any],
-    ) -> list[dict[str, Any]]:
-        rows = self._rows(suffix)
-        count = 0
-        for index, row in enumerate(rows):
-            if row[key] == value:
-                rows[index] = dict(replacement)
-                count += 1
-        if count != 1:
-            raise BatchValidationError(
-                f"{suffix} replacement cardinality is {count}, expected 1"
-            )
-        return rows
 
 
 def _normalized_rows(
@@ -1631,6 +2007,9 @@ def _normalized_rows(
             str(json.loads(value).get(key)) for key in keys
         ),
     )
+
+
+
 
 
 def _registered(row: Mapping[str, Any]) -> RegisteredWork:

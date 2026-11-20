@@ -282,7 +282,8 @@ def _executor_identities(
     batch_id: str,
     process_attempt_id: str,
 ) -> list[str]:
-    records = attempts.read_records(batch_id, process_attempt_id)
+    iterator = getattr(attempts, "iter_records", attempts.read_records)
+    records = iterator(batch_id, process_attempt_id)
     return sorted({str(record["executor_identity"]) for record in records})
 
 

@@ -20,10 +20,12 @@ import pytest
 
 import people_counter.fabric_sjd_runtime as candidate_jobs
 from people_counter.fabric_sjd_runtime import (
+    _build_fallback_artifact_manifest,
     _model_artifact_paths,
     _check_synthetic_model_identity,
     _check_synthetic_video_identity,
     _fallback_localize,
+    _register_fallback_artifact_manifest,
     _runtime_release,
     _resolve_localized_models,
     _resolve_localized_video,
@@ -628,6 +630,213 @@ def test_check_synthetic_model_identity_asserts_identity_present() -> None:
             route_identity=None,
             validation_error=_Boom,
         )
+
+
+# --------------------------------------------------------------------------
+# _build_fallback_artifact_manifest
+# --------------------------------------------------------------------------
+
+
+def test_fallback_artifact_manifest_deduplicates_content_without_driver_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    digest = _sha256_bytes(b"same-content")
+    envelope = {
+        "items": [
+            {
+                "work_id": "a",
+                "payload": {
+                    "source_video": "/lakehouse/default/Files/a/video.mp4",
+                    "source_sha256": digest,
+                    "model_artifact_sha256": {},
+                },
+            },
+            {
+                "work_id": "b",
+                "payload": {
+                    "source_video": "/lakehouse/default/Files/b/video.mp4",
+                    "source_sha256": digest,
+                    "model_artifact_sha256": {},
+                },
+            },
+        ]
+    }
+    monkeypatch.setattr(
+        candidate_jobs,
+        "_stream_hadoop_uri_to_local",
+        MagicMock(side_effect=AssertionError("driver-local staging is forbidden")),
+    )
+    manifest = _build_fallback_artifact_manifest(
+        envelope,
+        workspace_id=WORKSPACE_ID,
+        lakehouse_id=LAKEHOUSE_ID,
+        model_paths_for_payload=lambda _payload: (),
+        validation_error=_Boom,
+    )
+    assert manifest == {
+        digest: {
+            "localized_name": digest,
+            "sha256": digest,
+            "source_uri": (
+                f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
+                f"{LAKEHOUSE_ID}/Files/a/video.mp4"
+            ),
+        }
+    }
+
+
+def test_fallback_artifact_manifest_rejects_conflicting_source_identity() -> None:
+    source_uri = (
+        f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/"
+        f"{LAKEHOUSE_ID}/Files/video.mp4"
+    )
+    envelope = {
+        "items": [
+            {
+                "work_id": "a",
+                "payload": {
+                    "source_video": "/lakehouse/default/Files/video.mp4",
+                    "source_sha256": "a" * 64,
+                },
+            },
+            {
+                "work_id": "b",
+                "payload": {
+                    "source_video": "/lakehouse/default/Files/video.mp4",
+                    "source_sha256": "b" * 64,
+                },
+            },
+        ]
+    }
+    with pytest.raises(_Boom, match="different content identities"):
+        _build_fallback_artifact_manifest(
+            envelope,
+            workspace_id=WORKSPACE_ID,
+            lakehouse_id=LAKEHOUSE_ID,
+            model_paths_for_payload=lambda _payload: (),
+            validation_error=_Boom,
+        )
+    assert source_uri.endswith("Files/video.mp4")
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "source_video": "/lakehouse/default/Files/video.mp4",
+                "source_sha256": "not-a-digest",
+            },
+            "64-character hex digest",
+        ),
+        (
+            {
+                "source_video": "/lakehouse/default/Files/video.mp4",
+                "source_sha256": "a" * 64,
+                "model_artifact_sha256": {},
+            },
+            "missing 'model.bin'",
+        ),
+    ],
+)
+def test_fallback_artifact_manifest_validates_registered_digests(
+    payload: dict[str, object], message: str
+) -> None:
+    with pytest.raises(_Boom, match=message):
+        _build_fallback_artifact_manifest(
+            {"items": [{"work_id": "a", "payload": payload}]},
+            workspace_id=WORKSPACE_ID,
+            lakehouse_id=LAKEHOUSE_ID,
+            model_paths_for_payload=lambda _payload: ("model.bin",),
+            validation_error=_Boom,
+        )
+
+
+def test_register_manifest_rejects_failed_alias_publication() -> None:
+    spark = SimpleNamespace(sparkContext=SimpleNamespace(addFile=MagicMock()))
+    manifest = {
+        "a" * 64: {
+            "localized_name": "a" * 64,
+            "sha256": "a" * 64,
+            "source_uri": "abfss://source/video.mp4",
+        }
+    }
+
+    def publish(_source_uri: str, _destination_uri: str) -> None:
+        raise OSError("artifact alias creation failed")
+
+    with pytest.raises(OSError, match="artifact alias creation failed"):
+        _register_fallback_artifact_manifest(
+            spark,
+            manifest,
+            distributed_alias_root_uri="abfss://aliases",
+            publish=publish,
+        )
+    spark.sparkContext.addFile.assert_not_called()
+
+
+def test_registered_manifest_supports_sparkfiles_content_names_on_executors(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("pyspark.sql")
+    from people_counter.local_spark import create_local_spark_session
+
+    first = tmp_path / "a" / "config.json"
+    second = tmp_path / "b" / "config.json"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    works = [
+        {
+            "resolver_backend": "FABRIC_FALLBACK",
+            "spark_localized_video_name": _sha256_bytes(path.read_bytes()),
+            "source_sha256": _sha256_bytes(path.read_bytes()),
+        }
+        for path in (first, second)
+    ]
+    manifest = {
+        str(work["source_sha256"]): {
+            "localized_name": str(work["source_sha256"]),
+            "sha256": str(work["source_sha256"]),
+            "source_uri": path.as_uri(),
+        }
+        for work, path in zip(works, (first, second), strict=True)
+    }
+    spark = create_local_spark_session(
+        master="local[2]",
+        app_name="sjd-manifest-proof",
+        correlation_id="sjd-manifest-proof",
+    )
+    try:
+        alias_root = tmp_path / "distributed-aliases"
+
+        def publish(source_uri: str, destination_uri: str) -> None:
+            destination = Path(destination_uri.removeprefix("file://"))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if not destination.exists():
+                destination.hardlink_to(
+                    Path(source_uri.removeprefix("file://"))
+                )
+
+        _register_fallback_artifact_manifest(
+            spark,
+            manifest,
+            distributed_alias_root_uri=alias_root.as_uri(),
+            publish=publish,
+        )
+
+        def resolve(work: dict[str, str]) -> tuple[str, str]:
+            from people_counter.local_spark import _verified_video
+
+            path = _verified_video(work)
+            return path.name, stream_sha256(path)[0]
+
+        assert dict(spark.sparkContext.parallelize(works, 2).map(resolve).collect()) == {
+            work["source_sha256"]: work["source_sha256"] for work in works
+        }
+    finally:
+        spark.stop()
 
 
 # --------------------------------------------------------------------------

@@ -150,14 +150,12 @@ def _probe_and_persist_consumer_decision(
     )
     executors = tuple(discover(spark))
     task_cpus = int(spark.conf.get("spark.task.cpus", "1"))
-    planned_tasks = sum(
+    planned_tasks = min(
         max(1, executor.total_cores // task_cpus) for executor in executors
     )
     profile = _consumer_probe_profile(
         envelope, planned_concurrent_tasks=planned_tasks
     )
-    probe = probe_consumers or probe_direct_mount_consumer_capability
-    result = probe(spark, executors, profile=profile)
     profile_payload = {
         "hash_targets": [
             asdict(artifact) for artifact in profile.hash_targets
@@ -186,84 +184,82 @@ def _probe_and_persist_consumer_decision(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    decision = {
+    decision_base = {
         "schema": "people-counter-consumer-probe-decision-v1",
         "batch_id": batch_id,
         "namespace_mode": config.mode.value,
         "profile_sha256": profile_sha256,
         "profile": profile_payload,
         "executor_ids": sorted(executor.executor_id for executor in executors),
-        "status": result.status.value,
-        "selected_backend": (
-            InputBackend.FABRIC_DIRECT.value
-            if result.status is CapabilityStatus.AVAILABLE
-            else InputBackend.FABRIC_FALLBACK.value
-        ),
-        "capability": result.capability,
-        "evidence": result.evidence,
     }
-    content = json.dumps(
-        decision,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
     path = config.file_path(
         f"consumer-decisions/{batch_id}/{profile_sha256}.json"
     )
     storage = files or NotebookUtilsOneLakeFiles()
     if storage.exists(path):
         persisted_content = storage.read_text(path)
-        if persisted_content != content:
-            try:
-                persisted = json.loads(persisted_content)
-            except json.JSONDecodeError as error:
-                raise RuntimeError(
-                    "persisted consumer-probe decision is invalid JSON"
-                ) from error
-            if not isinstance(persisted, dict) or set(persisted) != set(decision):
-                raise RuntimeError(
-                    "persisted consumer-probe decision has an invalid shape"
-                )
-            invariant_keys = (
-                "schema",
-                "batch_id",
-                "namespace_mode",
-                "profile_sha256",
-                "profile",
+        try:
+            decision = json.loads(persisted_content)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "persisted consumer-probe decision is invalid JSON"
+            ) from error
+        expected_keys = set(decision_base) | {
+            "status",
+            "selected_backend",
+            "capability",
+            "evidence",
+            "decision_sha256",
+        }
+        if not isinstance(decision, dict) or set(decision) != expected_keys:
+            raise RuntimeError(
+                "persisted consumer-probe decision has an invalid shape"
             )
-            if any(persisted[key] != decision[key] for key in invariant_keys):
+        for key, value in decision_base.items():
+            if key == "executor_ids":
+                continue
+            if decision[key] != value:
                 raise RuntimeError(
                     "persisted consumer-probe decision conflicts with this workload"
                 )
-            persisted_executor_ids = persisted.get("executor_ids")
-            if (
-                not isinstance(persisted_executor_ids, list)
-                or not persisted_executor_ids
-                or any(
-                    not isinstance(executor_id, str) or not executor_id
-                    for executor_id in persisted_executor_ids
-                )
-                or len(set(persisted_executor_ids)) != len(persisted_executor_ids)
-            ):
-                raise RuntimeError(
-                    "persisted consumer-probe decision has invalid executor IDs"
-                )
-            if persisted_executor_ids == decision["executor_ids"]:
-                raise RuntimeError(
-                    "persisted consumer-probe evidence drifted for the same executors"
-                )
-            canonical_persisted = json.dumps(
-                persisted,
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
+        persisted_executor_ids = decision.get("executor_ids")
+        if (
+            not isinstance(persisted_executor_ids, list)
+            or not persisted_executor_ids
+            or any(
+                not isinstance(executor_id, str) or not executor_id
+                for executor_id in persisted_executor_ids
             )
-            if canonical_persisted != persisted_content:
-                raise RuntimeError(
-                    "persisted consumer-probe decision is not canonical JSON"
-                )
-            decision = persisted
+            or len(set(persisted_executor_ids)) != len(persisted_executor_ids)
+        ):
+            raise RuntimeError(
+                "persisted consumer-probe decision has invalid executor IDs"
+            )
+        canonical_persisted = json.dumps(
+            decision,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if canonical_persisted != persisted_content:
+            raise RuntimeError(
+                "persisted consumer-probe decision is not canonical JSON"
+            )
+        claimed_digest = decision.pop("decision_sha256")
+        unsigned_content = json.dumps(
+            decision,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if claimed_digest != hashlib.sha256(
+            unsigned_content.encode("utf-8")
+        ).hexdigest():
+            raise RuntimeError(
+                "persisted consumer-probe evidence drifted for the same executors"
+            )
+        decision["decision_sha256"] = claimed_digest
+        if persisted_executor_ids != decision_base["executor_ids"]:
             result = CapabilityProbeResult(
                 capability="direct_mount_consumer_capability",
                 status=CapabilityStatus.FABRIC_PLATFORM_BLOCKED,
@@ -272,7 +268,47 @@ def _probe_and_persist_consumer_decision(
                     "probe; verified fallback is required"
                 ),
             )
+        else:
+            try:
+                status = CapabilityStatus(str(decision["status"]))
+            except ValueError as error:
+                raise RuntimeError(
+                    "persisted consumer-probe decision has invalid status"
+                ) from error
+            result = CapabilityProbeResult(
+                capability=str(decision["capability"]),
+                status=status,
+                evidence=str(decision["evidence"]),
+            )
     else:
+        probe = probe_consumers or probe_direct_mount_consumer_capability
+        result = probe(spark, executors, profile=profile)
+        decision = {
+            **decision_base,
+            "status": result.status.value,
+            "selected_backend": (
+                InputBackend.FABRIC_DIRECT.value
+                if result.status is CapabilityStatus.AVAILABLE
+                else InputBackend.FABRIC_FALLBACK.value
+            ),
+            "capability": result.capability,
+            "evidence": result.evidence,
+        }
+        unsigned_content = json.dumps(
+            decision,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        decision["decision_sha256"] = hashlib.sha256(
+            unsigned_content.encode("utf-8")
+        ).hexdigest()
+        content = json.dumps(
+            decision,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         storage.create_text(path, content)
         if storage.read_text(path) != content:
             raise RuntimeError("consumer-probe decision readback differs")
@@ -663,6 +699,104 @@ def _fallback_localize(
     return entry.path.name, digest
 
 
+def _build_fallback_artifact_manifest(
+    envelope: Mapping[str, Any],
+    *,
+    workspace_id: str,
+    lakehouse_id: str,
+    model_paths_for_payload: Any,
+    validation_error: type[Exception],
+) -> dict[str, dict[str, str]]:
+    """Describe unique fallback assets without moving their bytes on the driver."""
+    manifest: dict[str, dict[str, str]] = {}
+    source_digests: dict[str, str] = {}
+
+    def add(source_uri: str, original_basename: str, expected_sha256: object) -> None:
+        try:
+            localized_name = content_addressed_name(
+                original_basename, str(expected_sha256)
+            )
+        except ValueError as error:
+            raise validation_error(str(error)) from error
+        digest = localized_name.split("-", 1)[0]
+        prior_digest = source_digests.get(source_uri)
+        if prior_digest is not None and prior_digest != digest:
+            raise validation_error(
+                f"canonical URI {source_uri!r} has different content identities"
+            )
+        source_digests[source_uri] = digest
+        manifest.setdefault(
+            digest,
+            {
+                "localized_name": digest,
+                "sha256": digest,
+                "source_uri": source_uri,
+            },
+        )
+
+    uri_root = (
+        f"abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/"
+        f"{lakehouse_id}"
+    )
+    mount_prefix = "/lakehouse/default/"
+    for item in envelope["items"]:
+        payload = item["payload"]
+        source = str(payload["source_video"])
+        if not source.startswith(mount_prefix):
+            raise validation_error(
+                "Fabric SJD source_video must use the default Lakehouse"
+            )
+        add(
+            f"{uri_root}/{source[len(mount_prefix) :]}",
+            source.rsplit("/", 1)[-1],
+            payload.get("source_sha256"),
+        )
+        expected_models = payload.get("model_artifact_sha256", {})
+        if not isinstance(expected_models, Mapping):
+            raise validation_error("model_artifact_sha256 must be an object")
+        for model_path in model_paths_for_payload(payload):
+            digest = expected_models.get(model_path)
+            if not isinstance(digest, str):
+                raise validation_error(
+                    f"model_artifact_sha256 is missing {model_path!r}"
+                )
+            add(
+                f"{uri_root}/Files/models/{model_path}",
+                model_path.rsplit("/", 1)[-1],
+                digest,
+            )
+    return manifest
+
+
+def _register_fallback_artifact_manifest(
+    spark: Any,
+    manifest: Mapping[str, Mapping[str, str]],
+    *,
+    distributed_alias_root_uri: str,
+    publish: Any = None,
+) -> None:
+    """Publish aliases by digest, then let Spark distribute those aliases."""
+    if publish is None:
+        from notebookutils import fs
+
+        def publish(source_uri: str, destination_uri: str) -> None:
+            if not fs.exists(destination_uri):
+                copied = fs.cp(source_uri, destination_uri, False)
+                if copied is False and not fs.exists(destination_uri):
+                    raise OSError(
+                        f"OneLake artifact alias creation failed for "
+                        f"{destination_uri}"
+                    )
+
+    for artifact in manifest.values():
+        localized_uri = (
+            f"{distributed_alias_root_uri.rstrip('/')}/"
+            f"{artifact['localized_name']}"
+        )
+        publish(artifact["source_uri"], localized_uri)
+        spark.sparkContext.addFile(localized_uri)
+
+
 def _stage_hadoop_alias(
     spark: Any,
     source: Path,
@@ -998,9 +1132,9 @@ def _localize_process_inputs(
     resolver_evidence)`` named tuple -- mirroring
     :func:`select_process_execution_harness`'s own
     ``(harness, evidence)`` contract -- so the exact capability evidence
-    used to pick the backend, and (for the fallback backend) the content
-    cache's hit/miss/eviction/corruption metrics, are never silently
-    dropped on the floor.
+    used to pick the backend, and (for the fallback backend) the unique
+    artifact-manifest digest and executor-local cache policy, are never
+    silently dropped on the floor.
     """
     envelope, _ = store.load_claim_envelope_with_digest(batch_id)
     validation_error: type[Exception] = ValueError
@@ -1020,17 +1154,6 @@ def _localize_process_inputs(
         consumer_probe_profile=consumer_probe_profile,
     )
     mount_root = backend_evidence.get("mount_root")
-    cache: LocalizedSourceCache | None = None
-    staged_sources: dict[str, Any] = {}
-    broadcast_digests: set[str] = set()
-    if backend is InputBackend.FABRIC_FALLBACK:
-        from pyspark import SparkFiles
-
-        cache = LocalizedSourceCache(
-            Path(SparkFiles.getRootDirectory()) / "content-addressed",
-            max_entries=256,
-            max_total_bytes=16 * 1024**3,
-        )
     store_config = getattr(store, "config", None)
     if not isinstance(
         store_config,
@@ -1041,6 +1164,24 @@ def _localize_process_inputs(
         f"abfss://{store_config.workspace_id}@onelake.dfs.fabric.microsoft.com/"
         f"{store_config.lakehouse_id}/{store_config.file_path('distributed-cache')}"
     )
+    staged_sources: dict[str, Any] = {}
+    broadcast_digests: set[str] = set()
+    artifact_manifest: dict[str, dict[str, str]] = {}
+    if backend is InputBackend.FABRIC_FALLBACK:
+        artifact_manifest = _build_fallback_artifact_manifest(
+            envelope,
+            workspace_id=store_config.workspace_id,
+            lakehouse_id=store_config.lakehouse_id,
+            model_paths_for_payload=lambda payload: _model_artifact_paths(
+                payload, validation_error=validation_error
+            ),
+            validation_error=validation_error,
+        )
+        _register_fallback_artifact_manifest(
+            spark,
+            artifact_manifest,
+            distributed_alias_root_uri=distributed_alias_root_uri,
+        )
 
     enrichment: dict[str, dict[str, Any]] = {}
     for item in envelope["items"]:
@@ -1052,43 +1193,37 @@ def _localize_process_inputs(
             route_identity=route_identity,
             validation_error=validation_error,
         )
-        relative, _, video_localized_name = _resolve_localized_video(
-            spark,
-            payload,
-            backend=backend,
-            mount_root=mount_root,
-            cache=cache,
-            staged_sources=staged_sources,
-            broadcast_digests=broadcast_digests,
-            distributed_alias_root_uri=distributed_alias_root_uri,
-            workspace_id=store_config.workspace_id,
-            lakehouse_id=store_config.lakehouse_id,
-            validation_error=validation_error,
-        )
         model_paths = _model_artifact_paths(
             payload, validation_error=validation_error
         )
-        localized_models = _resolve_localized_models(
-            spark,
-            payload,
-            model_paths,
-            backend=backend,
-            mount_root=mount_root,
-            cache=cache,
-            staged_sources=staged_sources,
-            broadcast_digests=broadcast_digests,
-            distributed_alias_root_uri=distributed_alias_root_uri,
-            workspace_id=store_config.workspace_id,
-            lakehouse_id=store_config.lakehouse_id,
-            validation_error=validation_error,
-        )
-        _check_synthetic_model_identity(
-            localized_models,
-            route_mode=route_mode,
-            route_identity=route_identity,
-            validation_error=validation_error,
-        )
         if backend is InputBackend.FABRIC_DIRECT:
+            relative, _, _ = _resolve_localized_video(
+                spark,
+                payload,
+                backend=backend,
+                mount_root=mount_root,
+                cache=None,
+                staged_sources=staged_sources,
+                broadcast_digests=broadcast_digests,
+                distributed_alias_root_uri=distributed_alias_root_uri,
+                workspace_id=store_config.workspace_id,
+                lakehouse_id=store_config.lakehouse_id,
+                validation_error=validation_error,
+            )
+            localized_models = _resolve_localized_models(
+                spark,
+                payload,
+                model_paths,
+                backend=backend,
+                mount_root=mount_root,
+                cache=None,
+                staged_sources=staged_sources,
+                broadcast_digests=broadcast_digests,
+                distributed_alias_root_uri=distributed_alias_root_uri,
+                workspace_id=store_config.workspace_id,
+                lakehouse_id=store_config.lakehouse_id,
+                validation_error=validation_error,
+            )
             enrichment[str(item["work_id"])] = {
                 "resolver_backend": InputBackend.FABRIC_DIRECT.value,
                 "lakehouse_mount_root": mount_root,
@@ -1096,13 +1231,44 @@ def _localize_process_inputs(
                 "lakehouse_relative_models_root": "Files/models",
             }
         else:
+            video_digest = str(payload["source_sha256"]).lower()
+            localized_models = {
+                path: {
+                    "localized_name": str(
+                        payload["model_artifact_sha256"][path]
+                    ).lower(),
+                    "sha256": str(
+                        payload["model_artifact_sha256"][path]
+                    ).lower(),
+                }
+                for path in model_paths
+            }
             enrichment[str(item["work_id"])] = {
                 "resolver_backend": InputBackend.FABRIC_FALLBACK.value,
-                "spark_localized_video_name": video_localized_name,
+                "spark_localized_video_name": video_digest,
                 "spark_localized_models": localized_models,
+                "spark_artifact_manifest": artifact_manifest,
             }
+        _check_synthetic_model_identity(
+            localized_models,
+            route_mode=route_mode,
+            route_identity=route_identity,
+            validation_error=validation_error,
+        )
     resolver_evidence = dict(backend_evidence)
-    resolver_evidence["cache_metrics"] = cache.metrics() if cache is not None else None
+    resolver_evidence["cache_metrics"] = None
+    if artifact_manifest:
+        resolver_evidence["artifact_manifest_sha256"] = _sha256_json(
+            artifact_manifest
+        )
+        resolver_evidence["artifact_manifest_unique_assets"] = len(
+            artifact_manifest
+        )
+        resolver_evidence["artifact_cache_policy"] = {
+            "scope": "executor-local",
+            "max_entries": 256,
+            "max_total_bytes": 16 * 1024**3,
+        }
     return LocalizedProcessInputs(enrichment, resolver_evidence)
 
 
@@ -1157,6 +1323,10 @@ def _control_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status")
     status.add_argument("--work-id", action="append", required=True)
     commands.add_parser("reconcile")
+    compact = commands.add_parser("compact-retention")
+    compact.add_argument("--retention-days", type=float, default=30.0)
+    compact.add_argument("--max-batches", type=int, default=100)
+    compact.add_argument("--apply", action="store_true")
     return parser
 
 
@@ -1445,6 +1615,23 @@ def _control_dispatch(
     elif arguments.command == "clear-stale-lock":
         result = _clear_stale_lock(
             _spark(), arguments.expected_owner_id, config=selected
+        )
+    elif arguments.command == "compact-retention":
+        from people_counter.fabric_retention import FabricRetentionPolicy
+        from people_counter.sjd_process import OneLakeDeltaAttemptAdapter
+
+        attempts = OneLakeDeltaAttemptAdapter(
+            selected.file_path("attempts"),
+            store.spark,
+            config=selected,
+        )
+        result = store.compact_history(
+            attempt_store=attempts,
+            policy=FabricRetentionPolicy(
+                retention_days=arguments.retention_days,
+                max_batches=arguments.max_batches,
+            ),
+            apply=arguments.apply,
         )
     else:
         result = [asdict(item) for item in store.reconcile()]

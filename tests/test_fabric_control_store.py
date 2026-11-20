@@ -348,7 +348,95 @@ def test_delta_compatibility_migrates_existing_work_and_processes_a_mixed_queue(
         ["blocked"], operator="ops", reason="new SDK",
     )[0].status == "BLOCKED_INCOMPATIBLE"
     assert store.spark.table(store.tables["attempts"]).count() == 1
+
+
+def test_delta_bootstrap_creates_partitioned_committed_records(delta_control):
+    from delta.tables import DeltaTable
+
+    store = delta_control
+    table = store.tables["committed_records"]
+
+    assert store.spark.table(table).columns == [
+        "batch_id",
+        "process_attempt_id",
+        "work_id",
+        "attempt_id",
+        "record_type",
+        "record_sequence",
+        "record_json",
+    ]
+    detail = DeltaTable.forName(store.spark, table).detail().first()
+    assert detail["partitionColumns"] == ["batch_id"]
     assert store.spark.table(store.tables["locks"]).first().owner_id is None
+
+
+def test_delta_sparse_registration_preserves_other_rows_without_full_collect(
+    delta_control, monkeypatch,
+):
+    store = delta_control
+    registration = {
+        "runtime_key": "cpu", "duration_seconds": 1, "config_sha256": "c" * 64,
+        "release_digest": "r" * 64, "max_attempts": 1,
+    }
+    store.register("existing", {}, **registration)
+    full_collect = Mock(side_effect=AssertionError("full-table control read"))
+    monkeypatch.setattr(store, "_rows", full_collect)
+
+    registered = store.register("new", {}, **registration)
+
+    assert registered.work_id == "new"
+    claim = store.claim(
+        "owner", max_items=1, lease_seconds=60,
+        minimum_speed_x=1, safety_factor=1, margin_seconds=0.1,
+        allowed_work_ids=["new"],
+    )
+    assert claim is not None
+    document, digest = store.load_claim_envelope_with_digest(claim.batch_id)
+    envelope = verify_envelope(document, batch_id=claim.batch_id, envelope_sha256=digest)
+    item = claim.items[0]
+    store.seal_batch(
+        claim.batch_id,
+        [{
+            "work_id": item.work_id, "attempt_id": item.attempt_id,
+            "succeeded": True, "output_path": "Files/output",
+            "output_sha256": "a" * 64,
+            "records": [{
+                "record_sequence": 0, "executor_identity": "executor",
+                "partition_id": 0, "task_attempt_id": 0,
+            }],
+        }],
+        envelope_sha256=digest,
+        membership_sha256=envelope.membership_sha256,
+    )
+    assert store.commit_batch(claim.batch_id) == (1,)
+    assert store.get_work("new").status == "SUCCEEDED"
+    assert {
+        row.work_id
+        for row in store.spark.table(store.tables["work"]).select("work_id").collect()
+    } == {"existing", "new"}
+    full_collect.assert_not_called()
+
+
+def test_delta_sparse_replacement_upserts_only_supplied_attempts(delta_control):
+    store = delta_control
+    original = {
+        "attempt_id": "old", "work_id": "work-old", "batch_id": "batch-old",
+        "fence": 1, "status": "EXPIRED", "lease_expires_at": None,
+        "payload_sha256": "old", "output_path": None, "output_sha256": None,
+        "terminal_succeeded": None, "records_json": None,
+        "recovery_outcome": "READY", "created_at": 1.0, "sealed_at": None,
+    }
+    replacement = original | {"attempt_id": "new", "work_id": "work-new"}
+    store._replace("attempts", [original])
+
+    store._replace("attempts", [original | {"status": "FAILED"}, replacement])
+
+    rows = {
+        row.attempt_id: row.status
+        for row in store.spark.table(store.tables["attempts"])
+        .select("attempt_id", "status").collect()
+    }
+    assert rows == {"old": "FAILED", "new": "EXPIRED"}
 
 
 def test_delta_exact_recovery_and_replacement_fail_closed(delta_control, monkeypatch):
@@ -391,12 +479,12 @@ def test_delta_exact_recovery_and_replacement_fail_closed(delta_control, monkeyp
         store._replace("work", rows + rows)
     assert store._rows("work") == rows
 
-    read_rows = store._rows
+    read_rows = store._rows_matching
     work_reads = 0
 
-    def stale_readback(suffix):
+    def stale_readback(suffix, matches):
         nonlocal work_reads
-        observed = read_rows(suffix)
+        observed = read_rows(suffix, matches)
         if suffix == "work":
             work_reads += 1
             if work_reads == 2:
@@ -404,7 +492,7 @@ def test_delta_exact_recovery_and_replacement_fail_closed(delta_control, monkeyp
         return observed
 
     with monkeypatch.context() as patch:
-        patch.setattr(store, "_rows", stale_readback)
+        patch.setattr(store, "_rows_matching", stale_readback)
         with pytest.raises(BatchValidationError, match="exact readback/cardinality"):
             store.register("unverified", {}, **registration)
     assert {row.work_id for row in store.spark.table(store.tables["work"]).collect()} == {

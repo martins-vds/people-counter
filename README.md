@@ -49,6 +49,20 @@ Start with the [GitHub deployment runbook](docs/github-deployment.md).
 
 - [Local Spark development](docs/local-spark-development.md)
 
+### Fabric retention
+
+Run `pc-production-control-sjd compact-retention` to review the bounded plan.
+The command is a dry run unless `--apply` is supplied. By default it compacts
+terminal, unpublished batch history older than 30 days, deletes consumer-probe
+evidence older than that cutoff, and removes resolved reconciliation findings.
+It processes at most 100 terminal batches per category and 1,000 findings per
+run. `--retention-days` has a 7-day minimum; `--max-batches` cannot exceed 100.
+
+Retention never deletes `work` rows, `publications`, replay requests, active or
+published attempts, their claim/staging evidence, or release provenance. Delta
+time travel is not vacuumed. Published staging and control provenance therefore
+remain available for committed pointer recovery and Gold replay.
+
 ### Operator portal
 
 Start the local browser-based camera, package, profile, and backfill tools:

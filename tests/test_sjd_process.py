@@ -12,6 +12,7 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -414,6 +415,121 @@ class SjdProcessTests(unittest.TestCase):
             target.write_text(previous, encoding="utf-8")
         with self.assertRaisesRegex(ProcessValidationError, "finite JSON"):
             self.attempts.write_records("batch", "nonfinite", [{"value": float("nan")}])
+
+    def test_delta_attempt_readers_stream_rows_and_preserve_order(self):
+        records = [
+            {
+                "work_id": "work-b",
+                "attempt_id": "attempt",
+                "record_type": "telemetry",
+                "record_sequence": 1,
+            },
+            {
+                "work_id": "work-a",
+                "attempt_id": "attempt",
+                "record_type": "video_result",
+                "record_sequence": 0,
+            },
+        ]
+
+        class Frame:
+            def select(self, *_columns):
+                return self
+
+            def orderBy(self, *_columns):
+                return self
+
+            def toLocalIterator(self):
+                return iter(
+                    [
+                        {
+                            **record,
+                            "record_json": json.dumps(record),
+                        }
+                        for record in records
+                    ]
+                )
+
+            def collect(self):
+                raise AssertionError("full-cardinality collect used")
+
+        class Reader:
+            def format(self, _format):
+                return self
+
+            def load(self, _path):
+                return Frame()
+
+        spark = SimpleNamespace(read=Reader())
+        local_root = self.root / "streamed-delta"
+        local = SparkDeltaAttemptAdapter(local_root, spark)
+        local_path = local.attempt_path("batch", "attempt")
+        (local_path / "_delta_log").mkdir(parents=True)
+
+        cloud = object.__new__(OneLakeDeltaAttemptAdapter)
+        cloud.spark_session = spark
+        cloud.files = SimpleNamespace(exists=lambda _path: True)
+        cloud.config = SimpleNamespace(abfss_path=lambda path: path)
+        cloud.root = "attempts"
+        cloud.attempt_path = lambda batch_id, process_attempt_id: (
+            f"attempts/batch={batch_id}/attempt={process_attempt_id}"
+        )
+
+        for adapter in (local, cloud):
+            with self.subTest(adapter=type(adapter).__name__):
+                self.assertEqual(
+                    adapter.read_records("batch", "attempt"),
+                    [records[1], records[0]],
+                )
+
+    def test_process_pipeline_accepts_repeatable_record_stream_without_list_conversion(
+        self,
+    ):
+        batch = self.claim((10, 8))
+        generated = SyntheticHarness().execute(
+            self.verified(batch),
+            plan_duration_lpt(
+                self.verified(batch).items,
+                LOCAL_TWO_WORKERS,
+                peak_rss_bytes=None,
+            ),
+            LOCAL_TWO_WORKERS,
+            "probe",
+        )
+        stream = process_module.ExecutionRecords(lambda: iter(generated))
+
+        class StreamingHarness:
+            calls = 0
+
+            def execute(self, envelope, plan, profile, mode):
+                self.calls += 1
+                return stream
+
+        class NoListWrites(LocalJsonAttemptAdapter):
+            def write_records(self, batch_id, process_attempt_id, records):
+                self.last_write_type = type(records)
+                self.assert_not_list(records)
+                return super().write_records(batch_id, process_attempt_id, records)
+
+            @staticmethod
+            def assert_not_list(records):
+                if isinstance(records, list):
+                    raise AssertionError("process pipeline materialized harness records")
+
+        adapter = NoListWrites(self.root / "streaming-process")
+        harness = StreamingHarness()
+        result = run_process_batch(
+            self.store,
+            batch.batch_id,
+            LOCAL_TWO_WORKERS,
+            "probe",
+            harness,
+            adapter,
+        )
+
+        self.assertEqual(result.record_count, len(generated))
+        self.assertIs(adapter.last_write_type, type(stream))
+        self.assertEqual(harness.calls, 1)
 
     def test_delta_bucket_adapters_handle_empty_and_malformed_containers(self):
         for containers in ([], [None], [{"rows": []}]):
@@ -1273,7 +1389,7 @@ class SjdProcessTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError, "after Delta stage before receipt"
             ):
-                harness.execute(envelope, plan, LOCAL_TWO_WORKERS, "probe")
+                list(harness.execute(envelope, plan, LOCAL_TWO_WORKERS, "probe"))
 
             history_before = (
                 spark.sql(f"DESCRIBE HISTORY delta.`{staged}`").collect()
@@ -1314,7 +1430,11 @@ class SjdProcessTests(unittest.TestCase):
                 with self.subTest(overrides=overrides), self.assertRaisesRegex(
                     StagingConflictError, message
                 ):
-                    harness.execute(envelope, plan, LOCAL_TWO_WORKERS, "probe")
+                    list(
+                        harness.execute(
+                            envelope, plan, LOCAL_TWO_WORKERS, "probe"
+                        )
+                    )
             duplicated = original + [row for row in original if row["row_kind"] == "receipt"]
             spark.createDataFrame(duplicated, schema=schema).write.format("delta").mode(
                 "overwrite"
@@ -1343,10 +1463,15 @@ class SjdProcessTests(unittest.TestCase):
         from tests.fabric_fixtures import RUNTIME_CONTEXT
 
         cloud_root = self.root / "onelake"
+        table_prefix = f"attempt_publication_{uuid4().hex}_"
 
         class LocalNamespace(FabricNamespaceConfig):
             def abfss_path(self, path):
                 return str(cloud_root / path)
+
+            def table(self, suffix):
+                super().table(suffix)
+                return f"{table_prefix}{suffix}"
 
         class LocalOneLakeFiles:
             def exists(self, path):
@@ -1409,6 +1534,20 @@ class SjdProcessTests(unittest.TestCase):
                     self.assertEqual(adapter.load_complete("batch", "attempt"), (expected, marker))
                     with self.assertRaises(ImmutableConflictError):
                         adapter.create_success("batch", "attempt", {"record_count": 3})
+
+            facade.bootstrap()
+            cloud.publish_records(
+                "batch", "attempt", cloud.record_source("batch", "attempt")
+            )
+            cloud.publish_records(
+                "batch", "attempt", cloud.record_source("batch", "attempt")
+            )
+            published = spark.table(config.table("committed_records"))
+            self.assertEqual(published.count(), len(records))
+            self.assertEqual(
+                published.select("batch_id", "process_attempt_id").distinct().collect(),
+                [("batch", "attempt")],
+            )
 
             cloud_path = cloud_root / cloud.attempt_path("batch", "attempt")
             for content in ("{", "[]"):
@@ -2322,7 +2461,7 @@ class SjdProcessTests(unittest.TestCase):
                 executor_host="worker",
             ),
         ):
-            harness.execute(envelope, plan, LOCAL_TWO_WORKERS, "probe")
+            list(harness.execute(envelope, plan, LOCAL_TWO_WORKERS, "probe"))
         self.assertTrue(captured_receipts)
         self.assertTrue(
             all(
@@ -2642,6 +2781,54 @@ class SjdProcessTests(unittest.TestCase):
         )
         self.assertTrue(result.resumed)
         self.assertEqual(harness.calls, 1)
+
+    def test_attempt_publication_precedes_seal_and_republishes_on_commit_resume(
+        self,
+    ):
+        batch = self.claim((10,))
+        events = []
+
+        class PublishingAdapter(LocalJsonAttemptAdapter):
+            def publish_records(
+                self, batch_id, process_attempt_id, records
+            ):
+                events.append(
+                    (
+                        "publish",
+                        batch_id,
+                        process_attempt_id,
+                        len(list(records)),
+                    )
+                )
+
+        adapter = PublishingAdapter(self.root / "published-staging")
+        seal_batch = self.store.seal_batch
+
+        def record_seal(batch_id, *args, **kwargs):
+            events.append(("seal", batch_id))
+            return seal_batch(batch_id, *args, **kwargs)
+
+        self.store.seal_batch = record_seal
+        result = run_process_batch(
+            self.store,
+            batch.batch_id,
+            LOCAL_TWO_WORKERS,
+            "probe",
+            SyntheticHarness(),
+            adapter,
+        )
+
+        self.assertEqual([event[0] for event in events], ["publish", "seal"])
+        self.assertEqual(events[0][3], result.record_count)
+        resumed = resume_committed_process_batch(
+            self.store, batch.batch_id, adapter
+        )
+        self.assertTrue(resumed.resumed)
+        self.assertEqual([event[0] for event in events], [
+            "publish",
+            "seal",
+            "publish",
+        ])
 
     def test_crash_after_seal_resumes_before_pointer_without_reexecution(self):
         batch = self.claim((10,))
@@ -3109,7 +3296,7 @@ def test_selected_delta_iterator_cleanup(record_json, closeable):
     frame = MagicMock()
     frame.where.return_value.select.return_value.orderBy.return_value.toLocalIterator.return_value = rows
     with pytest.raises((process_module.StagingConflictError, KeyError)):
-        process_module._read_selected_delta_records(frame, [])
+        list(process_module._read_selected_delta_records(frame, []))
     assert rows.closed is closeable
     frame.stop.assert_not_called()
 
@@ -3129,9 +3316,9 @@ def test_selected_delta_iterator_exhaustion_and_close_errors(close_kind):
     frame.where.return_value.select.return_value.orderBy.return_value.toLocalIterator.return_value = rows
     if close_kind == "raises":
         with pytest.raises(OSError, match="iterator close failed"):
-            process_module._read_selected_delta_records(frame, [])
+            list(process_module._read_selected_delta_records(frame, []))
     else:
-        assert process_module._read_selected_delta_records(frame, []) == []
+        assert list(process_module._read_selected_delta_records(frame, [])) == []
     if close_kind == "noncallable":
         close.assert_not_called()
     else:

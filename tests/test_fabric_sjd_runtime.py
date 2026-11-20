@@ -48,6 +48,7 @@ from people_counter.fabric_sjd_runtime import (
     _bind_consumer_probe_to_executor_inventory,
     _clear_stale_lock,
     _control_parser,
+    _consumer_probe_profile,
     _executor_warm_works,
     _fabric_process_profile,
     _localize_process_inputs,
@@ -312,10 +313,10 @@ def test_consumer_decision_is_workload_specific_immutable_and_read_back() -> Non
     assert first == repeated
     assert first["selected_backend"] == "FABRIC_FALLBACK"
     assert first["executor_ids"] == ["1", "2"]
-    assert first["profile"]["planned_concurrent_tasks"] == 2
+    assert first["profile"]["planned_concurrent_tasks"] == 1
     assert first["profile"]["hash_targets"]
     assert files.read_calls == 2
-    assert len(observed_profiles) == 2
+    assert len(observed_profiles) == 1
     assert len(files.content) == 1
     profile = first["profile"]
     expected_profile_sha256 = hashlib.sha256(
@@ -341,6 +342,14 @@ def test_consumer_decision_is_workload_specific_immutable_and_read_back() -> Non
         "capability": "direct consumers",
         "evidence": "consumer open failed on every executor",
     }
+    persisted["decision_sha256"] = hashlib.sha256(
+        json.dumps(
+            persisted,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     persisted_text = json.dumps(
         persisted,
         allow_nan=False,
@@ -353,6 +362,104 @@ def test_consumer_decision_is_workload_specific_immutable_and_read_back() -> Non
         "path": expected_path,
         "sha256": hashlib.sha256(persisted_text.encode("utf-8")).hexdigest(),
     }
+
+
+def test_consumer_probe_profile_selects_onnx_model_artifact() -> None:
+    digest = "a" * 64
+    profile = _consumer_probe_profile(
+        {
+            "items": [
+                {
+                    "payload": {
+                        "source_video": "/lakehouse/default/Files/video.mp4",
+                        "source_sha256": digest,
+                        "pipeline": "rtdetr-osnet",
+                        "detector_model": "r18",
+                        "model_format": "onnx",
+                        "model_artifact_sha256": {
+                            path: digest
+                            for path in (
+                                "rtdetr_osnet/rtdetr_v2_r18vd/config.json",
+                                "rtdetr_osnet/rtdetr_v2_r18vd/preprocessor_config.json",
+                                "rtdetr_osnet/rtdetr_v2_r18vd/model.onnx",
+                                "rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx",
+                            )
+                        },
+                    }
+                }
+            ]
+        },
+        planned_concurrent_tasks=2,
+    )
+
+    assert profile.safetensors_or_pytorch_model is None
+    assert profile.onnx_model.relative_path.endswith("model.onnx")
+    assert profile.planned_concurrent_tasks == 2
+
+
+def test_consumer_decision_uses_task_cpu_key_and_safe_executor_minimum() -> None:
+    from people_counter.fabric_capability_probe import (
+        CapabilityProbeResult,
+        CapabilityStatus,
+    )
+
+    requested: list[tuple[str, str]] = []
+
+    def get_conf(key: str, default: str) -> str:
+        requested.append((key, default))
+        return "2" if key == "spark.task.cpus" else default
+
+    spark = SimpleNamespace(conf=SimpleNamespace(get=get_conf))
+    executors = (
+        SimpleNamespace(executor_id="one", total_cores=4),
+        SimpleNamespace(executor_id="two", total_cores=8),
+    )
+    digest = "a" * 64
+    envelope = {
+        "items": [
+            {
+                "work_id": "work",
+                "payload": {
+                    "source_video": "/lakehouse/default/Files/video.mp4",
+                    "source_sha256": digest,
+                    "pipeline": "rtdetr-osnet",
+                    "detector_model": "r18",
+                    "model_format": "pytorch",
+                    "model_artifact_sha256": {
+                        path: digest
+                        for path in (
+                            "rtdetr_osnet/rtdetr_v2_r18vd/config.json",
+                            "rtdetr_osnet/rtdetr_v2_r18vd/preprocessor_config.json",
+                            "rtdetr_osnet/rtdetr_v2_r18vd/model.safetensors",
+                            "rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.pt",
+                        )
+                    },
+                },
+            }
+        ]
+    }
+    observed: list[object] = []
+    result = CapabilityProbeResult(
+        "probe",
+        CapabilityStatus.FABRIC_PLATFORM_BLOCKED,
+        "blocked",
+    )
+
+    _, decision = _probe_and_persist_consumer_decision(
+        spark,
+        FabricNamespaceConfig.benchmark(target=TEST_TARGET),
+        "safe-concurrency",
+        envelope,
+        discover_executors=lambda _spark: executors,
+        probe_consumers=lambda _spark, _executors, *, profile: (
+            observed.append(profile) or result
+        ),
+        files=MemoryFiles(),
+    )
+
+    assert requested == [("spark.task.cpus", "1")]
+    assert decision["profile"]["planned_concurrent_tasks"] == 2
+    assert observed[0].planned_concurrent_tasks == 2
 
 
 def test_consumer_decision_reuses_immutable_probe_after_executor_drift() -> None:
@@ -1248,8 +1355,14 @@ class FakeRead:
     def select(self, *_columns):
         return self
 
+    def orderBy(self, *_columns):
+        return self
+
     def collect(self):
         return copy.deepcopy(self.spark.rows[self.path])
+
+    def toLocalIterator(self):
+        return iter(copy.deepcopy(self.spark.rows[self.path]))
 
 
 class FakeSpark:
@@ -3421,6 +3534,13 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
     monkeypatch.setitem(
         sys.modules, "pyspark", SimpleNamespace(SparkFiles=spark_files)
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "notebookutils",
+        SimpleNamespace(
+            fs=SimpleNamespace(exists=lambda _path: False, cp=lambda *_args: True)
+        ),
+    )
     payload = {
         "source_video": (
             "/lakehouse/default/Files/_canary/people-counter/"
@@ -3451,7 +3571,10 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
         requested_batches.append(batch)
         return {"items": [{"work_id": "work-1", "payload": payload}]}, "digest"
 
-    store = SimpleNamespace(load_claim_envelope_with_digest=load_envelope)
+    store = SimpleNamespace(
+        config=FabricNamespaceConfig.canary(target=TEST_TARGET),
+        load_claim_envelope_with_digest=load_envelope,
+    )
     spark = SimpleNamespace(
         sparkContext=SimpleNamespace(addFile=MagicMock())
     )
@@ -3466,7 +3589,7 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
     monkeypatch.setattr(
         current_jobs_module,
         "_stream_hadoop_uri_to_local",
-        stream_remote,
+        MagicMock(side_effect=AssertionError("driver localization must not run")),
     )
     monkeypatch.setattr(
         current_jobs_module,
@@ -3495,7 +3618,13 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
     assert isinstance(localized, current_jobs_module.LocalizedProcessInputs)
     enrichment, resolver_capability = localized
     assert resolver_capability["backend"] == "FABRIC_FALLBACK"
-    assert resolver_capability["cache_metrics"]["misses"] == 5
+    assert resolver_capability["cache_metrics"] is None
+    assert resolver_capability["artifact_manifest_unique_assets"] == 5
+    assert resolver_capability["artifact_cache_policy"] == {
+        "scope": "executor-local",
+        "max_entries": 256,
+        "max_total_bytes": 16 * 1024**3,
+    }
 
     assert enrichment["work-1"]["resolver_backend"] == "FABRIC_FALLBACK"
     assert enrichment["work-1"]["spark_localized_video_name"] == _sha256_bytes(
@@ -3518,10 +3647,10 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
         call.args[0] for call in spark.sparkContext.addFile.call_args_list
     }
     assert all(arg.startswith("abfss://") for arg in broadcast_args)
-    assert not any("/Files/models/" in arg for arg in broadcast_args)
     assert any(
         arg.endswith(
-            models["rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.pt"][
+            "/"
+            + models["rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.pt"][
                 "sha256"
             ]
         )
@@ -3592,18 +3721,8 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
 
     for update, message in (
         ({"source_video": "/production/video.mp4"}, "default Lakehouse"),
-        ({"source_sha256": "0" * 64}, "SHA-256 mismatch"),
         ({"pipeline": "rfdetr-botsort"}, "RT-DETR"),
         ({"model_artifact_sha256": ["not", "a", "mapping"]}, "must be an object"),
-        (
-            {
-                "model_artifact_sha256": {
-                    **payload["model_artifact_sha256"],
-                    "rtdetr_osnet/rtdetr_v2_r18vd/model.safetensors": "f" * 64
-                }
-            },
-            "SHA-256 mismatch",
-        ),
     ):
         changed = payload | update
         store.load_claim_envelope_with_digest = lambda _batch, item=changed: (
@@ -3632,7 +3751,7 @@ def test_process_input_localizer_distributes_and_hashes_immutable_inputs(
         )
 
 
-def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
+def test_process_input_localizer_passes_exact_spark_session_and_manifest_policy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     (tmp_path / "synthetic.mp4").write_bytes(b"video")
@@ -3647,6 +3766,13 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
     )
     monkeypatch.setitem(
         sys.modules, "pyspark", SimpleNamespace(SparkFiles=spark_files)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "notebookutils",
+        SimpleNamespace(
+            fs=SimpleNamespace(exists=lambda _path: False, cp=lambda *_args: True)
+        ),
     )
     payload = {
         "source_video": (
@@ -3673,6 +3799,7 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
         },
     }
     store = SimpleNamespace(
+        config=FabricNamespaceConfig.canary(target=TEST_TARGET),
         load_claim_envelope_with_digest=lambda _batch: (
             {"items": [{"work_id": "work-1", "payload": payload}]},
             "digest",
@@ -3699,28 +3826,12 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
         return _fake_candidate_executors(2)
 
     from people_counter import fabric_sjd_runtime
-    from people_counter.fabric_source_cache import LocalizedSourceCache
 
-    real_cache_cls = LocalizedSourceCache
-
-    class _RecordingCache(real_cache_cls):  # type: ignore[misc]
-        def __init__(self, root: Path, **kwargs: object) -> None:
-            received["cache_root"] = root
-            received["cache_kwargs"] = kwargs
-            super().__init__(root, **kwargs)
-
-    monkeypatch.setattr(fabric_sjd_runtime, "LocalizedSourceCache", _RecordingCache)
-
-    def stream_remote(_spark, uri, destination):
-        source = tmp_path / uri.rsplit("/", 1)[-1]
-        with source.open("rb") as read_stream, destination.open("xb") as write_stream:
-            while chunk := read_stream.read(1024):
-                write_stream.write(chunk)
-
+    stream_remote = MagicMock(
+        side_effect=AssertionError("driver localization must not run")
+    )
     monkeypatch.setattr(
-        fabric_sjd_runtime,
-        "_stream_hadoop_uri_to_local",
-        stream_remote,
+        fabric_sjd_runtime, "_stream_hadoop_uri_to_local", stream_remote
     )
     monkeypatch.setattr(
         fabric_sjd_runtime,
@@ -3728,7 +3839,7 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
         lambda *_args, **_kwargs: None,
     )
 
-    _localize_process_inputs(
+    _, evidence = _localize_process_inputs(
         spark,
         store,
         "batch-1",
@@ -3740,14 +3851,13 @@ def test_process_input_localizer_passes_exact_spark_session_and_cache_params(
     # replaced with ``None``.
     assert received["probe_session"] is spark
     assert received["discover_session"] is spark
-    # The fallback content-addressed cache must be constructed under its own
-    # "content-addressed" subdirectory with the reviewed 256-entry /
-    # 16 GiB byte budget -- not some other silently-drifted value.
-    assert received["cache_root"] == Path(str(spark_root)) / "content-addressed"
-    assert received["cache_kwargs"] == {
+    assert evidence["artifact_cache_policy"] == {
+        "scope": "executor-local",
         "max_entries": 256,
         "max_total_bytes": 16 * 1024**3,
     }
+    assert evidence["artifact_manifest_unique_assets"] == 5
+    stream_remote.assert_not_called()
 
 
 def test_process_input_localizer_direct_backend_resolves_mount_without_distribution(
@@ -3947,6 +4057,13 @@ def test_synthetic_localizer_pins_r50_onnx_artifacts(
             )
         ),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "notebookutils",
+        SimpleNamespace(
+            fs=SimpleNamespace(exists=lambda _path: False, cp=lambda *_args: True)
+        ),
+    )
     payload = {
         "source_video": (
             "/lakehouse/default/Files/_shadow/people-counter/"
@@ -3977,6 +4094,7 @@ def test_synthetic_localizer_pins_r50_onnx_artifacts(
         "payload": payload,
     }
     store = SimpleNamespace(
+        config=FabricNamespaceConfig.canary(target=TEST_TARGET),
         load_claim_envelope_with_digest=lambda batch: (
             {"items": [item]} if batch == "batch-r50" else {},
             "digest",
@@ -4049,10 +4167,10 @@ def test_synthetic_localizer_pins_r50_onnx_artifacts(
         call.args[0] for call in spark.sparkContext.addFile.call_args_list
     }
     assert all(arg.startswith("abfss://") for arg in broadcast_args)
-    assert not any("/Files/models/" in arg for arg in broadcast_args)
     assert any(
         arg.endswith(
-            models["rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx"][
+            "/"
+            + models["rtdetr_osnet/libre_reid_osnet/osnet_ain_x0_25.onnx"][
                 "sha256"
             ]
         )
@@ -4959,9 +5077,10 @@ def test_fabric_control_bootstrap_creates_tables_and_rejects_bad_lock() -> None:
     store.bootstrap()
 
     assert spark.createDataFrame.call_count == len(_SCHEMAS)
-    assert frame.write.format.return_value.mode.return_value.saveAsTable.call_count == len(
-        _SCHEMAS
-    )
+    mode = frame.write.format.return_value.mode.return_value
+    unpartitioned = mode.saveAsTable
+    partitioned = mode.partitionBy.return_value.saveAsTable
+    assert unpartitioned.call_count + partitioned.call_count == len(_SCHEMAS)
     rows[:] = []
     with pytest.raises(RuntimeError, match="exactly one"):
         store.bootstrap()

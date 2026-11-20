@@ -71,6 +71,7 @@ _TABLE_SUFFIXES = frozenset(
         "batches",
         "batch_members",
         "attempts",
+        "committed_records",
         "publications",
         "replay_requests",
         "reconciliation_findings",
