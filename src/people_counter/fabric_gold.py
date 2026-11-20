@@ -605,6 +605,7 @@ class FabricCommittedSource:
         payload = F.from_json(
             F.col("work.payload_json"), payload_schema, {"mode": "FAILFAST"}
         )
+        materialized_json = F.parse_json(F.col("_materialized_output_json"))
         published_at = F.coalesce(
             F.col("publication.published_at"),
             F.col("batch.committed_at"),
@@ -656,8 +657,12 @@ class FabricCommittedSource:
                 F.col("attempt.output_sha256").alias("output_sha256"),
                 F.col("batch.committed_at").alias("batch_committed_at"),
             ).alias("attempt"),
-            F.col("_materialized.run").alias("run"),
-            F.col("_materialized.line_counts").alias("line_counts"),
+            F.variant_get(
+                materialized_json, "$.run", "variant"
+            ).alias("run"),
+            F.variant_get(
+                materialized_json, "$.line_counts", "variant"
+            ).alias("line_counts"),
         )
         return enriched.select(
             F.col("work.work_id").alias("work_id"),

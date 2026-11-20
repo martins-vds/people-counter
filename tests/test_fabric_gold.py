@@ -294,6 +294,7 @@ def test_committed_source_consumes_materialized_output_without_python_udf(
                 "processing_seconds": 2.0,
                 "processed_frames": 10,
                 "status": "SUCCEEDED",
+                "custom_metadata": {"encoding": "utf-8"},
             },
             "line_counts": [
                 {
@@ -336,6 +337,7 @@ def test_committed_source_consumes_materialized_output_without_python_udf(
     frame = source.committed_output_frame()
     assert len(outputs) == 1
     assert outputs[0].run["processing_seconds"] == 2.0
+    assert outputs[0].run["custom_metadata"] == {"encoding": "utf-8"}
     assert "BatchEvalPython" not in (
         frame._jdf.queryExecution().optimizedPlan().toString()
     )

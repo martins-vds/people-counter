@@ -18,6 +18,7 @@
 | Resolved: driver-byte fallback localization. | LOW | Executors read and cache deduplicated content-addressed aliases; the driver handles metadata only. |
 | Resolved: per-attempt Delta unions in Gold. | LOW | Process publishes a shared `committed_records` table partitioned by `batch_id`; Gold reads it directly. |
 | Resolved: final Gold Python UDF. | LOW | Publication now materializes canonical, versioned `output_json` in `committed_records`. [`FabricCommittedSource.committed_output_frame`](../../src/people_counter/fabric_gold.py:293) validates and parses that JSON with Spark-native expressions. |
+| Resolved: fixed-schema JSON projection could drop future fields. | LOW | The fresh review found that `from_json` through a fixed struct removed unknown `run` fields. Gold now keeps `run` and `line_counts` as Spark Variant values when rebuilding output JSON, preserving arbitrary nested fields. |
 | Residual: compatibility APIs can return Python lists. | LOW | `committed_outputs()` and attempt `read_records()` retain list contracts for compatibility. Native Fabric process and Gold paths avoid those APIs. |
 | Resolved: no retention policy. | LOW | Retention is dry-run by default, bounded by age/count, and preserves active, published, and provenance data. |
 
@@ -49,6 +50,7 @@
 3. Backfilled null materialization through idempotent process publication.
 4. Removed the final Gold Python UDF and its `BatchEvalPython` plan.
 5. Added shared-table schema migration and fail-closed output validation.
+6. Preserved arbitrary materialized JSON fields with Spark Variant while keeping the Gold plan free of Python evaluation.
 
 ## Evidence required for production sign-off
 
@@ -60,7 +62,7 @@
 
 | Check | Result |
 |---|---|
-| Focused process/Gold/control suite | 198 tests passed, 101 subtests passed. |
+| Focused process/Gold/control suite | 198 tests passed, 101 subtests passed after the fresh Variant regression test. |
 | CRAP | Process coverage 94%; Gold coverage 88%. The changed scopes introduced no top-20 CRAP regression; unrelated uncovered repository functions still exceed threshold 30. |
-| Native Spark plan | Tests assert no `BatchEvalPython` in materialized Gold plans. Source contains no `F.udf`. |
+| Native Spark plan | Tests assert no `BatchEvalPython` in materialized Gold plans and verify custom nested `run` fields survive. Source contains no `F.udf`. |
 | Mutation | Scoped run was attempted. Initial stats required optional `torch`; narrowed stats ran but exceeded the practical mutation window, so no new mutation result is claimed. |
