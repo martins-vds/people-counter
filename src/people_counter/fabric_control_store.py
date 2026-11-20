@@ -82,7 +82,7 @@ _SCHEMAS = {
     "committed_records": (
         "batch_id string, process_attempt_id string, work_id string, "
         "attempt_id string, record_type string, record_sequence long, "
-        "record_json string"
+        "record_json string, output_schema_version long, output_json string"
     ),
     "publications": (
         "publication_sequence long, work_id string, attempt_id string, "
@@ -293,6 +293,35 @@ class FabricControlStoreImpl:
             if not set(missing) <= set(self.spark.table(name).columns):
                 raise ControlError("compatibility schema migration readback differs")
 
+    def _migrate_committed_records(self) -> None:
+        name = self.tables["committed_records"]
+        columns = set(self.spark.table(name).columns)
+        missing = [
+            field
+            for field, data_type in (
+                ("output_schema_version", "BIGINT"),
+                ("output_json", "STRING"),
+            )
+            if field not in columns
+        ]
+        if missing:
+            additions = ", ".join(
+                f"{field} {data_type}" for field, data_type in (
+                    ("output_schema_version", "BIGINT"),
+                    ("output_json", "STRING"),
+                )
+                if field in missing
+            )
+            self.spark.sql(f"ALTER TABLE {name} ADD COLUMNS ({additions})")
+            self.spark.catalog.refreshTable(name)
+        if not {
+            "output_schema_version",
+            "output_json",
+        } <= set(self.spark.table(name).columns):
+            raise ControlError(
+                "committed output schema migration readback differs"
+            )
+
     def bootstrap(self) -> None:
         """Create every Delta table with an explicit schema and seed one lock."""
         for suffix, schema in _SCHEMAS.items():
@@ -323,6 +352,16 @@ class FabricControlStoreImpl:
         columns = set(self.spark.table(self.tables["work"]).columns)
         if not {"submitted_sdk_version", "compatibility_json"} <= columns:
             ControlWriter(self.spark, self.tables["locks"]).run(self._migrate_compatibility)
+        committed_columns = set(
+            self.spark.table(self.tables["committed_records"]).columns
+        )
+        if not {
+            "output_schema_version",
+            "output_json",
+        } <= committed_columns:
+            ControlWriter(self.spark, self.tables["locks"]).run(
+                self._migrate_committed_records
+            )
 
     def now(self) -> float:
         return _finite(self._clock(), "clock")

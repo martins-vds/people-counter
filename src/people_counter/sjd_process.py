@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 Mode = Literal["probe", "sdk"]
 TERMINAL_TYPES = frozenset({"video_result", "error"})
 RECORD_TYPES = frozenset({"video_result", "error", "telemetry", "line_count"})
+COMMITTED_OUTPUT_SCHEMA_VERSION = 1
 DETECTOR_BATCH_SIZES = frozenset({1, 2, 4})
 REVIEWED_TASK_CPU_WIDTHS = frozenset({1, 2, 4})
 MIB = 1024 * 1024
@@ -77,6 +78,24 @@ class StagingConflictError(ProcessValidationError):
 
 class UnsupportedAttemptStoreError(ProcessValidationError):
     """The requested attempt store is not implemented by this local SJD."""
+
+
+class _PublishedAttemptRecords:
+    """Attach exact output materializations without changing adapter APIs."""
+
+    def __init__(
+        self,
+        records: Iterable[Mapping[str, Any]],
+        outputs: Sequence[Mapping[str, Any]],
+    ) -> None:
+        self._records = records
+        self.committed_outputs = tuple(dict(output) for output in outputs)
+
+    def __iter__(self):
+        return iter(self._records)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._records, name)
 
 
 class ProcessRouteMode(str, Enum):
@@ -2249,6 +2268,28 @@ class OneLakeDeltaAttemptAdapter:
             source = self.record_source(
                 batch_id, process_attempt_id
             ).delta_frame
+        output_documents = getattr(records, "committed_outputs", None)
+        if output_documents is None:
+            grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for record in _iter_delta_attempt_records(source):
+                grouped.setdefault(
+                    (record["work_id"], record["attempt_id"]), []
+                ).append(record)
+            output_documents = tuple(
+                {
+                    "work_id": work_id,
+                    "attempt_id": attempt_id,
+                    "output_schema_version": COMMITTED_OUTPUT_SCHEMA_VERSION,
+                    "output_json": _materialize_committed_output(
+                        work_id,
+                        attempt_id,
+                        _sha256(rows),
+                        rows,
+                    ),
+                    "output_sha256": _sha256(rows),
+                }
+                for (work_id, attempt_id), rows in sorted(grouped.items())
+            )
         incoming = (
             source.select(
                 "work_id",
@@ -2269,6 +2310,40 @@ class OneLakeDeltaAttemptAdapter:
                 "record_json",
             )
         )
+        output_rows = [
+            {
+                "work_id": str(output["work_id"]),
+                "attempt_id": str(output["attempt_id"]),
+                "output_schema_version": int(
+                    output["output_schema_version"]
+                ),
+                "output_json": str(output["output_json"]),
+            }
+            for output in output_documents
+        ]
+        outputs = self.spark_session.createDataFrame(
+            output_rows,
+            (
+                "work_id string, attempt_id string, "
+                "output_schema_version long, output_json string"
+            ),
+        )
+        incoming_identities = incoming.select(
+            "work_id", "attempt_id"
+        ).distinct()
+        output_identities = outputs.select("work_id", "attempt_id").distinct()
+        if (
+            incoming_identities.exceptAll(output_identities).limit(1).first()
+            is not None
+            or output_identities.exceptAll(incoming_identities).limit(1).first()
+            is not None
+        ):
+            raise StagingConflictError(
+                "committed output materialization does not match attempt identities"
+            )
+        incoming = incoming.join(
+            outputs, ["work_id", "attempt_id"], "inner"
+        )
         table = self.config.table("committed_records")
         keys = (
             "batch_id",
@@ -2287,6 +2362,18 @@ class OneLakeDeltaAttemptAdapter:
             DeltaTable.forName(self.spark_session, table)
             .alias("target")
             .merge(incoming.alias("incoming"), condition)
+            .whenMatchedUpdate(
+                condition=(
+                    F.col("target.output_schema_version").isNull()
+                    & F.col("target.output_json").isNull()
+                ),
+                set={
+                    "output_schema_version": F.col(
+                        "incoming.output_schema_version"
+                    ),
+                    "output_json": F.col("incoming.output_json"),
+                },
+            )
             .whenNotMatchedInsertAll()
             .execute()
         )
@@ -2498,6 +2585,84 @@ class _CanonicalArrayDigest:
         return digest.hexdigest()
 
 
+def _materialize_committed_output(
+    work_id: str,
+    attempt_id: str,
+    output_sha256: str,
+    records: Iterable[Mapping[str, Any]],
+    *,
+    verify_digest: bool = True,
+) -> str:
+    """Return the versioned, canonical output contract shared with Gold."""
+    selected = sorted(
+        (dict(record) for record in records if record.get("work_id") == work_id
+         and record.get("attempt_id") == attempt_id),
+        key=_record_order_key,
+    )
+    if not selected:
+        raise ProcessValidationError(
+            f"committed output for {work_id} has no records"
+        )
+    if verify_digest:
+        actual_sha256 = _sha256(selected)
+        if actual_sha256 != output_sha256:
+            raise ProcessValidationError(
+                f"committed output digest mismatch for {work_id}"
+            )
+    terminals = [
+        record for record in selected
+        if record.get("record_type") in TERMINAL_TYPES
+    ]
+    if len(terminals) != 1:
+        raise ProcessValidationError(
+            f"committed output for {work_id}/{attempt_id} lacks exactly one terminal"
+        )
+    terminal = terminals[0]
+    try:
+        terminal_payload = json.loads(str(terminal.get("payload_json", "{}")))
+    except json.JSONDecodeError as error:
+        raise ProcessValidationError(
+            f"{terminal['record_type']} payload_json is invalid"
+        ) from error
+    if not isinstance(terminal_payload, dict):
+        raise ProcessValidationError(
+            f"{terminal['record_type']} payload_json must be an object"
+        )
+    run = {
+        **terminal_payload,
+        "work_id": work_id,
+        "attempt_id": attempt_id,
+        "processing_seconds": terminal.get("processing_seconds"),
+        "processed_frames": terminal.get("processed_frames"),
+        "status": terminal.get("status"),
+    }
+    lines: list[dict[str, Any]] = []
+    for record in selected:
+        if record.get("record_type") != "line_count":
+            continue
+        try:
+            payload = json.loads(str(record.get("payload_json", "{}")))
+        except json.JSONDecodeError as error:
+            raise ProcessValidationError(
+                "line_count payload_json is invalid"
+            ) from error
+        if not isinstance(payload, dict):
+            raise ProcessValidationError(
+                "line_count payload_json must be an object"
+            )
+        lines.append({**payload, "work_id": work_id, "attempt_id": attempt_id})
+    return _canonical(
+        {
+            "schema_version": COMMITTED_OUTPUT_SCHEMA_VERSION,
+            "work_id": work_id,
+            "attempt_id": attempt_id,
+            "output_sha256": output_sha256,
+            "run": run,
+            "line_counts": lines,
+        }
+    )
+
+
 def _validate_staged_records(
     records: Iterable[Mapping[str, Any]],
     envelope: VerifiedEnvelope,
@@ -2522,6 +2687,7 @@ def _validate_staged_records(
         for item in envelope.items
     }
     item_digests = {item.work_id: _CanonicalArrayDigest() for item in envelope.items}
+    materialized = {item.work_id: [] for item in envelope.items}
     records_digest = _CanonicalArrayDigest()
     if delta_frame is not None:
         duplicate_count = (
@@ -2598,6 +2764,8 @@ def _validate_staged_records(
                 raise ProcessValidationError(f"terminal status mismatch for {identity!r}")
         if retain_records:
             by_identity[identity].append(record)
+        if record_type in TERMINAL_TYPES | {"line_count"}:
+            materialized[item.work_id].append(record)
         if delta_frame is None:
             target = provenance[record["work_id"]]
             assert isinstance(target, list)
@@ -2630,15 +2798,23 @@ def _validate_staged_records(
         item_provenance = provenance[item.work_id]
         if not succeeded[item.work_id]:
             failed.append(item.work_id)
-        outputs.append(
-            {
-                "work_id": item.work_id,
-                "attempt_id": item.attempt_id,
-                "succeeded": succeeded[item.work_id],
-                "output_sha256": item_digests[item.work_id].hexdigest(),
-                "records": item_provenance,
-            }
+        output_sha256 = item_digests[item.work_id].hexdigest()
+        output = {
+            "work_id": item.work_id,
+            "attempt_id": item.attempt_id,
+            "succeeded": succeeded[item.work_id],
+            "output_sha256": output_sha256,
+            "records": item_provenance,
+        }
+        output["output_schema_version"] = COMMITTED_OUTPUT_SCHEMA_VERSION
+        output["output_json"] = _materialize_committed_output(
+            item.work_id,
+            item.attempt_id,
+            output_sha256,
+            materialized[item.work_id],
+            verify_digest=False,
         )
+        outputs.append(output)
     return _ValidatedRecords(
         grouped=grouped,
         record_count=records_digest.count,
@@ -2992,10 +3168,15 @@ def _publish_attempt_records(
     attempts: AttemptAdapter,
     envelope: VerifiedEnvelope,
     records: Iterable[Mapping[str, Any]],
+    outputs: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     publish = getattr(attempts, "publish_records", None)
     if callable(publish):
-        publish(envelope.batch_id, envelope.execution_attempt_id, records)
+        publish(
+            envelope.batch_id,
+            envelope.execution_attempt_id,
+            _PublishedAttemptRecords(records, outputs),
+        )
 
 
 def _resume_committed_process_batch(
@@ -3012,7 +3193,7 @@ def _resume_committed_process_batch(
         records, envelope, plan, retain_records=False
     )
     _verify_marker_from_validated(marker, validated, envelope)
-    _publish_attempt_records(attempts, envelope, records)
+    _publish_attempt_records(attempts, envelope, records, validated.outputs)
     sequences = store.commit_batch(envelope.batch_id)
     return _process_result(envelope, attempts, validated, sequences, True)
 
@@ -3104,7 +3285,7 @@ def run_process_batch(
     validated = _validate_staged_records(
         records, envelope, plan, retain_records=False
     )
-    _publish_attempt_records(attempts, envelope, records)
+    _publish_attempt_records(attempts, envelope, records, validated.outputs)
     staging_path = attempts.attempt_path(batch_id, envelope.execution_attempt_id)
     outputs = [
         {

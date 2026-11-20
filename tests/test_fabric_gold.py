@@ -274,6 +274,104 @@ def test_committed_source_prefers_shared_records_for_compatibility_api(
     source.spark.catalog.dropTempView(source.config.table("committed_records"))
 
 
+def test_committed_source_consumes_materialized_output_without_python_udf(
+    committed_source, monkeypatch
+):
+    source, _, _, _ = committed_source
+    from pyspark.sql import functions as F
+
+    digest = _pointer_rows()["attempts"][0]["output_sha256"]
+    output_json = json.dumps(
+        {
+            "schema_version": 1,
+            "work_id": "work",
+            "attempt_id": "attempt",
+            "output_sha256": digest,
+            "run": {
+                "work_id": "work",
+                "attempt_id": "attempt",
+                "captured_at_utc": "2026-10-01T23:59:30Z",
+                "processing_seconds": 2.0,
+                "processed_frames": 10,
+                "status": "SUCCEEDED",
+            },
+            "line_counts": [
+                {
+                    "work_id": "work",
+                    "attempt_id": "attempt",
+                    "frame_in_count": 2,
+                    "video_seconds": 1.0,
+                }
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    source.spark.createDataFrame(
+        [
+            (
+                "batch",
+                "process",
+                record["work_id"],
+                record["attempt_id"],
+                record["record_type"],
+                record["record_sequence"],
+                json.dumps(record, sort_keys=True, separators=(",", ":")),
+                1,
+                output_json,
+            )
+            for record in _records()
+        ],
+        (
+            "batch_id string, process_attempt_id string, work_id string, "
+            "attempt_id string, record_type string, record_sequence long, "
+            "record_json string, output_schema_version long, output_json string"
+        ),
+    ).createOrReplaceTempView(source.config.table("committed_records"))
+    monkeypatch.setattr(
+        F, "udf", lambda *args, **kwargs: pytest.fail("Python UDF was used")
+    )
+
+    outputs = source.committed_outputs()
+    frame = source.committed_output_frame()
+    assert len(outputs) == 1
+    assert outputs[0].run["processing_seconds"] == 2.0
+    assert "BatchEvalPython" not in (
+        frame._jdf.queryExecution().optimizedPlan().toString()
+    )
+    source.spark.catalog.dropTempView(source.config.table("committed_records"))
+
+
+def test_committed_source_fails_closed_for_invalid_materialization(
+    committed_source,
+):
+    source, _, _, _ = committed_source
+    source.spark.createDataFrame(
+        [
+            (
+                "batch",
+                "process",
+                "work",
+                "attempt",
+                "video_result",
+                0,
+                "{}",
+                2,
+                "{}",
+            )
+        ],
+        (
+            "batch_id string, process_attempt_id string, work_id string, "
+            "attempt_id string, record_type string, record_sequence long, "
+            "record_json string, output_schema_version long, output_json string"
+        ),
+    ).createOrReplaceTempView(source.config.table("committed_records"))
+
+    with pytest.raises(GoldSourceError, match="materialization is invalid"):
+        source.committed_output_frame().limit(1).collect()
+    source.spark.catalog.dropTempView(source.config.table("committed_records"))
+
+
 def test_committed_source_uses_filtered_spark_read_path(committed_source, monkeypatch):
     source, _, _, _ = committed_source
     monkeypatch.setattr(

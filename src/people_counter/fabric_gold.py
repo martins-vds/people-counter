@@ -291,55 +291,381 @@ class FabricCommittedSource:
 
     def committed_output_frame(self):
         from pyspark.sql import functions as F
+        from pyspark.sql.types import (
+            ArrayType,
+            DoubleType,
+            LongType,
+            StringType,
+            StructField,
+            StructType,
+        )
 
         visible = self._visible_frame()
-        records = self._record_frame(visible)
-        grouped = records.groupBy("work_id", "attempt_id").agg(
-            F.sort_array(
-                F.collect_list(
-                    F.struct(
-                        F.col("record_type"),
-                        F.col("record_sequence"),
-                        F.col("record_json"),
-                    )
-                )
-            ).alias("_records")
+        committed_table = self.config.table("committed_records")
+        table_columns = (
+            set(self.spark.table(committed_table).columns)
+            if self.spark.catalog.tableExists(committed_table)
+            else set()
         )
-        # Retained for compatibility: Spark's JSON encoder does not reproduce
-        # Python's sorted-key, ASCII-escaped canonical bytes or its timestamp
-        # and permissive-dynamic-field semantics. Those bytes authenticate the
-        # committed output digest, so moving this boundary would invalidate it.
-        parse = F.udf(_parse_committed_records, "string")
+        required = {"output_schema_version", "output_json"}
+        if required <= table_columns:
+            pointers = visible.select(
+                F.col("attempt.batch_id").alias("batch_id"),
+                F.col("work.work_id").alias("work_id"),
+                F.col("attempt.attempt_id").alias("attempt_id"),
+            )
+            materialized = (
+                pointers.join(
+                    self.spark.table(committed_table).select(
+                        "batch_id",
+                        "work_id",
+                        "attempt_id",
+                        "output_schema_version",
+                        "output_json",
+                    ),
+                    ["batch_id", "work_id", "attempt_id"],
+                    "inner",
+                )
+                .groupBy("batch_id", "work_id", "attempt_id")
+                .agg(
+                    F.count("*").alias("_materialized_records"),
+                    F.countDistinct("output_schema_version").alias(
+                        "_schema_versions"
+                    ),
+                    F.countDistinct("output_json").alias("_output_versions"),
+                    F.min("output_schema_version").alias(
+                        "output_schema_version"
+                    ),
+                    F.min("output_json").alias("_materialized_output_json"),
+                    F.sum(
+                        F.when(
+                            F.col("output_schema_version").isNull()
+                            | F.col("output_json").isNull(),
+                            1,
+                        ).otherwise(0)
+                    ).alias("_missing"),
+                )
+            )
+        else:
+            # Legacy Spark/temporary-table compatibility. Canonical bytes are
+            # authenticated natively from the immutable record_json rows.
+            records = self._record_frame(visible)
+            grouped = records.groupBy("work_id", "attempt_id").agg(
+                F.sort_array(
+                    F.collect_list(
+                        F.struct(
+                            "record_type",
+                            "record_sequence",
+                            "record_json",
+                        )
+                    )
+                ).alias("_records")
+            )
+            record_schema = StructType(
+                [
+                    StructField("work_id", StringType()),
+                    StructField("attempt_id", StringType()),
+                    StructField("record_type", StringType()),
+                    StructField("record_sequence", LongType()),
+                    StructField("payload_json", StringType()),
+                    StructField("processing_seconds", DoubleType()),
+                    StructField("processed_frames", LongType()),
+                    StructField("status", StringType()),
+                ]
+            )
+            parsed_records = F.transform(
+                grouped["_records"],
+                lambda item: F.from_json(
+                    item["record_json"], record_schema, {"mode": "FAILFAST"}
+                ).withField("record_sequence", item["record_sequence"])
+                .withField("record_type", item["record_type"]),
+            )
+            terminal_payload_schema = StructType(
+                [
+                    StructField("captured_at_utc", StringType()),
+                    StructField("camera_id", StringType()),
+                    StructField("location_id", StringType()),
+                    StructField("camera_timezone", StringType()),
+                    StructField("config_sha256", StringType()),
+                    StructField("asset_id", StringType()),
+                    StructField("asset_version", StringType()),
+                    StructField("duration_seconds", DoubleType()),
+                    StructField("video_duration_seconds", DoubleType()),
+                    StructField("processing_seconds", DoubleType()),
+                    StructField("processed_frames", LongType()),
+                    StructField("distinct_people", LongType()),
+                    StructField("line_in_count", LongType()),
+                    StructField("line_out_count", LongType()),
+                    StructField("completed_at", StringType()),
+                ]
+            )
+            legacy_terminal = F.element_at(
+                F.filter(
+                    parsed_records,
+                    lambda item: item["record_type"].isin(
+                        "video_result", "error"
+                    ),
+                ),
+                1,
+            )
+            lines = F.transform(
+                F.filter(
+                    parsed_records,
+                    lambda item: item["record_type"] == "line_count",
+                ),
+                lambda item: F.from_json(
+                    item["payload_json"],
+                    "struct<observed_at_utc:string,video_seconds:double,"
+                    "frame_in_count:long,frame_out_count:long,entries:long,"
+                    "exits:long,camera_id:string,location_id:string>",
+                    {"mode": "FAILFAST"},
+                ).withField("work_id", grouped["work_id"])
+                .withField("attempt_id", grouped["attempt_id"]),
+            )
+            run = (
+                F.from_json(
+                    legacy_terminal["payload_json"],
+                    terminal_payload_schema,
+                    {"mode": "FAILFAST"},
+                )
+                .withField("work_id", grouped["work_id"])
+                .withField("attempt_id", grouped["attempt_id"])
+                .withField(
+                    "processing_seconds",
+                    legacy_terminal["processing_seconds"],
+                )
+                .withField(
+                    "processed_frames", legacy_terminal["processed_frames"]
+                )
+                .withField("status", legacy_terminal["status"])
+            )
+            materialized = grouped.select(
+                "work_id",
+                "attempt_id",
+                F.lit(1).alias("output_schema_version"),
+                F.lit(0).alias("_materialized_records"),
+                F.lit(1).alias("_schema_versions"),
+                F.lit(1).alias("_output_versions"),
+                F.lit(0).alias("_missing"),
+                F.to_json(
+                    F.struct(
+                        F.lit(1).alias("schema_version"),
+                        grouped["work_id"],
+                        grouped["attempt_id"],
+                        F.sha2(
+                            F.concat(
+                                F.lit("["),
+                                F.concat_ws(
+                                    ",",
+                                    F.transform(
+                                        grouped["_records"],
+                                        lambda item: item["record_json"],
+                                    ),
+                                ),
+                                F.lit("]"),
+                            ),
+                            256,
+                        ).alias("output_sha256"),
+                        run.alias("run"),
+                        lines.alias("line_counts"),
+                    )
+                ).alias("_materialized_output_json"),
+            )
         joined = visible.join(
-            grouped,
-            (F.col("work.work_id") == grouped["work_id"])
-            & (F.col("attempt.attempt_id") == grouped["attempt_id"]),
+            materialized,
+            (F.col("work.work_id") == materialized["work_id"])
+            & (F.col("attempt.attempt_id") == materialized["attempt_id"]),
             "left",
         )
-        parsed = joined.withColumn(
-            "_output",
-            parse(
-                F.col("work"),
-                F.col("attempt"),
-                F.col("publication"),
-                F.col("batch"),
-                F.col("_records"),
+        invalid = (
+            joined.where(
+                F.col("_materialized_output_json").isNull()
+                | (F.col("_missing") != 0)
+                | (F.col("_schema_versions") != 1)
+                | (F.col("_output_versions") != 1)
+                | (F.col("output_schema_version") != 1)
+                | (
+                    F.get_json_object(
+                        F.col("_materialized_output_json"),
+                        "$.schema_version",
+                    ).cast("int")
+                    != 1
+                )
+                | (
+                    F.get_json_object(
+                        F.col("_materialized_output_json"), "$.work_id"
+                    )
+                    != F.col("work.work_id")
+                )
+                | (
+                    F.get_json_object(
+                        F.col("_materialized_output_json"), "$.attempt_id"
+                    )
+                    != F.col("attempt.attempt_id")
+                )
+                | (
+                    F.get_json_object(
+                        F.col("_materialized_output_json"),
+                        "$.output_sha256",
+                    )
+                    != F.col("publication.output_sha256")
+                )
+            )
+            .select("work.work_id")
+            .limit(1)
+            .first()
+        )
+        if invalid is not None:
+            raise GoldSourceError(
+                f"committed output materialization is invalid for "
+                f"{invalid['work_id']}; run committed process recovery "
+                "to backfill the attempt"
+            )
+        body_schema = StructType(
+            [
+                StructField("schema_version", LongType(), False),
+                StructField("work_id", StringType(), False),
+                StructField("attempt_id", StringType(), False),
+                StructField("output_sha256", StringType(), False),
+                StructField(
+                    "run",
+                    StructType(
+                        [
+                            StructField("work_id", StringType()),
+                            StructField("attempt_id", StringType()),
+                            StructField("captured_at_utc", StringType()),
+                            StructField("camera_id", StringType()),
+                            StructField("location_id", StringType()),
+                            StructField("camera_timezone", StringType()),
+                            StructField("config_sha256", StringType()),
+                            StructField("asset_id", StringType()),
+                            StructField("asset_version", StringType()),
+                            StructField("duration_seconds", DoubleType()),
+                            StructField(
+                                "video_duration_seconds", DoubleType()
+                            ),
+                            StructField("processing_seconds", DoubleType()),
+                            StructField("processed_frames", LongType()),
+                            StructField("distinct_people", LongType()),
+                            StructField("line_in_count", LongType()),
+                            StructField("line_out_count", LongType()),
+                            StructField("completed_at", StringType()),
+                            StructField("status", StringType()),
+                        ]
+                    ),
+                    False,
+                ),
+                StructField(
+                    "line_counts",
+                    ArrayType(
+                        StructType(
+                            [
+                                StructField("work_id", StringType()),
+                                StructField("attempt_id", StringType()),
+                                StructField("observed_at_utc", StringType()),
+                                StructField("video_seconds", DoubleType()),
+                                StructField("frame_in_count", LongType()),
+                                StructField("frame_out_count", LongType()),
+                                StructField("entries", LongType()),
+                                StructField("exits", LongType()),
+                                StructField("camera_id", StringType()),
+                                StructField("location_id", StringType()),
+                            ]
+                        )
+                    ),
+                    False,
+                ),
+            ]
+        )
+        payload_schema = StructType(
+            [
+                StructField("camera_id", StringType()),
+                StructField("location_id", StringType()),
+                StructField("captured_at_utc", StringType()),
+                StructField("camera_timezone", StringType()),
+                StructField("config_sha256", StringType()),
+                StructField("config_json", StringType()),
+                StructField("asset_id", StringType()),
+                StructField("asset_version", StringType()),
+                StructField("duration_seconds", DoubleType()),
+                StructField("video_duration_seconds", DoubleType()),
+                StructField("distinct_people", LongType()),
+                StructField("line_in_count", LongType()),
+                StructField("line_out_count", LongType()),
+            ]
+        )
+        enriched = joined.withColumn(
+            "_materialized",
+            F.from_json(
+                "_materialized_output_json",
+                body_schema,
+                {"mode": "FAILFAST"},
             ),
         )
-        failed = parsed.where(
-            F.get_json_object(F.col("_output"), "$.error").isNotNull()
-        ).select(F.col("_output").alias("error")).limit(1).first()
-        if failed is not None:
-            raise GoldSourceError(
-                str(json.loads(str(failed["error"]))["error"])
-            )
-        return parsed.where(F.col("_output").isNotNull()).select(
-            "work.work_id",
-            "attempt.attempt_id",
+        payload = F.from_json(
+            F.col("work.payload_json"), payload_schema, {"mode": "FAILFAST"}
+        )
+        published_at = F.coalesce(
+            F.col("publication.published_at"),
+            F.col("batch.committed_at"),
+        )
+        output = F.struct(
+            F.col("work.work_id").alias("work_id"),
+            F.col("attempt.attempt_id").alias("attempt_id"),
             F.col("publication.publication_sequence").alias(
                 "publication_sequence"
             ),
-            F.col("_output").alias("output_json"),
+            F.when(
+                published_at.isNull(), F.lit(None)
+            ).otherwise(
+                F.date_format(published_at, "yyyy-MM-dd'T'HH:mm:ssXXX")
+            ).alias("published_at"),
+            F.struct(
+                F.col("work.work_id").alias("work_id"),
+                payload["camera_id"].alias("camera_id"),
+                payload["location_id"].alias("location_id"),
+                payload["captured_at_utc"].alias("captured_at_utc"),
+                payload["camera_timezone"].alias("camera_timezone"),
+                F.coalesce(
+                    payload["config_sha256"],
+                    F.col("work.config_sha256")
+                    if "config_sha256"
+                    in {
+                        field.name
+                        for field in enriched.schema["work"].dataType.fields
+                    }
+                    else F.lit(None),
+                ).alias("config_sha256"),
+                payload["config_json"].alias("config_json"),
+                payload["asset_id"].alias("asset_id"),
+                payload["asset_version"].alias("asset_version"),
+                payload["duration_seconds"].alias("duration_seconds"),
+                payload["video_duration_seconds"].alias(
+                    "video_duration_seconds"
+                ),
+                payload["distinct_people"].alias("distinct_people"),
+                payload["line_in_count"].alias("line_in_count"),
+                payload["line_out_count"].alias("line_out_count"),
+                F.col("work.payload_json").alias("payload_json"),
+            ).alias("work"),
+            F.struct(
+                F.col("attempt.attempt_id").alias("attempt_id"),
+                F.col("attempt.work_id").alias("work_id"),
+                F.col("attempt.batch_id").alias("batch_id"),
+                F.col("attempt.output_path").alias("output_path"),
+                F.col("attempt.output_sha256").alias("output_sha256"),
+                F.col("batch.committed_at").alias("batch_committed_at"),
+            ).alias("attempt"),
+            F.col("_materialized.run").alias("run"),
+            F.col("_materialized.line_counts").alias("line_counts"),
+        )
+        return enriched.select(
+            F.col("work.work_id").alias("work_id"),
+            F.col("attempt.attempt_id").alias("attempt_id"),
+            F.col("publication.publication_sequence").alias(
+                "publication_sequence"
+            ),
+            F.to_json(output).alias("output_json"),
         )
 
     def _record_frame(self, visible):
@@ -2534,85 +2860,6 @@ def _spark_frame_checksum(
         ).alias("digest")
     ).first()
     return f"{schema_version}:{value['digest']}"
-
-
-def _parse_committed_records(
-    work: Any,
-    attempt: Any,
-    publication: Any,
-    batch: Any,
-    records: Any,
-) -> str:
-    work_row = _normalize_spark_row(work.asDict(recursive=True))
-    attempt_row = _normalize_spark_row(attempt.asDict(recursive=True))
-    publication_row = _normalize_spark_row(
-        publication.asDict(recursive=True)
-    )
-    batch_row = _normalize_spark_row(batch.asDict(recursive=True))
-    try:
-        selected = []
-        for item in records or ():
-            value = item.asDict(recursive=True)
-            decoded = json.loads(str(value["record_json"]))
-            if not isinstance(decoded, dict):
-                raise GoldSourceError(
-                    "committed Delta record_json must be an object"
-                )
-            if (
-                decoded.get("work_id") == work_row["work_id"]
-                and decoded.get("attempt_id") == attempt_row["attempt_id"]
-            ):
-                if (
-                    decoded.get("record_type") != value["record_type"]
-                    or decoded.get("record_sequence") != value["record_sequence"]
-                ):
-                    raise GoldSourceError(
-                        "committed Delta record columns differ from record_json"
-                    )
-                selected.append(decoded)
-        if not selected:
-            raise GoldSourceError(
-                f"committed output for {work_row['work_id']} has no records"
-            )
-        if _sha256(selected) != publication_row["output_sha256"]:
-            raise GoldSourceError(
-                f"committed output digest mismatch for {work_row['work_id']}"
-            )
-        document = _records_output_document(
-            selected,
-            str(work_row["work_id"]),
-            str(attempt_row["attempt_id"]),
-        )
-        run, line_counts = _split_output_document(
-            document,
-            str(work_row["work_id"]),
-            str(attempt_row["attempt_id"]),
-        )
-        payload = json.loads(str(work_row["payload_json"]))
-        if not isinstance(payload, dict):
-            raise GoldSourceError("committed work payload must be an object")
-        published_at = _optional_datetime(
-            publication_row.get("published_at")
-        ) or _optional_datetime(batch_row.get("committed_at"))
-        return _canonical(
-            {
-                "work_id": str(work_row["work_id"]),
-                "attempt_id": str(attempt_row["attempt_id"]),
-                "publication_sequence": int(
-                    publication_row["publication_sequence"]
-                ),
-                "published_at": (
-                    None if published_at is None else _iso(published_at)
-                ),
-                "work": dict(work_row) | payload,
-                "attempt": dict(attempt_row)
-                | {"batch_committed_at": batch_row.get("committed_at")},
-                "run": run,
-                "line_counts": line_counts,
-            }
-        )
-    except (GoldSourceError, json.JSONDecodeError, TypeError, ValueError) as error:
-        return _canonical({"error": str(error)})
 
 
 def _output_from_json(value: str) -> CommittedOutput:

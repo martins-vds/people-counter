@@ -42,6 +42,7 @@ from people_counter.sjd_process import (
     StreamingSparkExecutionHarness,
     TaskIdentity,
     UnsupportedAttemptStoreError,
+    _materialize_committed_output,
     _committed_plan,
     _model_identity,
     _package_version,
@@ -65,6 +66,68 @@ from people_counter.sjd_process import (
     validate_staged_records,
     verify_envelope,
 )
+
+
+def test_materialized_committed_output_is_exact_and_versioned() -> None:
+    records = [
+        {
+            "work_id": "work",
+            "attempt_id": "attempt",
+            "record_type": "video_result",
+            "record_sequence": 0,
+            "payload_json": '{"processing":"caf\\u00e9"}',
+            "processing_seconds": 2.5,
+            "processed_frames": 12,
+            "status": "SUCCEEDED",
+        },
+        {
+            "work_id": "work",
+            "attempt_id": "attempt",
+            "record_type": "line_count",
+            "record_sequence": 1,
+            "payload_json": '{"entries":2}',
+        },
+    ]
+    output_sha256 = _sha256(
+        sorted(records, key=lambda row: (row["record_type"], row["record_sequence"]))
+    )
+
+    output = _materialize_committed_output(
+        "work", "attempt", output_sha256, records
+    )
+
+    assert output == json.dumps(
+        {
+            "attempt_id": "attempt",
+            "line_counts": [
+                {"attempt_id": "attempt", "entries": 2, "work_id": "work"}
+            ],
+            "output_sha256": output_sha256,
+            "run": {
+                "attempt_id": "attempt",
+                "processed_frames": 12,
+                "processing": "café",
+                "processing_seconds": 2.5,
+                "status": "SUCCEEDED",
+                "work_id": "work",
+            },
+            "schema_version": 1,
+            "work_id": "work",
+        },
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def test_materialized_committed_output_fails_closed() -> None:
+    with pytest.raises(
+        ProcessValidationError, match="has no records"
+    ):
+        _materialize_committed_output(
+            "work", "attempt", "0" * 64, []
+        )
 
 
 def test_warm_executor_derives_model_identity_when_caller_omits_it() -> None:

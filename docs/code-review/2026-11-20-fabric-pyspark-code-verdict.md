@@ -5,66 +5,62 @@
 
 | Hypothesis | Severity | Confidence | Reason |
 |---|---:|---:|---|
-| One exact-compatibility Python UDF remains in the Gold hot path. | MEDIUM | High | Four former row UDFs were removed. `_parse_committed_records` remains per published work because replacing it with Spark `to_json` would change the authenticated canonical JSON bytes and SHA-256 values. It is distributed, but still serializes one grouped work record through Python. |
-| Main process and control paths are Spark-distributed and bounded. | LOW | High | Process work uses `mapPartitions`, receipts are bounded, attempt records stream, normal control mutations use filtered Delta merge, fallback assets do not cross the driver as bytes, and retention removes obsolete unpublished state. |
+| The reviewed Fabric runtime is Spark-distributed and bounded. | LOW | High | Inference uses `mapPartitions`; control writes use filtered Delta merges; attempt output streams; fallback assets are content-addressed; Gold has no Python UDF or per-attempt Delta union. |
+| Live spill, skew, and memory behavior remain unverified. | MEDIUM | High | Static plans prove no known driver/Python bottleneck in the reviewed paths, but they do not prove real executor RSS, shuffle spill, task skew, or driver GC behavior. |
 
 # Code smells detected
 
 | Smell | Severity | Exact references |
 |---|---:|---|
-| Resolved: full control-table Python read/overwrite. | LOW | [`FabricControlStoreImpl`](../../src/people_counter/fabric_control_store.py:288) bootstraps typed tables, filters normal reads, and performs keyed Delta merge/readback. |
-| Resolved: full attempt-output collection and driver reconstruction. | LOW | [`sjd_process.py`](../../src/people_counter/sjd_process.py:1502) collects only bounded receipt metadata; record readers and validation use `toLocalIterator` and incremental hashes. |
-| Resolved: cluster-wide probe thread counts. | LOW | [`fabric_sjd_runtime.py`](../../src/people_counter/fabric_sjd_runtime.py:147) uses the minimum per-executor safe slot count. Identical signed probe evidence is reused. |
-| Resolved: serial fallback asset-byte staging on the driver. | LOW | [`fabric_sjd_runtime.py`](../../src/people_counter/fabric_sjd_runtime.py) now publishes content-addressed aliases and deduplicates them; executors read and cache assets, while the driver handles metadata only. |
-| Resolved: one path read and Delta union per committed attempt. | LOW | Process publication maintains partitioned `committed_records`; [`fabric_gold.py`](../../src/people_counter/fabric_gold.py:348) joins that shared table directly. Existing committed attempts require an explicit rerun/backfill before Gold. |
-| Resolved: four Gold Python UDF boundaries. | LOW | Checkpoint versions and operational projections now use Spark JSON/array/struct expressions. Focused plans show no Python evaluation for those paths. |
-| Residual compatibility boundary: one UDF authenticates committed output. | MEDIUM | [`_parse_committed_records`](../../src/people_counter/fabric_gold.py:2539) validates columns, computes byte-exact canonical SHA-256, and builds the historical `CommittedOutput` JSON shape. It is one call per published work, not one call per raw telemetry row. |
-| Residual bounded compatibility APIs. | LOW | Compatibility methods such as `committed_outputs()` and `read_records()` can still return Python lists. Native Fabric process/Gold paths use shared Delta tables and streaming contracts. |
-| Resolved: no explicit retention policy. | LOW | [`fabric_retention.py`](../../src/people_counter/fabric_retention.py) enforces dry-run default, 7-day minimum age, bounded deletion counts, and preserves active leases, published outputs, provenance, and Delta history. |
+| Resolved: full control-table Python read/overwrite. | LOW | [`FabricControlStoreImpl`](../../src/people_counter/fabric_control_store.py:288) filters transactional reads and performs keyed Delta merge/readback. |
+| Resolved: full attempt-output collection and reconstruction. | LOW | [`sjd_process.py`](../../src/people_counter/sjd_process.py:1502) collects only bounded receipt metadata; record processing streams. |
+| Resolved: cluster-wide probe thread count. | LOW | [`fabric_sjd_runtime.py`](../../src/people_counter/fabric_sjd_runtime.py) uses the minimum per-executor safe slot count and reuses signed decisions. |
+| Resolved: driver-byte fallback localization. | LOW | Executors read and cache deduplicated content-addressed aliases; the driver handles metadata only. |
+| Resolved: per-attempt Delta unions in Gold. | LOW | Process publishes a shared `committed_records` table partitioned by `batch_id`; Gold reads it directly. |
+| Resolved: final Gold Python UDF. | LOW | Publication now materializes canonical, versioned `output_json` in `committed_records`. [`FabricCommittedSource.committed_output_frame`](../../src/people_counter/fabric_gold.py:293) validates and parses that JSON with Spark-native expressions. |
+| Residual: compatibility APIs can return Python lists. | LOW | `committed_outputs()` and attempt `read_records()` retain list contracts for compatibility. Native Fabric process and Gold paths avoid those APIs. |
+| Resolved: no retention policy. | LOW | Retention is dry-run by default, bounded by age/count, and preserves active, published, and provenance data. |
 
 # Recommendations
 
 | Priority | Severity | Recommendation |
 |---:|---:|---|
-| 1 | MEDIUM | Keep `_parse_committed_records` only behind an explicit compatibility contract. Add a second native schema version before removing it, with byte-identical digest fixtures for old attempts. |
-| 2 | LOW | Monitor Python task time and driver GC for the remaining authenticated committed-record UDF. This is one bounded task per work, not a per-record raw-data Python path. |
-| 3 | LOW | Run retention as an operator dry run first, then apply it on an approved schedule. Keep Delta VACUUM disabled. |
-| 4 | LOW | Capture Spark UI metrics for live Fabric: task-duration distribution, spill, shuffle, executor RSS, Python worker count, and driver GC. |
+| 1 | LOW | Keep schema version `1` immutable. A future output shape must create a new version and prove byte/digest compatibility for backfill. |
+| 2 | LOW | Before production cutover, complete committed-attempt backfill so every visible `committed_records` row has non-null `output_schema_version` and `output_json`. |
+| 3 | LOW | Run retention in dry-run mode, review the plan, then apply with operator approval. Keep Delta VACUUM disabled. |
+| 4 | MEDIUM | Capture live Spark UI task duration, spill, shuffle, executor RSS, Python worker count, and driver GC for one representative production batch. |
 
 # Distributed correctness / parallelism checks
 
 | Check | Severity | Result |
 |---|---:|---|
-| Main inference | LOW | Uses Spark `mapPartitions`; no RDD-to-DataFrame round trip and no Python thread/process pool runs inference. |
-| Control state | LOW | Normal transaction reads are filtered and writes use Delta merge. Full global reads are limited to reconciliation and singleton lock checks. |
-| Process output | LOW | Receipt `collect` is partition-bounded. Attempt records stream through `toLocalIterator`; publication writes a shared partitioned Delta table. |
-| Gold joins and aggregation | LOW | Dates, fact rows, operations, dimensions, validation, and checkpoint hashes use Spark-native DataFrame/SQL expressions. |
-| Exact committed-output authentication | MEDIUM | One Python UDF remains per grouped work. It is required to preserve historical canonical JSON bytes and output digest compatibility. |
-| Fallback localization | LOW | Driver handles only envelope metadata and alias registration. Executors read, hash, and cache deduplicated content-addressed files. |
-| Retention | LOW | Dry-run by default; active and published data is protected; deletion counts and age are bounded; no VACUUM is performed. |
-| Spill and skew | MEDIUM | No live Spark UI evidence was available. Static review cannot confirm spill, skew, executor memory, or driver GC. |
+| Inference | LOW | Spark `mapPartitions`; no Python thread/process pool, pandas UDF, or per-row executor serialization. |
+| Control | LOW | Filtered reads, keyed Delta merge, bounded exact readback; global reads are limited to reconciliation and singleton lock checks. |
+| Process publication | LOW | Bounded receipts; streaming record reads; idempotent shared-table merge with materialized output JSON. |
+| Gold | LOW | No `F.udf` or `BatchEvalPython`. Shared-table join, validation, JSON parsing, and aggregation stay in Spark. |
+| Fallback localization | LOW | Driver publishes deduplicated aliases; executors perform asset reads and hashing. |
+| Retention | LOW | Age/count bounded, fail-closed, dry-run first, no VACUUM. |
+| Spill and skew | MEDIUM | Not measured. Live Spark evidence is still required. |
 
 ## Immediate code changes completed
 
-1. Added shared `committed_records`, partitioned by `batch_id`, with idempotent process publication.
-2. Removed Gold per-attempt path collection and union planning.
-3. Removed four of five Python UDF boundaries.
-4. Added streaming attempt reads and incremental validation.
-5. Added distributed, content-addressed fallback localization.
-6. Added bounded, dry-run-by-default retention.
-7. Added tests for executor-safe probe concurrency, ONNX profile selection, and shared-table fallback behavior.
+1. Added versioned `output_json` to `committed_records`.
+2. Materialized exact canonical output once during process validation/publication.
+3. Backfilled null materialization through idempotent process publication.
+4. Removed the final Gold Python UDF and its `BatchEvalPython` plan.
+5. Added shared-table schema migration and fail-closed output validation.
 
 ## Evidence required for production sign-off
 
-1. One representative Fabric run with Spark UI stage metrics and driver/executor RSS.
-2. One retention dry-run and operator-approved apply run on a non-production environment.
-3. Historical committed-attempt backfill completion before enabling shared-table-only Gold reads.
+1. Complete historical committed-attempt backfill and verify zero null `output_json` values.
+2. Capture one representative live Fabric Spark UI run and driver/executor RSS.
+3. Run one retention dry-run and review the deletion plan.
 
 ## Validation
 
 | Check | Result |
 |---|---|
-| Integrated Fabric suite | 434 passed and 97 subtests; one Spark test failed only because `/tmp` was full. After deleting generated mutation/Spark caches, that exact test passed with 4 subtests. Combined verified result: 435 tests and 101 subtests passed. |
-| CRAP | Focused changed-module coverage and CRAP runs completed during each track. Latest broad CRAP pass before the final schema table reported 426 passing tests; the final integration reached 434 passing before the disk-only failure. |
-| Mutation | Control `_replace*`: 59 killed, 0 survived. Probe gaps received explicit tests. Broader process/Gold mutation runs were incomplete because of runtime and cache/stats limits. |
-| Spark-native plans | Gold checkpoint, operational projection, and native aggregation tests found no `BatchEvalPython`; one deliberate compatibility UDF remains. |
+| Focused process/Gold/control suite | 198 tests passed, 101 subtests passed. |
+| CRAP | Process coverage 94%; Gold coverage 88%. The changed scopes introduced no top-20 CRAP regression; unrelated uncovered repository functions still exceed threshold 30. |
+| Native Spark plan | Tests assert no `BatchEvalPython` in materialized Gold plans. Source contains no `F.udf`. |
+| Mutation | Scoped run was attempted. Initial stats required optional `torch`; narrowed stats ran but exceeded the practical mutation window, so no new mutation result is claimed. |

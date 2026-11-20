@@ -364,10 +364,34 @@ def test_delta_bootstrap_creates_partitioned_committed_records(delta_control):
         "record_type",
         "record_sequence",
         "record_json",
+        "output_schema_version",
+        "output_json",
     ]
     detail = DeltaTable.forName(store.spark, table).detail().first()
     assert detail["partitionColumns"] == ["batch_id"]
     assert store.spark.table(store.tables["locks"]).first().owner_id is None
+
+
+def test_delta_bootstrap_backfills_committed_output_schema(delta_control):
+    store = delta_control
+    table = store.tables["committed_records"]
+    store.spark.sql(
+        f"CREATE OR REPLACE TABLE {table} USING DELTA AS "
+        "SELECT 'batch' batch_id, 'process' process_attempt_id, "
+        "'work' work_id, 'attempt' attempt_id, 'video_result' record_type, "
+        "0L record_sequence, '{}' record_json"
+    )
+
+    store.bootstrap()
+    store.bootstrap()
+
+    assert {
+        "output_schema_version",
+        "output_json",
+    } <= set(store.spark.table(table).columns)
+    row = store.spark.table(table).first()
+    assert row["output_schema_version"] is None
+    assert row["output_json"] is None
 
 
 def test_delta_sparse_registration_preserves_other_rows_without_full_collect(
