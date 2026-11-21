@@ -68,6 +68,58 @@ from people_counter.sjd_process import (
 )
 
 
+def test_delta_output_provenance_supports_indexing_and_slicing():
+    frame = MagicMock()
+    records = [
+        {
+            "executor_identity": "executor@host", "partition_id": 0,
+            "task_attempt_id": 1, "record_sequence": sequence,
+        }
+        for sequence in range(3)
+    ]
+    with patch.object(process_module, "_iter_delta_attempt_records", return_value=records):
+        provenance = process_module._DeltaOutputRecords(frame, "work'1")
+        assert len(provenance) == 3
+        assert provenance[0] == records[0]
+        assert provenance[2] == records[2]
+        assert provenance[-1] == records[-1]
+        assert provenance[1:] == records[1:]
+        assert provenance[::-1] == records[::-1]
+        for index in (3, -4):
+            with pytest.raises(IndexError):
+                provenance[index]
+        with pytest.raises(TypeError, match="integer or slice"):
+            provenance[True]
+    frame.where.assert_called_with("work_id = 'work''1'")
+
+
+def test_streaming_execution_records_require_bounded_slices():
+    records = [{"work_id": str(index)} for index in range(3)]
+    output = process_module.ExecutionRecords(lambda: iter(records))
+    assert output[0] == records[0]
+    assert output[2] == records[2]
+    assert output[0:2] == records[0:2]
+    assert output[1:3] == records[1:3]
+    for index in (3, -1, True):
+        with pytest.raises(IndexError):
+            output[index]
+    for section in (slice(None, 2), slice(-1, 2), slice(0, None)):
+        with pytest.raises(IndexError, match="bounded slice"):
+            output[section]
+    with pytest.raises(TypeError, match="no known cardinality"):
+        len(output)
+
+
+def test_delta_publication_rejects_missing_authoritative_frame():
+    adapter = OneLakeDeltaAttemptAdapter.__new__(OneLakeDeltaAttemptAdapter)
+    with patch.object(
+        adapter, "record_source",
+        return_value=process_module.ExecutionRecords(lambda: iter(())),
+    ):
+        with pytest.raises(UnsupportedAttemptStoreError, match="requires a Delta frame"):
+            adapter.publish_records("batch", "attempt", [])
+
+
 def test_materialized_committed_output_is_exact_and_versioned() -> None:
     records = [
         {

@@ -58,6 +58,9 @@ def portal(tmp_path, monkeypatch, request):
         shortcut = {}
 
         class Files:
+            def close(self):
+                pass
+
             def __init__(self, config, *, credential=None, identity_policy=None):
                 assert config.workspace_id == "11111111-1111-1111-1111-111111111111"
                 parent, name = config.shortcut_path.rsplit("/", 1)

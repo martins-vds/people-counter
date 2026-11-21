@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from people_counter.cpu_runtime import (
     configure_placement_safe_cpu_runtime,
@@ -1701,7 +1701,7 @@ class StreamingSparkExecutionHarness:
         plan: ExecutionPlan,
         profile: ExecutionProfile,
         mode: Mode,
-    ) -> list[dict[str, Any]]:
+    ) -> ExecutionRecords:
         if self.verify_settings:
             _verify_live_spark_settings(self.spark_session, profile)
         by_partition = {
@@ -1924,7 +1924,7 @@ class LocalJsonAttemptAdapter:
 
     def iter_records(
         self, batch_id: str, process_attempt_id: str
-    ) -> Iterable[Mapping[str, Any]]:
+    ) -> Iterable[dict[str, Any]]:
         path = self.attempt_path(batch_id, process_attempt_id) / "records.json"
         if not path.is_file():
             raise StagingConflictError(f"attempt records are missing at {path}")
@@ -2268,6 +2268,8 @@ class OneLakeDeltaAttemptAdapter:
             source = self.record_source(
                 batch_id, process_attempt_id
             ).delta_frame
+        if source is None:
+            raise UnsupportedAttemptStoreError("attempt publication requires a Delta frame")
         output_documents = getattr(records, "committed_outputs", None)
         if output_documents is None:
             grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -2663,6 +2665,33 @@ def _materialize_committed_output(
     )
 
 
+def _staged_provenance(
+    envelope: VerifiedEnvelope, delta_frame: Any,
+) -> dict[str, Sequence[dict[str, Any]]]:
+    return {
+        item.work_id: (
+            _DeltaOutputRecords(delta_frame, item.work_id)
+            if delta_frame is not None else []
+        )
+        for item in envelope.items
+    }
+
+
+def _validate_staged_checks(
+    record: Mapping[str, Any],
+    checks: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    identity: tuple[str, str],
+) -> None:
+    for name, value in checks.items():
+        if record.get(name) != value:
+            raise ProcessValidationError(
+                f"staged {name} mismatch for {identity!r}"
+            )
+    if record.get("record_payload_sha256") != _sha256(payload):
+        raise ProcessValidationError(f"record payload hash mismatch for {identity!r}")
+
+
 def _validate_staged_records(
     records: Iterable[Mapping[str, Any]],
     envelope: VerifiedEnvelope,
@@ -2678,14 +2707,7 @@ def _validate_staged_records(
     }
     by_identity = {identity: [] for identity in expected}
     delta_frame = getattr(records, "delta_frame", None)
-    provenance: dict[str, Sequence[dict[str, Any]]] = {
-        item.work_id: (
-            _DeltaOutputRecords(delta_frame, item.work_id)
-            if delta_frame is not None
-            else []
-        )
-        for item in envelope.items
-    }
+    provenance = _staged_provenance(envelope, delta_frame)
     item_digests = {item.work_id: _CanonicalArrayDigest() for item in envelope.items}
     materialized = {item.work_id: [] for item in envelope.items}
     records_digest = _CanonicalArrayDigest()
@@ -2750,18 +2772,10 @@ def _validate_staged_records(
             "peak_rss_bytes": plan.concurrency.peak_rss_bytes,
             "duration_only_fallback": plan.concurrency.duration_only_fallback,
         }
-        for name, value in checks.items():
-            if record.get(name) != value:
-                raise ProcessValidationError(
-                    f"staged {name} mismatch for {identity!r}"
-                )
-        if record.get("record_payload_sha256") != _sha256(payload):
-            raise ProcessValidationError(f"record payload hash mismatch for {identity!r}")
+        _validate_staged_checks(record, checks, payload, identity)
         if record_type in TERMINAL_TYPES:
             terminal[identity] += 1
             succeeded[record["work_id"]] = record_type == "video_result"
-            if (record_type == "error") != (record.get("status") == "FAILED"):
-                raise ProcessValidationError(f"terminal status mismatch for {identity!r}")
         if retain_records:
             by_identity[identity].append(record)
         if record_type in TERMINAL_TYPES | {"line_count"}:
@@ -3133,7 +3147,11 @@ def _iter_attempt_records(
     if callable(iterator) and not (
         custom_reader and "iter_records" not in type(attempts).__dict__
     ):
-        return iterator(attempts, batch_id, process_attempt_id)
+        reader = cast(
+            Callable[[AttemptAdapter, str, str], Iterable[Mapping[str, Any]]],
+            iterator,
+        )
+        return reader(attempts, batch_id, process_attempt_id)
     return attempts.read_records(batch_id, process_attempt_id)
 
 
@@ -3144,7 +3162,11 @@ def _attempt_record_source(
 ) -> Iterable[Mapping[str, Any]]:
     source = getattr(type(attempts), "record_source", None)
     if callable(source):
-        return source(attempts, batch_id, process_attempt_id)
+        reader = cast(
+            Callable[[AttemptAdapter, str, str], Iterable[Mapping[str, Any]]],
+            source,
+        )
+        return reader(attempts, batch_id, process_attempt_id)
     return ExecutionRecords(
         lambda: _iter_attempt_records(attempts, batch_id, process_attempt_id)
     )
@@ -3156,7 +3178,14 @@ def _load_complete_records(
 ) -> tuple[Iterable[Mapping[str, Any]], Mapping[str, Any]] | None:
     stream_loader = getattr(type(attempts), "load_complete_stream", None)
     if callable(stream_loader):
-        return stream_loader(
+        loader = cast(
+            Callable[
+                [AttemptAdapter, str, str],
+                tuple[Iterable[Mapping[str, Any]], Mapping[str, Any]] | None,
+            ],
+            stream_loader,
+        )
+        return loader(
             attempts, envelope.batch_id, envelope.execution_attempt_id
         )
     return attempts.load_complete(
@@ -3343,7 +3372,7 @@ def _read_json(path: Path, *, expected_type: type[Any]) -> Any:
     return value
 
 
-def _ordered_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _ordered_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     normalized = [dict(record) for record in records]
     return sorted(
         normalized,

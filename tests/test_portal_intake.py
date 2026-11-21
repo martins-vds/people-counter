@@ -121,6 +121,107 @@ def put_video(intake, path, data=b"hello"):
     intake.source.client.files["root/" + path] = {"size": len(data), "etag": "reviewed", "metadata": {}, "data": data, "is_directory": False}
 
 
+@pytest.mark.parametrize("phase", ["create_file", "append_data", "flush_data"])
+def test_storage_write_failure_keeps_recoverable_journal_and_reservations(intake, monkeypatch, phase):
+    def failed(*args, **kwargs):
+        raise OSError("Storage write interrupted")
+    if phase == "create_file":
+        monkeypatch.setattr(File, phase, failed)
+        operation = intake.start_upload("", "new.mp4", 5)
+    else:
+        operation = intake.start_upload("", "new.mp4", 5)
+        if phase == "flush_data":
+            intake.append_upload(operation["id"], 0, b"hello")
+        monkeypatch.setattr(File, phase, failed)
+        operation = (
+            intake.append_upload(operation["id"], 0, b"hello") if phase == "append_data"
+            else intake.ready_upload(operation["id"])
+        )
+    assert operation["state"] == "recovery" and operation["message"] == "Storage write interrupted"
+    assert "root/new.mp4" not in intake.source.client.files
+    with pytest.raises(ValueError, match="reserved"):
+        intake.assert_available(["new.mp4"])
+    if phase == "flush_data":
+        assert operation["id"] not in intake._digests
+    cancelled = intake.cancel(operation["id"])
+    assert cancelled["state"] == "cancelled"
+    intake.assert_available(["new.mp4"])
+
+
+def test_reviewed_upload_destination_must_still_exist_and_be_a_file(intake):
+    intake.create_folder("destination.mp4")
+    with pytest.raises(ValueError, match="Folder destination collisions"):
+        intake.start_upload("", "destination.mp4", 5, replace=True, destination_etag="v1")
+    put_video(intake, "clip.mp4")
+    del intake.source.client.files["root/clip.mp4"]
+    with pytest.raises(ValueError, match="no longer exists"):
+        intake.start_upload("", "clip.mp4", 5, replace=True, destination_etag="reviewed")
+    assert [row["kind"] for row in intake.store.entries("intake")] == ["folder"]
+
+
+def test_recovery_completes_known_folder_creation_but_keeps_unknown_intent_reserved(intake, monkeypatch):
+    original_save = intake._save
+    def interrupted(record):
+        if record["kind"] == "folder" and record["state"] == "completed":
+            raise OSError("Journal write interrupted")
+        return original_save(record)
+    monkeypatch.setattr(intake, "_save", interrupted)
+    operation = intake.create_folder("created")
+    assert operation["state"] == "recovery" and "root/created" in intake.source.client.files
+    monkeypatch.setattr(intake, "_save", original_save)
+    original_save({**operation, "state": "remote_done"})
+    recovered = intake.recover({operation["id"]})
+    assert recovered[0]["state"] == "completed"
+    assert intake.complete(operation["id"])["state"] == "completed"
+    assert intake.cancel(operation["id"])["state"] == "completed"
+    uncertain = intake._new("folder", path="unknown", reservations=["unknown"], state="mutating")
+    intake._save(uncertain)
+    recovered = intake.recover({uncertain["id"]})
+    assert recovered[0]["state"] == "recovery"
+    with pytest.raises(ValueError, match="reserved"):
+        intake.assert_available(["unknown"])
+
+
+def test_intake_session_cannot_be_reused_after_source_or_identity_metadata_changes(intake):
+    operation = intake.start_upload("", "new.mp4", 5)
+    intake._save({**operation, "execution_identity": None})
+    with pytest.raises(ValueError, match="execution identity is missing"):
+        intake.append_upload(operation["id"], 0, b"hello")
+    assert intake.record(operation["id"])["received"] == 0
+    intake._save({**operation, "source": {**operation["source"], "root": "another"}})
+    with pytest.raises(ValueError, match="does not belong to this source"):
+        intake.record(operation["id"])
+    assert "root/" + operation["stage"] in intake.source.client.files
+
+
+def test_interrupted_digest_and_completed_upload_cannot_accept_more_bytes(intake):
+    operation = intake.start_upload("", "clip.mp4", 5)
+    intake.append_upload(operation["id"], 0, b"hello")
+    intake._digests.clear()
+    with pytest.raises(ValueError, match="cancel and restart"):
+        intake.ready_upload(operation["id"])
+    assert intake.record(operation["id"])["state"] == "uploading"
+    intake.cancel(operation["id"])
+    with pytest.raises(ValueError, match="not accepting bytes"):
+        intake.append_upload(operation["id"], 0, b"hello")
+    replacement = intake.start_upload("", "clip.mp4", 5)
+    assert replacement["id"] != operation["id"] and replacement["received"] == 0
+
+
+def test_missing_parent_and_changed_move_source_leave_no_remote_intents(intake):
+    with pytest.raises(ValueError, match="parent is not a folder"):
+        intake.start_upload("missing", "clip.mp4", 5)
+    put_video(intake, "clip.mp4")
+    with pytest.raises(ValueError, match="Move source does not exist"):
+        intake.start_move(["missing.mp4"], "", rename="new.mp4")
+    with pytest.raises(ValueError, match="supported video file"):
+        intake.start_move(["clip.mp4"], "", rename="notes.txt")
+    intake.source.client.files["root/clip.mp4"]["etag"] = "*"
+    with pytest.raises(ValueError, match="concrete source ETag"):
+        intake.start_move(["clip.mp4"], "", rename="new.mp4")
+    assert intake.store.entries("intake") == [] and intake.source.client.calls == []
+
+
 def test_upload_exact_offsets_hash_and_no_early_destination(intake):
     operation = intake.start_upload("", "new.mp4", 5)
     with pytest.raises(ValueError):

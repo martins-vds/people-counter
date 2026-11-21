@@ -111,6 +111,262 @@ def csrf(client):
         return session["csrf"]
 
 
+@pytest.fixture
+def remote_service(service):
+    from people_counter.portal_sources import AdlsFootageSource
+    from tests.test_portal_intake import Cloud
+
+    source = AdlsFootageSource(
+        {"kind": "adls", "account": "testing", "filesystem": "videos", "root": ""},
+        service.azure, service.store,
+    )
+    source._client = Cloud()
+    source._client.files["clip.mp4"] = {
+        "size": 5, "etag": "original", "metadata": {}, "data": b"hello", "is_directory": False,
+    }
+    service.source = source
+    service.store.put("source", source.identity, source.descriptor)
+    return service
+
+
+def test_intake_upload_http_protocol_queues_and_completes_background_work(app, remote_service):
+    client = app.test_client()
+    token = csrf(client)
+    assert client.post("/intake/destination", data={"csrf": token, "folder": ""}).json == {"folder": ""}
+    folder = client.post("/intake/folders", data={"csrf": token, "path": "incoming"})
+    assert folder.json["state"] == "completed"
+    assert client.post("/intake/destination", data={"csrf": token, "folder": "incoming"}).json == {"folder": "incoming"}
+    upload = client.post("/intake/uploads", data={
+        "csrf": token, "folder": "incoming", "name": "new.mp4", "size": "5",
+    }).json
+    identity = upload["id"]
+    url = f"/intake/uploads/{identity}/chunks?offset=0"
+    assert client.put(url, data=b"hello", content_type="application/octet-stream").status_code == 403
+    bad_type = client.put(url, data=b"hello", headers={"X-CSRF-Token": token}, content_type="text/plain")
+    assert bad_type.status_code == 400 and "application/octet-stream" in bad_type.json["error"]
+    chunk = client.put(url, data=b"hello", headers={"X-CSRF-Token": token}, content_type="application/octet-stream")
+    assert chunk.json["received"] == 5
+    queued = client.post(f"/intake/uploads/{identity}/finish", data={"csrf": token})
+    assert queued.status_code == 202
+    assert remote_service.store.job(queued.json["job_id"])["payload"] == {"operation_id": identity}
+    assert remote_service.run_next_job()
+    assert remote_service.store.job(queued.json["job_id"])["status"] == "SUCCEEDED"
+    assert client.get(f"/intake/operations/{identity}").json["state"] == "completed"
+    assert remote_service.source.client.files["incoming/new.mp4"]["data"] == b"hello"
+
+
+def test_intake_review_binds_replacement_to_destination_and_confirmation(app, remote_service):
+    client = app.test_client()
+    token = csrf(client)
+    assert client.post("/intake/review", data={"csrf": token, "path": "absent.mp4"}).json == {
+        "exists": False, "path": "absent.mp4",
+    }
+    review = client.post("/intake/review", data={"csrf": token, "path": "clip.mp4"}).json
+    assert review["exists"] is True and review["etag"] == "original" and review["size"] == 5
+    form = {"csrf": token, "name": "clip.mp4", "size": "5", "confirmation": review["confirmation"]}
+    response = client.post("/intake/uploads", data=form)
+    assert response.status_code == 400 and "Explicit replacement confirmation" in response.json["error"]
+    form["confirm_replace"] = "yes"
+    response = client.post("/intake/uploads", data={**form, "confirmation": "tampered"})
+    assert response.status_code == 400 and "Invalid replacement review" in response.json["error"]
+    response = client.post("/intake/uploads", data={**form, "name": "other.mp4"})
+    assert response.status_code == 400 and "another destination" in response.json["error"]
+    uploaded = client.post("/intake/uploads", data=form)
+    assert uploaded.status_code == 200 and uploaded.json["destination_etag"] == "original"
+    assert client.post(f"/intake/operations/{uploaded.json['id']}/cancel", data={"csrf": token}).json["state"] == "cancelled"
+    assert remote_service.source.client.files["clip.mp4"]["data"] == b"hello"
+
+
+def test_intake_move_and_reconcile_routes_preserve_operation_identity(app, remote_service):
+    client = app.test_client()
+    token = csrf(client)
+    invalid = client.post("/intake/move", data={"csrf": token, "replacements": "[]"})
+    assert invalid.status_code == 400 and invalid.json == {"error": "Invalid replacement review"}
+    moved = client.post("/intake/move", data={"csrf": token, "paths": "clip.mp4", "rename": "renamed.mp4"})
+    assert moved.status_code == 202
+    identity = moved.json["id"]
+    response = client.post(f"/intake/operations/{identity}/reconcile", data={"csrf": token})
+    assert response.status_code == 400 and "requiring recovery" in response.json["error"]
+    operation = remote_service.intake.record(identity)
+    remote_service.intake._save({**operation, "state": "recovery"})
+    response = client.post(f"/intake/operations/{identity}/reconcile", data={"csrf": token})
+    assert response.status_code == 302
+    job_id = response.location.rsplit("/", 1)[1]
+    assert remote_service.store.job(job_id)["payload"] == {"operation_id": identity, "reconcile": True}
+    assert remote_service.run_next_job()
+    assert remote_service.store.job(moved.json["job_id"])["status"] == "FAILED"
+    assert remote_service.run_next_job()
+    assert remote_service.store.job(job_id)["status"] == "SUCCEEDED"
+    assert remote_service.intake.record(identity)["state"] == "cancelled"
+    assert "clip.mp4" in remote_service.source.client.files
+
+
+def test_intake_routes_return_safe_json_for_identity_and_storage_failures(app, remote_service, monkeypatch):
+    from people_counter.portal_azure import PortalAzureError
+
+    client = app.test_client()
+    token = csrf(client)
+    monkeypatch.setattr(remote_service.intake, "create_folder", lambda path: {"state": "recovery", "message": "Folder creation interrupted"})
+    response = client.post("/intake/folders", data={"csrf": token, "path": "incoming"})
+    assert response.status_code == 400 and response.json == {"error": "Folder creation interrupted"}
+    monkeypatch.setattr(remote_service.intake, "ready_upload", lambda identity: {"state": "recovery", "message": "Flush interrupted"})
+    response = client.post("/intake/uploads/example/finish", data={"csrf": token})
+    assert response.status_code == 400 and response.json == {"error": "Flush interrupted"}
+    assert remote_service.store.jobs() == []
+    def denied():
+        raise PortalAzureError("identity_changed")
+    monkeypatch.setattr(remote_service.azure, "require_identity", denied)
+    response = client.post("/intake/uploads", data={"csrf": token, "name": "new.mp4", "size": "5"})
+    assert response.status_code == 403 and response.json == {"error": str(PortalAzureError("identity_changed"))}
+    assert remote_service.store.entries("intake") == []
+
+
+def test_intake_download_streams_single_and_archive_without_duplicate_entries(app, remote_service):
+    import io
+    import zipfile
+
+    client = app.test_client()
+    assert client.get("/intake/download").status_code == 400
+    response = client.get("/intake/download?video=clip.mp4")
+    assert response.status_code == 200 and response.data == b"hello"
+    assert response.headers["Content-Length"] == "5"
+    remote_service.source.client.files["other.mp4"] = {
+        "size": 3, "etag": "other", "metadata": {}, "data": b"bye", "is_directory": False,
+    }
+    response = client.get("/intake/download?video=clip.mp4&video=other.mp4&video=clip.mp4")
+    assert response.mimetype == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        assert len(archive.namelist()) == 2
+        assert sorted(archive.read(name) for name in archive.namelist()) == [b"bye", b"hello"]
+
+
+def test_package_workspace_saves_selection_assignment_destination_and_generation(app, service, monkeypatch):
+    from werkzeug.datastructures import MultiDict
+
+    form = save_camera(service, monkeypatch)
+    (service.source.root / "lobby/other.mp4").write_bytes(b"other")
+    draft = service.new_draft("Reviewed package")
+    service.update_draft(draft["id"], {"videos": [form["video"]]})
+    client = app.test_client()
+    token = csrf(client)
+    url = f"/packages/drafts/{draft['id']}"
+    selection = client.post(url, data=MultiDict([
+        ("csrf", token), ("action", "selection"), ("mode", "individual"),
+        ("visible", "lobby/other.mp4"), ("videos", "lobby/other.mp4"),
+    ]))
+    assert selection.status_code == 302
+    assert service.draft(draft["id"])["videos"] == [form["video"], "lobby/other.mp4"]
+    rejected = client.post(url, data={"csrf": token, "action": "assign", "videos": "lobby/not-selected.mp4", "camera_id": form["camera_id"]})
+    assert rejected.status_code == 400 and "selected for this package" in rejected.text
+    assigned = client.post(url, data={"csrf": token, "action": "assign", "videos": "lobby/other.mp4", "camera_id": form["camera_id"]})
+    assert assigned.status_code == 302 and "step=cameras" in assigned.location
+    assert service.footage_assignments()["lobby/other.mp4"] == form["camera_id"]
+    destination = "reviewed"
+    response = client.post(url, data={"csrf": token, "action": "destination", "destination": destination})
+    assert response.status_code == 302 and "step=generate" in response.location
+    assert service.draft(draft["id"])["destination"] == destination
+    generated = client.post(url, data={"csrf": token, "action": "generate"})
+    assert generated.status_code == 302
+    job = service.store.job(generated.location.rsplit("/", 1)[1])
+    assert job["kind"] == "prepare" and job["payload"]["videos"] == service.draft(draft["id"])["videos"]
+
+
+def test_remote_workspace_browses_configured_source_and_blocks_legacy_mutations(app, remote_service):
+    draft = remote_service.new_draft("Remote")
+    client = app.test_client()
+    url = f"/packages/drafts/{draft['id']}"
+    page = client.get(url)
+    assert page.status_code == 200 and "clip.mp4" in page.text
+    assert client.get(url + "?step=unknown").status_code == 400
+    assert client.get(url + "?page=0").status_code == 400
+    response = client.post("/packages", data={"csrf": csrf(client)})
+    assert response.status_code == 400 and "draft workflow" in response.text
+    legacy = {**draft, "source": {"kind": "local", "root": str(remote_service.local_source.root)}}
+    remote_service.store.put("draft", draft["id"], legacy)
+    page = client.get(url)
+    assert page.status_code == 200 and "read-only" in page.text.lower()
+    with pytest.raises(ValueError, match="read-only history"):
+        remote_service.for_source(legacy["source"])
+
+
+def test_remote_draft_generation_requires_fresh_review_and_camera_assignment(remote_service, monkeypatch):
+    draft = remote_service.new_draft("Remote")
+    with pytest.raises(ValueError, match="Select footage"):
+        remote_service.generate_draft(draft["id"])
+    remote_service.update_draft(draft["id"], {"videos": ["clip.mp4"]})
+    with pytest.raises(ValueError, match="Choose an existing camera"):
+        remote_service.generate_draft(draft["id"])
+    location = remote_service.store.add_location("North")
+    camera = remote_service.store.add_camera("Entrance", location)
+    remote_service.store.assign_footage(camera, [remote_service.video_key("clip.mp4")])
+    remote_service.store.put("source_review", remote_service.source.relative_video("clip.mp4"), {"required": True})
+    with pytest.raises(ValueError, match="fresh recording"):
+        remote_service.generate_draft(draft["id"])
+    monkeypatch.setattr(remote_service.source, "probe", lambda video: VideoMetadata(1920, 1080, 30))
+    monkeypatch.setattr(remote_service.source, "frame", lambda video: (b"jpeg", 1920, 1080))
+    remote_service.clear_intake_review("clip.mp4")
+    job_id = remote_service.generate_draft(draft["id"])
+    assert remote_service.store.job(job_id)["payload"]["execution_identity"] == remote_service.azure.require_identity()
+    assert remote_service.store.job(job_id)["payload"]["observations"] == {"clip.mp4": {"size": 5, "etag": "original"}}
+
+
+@pytest.mark.parametrize("chunks,dimensions,message", [
+    ([b"hello!"], (1920, 1080), "grew"),
+    ([b"hell"], (1920, 1080), "truncated"),
+    ([b"hello"], (640, 480), "dimensions conflict"),
+])
+def test_full_preview_failures_do_not_retain_partial_media(remote_service, monkeypatch, chunks, dimensions, message):
+    from people_counter.portal_sources import SelectedFootageInput
+
+    monkeypatch.setattr(SelectedFootageInput, "chunks", lambda self, relative: iter(chunks))
+    monkeypatch.setattr(portal_module.LocalFootageSource, "frame", lambda *args: (b"jpeg", *dimensions))
+    with pytest.raises(ValueError, match=message):
+        remote_service.full_preview("clip.mp4", 0, observations={"size": 5, "etag": "original"})
+    assert remote_service.store.entries("source_preview") == []
+    assert not list(remote_service.state.rglob("*.mp4"))
+    assert not list(remote_service.state.rglob("*.jpg"))
+
+
+def test_full_preview_http_requires_untampered_recording_approval(app, remote_service, monkeypatch):
+    from unittest.mock import Mock
+
+    client = app.test_client()
+    token = csrf(client)
+    page = client.get("/footage/full-preview?video=clip.mp4")
+    fields = next(form["fields"] for form in form_inputs(page.data) if "approval" in form["fields"])
+    download = Mock()
+    monkeypatch.setattr(remote_service, "full_preview", download)
+    url = "/footage/full-preview"
+    response = client.post(url, data={**fields, "csrf": token, "confirm": ""})
+    assert response.status_code == 403
+    response = client.post(url, data={**fields, "csrf": token, "confirm": "yes", "approval": "tampered"})
+    assert response.status_code == 400
+    response = client.post(url, data={**fields, "csrf": token, "confirm": "yes", "video": "other.mp4"})
+    assert response.status_code == 400 and "approved source or recording changed" in response.text
+    download.assert_not_called()
+    response = client.post(url, data={**fields, "csrf": token, "confirm": "yes"})
+    assert response.status_code == 302 and "video=clip.mp4" in response.location
+    download.assert_called_once_with("clip.mp4", 0, observations={"size": 5, "etag": "original"})
+
+
+def test_identity_refresh_resets_remote_clients_and_nonintake_errors_remain_html(app, remote_service, monkeypatch):
+    from unittest.mock import Mock
+    from people_counter.portal_azure import PortalAzureError
+
+    client = app.test_client()
+    token = csrf(client)
+    reset = Mock()
+    monkeypatch.setattr(remote_service.source, "reset", reset)
+    assert client.post("/identity/refresh", data={"csrf": token}).status_code == 302
+    reset.assert_called_once()
+    def denied():
+        raise PortalAzureError("expired")
+    monkeypatch.setattr(remote_service.azure, "refresh", denied)
+    response = client.post("/identity/refresh", data={"csrf": token})
+    assert response.status_code == 403 and "credentials have expired" in response.text
+    assert response.mimetype == "text/html"
+
+
 def test_root_and_health_need_no_cloud_access(app):
     client = app.test_client()
     assert client.get("/healthz").json == {"status": "ok"}

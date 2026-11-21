@@ -11,7 +11,6 @@ import math
 import os
 import re
 import sys
-import tempfile
 import time
 import traceback
 import urllib.error
@@ -122,6 +121,22 @@ def _consumer_probe_profile(
     )
 
 
+def _validated_consumer_executor_ids(value: object) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(
+            not isinstance(executor_id, str) or not executor_id
+            for executor_id in value
+        )
+        or len(set(value)) != len(value)
+    ):
+        raise RuntimeError(
+            "persisted consumer-probe decision has invalid executor IDs"
+        )
+    return value
+
+
 def _probe_and_persist_consumer_decision(
     spark: Any,
     config: FabricRuntimeConfig,
@@ -222,19 +237,9 @@ def _probe_and_persist_consumer_decision(
                 raise RuntimeError(
                     "persisted consumer-probe decision conflicts with this workload"
                 )
-        persisted_executor_ids = decision.get("executor_ids")
-        if (
-            not isinstance(persisted_executor_ids, list)
-            or not persisted_executor_ids
-            or any(
-                not isinstance(executor_id, str) or not executor_id
-                for executor_id in persisted_executor_ids
-            )
-            or len(set(persisted_executor_ids)) != len(persisted_executor_ids)
-        ):
-            raise RuntimeError(
-                "persisted consumer-probe decision has invalid executor IDs"
-            )
+        persisted_executor_ids = _validated_consumer_executor_ids(
+            decision.get("executor_ids")
+        )
         canonical_persisted = json.dumps(
             decision,
             allow_nan=False,

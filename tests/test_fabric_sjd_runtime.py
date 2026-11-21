@@ -113,6 +113,113 @@ class ImmediateWriter:
         return operation()
 
 
+@pytest.mark.parametrize("peak_rss_mib", [None, 321])
+def test_process_main_propagates_claim_provenance_and_execution_options(
+    monkeypatch, capsys, peak_rss_mib
+):
+    import people_counter.fabric_sjd_runtime as runtime
+    import people_counter.sjd_control as control
+    import people_counter.sjd_process as process
+
+    config = MagicMock()
+    spark = SimpleNamespace(
+        conf=SimpleNamespace(get=lambda key, default=None: {
+            "spark.task.cpus": "2", "spark.executor.cores": "8",
+        }.get(key, default))
+    )
+    envelope = {"items": [{"work_id": "work-1"}]}
+    store = MagicMock()
+    store.load_claim_envelope_with_digest.return_value = (envelope, "digest")
+    release = SimpleNamespace(package_version="0.12.0", digest="a" * 64)
+    enrichment = {"work-1": {"localized_video": "video.mp4"}}
+    decision = {"executor_ids": ["1", "2"], "status": "FABRIC_PLATFORM_BLOCKED"}
+    probe_result, fixed_probe, attempts = object(), object(), object()
+    harness = SimpleNamespace(staging_backend="spark_delta")
+    profile = SimpleNamespace(peak_rss_bytes=999)
+    warm_works = ["warm-work"]
+    monkeypatch.setattr(runtime, "_spark", lambda: spark)
+    monkeypatch.setattr(runtime, "_runtime_release", lambda _: release)
+    monkeypatch.setattr(control, "FabricControlStore", lambda *a, **kw: store)
+    adapter = MagicMock(return_value=attempts)
+    monkeypatch.setattr(process, "OneLakeDeltaAttemptAdapter", adapter)
+    monkeypatch.setattr(process, "resume_committed_process_batch", lambda *a, **kw: None)
+    probe = MagicMock(return_value=(probe_result, decision))
+    monkeypatch.setattr(runtime, "_probe_and_persist_consumer_decision", probe)
+    bind = MagicMock(return_value=fixed_probe)
+    monkeypatch.setattr(runtime, "_bind_consumer_probe_to_executor_inventory", bind)
+    localize = MagicMock(return_value=(enrichment, {"resolver": "fallback"}))
+    monkeypatch.setattr(runtime, "_localize_process_inputs", localize)
+    warm = MagicMock(return_value=warm_works)
+    monkeypatch.setattr(runtime, "_executor_warm_works", warm)
+    warm_executor = MagicMock()
+    monkeypatch.setattr(process, "warm_executor_for_works", warm_executor)
+
+    def build_profile(actual_spark, *, warm_up):
+        assert actual_spark is spark
+        warm_up()
+        return profile
+
+    monkeypatch.setattr(runtime, "_fabric_process_profile", build_profile)
+    select = MagicMock(return_value=(harness, {"harness": "delta"}))
+    monkeypatch.setattr(runtime, "select_process_execution_harness", select)
+    result = ProcessResult(
+        batch_id="batch-1", process_attempt_id="process-1",
+        staging_path="Files/staging/process-1", record_count=2,
+        failed_work_ids=(), publication_sequences=(7,), resumed=False,
+        driver_package_version=release.package_version,
+    )
+    run = MagicMock(return_value=result)
+    monkeypatch.setattr(process, "run_process_batch", run)
+    arguments = [
+        "--batch-id", "batch-1", "--mode", "probe",
+        "--inject-failure-after-stage-before-receipt",
+    ]
+    if peak_rss_mib is not None:
+        arguments += ["--peak-rss-mib", str(peak_rss_mib)]
+    identity = {"principal": "test"}
+
+    assert runtime.process_main(
+        arguments, config=config, route_mode="fallback", route_identity=identity
+    ) == 0
+
+    config.require_write_enabled.assert_called_once_with()
+    adapter.assert_called_once_with(
+        config.file_path.return_value, spark, config=config, route_mode="fallback"
+    )
+    probe.assert_called_once_with(spark, config, "batch-1", envelope)
+    bind.assert_called_once_with(probe_result, decision["executor_ids"])
+    localize.assert_called_once_with(
+        spark, store, "batch-1", route_mode="fallback", route_identity=identity,
+        probe_mounted_path=fixed_probe,
+    )
+    warm.assert_called_once_with(
+        envelope, enrichment, executor_cores=8, task_cpus=2,
+        package_version=release.package_version, manifest_sha256=release.digest,
+    )
+    warm_executor.assert_called_once_with(warm_works)
+    assert enrichment["work-1"]["_expected_release_package_version"] == "0.12.0"
+    assert enrichment["work-1"]["_expected_release_manifest_sha256"] == release.digest
+    select.assert_called_once_with(
+        spark, config, "batch-1", row_enrichment=enrichment,
+        probe_mounted_path=fixed_probe,
+    )
+    with pytest.raises(RuntimeError, match="after Delta stage before receipt"):
+        harness.after_stage_hook()
+    run.assert_called_once_with(
+        store, "batch-1", profile, "probe", harness, attempts,
+        release_evidence=release,
+        peak_rss_bytes=peak_rss_mib * process.MIB if peak_rss_mib is not None else 999,
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["publication_sequences"] == [7]
+    assert output["sdk_release"] == {
+        "package_version": "0.12.0", "digest": release.digest,
+    }
+    assert output["consumer_probe_decision"] == decision
+    assert output["resolver_capability"] == {"resolver": "fallback"}
+    assert output["harness_capability"] == {"harness": "delta"}
+
+
 def test_process_main_resumes_committed_batch_before_live_probing(
     monkeypatch,
     capsys,
@@ -397,6 +504,27 @@ def test_consumer_probe_profile_selects_onnx_model_artifact() -> None:
     assert profile.planned_concurrent_tasks == 2
 
 
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        (None, "at least one claimed video"),
+        ({"source_video": "abfss://video.mp4"}, "default-Lakehouse source identities"),
+        ({"model_artifact_sha256": None}, "requires model_artifact_sha256"),
+        ({"model_artifact_sha256": {}}, "missing model digest"),
+    ],
+)
+def test_consumer_probe_rejects_unverifiable_claim_artifacts(payload, message):
+    base = {
+        "source_video": "/lakehouse/default/Files/video.mp4",
+        "source_sha256": "a" * 64,
+        "pipeline": "rtdetr-osnet", "detector_model": "r18",
+        "model_format": "pytorch",
+    }
+    envelope = {"items": [] if payload is None else [{"payload": base | payload}]}
+    with pytest.raises(ValueError, match=message):
+        _consumer_probe_profile(envelope, planned_concurrent_tasks=1)
+
+
 def test_consumer_decision_uses_task_cpu_key_and_safe_executor_minimum() -> None:
     from people_counter.fabric_capability_probe import (
         CapabilityProbeResult,
@@ -575,6 +703,11 @@ def test_consumer_decision_reuses_immutable_probe_after_executor_drift() -> None
             "noncanonical-drift",
             "persisted consumer-probe decision is not canonical JSON",
         ),
+        (
+            "invalid-status",
+            "persisted consumer-probe decision has invalid status",
+        ),
+        ("readback-drift", "consumer-probe decision readback differs"),
     ),
 )
 def test_consumer_decision_rejects_corrupt_persistence(
@@ -672,6 +805,15 @@ def test_consumer_decision_rejects_corrupt_persistence(
             for index, executor in enumerate(original_executors)
         )
         files.content[path] = json.dumps(persisted, indent=2, sort_keys=True)
+    elif corruption == "invalid-status":
+        persisted["status"] = "UNKNOWN"
+        persisted.pop("decision_sha256")
+        unsigned = json.dumps(persisted, separators=(",", ":"), sort_keys=True)
+        persisted["decision_sha256"] = hashlib.sha256(unsigned.encode("utf-8")).hexdigest()
+        files.content[path] = json.dumps(persisted, separators=(",", ":"), sort_keys=True)
+    elif corruption == "readback-drift":
+        files.content.clear()
+        files.read_text = lambda _path: "{}"
     else:
         raise AssertionError(f"unexpected corruption case: {corruption}")
 
@@ -2759,6 +2901,17 @@ def test_fabric_process_profile_enforces_runtime_and_computes_reserve(
         ),
     )
     monkeypatch.setattr(sys, "version_info", (3, 13))
+    original_version = spark.version
+    spark.version = "3.5.0"
+    with pytest.raises(RuntimeError, match="requires Spark 4.1.1"):
+        _fabric_process_profile(spark)
+    spark.version = original_version
+    java_system = spark.sparkContext._jvm.java.lang.System
+    original_get_property = java_system.getProperty
+    java_system.getProperty = lambda name: "17.0.1"
+    with pytest.raises(RuntimeError, match="requires Java 21"):
+        _fabric_process_profile(spark)
+    java_system.getProperty = original_get_property
 
     def discover(session, minimum):
         assert minimum == 1
@@ -5050,6 +5203,50 @@ def test_refresh_main_keeps_outbox_pending_when_any_model_fails(
     state.acknowledge_refresh.assert_not_called()
 
 
+@pytest.mark.parametrize("failure", ["idle", "empty-token", "acknowledgement"])
+def test_refresh_main_idle_or_incomplete_refresh_never_claims_success(
+    monkeypatch, capsys, failure
+):
+    state = MagicMock()
+    state.pending_refreshes.return_value = (
+        [] if failure == "idle" else [{"outbox_id": 4, "dedupe_key": "dedupe-4"}]
+    )
+    state.acknowledge_refresh.return_value = False
+    monkeypatch.setattr("people_counter.fabric_gold.FabricGoldState", lambda *a, **kw: state)
+    monkeypatch.setattr("people_counter.fabric_sjd_runtime._spark", lambda: object())
+    refresh = MagicMock(return_value={"status": "Completed"})
+    monkeypatch.setattr("people_counter.fabric_sjd_runtime._refresh_semantic_model", refresh)
+    diagnostic = MagicMock()
+    monkeypatch.setattr("people_counter.fabric_sjd_runtime._write_control_diagnostic", diagnostic)
+    get_token = MagicMock(return_value="" if failure == "empty-token" else "token")
+    monkeypatch.setitem(
+        sys.modules, "notebookutils",
+        SimpleNamespace(credentials=SimpleNamespace(getToken=get_token)),
+    )
+    config = FabricNamespaceConfig.benchmark(target=TEST_TARGET)
+    args = ["--workspace-id", "workspace", "--semantic-model-id", "model"]
+    if failure == "idle":
+        assert refresh_main(args, config=config) == 0
+        assert json.loads(capsys.readouterr().out) == {"status": "IDLE"}
+        get_token.assert_not_called()
+        refresh.assert_not_called()
+        diagnostic.assert_not_called()
+    else:
+        message = "empty Power BI token" if failure == "empty-token" else "was not acknowledged"
+        with pytest.raises(RuntimeError, match=message) as caught:
+            refresh_main(args, config=config)
+        assert capsys.readouterr().out == ""
+        diagnostic.assert_called_once_with(config, "refresh", caught.value, prefix="refresh")
+        if failure == "empty-token":
+            refresh.assert_not_called()
+            state.acknowledge_refresh.assert_not_called()
+        else:
+            refresh.assert_called_once()
+            state.acknowledge_refresh.assert_called_once_with(
+                4, actor="pc-production-refresh-sjd", expected_dedupe_key="dedupe-4"
+            )
+
+
 def test_write_control_diagnostic_swallows_its_own_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5066,7 +5263,10 @@ def test_fabric_control_bootstrap_creates_tables_and_rejects_bad_lock() -> None:
     store.tables = {name: f"table_{name}" for name in _SCHEMAS}
     spark = MagicMock()
     spark.catalog.tableExists.return_value = False
-    spark.table.return_value.columns = ["submitted_sdk_version", "compatibility_json"]
+    spark.table.return_value.columns = [
+        "submitted_sdk_version", "compatibility_json",
+        "output_schema_version", "output_json",
+    ]
     frame = MagicMock()
     spark.createDataFrame.return_value = frame
     frame.write.format.return_value.mode.return_value.saveAsTable.return_value = None

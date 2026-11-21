@@ -391,3 +391,131 @@ def test_local_input_version_tracks_real_file_changes(tmp_path):
     after = inputs.stat("videos/clip.mp4")
     assert after.size == before.size
     assert after.version != before.version
+
+
+def test_cached_preview_requires_matching_version_and_frame_time(source, tmp_path, monkeypatch):
+    from people_counter.portal_service import PortalStore
+    from people_counter import portal_remote_media
+
+    adapter, filesystem, _, _ = source
+    filesystem.get_file_client.return_value.get_file_properties.return_value = SimpleNamespace(size=7, etag="original")
+    adapter.preview_store = PortalStore(tmp_path / "state.sqlite3")
+    (tmp_path / "previews").mkdir()
+    (tmp_path / "previews" / "preview.jpg").write_bytes(b"cached-jpeg")
+    metadata = {"width": 640, "height": 480, "duration_seconds": 30, "embedded_capture_times": []}
+    adapter.preview_store.put("source_preview", "preview", {
+        "video": adapter.relative_video("clip.mp4"), "observations": {"size": 7, "etag": "original"},
+        "seconds": 2, "metadata": metadata,
+    })
+    frame = Mock(return_value=(b"remote-jpeg", 640, 480))
+    probe = Mock(return_value=SimpleNamespace(width=1920))
+    monkeypatch.setattr(portal_remote_media, "remote_frame", frame)
+    monkeypatch.setattr(portal_remote_media, "remote_probe", probe)
+    assert adapter.frame("clip.mp4", 2) == (b"cached-jpeg", 640, 480)
+    assert adapter.probe("clip.mp4").width == 640
+    frame.assert_not_called()
+    probe.assert_not_called()
+    assert adapter.frame("clip.mp4", 3)[0] == b"remote-jpeg"
+    filesystem.get_file_client.return_value.get_file_properties.return_value.etag = "replacement"
+    assert adapter.probe("clip.mp4").width == 1920
+    assert frame.call_args.args[1:4] == ("original", 7, 3)
+    assert probe.call_args.args[1:] == ("replacement", 7)
+    adapter.preview_store = None
+    assert adapter.probe("clip.mp4").width == 1920
+
+
+def test_folder_navigation_preserves_directories_and_rejects_incomplete_pages(source, monkeypatch):
+    adapter = source[0]
+    rows = [{"name": "day", "path": "day", "directory": True}, {"name": "clip.mp4", "path": "clip.mp4", "directory": False}]
+    monkeypatch.setattr(adapter, "page", lambda folder: (rows, None))
+    assert adapter.entries("") == rows
+    assert adapter.folders("") == [{"name": "day", "path": "day", "children": None}]
+    monkeypatch.setattr(adapter, "page", lambda folder: (rows, "next"))
+    with pytest.raises(ValueError, match="paged package browsing"):
+        adapter.folders("")
+
+
+def test_adls_root_page_sorts_directories_and_rejects_nonstring_continuation(source):
+    adapter, filesystem, _, _ = source
+    adapter.remote_root = ""
+    class Pages:
+        continuation_token = 123
+        def __iter__(self):
+            return self
+        def __next__(self):
+            return iter([
+                SimpleNamespace(name="clip.mp4", is_directory=False, content_length=5, last_modified=datetime.now(timezone.utc)),
+                SimpleNamespace(name="day", is_directory=True, content_length=0, last_modified=datetime.now(timezone.utc)),
+            ])
+    pages = Pages()
+    filesystem.get_paths.return_value.by_page.return_value = pages
+    with pytest.raises(ValueError, match="invalid continuation token"):
+        adapter.page("")
+    pages.continuation_token = None
+    rows, token = adapter.page("")
+    assert [row["path"] for row in rows] == ["day", "clip.mp4"]
+    assert rows[0]["size_bytes"] is None and token is None
+    assert filesystem.get_paths.call_args.kwargs["path"] is None
+
+
+def test_recursive_listing_failure_does_not_return_partial_selection(source, caplog):
+    adapter, filesystem, _, _ = source
+    def paths():
+        yield SimpleNamespace(name="entrance/clip.mp4", is_directory=False)
+        yield SimpleNamespace(name="entrance/day", is_directory=True)
+        yield SimpleNamespace(name="entrance/notes.txt", is_directory=False)
+        raise ServiceResponseError("PRIVATE_STORAGE_DETAIL")
+    filesystem.get_paths.return_value = paths()
+    with pytest.raises(ValueError, match="Cannot enumerate ADLS folder") as raised:
+        adapter.videos("")
+    assert isinstance(raised.value.__cause__, ServiceResponseError)
+    assert "PRIVATE_STORAGE_DETAIL" not in caplog.text
+
+
+def test_selected_remote_inspection_hashes_complete_input_and_reports_progress(source, monkeypatch):
+    import hashlib
+    from people_counter.manifest import VideoMetadata
+    from people_counter import portal_remote_media
+
+    adapter, filesystem, _, _ = source
+    filesystem.get_file_client.return_value.get_file_properties.return_value = SimpleNamespace(size=5, etag="original")
+    progress = Mock()
+    chunks = Mock(return_value=iter([b"he", b"llo"]))
+    monkeypatch.setattr(portal_remote_media, "complete_chunks", chunks)
+    monkeypatch.setattr(adapter, "probe", lambda video: VideoMetadata(640, 480, 30))
+    inputs = SelectedFootageInput(adapter, ["clip.mp4"], progress=progress)
+    result = inputs.inspect(adapter.relative_video("clip.mp4"))
+    assert (result.size_bytes, result.sha256, result.width, result.height) == (
+        5, hashlib.sha256(b"hello").hexdigest(), 640, 480,
+    )
+    chunks.assert_called_once_with(
+        filesystem.get_file_client.return_value, "original", 5,
+        check_identity=adapter.assert_identity,
+    )
+    progress.assert_called_once_with("Inspecting and hashing clip.mp4")
+    chunks.return_value = iter([b"he"])
+    with pytest.raises(ValueError, match="truncated while hashing"):
+        inputs.inspect(adapter.relative_video("clip.mp4"))
+    chunks.return_value = iter([b"hello"])
+    def changed_during_probe(video):
+        filesystem.get_file_client.return_value.get_file_properties.return_value.etag = "replacement"
+        return VideoMetadata(640, 480, 30)
+    monkeypatch.setattr(adapter, "probe", changed_during_probe)
+    with pytest.raises(ValueError, match="changed or was truncated"):
+        inputs.inspect(adapter.relative_video("clip.mp4"))
+
+
+def test_selected_local_input_reads_exact_bytes_and_rejects_replaced_observations(tmp_path):
+    from people_counter.portal_service import LocalFootageSource
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"hello")
+    metadata = video.stat()
+    source = LocalFootageSource(tmp_path)
+    inputs = SelectedFootageInput(source, ["clip.mp4"], {"clip.mp4": {"size": metadata.st_size, "mtime_ns": metadata.st_mtime_ns}})
+    relative = source.relative_video("clip.mp4")
+    assert inputs.local_path(relative) == video
+    assert b"".join(inputs.chunks(relative)) == b"hello"
+    video.write_bytes(b"replacement")
+    with pytest.raises(ValueError, match="Local footage changed after selection"):
+        inputs.stat(relative)

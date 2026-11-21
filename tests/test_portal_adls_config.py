@@ -251,10 +251,10 @@ def test_initialized_local_portal_is_healthy_and_displays_resolved_source(tmp_pa
 def test_direct_adls_constructor_enforces_upload_boundary_without_environment_override(
     tmp_path, fabric_runtime_context, size, accepted,
 ):
-    from people_counter.portal_azure import PortalAzureSession
     from tests.test_portal_intake import Cloud
+    from tests.test_operator_portal import FakePortalAzure
 
-    source = AdlsFootageSource({"kind": "adls", "account": "testing", "filesystem": "videos"}, PortalAzureSession())
+    source = AdlsFootageSource({"kind": "adls", "account": "testing", "filesystem": "videos"}, FakePortalAzure())
     source._client = Cloud()
     service = PortalService(source, tmp_path / "models", tmp_path / "state")
     if accepted:

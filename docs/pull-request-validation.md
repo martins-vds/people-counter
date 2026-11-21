@@ -66,6 +66,20 @@ by physical source lines, which inflates risk for documentation and multiline
 data. The executable-line report is the CI gate. It rejects missing evidence
 and scores at or above 30 without rounding them below the threshold.
 
+To reproduce the separate browser checks, install the `portal`, `publisher`,
+and `demo` extras and the `ui` dependency group, then run:
+
+```bash
+uv run --no-sync playwright install chromium
+uv run --no-sync pytest tests/ui --portal-e2e --browser chromium \
+  --cov=people_counter --cov-branch --crap
+```
+
+Without `--portal-e2e`, browser tests are skipped. Their cloud adapters must
+implement the real clients' cleanup contract and must not request live Azure
+credentials. When running coverage commands concurrently, set a different
+`COVERAGE_FILE` for each process.
+
 The separate [CodeQL Advanced workflow](../.github/workflows/codeql.yml) analyzes
 GitHub Actions, portal JavaScript, and Python on pushes and pull requests to
 `main`, plus Saturdays at 11:37 UTC. All three languages use build mode `none`;

@@ -897,6 +897,316 @@ def _minute(day="2026-10-01", entries=2):
     }
 
 
+@pytest.mark.parametrize("mode", ["plan", "validate", "run"])
+def test_gold_cli_uses_catalog_backends_and_forwards_rebuild_options(
+    monkeypatch, capsys, mode
+):
+    from unittest.mock import MagicMock
+    import people_counter.fabric_gold as gold
+    import people_counter.fabric_sjd_runtime as runtime
+    import people_counter.sjd_process as process
+
+    spark, adapter, source, store, state = [object() for _ in range(5)]
+    config = MagicMock()
+    job = MagicMock()
+    expected = {"mode": mode, "valid": True}
+    job.plan.return_value.to_dict.return_value = expected
+    job.validate.return_value = expected
+    job.run.return_value = expected
+    monkeypatch.setattr(runtime, "_spark", lambda: spark)
+    constructors = [
+        (process, "OneLakeDeltaAttemptAdapter", adapter),
+        (gold, "FabricCommittedSource", source),
+        (gold, "FabricGoldStoreImpl", store),
+        (gold, "FabricGoldState", state),
+        (gold, "FabricGoldJob", job),
+    ]
+    mocks = []
+    for module, name, result in constructors:
+        mock = MagicMock(return_value=result)
+        monkeypatch.setattr(module, name, mock)
+        mocks.append(mock)
+
+    assert runtime.gold_main(
+        [mode, "--lookback-hours", "7", "--force", "--full-rebuild"], config=config
+    ) == 0
+
+    config.require_write_enabled.assert_called_once_with()
+    mocks[0].assert_called_once_with(config.file_path.return_value, spark, config=config)
+    mocks[1].assert_called_once_with(spark, adapter, config=config)
+    mocks[2].assert_called_once_with(spark, config=config)
+    mocks[3].assert_called_once_with(spark, config=config)
+    mocks[4].assert_called_once_with(source, store, state)
+    if mode == "plan":
+        job.plan.assert_called_once_with(lookback_hours=7, full_rebuild=True, reset=True)
+    elif mode == "run":
+        job.run.assert_called_once_with(lookback_hours=7, force=True, full_rebuild=True)
+    else:
+        job.validate.assert_called_once_with()
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+def test_record_frame_local_adapter_and_empty_spark_adapter(gold_spark, tmp_path):
+    schema = (
+        "work struct<work_id:string>, "
+        "attempt struct<attempt_id:string,batch_id:string>, "
+        "publication struct<output_path:string,publication_sequence:long>"
+    )
+    visible = gold_spark.createDataFrame(
+        [({"work_id": "work"}, {"attempt_id": "attempt", "batch_id": "batch"},
+          {"output_path": "Files/output/batch=batch/attempt=process", "publication_sequence": 1})],
+        schema,
+    )
+    adapter = LocalJsonAttemptAdapter(tmp_path / "attempts")
+    adapter.write_records("batch", "process", _records())
+    source = FabricCommittedSource(gold_spark, adapter, config=SimpleNamespace(table=str))
+    rows = [row.asDict() for row in source._record_frame(visible).collect()]
+    assert len(rows) == 2
+    assert sorted(
+        (json.loads(row["record_json"]) for row in rows),
+        key=lambda r: r["record_sequence"],
+    ) == _records()
+    assert {row["work_id"] for row in rows} == {"work"}
+    source.attempts = SimpleNamespace(
+        spark_session=gold_spark,
+        attempt_path=lambda *args: pytest.fail("empty pointers resolved an attempt"),
+    )
+    assert source._record_frame(visible.where("false")).count() == 0
+
+
+def test_fabric_state_replace_checks_identities_and_exact_readback(
+    gold_spark, gold_namespace, monkeypatch
+):
+    state = FabricGoldState(gold_spark, config=gold_namespace, clock=lambda: NOW)
+    row = {
+        "stage": "facts", "source_key": "source", "publication_sequence": 2,
+        "source_versions_json": "{}", "target_versions_json": "{}",
+        "completed_at": NOW.replace(tzinfo=None),
+    }
+    state._replace("gold_checkpoints", [row], ("stage",))
+    assert state.checkpoint("facts") == row | {"completed_at": NOW}
+    with pytest.raises(GoldValidationError, match="duplicate gold_checkpoints identity"):
+        state._replace("gold_checkpoints", [row, row], ("stage",))
+    assert state.checkpoint("facts")["publication_sequence"] == 2
+    monkeypatch.setattr(state, "_rows", lambda suffix: [])
+    with pytest.raises(GoldValidationError, match="gold_checkpoints exact readback failed"):
+        state._replace("gold_checkpoints", [row], ("stage",))
+
+
+@pytest.mark.parametrize(
+    "mutation,error,message",
+    [
+        ({"location_id": "other"}, GoldValidationError, "one location"),
+        ({"camera_timezone": "Mars/Olympus"}, GoldSourceError, "invalid IANA timezone"),
+        ({"config_json": {"different": True}}, GoldValidationError, "multiple configurations"),
+    ],
+)
+def test_native_dimensions_reject_conflicting_metadata(
+    gold_spark, mutation, error, message
+):
+    base = {
+        "camera_id": "camera", "location_id": "lobby",
+        "config_sha256": "config", "config_json": {},
+    }
+    if "camera_timezone" in mutation:
+        base |= mutation
+    outputs = gold_spark.createDataFrame(
+        [
+            (json.dumps({
+                "work_id": str(index), "work": metadata,
+                "run": {"captured_at_utc": "2026-10-01T12:00:00Z"},
+            }),)
+            for index, metadata in enumerate([base, base | mutation])
+        ],
+        "output_json string",
+    )
+    job = FabricGoldJob(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    with pytest.raises(error, match=message):
+        job._dimension_frames(outputs, NOW.isoformat())
+
+
+@pytest.mark.parametrize(
+    "changed,prior_sequence,expected",
+    [
+        (False, 10, ["2026-08-01", "2026-08-02", "2026-10-02"]),
+        (False, 100, ["2026-10-02"]),
+        (True, 100, ["2026-08-01", "2026-08-02", "2026-09-01", "2026-09-02", "2026-10-02"]),
+    ],
+)
+def test_native_plan_incremental_dates_and_changed_hash_fallback(
+    gold_spark, changed, prior_sequence, expected
+):
+    flow = SourceCheckpoint(11, {"work": "current"})
+    operations = SourceCheckpoint(0, {"attempts": "current"})
+    previous = {
+        "facts:flow": {
+            "publication_sequence": prior_sequence,
+            "source_key": "old" if changed else flow.key,
+        },
+        "facts:operations": {
+            "completed_at": NOW,
+            "source_key": "old" if changed else operations.key,
+        },
+    }
+    output_rows = [
+        {
+            "publication_sequence": sequence,
+            "published_at": published,
+            "run": {"captured_at_utc": captured},
+            "line_counts": lines,
+        }
+        for sequence, published, captured, lines in [
+            (2, "2026-09-01T12:00:00Z", "2026-09-01T12:00:00Z", []),
+            (3, "2026-10-02T12:00:00Z", "2026-10-02T12:00:00Z", []),
+            (11, "2026-08-01T12:00:00Z", "2026-08-01T23:59:30Z",
+             [{"video_seconds": 60.0}]),
+        ]
+    ]
+    outputs = gold_spark.createDataFrame(
+        [(row["publication_sequence"], row["published_at"], json.dumps(row))
+         for row in output_rows],
+        "publication_sequence long, published_at string, output_json string",
+    )
+    control = {
+        "work": gold_spark.createDataFrame(
+            [("2026-09-02T12:00:00Z",)] if changed else [("2026-10-02T12:00:00Z",)],
+            "queued_at string",
+        ),
+        "attempts": gold_spark.createDataFrame([], "created_at timestamp"),
+    }
+    source = SimpleNamespace(
+        checkpoint=lambda: flow, operations_checkpoint=lambda: operations,
+        committed_output_frame=lambda: outputs, control_frame=lambda: control,
+    )
+    job = FabricGoldJob(
+        source, SimpleNamespace(replace_partition_frame=object()),
+        SimpleNamespace(checkpoint=previous.get), clock=lambda: NOW,
+    )
+    try:
+        assert list(job.plan(lookback_hours=24).items) == expected
+        with pytest.raises(ValueError, match="lookback_hours must be at least 1"):
+            job.plan(lookback_hours=True)
+    finally:
+        job._clear_native_frames()
+
+
+def test_native_build_skips_current_targets_and_defers_partial_checkpoints(monkeypatch):
+    from unittest.mock import MagicMock
+
+    flow = SourceCheckpoint(11, {"work": "current"})
+    operations = SourceCheckpoint(0, {"attempts": "current"})
+    fact_versions = {table: 3 for table in FACT_TARGET_TABLES}
+    dimension_versions = {table: 5 for table in DIMENSION_TABLES}
+    store, state, source = MagicMock(), MagicMock(), MagicMock()
+    source.checkpoint.return_value = flow
+    source.operations_checkpoint.return_value = operations
+    store.versions.side_effect = lambda names: (
+        dimension_versions if tuple(names) == DIMENSION_TABLES else fact_versions
+    )
+    job = FabricGoldJob(source, store, state, clock=lambda: NOW)
+    facts = job._fact_source(flow, operations)
+    dimensions = SourceCheckpoint(
+        flow.publication_sequence,
+        flow.versions | {f"target:{name}": str(version) for name, version in fact_versions.items()},
+    )
+    checkpoints = {
+        "facts": {"source_key": facts.key, "target_versions_json": json.dumps(fact_versions)},
+        "dimensions": {
+            "source_key": dimensions.key,
+            "target_versions_json": json.dumps(dimension_versions),
+        },
+    }
+    state.checkpoint.side_effect = checkpoints.get
+    assert job.build_facts()["skipped"] is True
+    assert job.build_dimensions()["skipped"] is True
+    source.committed_output_frame.assert_not_called()
+    store.replace_partition_frame.assert_not_called()
+    frames = {table: MagicMock() for table in FACT_TARGET_TABLES + DIMENSION_TABLES}
+    monkeypatch.setattr(job, "_fact_frames", lambda *args: frames)
+    monkeypatch.setattr(job, "_dimension_frames", lambda *args: frames)
+    source.control_frame.return_value = {"work": MagicMock(), "attempts": MagicMock()}
+    store.replace_partition_frame.return_value = 1
+    store.replace_table_frame.return_value = 1
+    try:
+        partial = job.build_facts(dates=["2026-10-01", "2026-10-01"], save_state=False)
+        assert partial["dates"] == ["2026-10-01"]
+        assert partial["partition_count"] == 1
+        assert partial["complete_checkpoint_advanced"] is False
+        assert partial["outbox_id"] is None
+        assert set(partial["_checkpoint_updates"]) == {"facts:partition:2026-10-01"}
+        assert partial["_checkpoint_updates"]["facts:partition:2026-10-01"] == (facts, fact_versions)
+        rebuilt = job.build_dimensions(force=True, save_state=False)
+        assert rebuilt["skipped"] is False
+        assert rebuilt["outbox_id"] is None
+        assert rebuilt["_checkpoint_updates"]["dimensions"] == (dimensions, dimension_versions)
+        state.save_checkpoints_and_enqueue.assert_not_called()
+    finally:
+        job._clear_native_frames()
+
+
+@pytest.mark.parametrize(
+    "name,rows,message",
+    [
+        ("gold_dim_camera", [{
+            "camera_id": "camera", "location_id": "lobby", "camera_timezone": "UTC",
+            "first_capture_utc": NOW.isoformat(), "last_capture_utc": NOW.isoformat(),
+            "video_count": 1, "refreshed_at": NOW.isoformat(),
+        }] * 2,
+         "must be non-null and unique"),
+        ("gold_attempt_operations", [{
+            "attempt_id": "attempt", "work_id": "missing", "status": "SUCCEEDED",
+        }],
+         "gold_attempt_operations.work_id has unresolved"),
+        ("gold_flow_minute", [_minute()], "gold_flow_minute.flow_date has unresolved"),
+    ],
+)
+def test_catalog_validation_rejects_duplicate_and_unresolved_keys(
+    gold_spark, name, rows, message
+):
+    from people_counter.sjd_gold import _spark_schema
+
+    store = FabricGoldStoreImpl(gold_spark, config=SimpleNamespace(table=str))
+    frames = {
+        table: gold_spark.createDataFrame(
+            [_spark_row(table, row) for row in rows] if table == name else [],
+            _spark_schema(table),
+        )
+        for table in FACT_TARGET_TABLES + DIMENSION_TABLES
+    }
+    store._frame = frames.__getitem__
+    with pytest.raises(GoldValidationError, match=message):
+        store.validation_summary()
+
+
+@pytest.mark.parametrize("frame_api", [False, True])
+def test_catalog_writeback_failure_is_not_reported_as_success(
+    gold_spark, gold_namespace, monkeypatch, frame_api
+):
+    from people_counter.sjd_gold import _spark_schema
+    import people_counter.fabric_gold as gold
+
+    store = FabricGoldStoreImpl(gold_spark, config=gold_namespace)
+    store.writer = SimpleNamespace(run=lambda operation: operation())
+    row = _minute()
+    frame = gold_spark.createDataFrame(
+        [_spark_row("gold_flow_minute", row)], _spark_schema("gold_flow_minute")
+    )
+    monkeypatch.setattr(gold, "_frames_equal", lambda observed, expected: False)
+    with pytest.raises(GoldValidationError, match="partition exact readback failed"):
+        if frame_api:
+            store.replace_partition_frame("gold_flow_minute", "flow_date", "2026-10-01", frame)
+        else:
+            store.replace_partition("gold_flow_minute", "flow_date", "2026-10-01", [row])
+    with pytest.raises(GoldValidationError, match="exact readback/cardinality failed"):
+        if frame_api:
+            store.replace_table_frame("gold_flow_minute", frame)
+        else:
+            store.replace_table("gold_flow_minute", [row])
+    if frame_api:
+        with pytest.raises(ValueError, match="outside"):
+            store.replace_partition_frame("gold_flow_minute", "flow_date", "2026-10-02", frame)
+
+
 def test_catalog_gold_partition_replacement_and_versions(gold_spark, gold_namespace):
     _seed_lock(gold_spark, gold_namespace)
     store = FabricGoldStoreImpl(gold_spark, config=gold_namespace)
