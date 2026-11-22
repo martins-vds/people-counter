@@ -65,7 +65,20 @@ remain available for committed pointer recovery and Gold replay.
 
 ### Operator portal
 
-Start the local browser-based camera, package, profile, and backfill tools:
+Start the local browser-based camera, package, profile, and backfill tools
+without Docker (requires `uv` and Python 3.11.5+):
+
+```bash
+./scripts/start-portal-local.sh
+```
+
+Configure the ADLS variables in the repository-root `.env` file or export them
+in your shell (shell values take precedence), as described in the
+[operator portal guide](docs/operator-portal.md). The launcher installs locked
+dependencies as needed and serves the checked-in CSS. It uses host credentials
+and local state; stop it with Ctrl+C. Pass `--port 8090` to change the port.
+
+Or start with Docker Compose and live Tailwind rebuilding:
 
 ```bash
 ./scripts/start-portal.sh

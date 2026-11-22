@@ -11,13 +11,32 @@ local footage folders or discover subscriptions/accounts. Configure an existing
 account, filesystem and optional allowed root before starting:
 
 ```bash
-uv sync --extra portal --extra publisher --extra demo
 export PC_PORTAL_ADLS_ACCOUNT_URL=https://youraccount.dfs.core.windows.net
 export PC_PORTAL_ADLS_FILESYSTEM=videos
 export PC_PORTAL_ADLS_ROOT=intake
 export PC_PORTAL_MAX_UPLOAD_BYTES=5368709120
-uv run pc-admin --port 8088
+./scripts/start-portal-local.sh
 ```
+
+This Docker-free launcher requires `uv` and Python 3.11.5 or newer. It installs
+the locked portal, publisher and demo dependencies as needed, then runs in the
+foreground on loopback port 8088. Stop it with Ctrl+C. It does not start Spark
+or a Tailwind watcher; it serves the checked-in CSS. Set `PC_PORTAL_PORT` or pass
+`--port` to change the port. Other `pc-admin` arguments are forwarded unchanged:
+
+```bash
+./scripts/start-portal-local.sh --port 8090 --models-root /path/to/models
+```
+
+The launcher loads the repository-root `.env` file with `uv` when it exists;
+exported shell variables take precedence. This includes credentials, ADLS settings
+and `PC_PORTAL_PORT`. It does not execute the file as shell code. Keep credentials
+outside source control. Without `.env`, it uses the current shell alone.
+Models default to `offline-models` and state to
+`.people-counter-portal`, both relative to the repository root. Package outputs
+default to the state directory's `packages` subdirectory. Host native libraries
+needed by OpenCV/PyAV must be available (on Debian/Ubuntu, `libgl1` and
+`libglib2.0-0`); dependency or startup failures are not suppressed.
 
 Add `--allow-cloud` only when publication/submission should be enabled.
 ADLS intake writes are explicitly requested file-management actions; the cloud
